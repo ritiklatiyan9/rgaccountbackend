@@ -1,0 +1,614 @@
+-- ============================================================
+-- DGAccount — Real Estate Accountancy SaaS
+-- PostgreSQL Schema
+-- ============================================================
+
+-- ──────────────────────────────────────────────────────────────
+-- 1. USERS (admin / sub_admin)
+-- ──────────────────────────────────────────────────────────────
+DROP TABLE IF EXISTS user_sites CASCADE;
+DROP TABLE IF EXISTS sites CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+CREATE TABLE IF NOT EXISTS users (
+  id              SERIAL PRIMARY KEY,
+  name            VARCHAR(255) NOT NULL,
+  email           VARCHAR(255) UNIQUE NOT NULL,
+  password        VARCHAR(255) NOT NULL,
+  phone           VARCHAR(20),
+  photo           VARCHAR(500),
+  role            VARCHAR(20) NOT NULL DEFAULT 'sub_admin'
+                    CHECK (role IN ('admin', 'sub_admin')),
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  is_active       BOOLEAN DEFAULT TRUE,
+  refresh_token   VARCHAR(500),
+  token_version   INTEGER DEFAULT 1,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email      ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_role       ON users(role);
+CREATE INDEX IF NOT EXISTS idx_users_created_by ON users(created_by);
+
+-- ──────────────────────────────────────────────────────────────
+-- 2. SITES (real-estate projects / properties)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS sites (
+  id              SERIAL PRIMARY KEY,
+  name            VARCHAR(255) NOT NULL,
+  code            VARCHAR(50) UNIQUE,
+  address         TEXT,
+  city            VARCHAR(100),
+  state           VARCHAR(100),
+  description     TEXT,
+  status          VARCHAR(20) NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'inactive', 'completed')),
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sites_status     ON sites(status);
+CREATE INDEX IF NOT EXISTS idx_sites_created_by ON sites(created_by);
+
+-- ──────────────────────────────────────────────────────────────
+-- 3. USER_SITES  (which sub-admins can access which sites)
+--    Admins have access to ALL sites by default (checked in code)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS user_sites (
+  id              SERIAL PRIMARY KEY,
+  user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  assigned_at     TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, site_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_sites_user ON user_sites(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_sites_site ON user_sites(site_id);
+
+-- ──────────────────────────────────────────────────────────────
+-- Trigger: auto-update updated_at
+-- ──────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_users_updated_at
+  BEFORE UPDATE ON users
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER trg_sites_updated_at
+  BEFORE UPDATE ON sites
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 4. FARMERS (land owners who receive payments from admin)
+-- ──────────────────────────────────────────────────────────────
+DROP TABLE IF EXISTS farmer_payments CASCADE;
+DROP TABLE IF EXISTS farmers CASCADE;
+
+CREATE TABLE IF NOT EXISTS farmers (
+  id              SERIAL PRIMARY KEY,
+  name            VARCHAR(255) NOT NULL,
+  phone           VARCHAR(20),
+  address         TEXT,
+  total_amount    NUMERIC(15,2) NOT NULL DEFAULT 0,
+  interest_rate   NUMERIC(5,2) NOT NULL DEFAULT 0,
+  site_id         INTEGER REFERENCES sites(id) ON DELETE CASCADE,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  notes           TEXT,
+  status          VARCHAR(20) NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'completed', 'inactive')),
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_farmers_site     ON farmers(site_id);
+CREATE INDEX IF NOT EXISTS idx_farmers_status   ON farmers(status);
+CREATE INDEX IF NOT EXISTS idx_farmers_created  ON farmers(created_by);
+
+-- ──────────────────────────────────────────────────────────────
+-- 5. FARMER_PAYMENTS (installments paid to farmers)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS farmer_payments (
+  id              SERIAL PRIMARY KEY,
+  farmer_id       INTEGER NOT NULL REFERENCES farmers(id) ON DELETE CASCADE,
+  date            DATE NOT NULL DEFAULT CURRENT_DATE,
+  particular      VARCHAR(255) NOT NULL,
+  amount          NUMERIC(15,2) NOT NULL DEFAULT 0,
+  by_note         VARCHAR(500),
+  interest_rate   NUMERIC(5,2) DEFAULT 0,
+  interest_amount NUMERIC(15,2) DEFAULT 0,
+  remarks         TEXT,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_farmer_payments_farmer ON farmer_payments(farmer_id);
+CREATE INDEX IF NOT EXISTS idx_farmer_payments_date   ON farmer_payments(date);
+
+CREATE TRIGGER trg_farmers_updated_at
+  BEFORE UPDATE ON farmers
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER trg_farmer_payments_updated_at
+  BEFORE UPDATE ON farmer_payments
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 6. PLOT_COMMISSIONS (commission payments per site)
+-- ──────────────────────────────────────────────────────────────
+DROP TABLE IF EXISTS plot_commissions CASCADE;
+
+CREATE TABLE IF NOT EXISTS plot_commissions (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  date            DATE NOT NULL DEFAULT CURRENT_DATE,
+  particular      VARCHAR(255) NOT NULL,
+  father_name     VARCHAR(255),
+  plot_no         VARCHAR(50),
+  plot_size       VARCHAR(50),
+  plot_rate       VARCHAR(50),
+  amount          NUMERIC(15,2) NOT NULL DEFAULT 0,
+  by_note         VARCHAR(500),
+  remarks         TEXT,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_plot_commissions_site   ON plot_commissions(site_id);
+CREATE INDEX IF NOT EXISTS idx_plot_commissions_date   ON plot_commissions(date);
+CREATE INDEX IF NOT EXISTS idx_plot_commissions_plot   ON plot_commissions(plot_no);
+
+CREATE TRIGGER trg_plot_commissions_updated_at
+  BEFORE UPDATE ON plot_commissions
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 7. CASH FLOW MONTHS (monthly periods per site)
+-- ──────────────────────────────────────────────────────────────
+DROP TABLE IF EXISTS cash_flow_entries CASCADE;
+DROP TABLE IF EXISTS cash_flow_months CASCADE;
+
+CREATE TABLE IF NOT EXISTS cash_flow_months (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  month           INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+  year            INTEGER NOT NULL,
+  ledger_name     VARCHAR(255) NOT NULL DEFAULT '',
+  ledger_type     VARCHAR(20) NOT NULL DEFAULT 'site',
+  opening_balance NUMERIC(15,2) NOT NULL DEFAULT 0,
+  notes           TEXT,
+  is_locked       BOOLEAN DEFAULT FALSE,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(site_id, month, year, ledger_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cfm_site   ON cash_flow_months(site_id);
+CREATE INDEX IF NOT EXISTS idx_cfm_period ON cash_flow_months(year, month);
+
+CREATE TRIGGER trg_cash_flow_months_updated_at
+  BEFORE UPDATE ON cash_flow_months
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 8. CASH FLOW ENTRIES (individual debit/credit rows)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS cash_flow_entries (
+  id                  SERIAL PRIMARY KEY,
+  cash_flow_month_id  INTEGER NOT NULL REFERENCES cash_flow_months(id) ON DELETE CASCADE,
+  site_id             INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  date                DATE NOT NULL DEFAULT CURRENT_DATE,
+  particular          VARCHAR(500) NOT NULL,
+  debit               NUMERIC(15,2) NOT NULL DEFAULT 0,
+  credit              NUMERIC(15,2) NOT NULL DEFAULT 0,
+  remarks             TEXT,
+  created_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at          TIMESTAMPTZ DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cfe_month ON cash_flow_entries(cash_flow_month_id);
+CREATE INDEX IF NOT EXISTS idx_cfe_site  ON cash_flow_entries(site_id);
+CREATE INDEX IF NOT EXISTS idx_cfe_date  ON cash_flow_entries(date);
+
+CREATE TRIGGER trg_cash_flow_entries_updated_at
+  BEFORE UPDATE ON cash_flow_entries
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 9. FIRMS (bank accounts / entities per site)
+-- ──────────────────────────────────────────────────────────────
+DROP TABLE IF EXISTS firm_transactions CASCADE;
+DROP TABLE IF EXISTS firms CASCADE;
+
+CREATE TABLE IF NOT EXISTS firms (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  name            VARCHAR(255) NOT NULL,
+  account_number  VARCHAR(50),
+  bank_name       VARCHAR(255),
+  ifsc_code       VARCHAR(20),
+  opening_balance NUMERIC(15,2) NOT NULL DEFAULT 0,
+  notes           TEXT,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(site_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_firms_site ON firms(site_id);
+
+CREATE TRIGGER trg_firms_updated_at
+  BEFORE UPDATE ON firms
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 10. FIRM TRANSACTIONS (bank statement rows)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS firm_transactions (
+  id              SERIAL PRIMARY KEY,
+  firm_id         INTEGER NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  date            DATE NOT NULL DEFAULT CURRENT_DATE,
+  description     TEXT NOT NULL,
+  debit           NUMERIC(15,2) NOT NULL DEFAULT 0,
+  credit          NUMERIC(15,2) NOT NULL DEFAULT 0,
+  name            VARCHAR(255),
+  purpose         VARCHAR(500),
+  remark          VARCHAR(100),
+  cheque_no       VARCHAR(50),
+  cash_flow_entry_id INTEGER REFERENCES cash_flow_entries(id) ON DELETE SET NULL,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ft_firm   ON firm_transactions(firm_id);
+CREATE INDEX IF NOT EXISTS idx_ft_site   ON firm_transactions(site_id);
+CREATE INDEX IF NOT EXISTS idx_ft_date   ON firm_transactions(date);
+CREATE INDEX IF NOT EXISTS idx_ft_remark ON firm_transactions(remark);
+CREATE INDEX IF NOT EXISTS idx_ft_cash_flow_entry_id ON firm_transactions(cash_flow_entry_id);
+
+CREATE TRIGGER trg_firm_transactions_updated_at
+  BEFORE UPDATE ON firm_transactions
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 11. PLOTS (plot sales / bookings per site)
+-- ──────────────────────────────────────────────────────────────
+DROP TABLE IF EXISTS plot_payments CASCADE;
+DROP TABLE IF EXISTS plots CASCADE;
+
+CREATE TABLE IF NOT EXISTS plots (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  plot_no         VARCHAR(20) NOT NULL,
+  block           VARCHAR(10),
+  buyer_name      VARCHAR(255),
+  plot_size       NUMERIC(10,2),
+  plot_rate       NUMERIC(15,2),
+  sale_price      NUMERIC(15,2) NOT NULL DEFAULT 0,
+  registry_area   NUMERIC(10,2) DEFAULT 0,
+  circle_rate     NUMERIC(15,2) DEFAULT 0,
+  to_receive_bank NUMERIC(15,2) DEFAULT 0,
+  first_installment NUMERIC(15,2) DEFAULT 0,
+  booking_by      VARCHAR(255),
+  booking_date    DATE,
+  status          VARCHAR(50) DEFAULT 'BOOKED',
+  notes           TEXT,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(site_id, plot_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_plots_site ON plots(site_id);
+CREATE INDEX IF NOT EXISTS idx_plots_status ON plots(status);
+CREATE INDEX IF NOT EXISTS idx_plots_plot_no ON plots(plot_no);
+
+CREATE TRIGGER trg_plots_updated_at
+  BEFORE UPDATE ON plots
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 12. PLOT PAYMENTS (payments received against plot sales)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS plot_payments (
+  id              SERIAL PRIMARY KEY,
+  plot_id         INTEGER NOT NULL REFERENCES plots(id) ON DELETE CASCADE,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  date            DATE NOT NULL DEFAULT CURRENT_DATE,
+  payment_from    VARCHAR(100),
+  payment_type    VARCHAR(20) DEFAULT 'CASH'
+                    CHECK (payment_type IN ('BANK', 'CASH')),
+  bank_details    VARCHAR(255),
+  narration       TEXT,
+  received_by     VARCHAR(255),
+  amount          NUMERIC(15,2) NOT NULL DEFAULT 0,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pp_plot ON plot_payments(plot_id);
+CREATE INDEX IF NOT EXISTS idx_pp_site ON plot_payments(site_id);
+CREATE INDEX IF NOT EXISTS idx_pp_date ON plot_payments(date);
+
+CREATE TRIGGER trg_plot_payments_updated_at
+  BEFORE UPDATE ON plot_payments
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 13. EXPENSES (site-level payment/expense tracking)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS expenses (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  date            DATE NOT NULL DEFAULT CURRENT_DATE,
+  from_entity     VARCHAR(255),
+  to_entity       VARCHAR(255),
+  payment_mode    VARCHAR(50),
+  debit           NUMERIC(15,2) NOT NULL DEFAULT 0,
+  credit          NUMERIC(15,2) NOT NULL DEFAULT 0,
+  remark          TEXT,
+  account_no      VARCHAR(100),
+  branch          VARCHAR(255),
+  category        VARCHAR(100),
+  status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'approved', 'rejected')),
+  approved_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  approved_at     TIMESTAMPTZ,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_exp_site     ON expenses(site_id);
+CREATE INDEX IF NOT EXISTS idx_exp_date     ON expenses(date);
+CREATE INDEX IF NOT EXISTS idx_exp_site_date ON expenses(site_id, date);
+CREATE INDEX IF NOT EXISTS idx_exp_mode     ON expenses(payment_mode);
+CREATE INDEX IF NOT EXISTS idx_exp_category ON expenses(category);
+CREATE INDEX IF NOT EXISTS idx_exp_status   ON expenses(status);
+
+CREATE TRIGGER trg_expenses_updated_at
+  BEFORE UPDATE ON expenses
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 14. PLOT REGISTRIES (registry / sale-deed tracking per site)
+-- ──────────────────────────────────────────────────────────────
+DROP TABLE IF EXISTS plot_registry_payments CASCADE;
+DROP TABLE IF EXISTS plot_registries CASCADE;
+
+CREATE TABLE IF NOT EXISTS plot_registries (
+  id                SERIAL PRIMARY KEY,
+  site_id           INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  plot_no           VARCHAR(50) NOT NULL,
+  customer_name     VARCHAR(255),
+  size_meter        NUMERIC(10,2),
+  size_sqyard       NUMERIC(10,2),
+  registry_date     DATE,
+  farmer_name       VARCHAR(255),
+  registry_payment  NUMERIC(15,2) NOT NULL DEFAULT 0,
+  notes             TEXT,
+  created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(site_id, plot_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_site ON plot_registries(site_id);
+CREATE INDEX IF NOT EXISTS idx_pr_plot_no ON plot_registries(plot_no);
+
+CREATE TRIGGER trg_plot_registries_updated_at
+  BEFORE UPDATE ON plot_registries
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- 15. PLOT REGISTRY PAYMENTS (individual payments against registry)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS plot_registry_payments (
+  id              SERIAL PRIMARY KEY,
+  registry_id     INTEGER NOT NULL REFERENCES plot_registries(id) ON DELETE CASCADE,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  payment_date    DATE NOT NULL DEFAULT CURRENT_DATE,
+  amount          NUMERIC(15,2) NOT NULL DEFAULT 0,
+  payment_mode    VARCHAR(50),
+  tally_date      DATE,
+  tally_amount    NUMERIC(15,2),
+  notes           TEXT,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_prp_registry ON plot_registry_payments(registry_id);
+CREATE INDEX IF NOT EXISTS idx_prp_site ON plot_registry_payments(site_id);
+CREATE INDEX IF NOT EXISTS idx_prp_date ON plot_registry_payments(payment_date);
+
+CREATE TRIGGER trg_plot_registry_payments_updated_at
+  BEFORE UPDATE ON plot_registry_payments
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- MEMBERS (clients / farmers / members records — NOT login users)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS members (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  member_type     VARCHAR(30) NOT NULL DEFAULT 'CLIENT'
+                    CHECK (member_type IN ('CLIENT','FARMER','MEMBER','BROKER','PARTNER','VENDOR','OTHER')),
+  -- Personal
+  full_name       VARCHAR(255) NOT NULL,
+  father_name     VARCHAR(255),
+  photo           VARCHAR(500),
+  gender          VARCHAR(10) CHECK (gender IN ('MALE','FEMALE','OTHER')),
+  date_of_birth   DATE,
+  blood_group     VARCHAR(5),
+  -- Contact
+  phone           VARCHAR(20),
+  alt_phone       VARCHAR(20),
+  email           VARCHAR(255),
+  whatsapp        VARCHAR(20),
+  -- Address
+  address         TEXT,
+  city            VARCHAR(100),
+  state           VARCHAR(100),
+  pincode         VARCHAR(10),
+  -- Identity
+  aadhar_no       VARCHAR(20),
+  pan_no          VARCHAR(15),
+  voter_id        VARCHAR(30),
+  -- Bank
+  bank_name       VARCHAR(100),
+  account_no      VARCHAR(30),
+  ifsc_code       VARCHAR(15),
+  branch          VARCHAR(100),
+  -- Extra
+  occupation      VARCHAR(100),
+  company_name    VARCHAR(255),
+  reference       VARCHAR(255),
+  notes           TEXT,
+  status          VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'
+                    CHECK (status IN ('ACTIVE','INACTIVE','BLOCKED')),
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_members_site ON members(site_id);
+CREATE INDEX IF NOT EXISTS idx_members_type ON members(member_type);
+CREATE INDEX IF NOT EXISTS idx_members_name ON members(site_id, full_name);
+CREATE INDEX IF NOT EXISTS idx_members_phone ON members(phone);
+
+CREATE TRIGGER trg_members_updated_at
+  BEFORE UPDATE ON members
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- DAY BOOK (daily ledger entries with integration to expenses)
+DROP TABLE IF EXISTS day_book CASCADE;
+
+CREATE TABLE IF NOT EXISTS day_book (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  date            DATE NOT NULL DEFAULT CURRENT_DATE,
+  particular      VARCHAR(500) NOT NULL,
+  entry_type      VARCHAR(50) NOT NULL DEFAULT 'GENERAL'
+                    CHECK (entry_type IN ('GENERAL','EXPENSE','INCOME','PAYMENT','RECEIPT','TRANSFER','ADJUSTMENT','OTHER','FARMER PAYMENT','PLOT COMMISSION','CASH FLOW','FIRM TRANSACTION','PLOT PAYMENT','IMPREST')),
+  debit           NUMERIC(15,2) NOT NULL DEFAULT 0,
+  credit          NUMERIC(15,2) NOT NULL DEFAULT 0,
+  remarks         TEXT,
+  payment_mode    VARCHAR(50),
+  category        VARCHAR(100),
+  from_entity     VARCHAR(255),
+  to_entity       VARCHAR(255),
+  account_no      VARCHAR(100),
+  branch          VARCHAR(255),
+  status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'approved', 'rejected')),
+  approved_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  approved_at     TIMESTAMPTZ,
+  farmer_payment_id INTEGER REFERENCES farmer_payments(id) ON DELETE SET NULL,
+  commission_id   INTEGER REFERENCES plot_commissions(id) ON DELETE SET NULL,
+  cash_flow_entry_id INTEGER REFERENCES cash_flow_entries(id) ON DELETE SET NULL,
+  firm_transaction_id INTEGER REFERENCES firm_transactions(id) ON DELETE SET NULL,
+  plot_payment_id INTEGER REFERENCES plot_payments(id) ON DELETE SET NULL,
+  imprest_allocation_id INTEGER REFERENCES imprest_allocations(id) ON DELETE SET NULL,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_day_book_site ON day_book(site_id);
+CREATE INDEX IF NOT EXISTS idx_day_book_date ON day_book(date);
+CREATE INDEX IF NOT EXISTS idx_day_book_type ON day_book(entry_type);
+CREATE INDEX IF NOT EXISTS idx_day_book_site_date ON day_book(site_id, date);
+CREATE INDEX IF NOT EXISTS idx_day_book_status ON day_book(status);
+CREATE INDEX IF NOT EXISTS idx_day_book_cash_flow_entry_id ON day_book(cash_flow_entry_id);
+CREATE INDEX IF NOT EXISTS idx_day_book_firm_transaction_id ON day_book(firm_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_day_book_plot_payment_id ON day_book(plot_payment_id);
+
+CREATE TRIGGER trg_day_book_updated_at
+  BEFORE UPDATE ON day_book
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- IMPREST ALLOCATIONS (admin → sub-admin petty cash)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS imprest_allocations (
+  id                  SERIAL PRIMARY KEY,
+  admin_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sub_admin_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount              NUMERIC(15,2) NOT NULL,
+  remark              TEXT,
+  status              VARCHAR(30) NOT NULL DEFAULT 'PENDING_RECEIPT'
+                        CHECK (status IN ('PENDING_RECEIPT', 'RECEIVED', 'CANCELLED')),
+  confirmation_remark TEXT,
+  created_at          TIMESTAMPTZ DEFAULT NOW(),
+  confirmed_at        TIMESTAMPTZ,
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ia_admin ON imprest_allocations(admin_id);
+CREATE INDEX IF NOT EXISTS idx_ia_sub_admin ON imprest_allocations(sub_admin_id);
+CREATE INDEX IF NOT EXISTS idx_ia_status ON imprest_allocations(status);
+
+CREATE TRIGGER trg_imprest_allocations_updated_at
+  BEFORE UPDATE ON imprest_allocations
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ──────────────────────────────────────────────────────────────
+-- IMPREST LEDGER (every imprest balance movement)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS imprest_ledger (
+  id                  SERIAL PRIMARY KEY,
+  user_id             INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type                VARCHAR(30) NOT NULL
+                        CHECK (type IN ('ALLOCATION', 'EXPENSE', 'ADJUSTMENT', 'REFUND')),
+  reference_id        INTEGER,
+  amount              NUMERIC(15,2) NOT NULL,
+  balance_after       NUMERIC(15,2) NOT NULL DEFAULT 0,
+  remarks             TEXT,
+  created_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_il_user ON imprest_ledger(user_id);
+CREATE INDEX IF NOT EXISTS idx_il_type ON imprest_ledger(type);
+CREATE INDEX IF NOT EXISTS idx_il_created ON imprest_ledger(created_at);
+
+-- ──────────────────────────────────────────────────────────────
+-- IMPREST EXPENSE REQUESTS (overdraft approval workflow)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS imprest_expense_requests (
+  id                  SERIAL PRIMARY KEY,
+  sub_admin_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  site_id             INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  amount              NUMERIC(15,2) NOT NULL,
+  expense_data        JSONB NOT NULL,
+  reason              TEXT,
+  status              VARCHAR(30) NOT NULL DEFAULT 'PENDING'
+                        CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+  reviewed_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at         TIMESTAMPTZ,
+  review_remark       TEXT,
+  created_at          TIMESTAMPTZ DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ier_sub_admin ON imprest_expense_requests(sub_admin_id);
+CREATE INDEX IF NOT EXISTS idx_ier_status ON imprest_expense_requests(status);
+CREATE INDEX IF NOT EXISTS idx_ier_site ON imprest_expense_requests(site_id);
+
+CREATE TRIGGER trg_imprest_expense_requests_updated_at
+  BEFORE UPDATE ON imprest_expense_requests
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
