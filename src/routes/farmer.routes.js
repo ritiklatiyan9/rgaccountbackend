@@ -11,12 +11,16 @@ import {
   listPayments,
   updatePayment,
   deletePayment,
+  listFarmerMembers,
 } from '../controllers/farmer.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 
 // All farmer routes require auth
 router.use(authMiddleware);
+
+// Farmer members (for registration dropdown) — must come before /:id
+router.get('/members', listFarmerMembers);
 
 // Farmer CRUD
 router.get('/', listFarmers);                                     // ?site_id=X

@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS farmers (
   notes           TEXT,
   status          VARCHAR(20) NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active', 'completed', 'inactive')),
+  member_id       INTEGER REFERENCES members(id) ON DELETE SET NULL,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
   updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
@@ -125,6 +126,13 @@ CREATE TABLE IF NOT EXISTS farmer_payments (
   interest_rate   NUMERIC(5,2) DEFAULT 0,
   interest_amount NUMERIC(15,2) DEFAULT 0,
   remarks         TEXT,
+  payment_mode    VARCHAR(20) DEFAULT 'CASH',        -- CASH, BANK, SPLIT
+  cash_amount     NUMERIC(15,2) DEFAULT 0,
+  bank_amount     NUMERIC(15,2) DEFAULT 0,
+  bank_name       VARCHAR(255),
+  bank_account_no VARCHAR(100),
+  bank_reference  VARCHAR(255),
+  bank_ifsc       VARCHAR(20),
   created_at      TIMESTAMPTZ DEFAULT NOW(),
   updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
@@ -446,7 +454,7 @@ CREATE TABLE IF NOT EXISTS members (
   id              SERIAL PRIMARY KEY,
   site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   member_type     VARCHAR(30) NOT NULL DEFAULT 'CLIENT'
-                    CHECK (member_type IN ('CLIENT','FARMER','MEMBER','BROKER','PARTNER','VENDOR','OTHER')),
+                    CHECK (member_type IN ('CLIENT','FARMER','MEMBER','BROKER','PARTNER','VENDOR','EMPLOYEE','OTHER')),
   -- Personal
   full_name       VARCHAR(255) NOT NULL,
   father_name     VARCHAR(255),
@@ -454,6 +462,14 @@ CREATE TABLE IF NOT EXISTS members (
   gender          VARCHAR(10) CHECK (gender IN ('MALE','FEMALE','OTHER')),
   date_of_birth   DATE,
   blood_group     VARCHAR(5),
+  mother_name     VARCHAR(255),
+  spouse_name     VARCHAR(255),
+  nationality     VARCHAR(50) DEFAULT 'INDIAN',
+  religion        VARCHAR(50),
+  caste           VARCHAR(100),
+  marital_status  VARCHAR(20),
+  anniversary_date DATE,
+  qualification   VARCHAR(100),
   -- Contact
   phone           VARCHAR(20),
   alt_phone       VARCHAR(20),
@@ -468,11 +484,47 @@ CREATE TABLE IF NOT EXISTS members (
   aadhar_no       VARCHAR(20),
   pan_no          VARCHAR(15),
   voter_id        VARCHAR(30),
+  passport_no     VARCHAR(20),
+  driving_license_no VARCHAR(30),
+  gst_no          VARCHAR(20),
+  tin_no          VARCHAR(20),
   -- Bank
   bank_name       VARCHAR(100),
   account_no      VARCHAR(30),
   ifsc_code       VARCHAR(15),
   branch          VARCHAR(100),
+  -- Emergency Contact
+  emergency_contact_name  VARCHAR(255),
+  emergency_contact_phone VARCHAR(20),
+  emergency_contact_relation VARCHAR(50),
+  -- Nominee
+  nominee_name    VARCHAR(255),
+  nominee_relation VARCHAR(50),
+  nominee_phone   VARCHAR(20),
+  -- Employee-specific
+  employee_id     VARCHAR(50),
+  designation     VARCHAR(100),
+  department      VARCHAR(100),
+  date_of_joining DATE,
+  salary          NUMERIC(15,2),
+  employment_type VARCHAR(30),
+  -- Employee Document URLs (Cloudinary)
+  resume_url      VARCHAR(500),
+  marksheet_10th_url VARCHAR(500),
+  marksheet_12th_url VARCHAR(500),
+  degree_certificate_url VARCHAR(500),
+  experience_certificate_url VARCHAR(500),
+  offer_letter_url VARCHAR(500),
+  other_certificate_url VARCHAR(500),
+  -- KYC Document Photo URLs (Cloudinary)
+  aadhar_front_url VARCHAR(500),
+  aadhar_back_url VARCHAR(500),
+  pan_card_url    VARCHAR(500),
+  voter_id_url    VARCHAR(500),
+  passport_url    VARCHAR(500),
+  driving_license_url VARCHAR(500),
+  cheque_url      VARCHAR(500),
+  other_kyc_url   VARCHAR(500),
   -- Extra
   occupation      VARCHAR(100),
   company_name    VARCHAR(255),

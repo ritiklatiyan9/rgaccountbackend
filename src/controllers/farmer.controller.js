@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { farmerModel, farmerPaymentModel } from '../models/Farmer.model.js';
+import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
 
 // ──────────────────────────────────────────────────────────────
@@ -11,7 +12,10 @@ import pool from '../config/db.js';
  * Create a new farmer (admin only)
  */
 export const createFarmer = asyncHandler(async (req, res) => {
-  const { name, phone, address, total_amount, interest_rate, site_id, notes, status } = req.body;
+  const {
+    name, phone, address, total_amount, interest_rate, site_id, notes, status, member_id,
+    payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
+  } = req.body;
 
   if (!name) {
     return res.status(400).json({ message: 'Farmer name is required' });
@@ -20,16 +24,29 @@ export const createFarmer = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Site is required' });
   }
 
+  const mode = (payment_mode || 'CASH').toUpperCase();
+  const totalAmt = parseFloat(total_amount) || 0;
+  const cashAmt = mode === 'BANK' ? 0 : (mode === 'SPLIT' ? (parseFloat(cash_amount) || 0) : totalAmt);
+  const bankAmt = mode === 'CASH' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmt);
+
   const farmerData = {
     name,
     phone: phone || null,
     address: address || null,
-    total_amount: total_amount || 0,
+    total_amount: totalAmt,
     interest_rate: interest_rate || 0,
     site_id: parseInt(site_id),
     created_by: req.user.id,
     notes: notes || null,
     status: status || 'active',
+    member_id: member_id ? parseInt(member_id) : null,
+    payment_mode: mode,
+    cash_amount: cashAmt,
+    bank_amount: bankAmt,
+    bank_name: bank_name || null,
+    bank_account_no: bank_account_no || null,
+    bank_reference: bank_reference || null,
+    bank_ifsc: bank_ifsc || null,
   };
 
   const farmer = await farmerModel.create(farmerData, pool);
@@ -72,7 +89,10 @@ export const getFarmer = asyncHandler(async (req, res) => {
  */
 export const updateFarmer = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { name, phone, address, total_amount, interest_rate, notes, status } = req.body;
+  const {
+    name, phone, address, total_amount, interest_rate, notes, status, member_id,
+    payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
+  } = req.body;
 
   const farmer = await farmerModel.findById(parseInt(id), pool);
   if (!farmer) {
@@ -87,6 +107,14 @@ export const updateFarmer = asyncHandler(async (req, res) => {
   if (interest_rate !== undefined) updateData.interest_rate = interest_rate;
   if (notes !== undefined) updateData.notes = notes;
   if (status !== undefined) updateData.status = status;
+  if (member_id !== undefined) updateData.member_id = member_id ? parseInt(member_id) : null;
+  if (payment_mode !== undefined) updateData.payment_mode = payment_mode;
+  if (cash_amount !== undefined) updateData.cash_amount = cash_amount;
+  if (bank_amount !== undefined) updateData.bank_amount = bank_amount;
+  if (bank_name !== undefined) updateData.bank_name = bank_name;
+  if (bank_account_no !== undefined) updateData.bank_account_no = bank_account_no;
+  if (bank_reference !== undefined) updateData.bank_reference = bank_reference;
+  if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
 
   const updated = await farmerModel.update(parseInt(id), updateData, pool);
   res.json({ farmer: updated });
@@ -115,11 +143,14 @@ export const deleteFarmer = asyncHandler(async (req, res) => {
 
 /**
  * POST /farmers/:farmerId/payments
- * Add a payment/installment to a farmer
+ * Add a payment/installment to a farmer with cash/bank split + DayBook integration
  */
 export const createPayment = asyncHandler(async (req, res) => {
   const { farmerId } = req.params;
-  const { date, particular, amount, by_note, interest_rate, interest_amount, remarks } = req.body;
+  const {
+    date, particular, amount, by_note, interest_rate, interest_amount, remarks,
+    payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
+  } = req.body;
 
   const farmer = await farmerModel.findById(parseInt(farmerId), pool);
   if (!farmer) {
@@ -130,19 +161,77 @@ export const createPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Particular (payment method) is required' });
   }
 
+  const totalAmount = parseFloat(amount) || 0;
+  const mode = (payment_mode || 'CASH').toUpperCase();
+  const cashAmt = mode === 'BANK' ? 0 : (mode === 'SPLIT' ? (parseFloat(cash_amount) || 0) : totalAmount);
+  const bankAmt = mode === 'CASH' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmount);
+
+  const paymentDate = date || new Date().toISOString().split('T')[0];
+
   const paymentData = {
     farmer_id: parseInt(farmerId),
-    date: date || new Date().toISOString().split('T')[0],
+    date: paymentDate,
     particular,
-    amount: amount || 0,
+    amount: totalAmount,
     by_note: by_note || null,
-    interest_rate: interest_rate || 0,
-    interest_amount: interest_amount || 0,
+    interest_rate: parseFloat(interest_rate) || 0,
+    interest_amount: parseFloat(interest_amount) || 0,
     remarks: remarks || null,
+    payment_mode: mode,
+    cash_amount: cashAmt,
+    bank_amount: bankAmt,
+    bank_name: bank_name || null,
+    bank_account_no: bank_account_no || null,
+    bank_reference: bank_reference || null,
+    bank_ifsc: bank_ifsc || null,
   };
 
   const payment = await farmerPaymentModel.create(paymentData, pool);
-  res.status(201).json({ payment });
+
+  // ── Auto-create DayBook entries ──
+  const dayBookEntries = [];
+
+  if (cashAmt > 0) {
+    const cashEntry = await dayBookModel.create({
+      site_id: farmer.site_id,
+      date: paymentDate,
+      particular: `${farmer.name} - FARMER PAYMENT (CASH)`.toUpperCase(),
+      entry_type: 'FARMER PAYMENT',
+      debit: cashAmt,
+      credit: 0,
+      remarks: remarks ? remarks.trim() : null,
+      payment_mode: 'CASH',
+      category: 'FARMER PAYMENT',
+      from_entity: farmer.name.toUpperCase(),
+      to_entity: null,
+      created_by: req.user.id,
+      farmer_payment_id: payment.id,
+    }, pool);
+    dayBookEntries.push(cashEntry);
+  }
+
+  if (bankAmt > 0) {
+    const bankEntry = await dayBookModel.create({
+      site_id: farmer.site_id,
+      date: paymentDate,
+      particular: `${farmer.name} - FARMER PAYMENT (BANK)`.toUpperCase(),
+      entry_type: 'FARMER PAYMENT',
+      debit: bankAmt,
+      credit: 0,
+      remarks: [remarks, bank_reference ? `Ref: ${bank_reference}` : null, bank_name ? `Bank: ${bank_name}` : null].filter(Boolean).join(' | ') || null,
+      payment_mode: particular.toUpperCase(),
+      category: 'FARMER PAYMENT',
+      from_entity: farmer.name.toUpperCase(),
+      to_entity: bank_name ? bank_name.toUpperCase() : null,
+      account_no: bank_account_no || null,
+      branch: bank_ifsc || null,
+      created_by: req.user.id,
+      farmer_payment_id: payment.id,
+    }, pool);
+    dayBookEntries.push(bankEntry);
+  }
+
+  res.status(201).json({ payment, daybook_entries: dayBookEntries });
 });
 
 /**
@@ -161,6 +250,13 @@ export const listPayments = asyncHandler(async (req, res) => {
   const totalPaid = await farmerPaymentModel.getTotalPaid(parseInt(farmerId), pool);
   const totalInterest = await farmerPaymentModel.getTotalInterest(parseInt(farmerId), pool);
 
+  // Cash/Bank paid totals from payments
+  let cashPaid = 0, bankPaid = 0;
+  for (const p of payments) {
+    cashPaid += parseFloat(p.cash_amount) || 0;
+    bankPaid += parseFloat(p.bank_amount) || 0;
+  }
+
   res.json({
     farmer,
     payments,
@@ -169,6 +265,12 @@ export const listPayments = asyncHandler(async (req, res) => {
       total_paid: totalPaid,
       total_interest: totalInterest,
       remaining: parseFloat(farmer.total_amount) - totalPaid,
+      cash_to_pay: parseFloat(farmer.cash_amount) || 0,
+      bank_to_pay: parseFloat(farmer.bank_amount) || 0,
+      cash_paid: cashPaid,
+      bank_paid: bankPaid,
+      cash_remaining: (parseFloat(farmer.cash_amount) || 0) - cashPaid,
+      bank_remaining: (parseFloat(farmer.bank_amount) || 0) - bankPaid,
     },
   });
 });
@@ -179,7 +281,10 @@ export const listPayments = asyncHandler(async (req, res) => {
  */
 export const updatePayment = asyncHandler(async (req, res) => {
   const { farmerId, paymentId } = req.params;
-  const { date, particular, amount, by_note, interest_rate, interest_amount, remarks } = req.body;
+  const {
+    date, particular, amount, by_note, interest_rate, interest_amount, remarks,
+    payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
+  } = req.body;
 
   const payment = await farmerPaymentModel.findById(parseInt(paymentId), pool);
   if (!payment || payment.farmer_id !== parseInt(farmerId)) {
@@ -194,6 +299,13 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (interest_rate !== undefined) updateData.interest_rate = interest_rate;
   if (interest_amount !== undefined) updateData.interest_amount = interest_amount;
   if (remarks !== undefined) updateData.remarks = remarks;
+  if (payment_mode !== undefined) updateData.payment_mode = payment_mode;
+  if (cash_amount !== undefined) updateData.cash_amount = cash_amount;
+  if (bank_amount !== undefined) updateData.bank_amount = bank_amount;
+  if (bank_name !== undefined) updateData.bank_name = bank_name;
+  if (bank_account_no !== undefined) updateData.bank_account_no = bank_account_no;
+  if (bank_reference !== undefined) updateData.bank_reference = bank_reference;
+  if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
 
   const updated = await farmerPaymentModel.update(parseInt(paymentId), updateData, pool);
   res.json({ payment: updated });
@@ -213,4 +325,27 @@ export const deletePayment = asyncHandler(async (req, res) => {
 
   await farmerPaymentModel.delete(parseInt(paymentId), pool);
   res.json({ message: 'Payment deleted' });
+});
+
+// ──────────────────────────────────────────────────────────────
+// FARMER MEMBERS (for Register Farmer dropdown)
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * GET /farmers/members?site_id=X
+ * List all registered members for farmer registration dropdown
+ */
+export const listFarmerMembers = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const result = await pool.query(
+    `SELECT id, full_name, phone, address, bank_name, branch AS bank_branch, account_no AS bank_account_no, ifsc_code AS bank_ifsc, member_type
+     FROM members
+     WHERE site_id = $1
+     ORDER BY full_name ASC`,
+    [parseInt(site_id)]
+  );
+
+  res.json({ members: result.rows });
 });

@@ -11,6 +11,17 @@ const MEMBER_FIELDS = [
   'aadhar_no', 'pan_no', 'voter_id',
   'bank_name', 'account_no', 'ifsc_code', 'branch',
   'occupation', 'company_name', 'reference', 'notes', 'status',
+  // New personal fields
+  'mother_name', 'spouse_name', 'nationality', 'religion', 'caste',
+  'marital_status', 'anniversary_date', 'qualification',
+  // Additional identity
+  'passport_no', 'driving_license_no', 'gst_no', 'tin_no',
+  // Emergency contact
+  'emergency_contact_name', 'emergency_contact_phone', 'emergency_contact_relation',
+  // Nominee
+  'nominee_name', 'nominee_relation', 'nominee_phone',
+  // Employee-specific
+  'employee_id', 'designation', 'department', 'date_of_joining', 'salary', 'employment_type',
 ];
 
 const sanitize = (body) => {
@@ -22,13 +33,44 @@ const sanitize = (body) => {
       // Uppercase certain fields
       if (['full_name', 'father_name', 'member_type', 'gender', 'blood_group',
            'city', 'state', 'aadhar_no', 'pan_no', 'voter_id', 'ifsc_code',
-           'occupation', 'company_name', 'reference', 'status'].includes(f) && val) {
+           'occupation', 'company_name', 'reference', 'status',
+           'mother_name', 'spouse_name', 'nationality', 'religion', 'caste',
+           'marital_status', 'qualification', 'passport_no', 'driving_license_no',
+           'gst_no', 'tin_no', 'emergency_contact_name', 'emergency_contact_relation',
+           'nominee_name', 'nominee_relation', 'designation', 'department',
+           'employment_type'].includes(f) && val) {
         val = val.toUpperCase();
       }
       data[f] = val || null;
     }
   });
   return data;
+};
+
+// Document field names that map to file upload keys
+const DOC_FIELDS = [
+  'photo', 'aadhar_front_url', 'aadhar_back_url', 'pan_card_url',
+  'voter_id_url', 'passport_url', 'driving_license_url', 'cheque_url', 'other_kyc_url',
+  'resume_url', 'marksheet_10th_url', 'marksheet_12th_url',
+  'degree_certificate_url', 'experience_certificate_url',
+  'offer_letter_url', 'other_certificate_url',
+];
+
+/** Upload all document files from req.files and return a map of field→url */
+const uploadDocuments = async (files) => {
+  const urls = {};
+  if (!files) return urls;
+  for (const fieldName of DOC_FIELDS) {
+    const fileArr = files[fieldName];
+    if (fileArr && fileArr.length > 0) {
+      try {
+        urls[fieldName] = await uploadSingle(fileArr[0], 'cloudinary');
+      } catch (err) {
+        console.error(`Upload failed for ${fieldName}:`, err);
+      }
+    }
+  }
+  return urls;
 };
 
 /** POST /members — Create a new member */
@@ -42,14 +84,9 @@ export const createMember = asyncHandler(async (req, res) => {
   data.site_id = parseInt(site_id);
   data.created_by = req.user.id;
 
-  // Handle photo upload via multer + cloudinary
-  if (req.file) {
-    try {
-      data.photo = await uploadSingle(req.file, 'cloudinary');
-    } catch (err) {
-      console.error('Photo upload failed:', err);
-    }
-  }
+  // Handle document uploads (photo + KYC + employee docs)
+  const docUrls = await uploadDocuments(req.files);
+  Object.assign(data, docUrls);
 
   const member = await memberModel.create(data, pool);
   res.status(201).json({ member });
@@ -98,17 +135,15 @@ export const updateMember = asyncHandler(async (req, res) => {
 
   const data = sanitize(req.body);
 
-  // Handle photo upload
-  if (req.file) {
-    try {
-      data.photo = await uploadSingle(req.file, 'cloudinary');
-    } catch (err) {
-      console.error('Photo upload failed:', err);
+  // Handle document uploads (photo + KYC + employee docs)
+  const docUrls = await uploadDocuments(req.files);
+  Object.assign(data, docUrls);
+
+  // Handle removing documents
+  for (const field of DOC_FIELDS) {
+    if (req.body[`remove_${field}`] === 'true') {
+      data[field] = null;
     }
-  }
-  // Allow clearing photo
-  if (req.body.remove_photo === 'true') {
-    data.photo = null;
   }
 
   if (Object.keys(data).length === 0) return res.status(400).json({ message: 'Nothing to update' });

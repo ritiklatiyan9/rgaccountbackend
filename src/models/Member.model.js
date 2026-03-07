@@ -50,6 +50,7 @@ class MemberModel extends MasterModel {
         COUNT(*) FILTER (WHERE member_type = 'BROKER')::int AS brokers,
         COUNT(*) FILTER (WHERE member_type = 'PARTNER')::int AS partners,
         COUNT(*) FILTER (WHERE member_type = 'VENDOR')::int AS vendors,
+        COUNT(*) FILTER (WHERE member_type = 'EMPLOYEE')::int AS employees,
         COUNT(*) FILTER (WHERE member_type = 'OTHER')::int AS others,
         COUNT(*) FILTER (WHERE status = 'ACTIVE')::int AS active,
         COUNT(*) FILTER (WHERE status = 'INACTIVE')::int AS inactive

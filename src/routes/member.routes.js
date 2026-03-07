@@ -11,14 +11,34 @@ import upload from '../middlewares/multer.middleware.js';
 
 router.use(authMiddleware);
 
+// Multi-file upload config for member documents
+const memberUpload = upload.fields([
+  { name: 'photo', maxCount: 1 },
+  { name: 'aadhar_front_url', maxCount: 1 },
+  { name: 'aadhar_back_url', maxCount: 1 },
+  { name: 'pan_card_url', maxCount: 1 },
+  { name: 'voter_id_url', maxCount: 1 },
+  { name: 'passport_url', maxCount: 1 },
+  { name: 'driving_license_url', maxCount: 1 },
+  { name: 'cheque_url', maxCount: 1 },
+  { name: 'other_kyc_url', maxCount: 1 },
+  { name: 'resume_url', maxCount: 1 },
+  { name: 'marksheet_10th_url', maxCount: 1 },
+  { name: 'marksheet_12th_url', maxCount: 1 },
+  { name: 'degree_certificate_url', maxCount: 1 },
+  { name: 'experience_certificate_url', maxCount: 1 },
+  { name: 'offer_letter_url', maxCount: 1 },
+  { name: 'other_certificate_url', maxCount: 1 },
+]);
+
 // Static routes first
 router.get('/search', searchMembers);
 router.get('/autocomplete', getMemberAutocomplete);
 router.get('/', listMembers);
 
-// With file upload for photo
-router.post('/', requireRole('admin'), upload.single('photo'), createMember);
-router.put('/:id', requireRole('admin'), upload.single('photo'), updateMember);
+// With file upload for documents
+router.post('/', requireRole('admin'), memberUpload, createMember);
+router.put('/:id', requireRole('admin'), memberUpload, updateMember);
 router.delete('/:id', requireRole('admin'), deleteMember);
 
 // Dynamic param last
