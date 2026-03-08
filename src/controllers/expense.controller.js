@@ -69,105 +69,40 @@ export const createExpense = asyncHandler(async (req, res) => {
 
 /**
  * GET /expenses?site_id=X
- * List all expenses for a site (DESC order)
- * Includes entries from both expenses and day_book tables
+ * List expenses for a site (Paginated, Unified expenses + day_book)
+ * Includes server-side filters, search, and running balances
  */
 export const listExpenses = asyncHandler(async (req, res) => {
-  const { site_id } = req.query;
+  const {
+    site_id, page = 1, limit = 20,
+    search, mode, category, to_entity,
+    dateFrom, dateTo, export: isExport
+  } = req.query;
+
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const siteId = site_id;
-  
-  // Fetch regular expenses + try day_book (graceful fallback if table missing)
-  let regularExpenses = [];
-  let dayBookExpenses = [];
-  
-  try {
-    [regularExpenses, dayBookExpenses] = await Promise.all([
-      expenseModel.findBySiteIdAsc(siteId, pool),
-      dayBookModel.findByType(siteId, 'EXPENSE', pool).catch(() => []),
-    ]);
-  } catch (err) {
-    // If day_book table doesn't exist yet, just fetch regular expenses
-    regularExpenses = await expenseModel.findBySiteIdAsc(siteId, pool);
-    dayBookExpenses = [];
-  }
+  const filters = { search, mode, category, to_entity, dateFrom, dateTo };
 
-  // Merge and transform day book entries to expense format
-  const transformedDayBook = dayBookExpenses.map(entry => ({
-    id: `daybook_${entry.id}`,
-    daybook_id: entry.id, // Original ID for editing
-    site_id: entry.site_id,
-    date: entry.date,
-    from_entity: entry.from_entity,
-    to_entity: entry.to_entity,
-    payment_mode: entry.payment_mode,
-    debit: entry.debit,
-    credit: entry.credit,
-    remark: entry.particular + (entry.remarks ? ' - ' + entry.remarks : ''),
-    account_no: entry.account_no,
-    branch: entry.branch,
-    category: entry.category,
-    status: entry.status || 'pending', // Include status
-    approved_by: entry.approved_by,
-    approved_at: entry.approved_at,
-    created_by: entry.created_by,
-    created_at: entry.created_at,
-    updated_at: entry.updated_at,
-    source: 'daybook', // Marker to identify source
-  }));
+  // If exporting, fetch all filtered records by bypassing the limit
+  const fetchLimit = isExport === 'true' ? 0 : parseInt(limit);
+  const fetchPage = parseInt(page);
 
-  // Combine both sources
-  const allExpenses = [...regularExpenses, ...transformedDayBook].sort((a, b) => {
-    const dateA = new Date(a.date);
-    const dateB = new Date(b.date);
-    if (dateA.getTime() !== dateB.getTime()) {
-      return dateA.getTime() - dateB.getTime(); // ASC by date
-    }
-    // For same date, extract numeric id (skip daybook_ prefix if exists)
-    const idA = typeof a.id === 'string' && a.id.startsWith('daybook_') ? parseInt(a.id.split('_')[1]) : a.id;
-    const idB = typeof b.id === 'string' && b.id.startsWith('daybook_') ? parseInt(b.id.split('_')[1]) : b.id;
-    return idA - idB; // ASC by id
-  });
-
-  // Calculate summary from combined data
-  const summary = {
-    total_debit: allExpenses.reduce((sum, e) => sum + (parseFloat(e.debit) || 0), 0),
-    total_credit: allExpenses.reduce((sum, e) => sum + (parseFloat(e.credit) || 0), 0),
-    total_count: allExpenses.length,
-  };
-
-  // Calculate mode breakdown
-  const modeMap = {};
-  allExpenses.forEach(e => {
-    const mode = e.payment_mode || 'UNSPECIFIED';
-    if (!modeMap[mode]) {
-      modeMap[mode] = { payment_mode: mode, total_debit: 0, total_credit: 0, entries: 0 };
-    }
-    modeMap[mode].total_debit += parseFloat(e.debit) || 0;
-    modeMap[mode].total_credit += parseFloat(e.credit) || 0;
-    modeMap[mode].entries += 1;
-  });
-  const modeBreakdown = Object.values(modeMap).sort((a, b) => b.total_debit - a.total_debit);
-
-  // Calculate category breakdown
-  const categoryMap = {};
-  allExpenses.forEach(e => {
-    const cat = e.category || 'UNCATEGORIZED';
-    if (!categoryMap[cat]) {
-      categoryMap[cat] = { category: cat, total_debit: 0, total_credit: 0, entries: 0 };
-    }
-    categoryMap[cat].total_debit += parseFloat(e.debit) || 0;
-    categoryMap[cat].total_credit += parseFloat(e.credit) || 0;
-    categoryMap[cat].entries += 1;
-  });
-  const categoryBreakdown = Object.values(categoryMap).sort((a, b) => b.total_debit - a.total_debit);
+  const [paginatedData, breakdowns] = await Promise.all([
+    expenseModel.findPaginatedUnified(parseInt(site_id), filters, fetchPage, fetchLimit, pool),
+    expenseModel.getUnifiedBreakdowns(parseInt(site_id), filters, pool)
+  ]);
 
   res.json({
-    expenses: allExpenses,
-    summary,
-    modeBreakdown,
-    categoryBreakdown,
+    expenses: paginatedData.items,
+    summary: paginatedData.summary,
+    pagination: {
+      totalItems: paginatedData.totalItems,
+      totalPages: fetchLimit > 0 ? Math.ceil(paginatedData.totalItems / fetchLimit) : 1,
+      currentPage: fetchPage,
+      itemsPerPage: fetchLimit > 0 ? fetchLimit : paginatedData.totalItems
+    },
+    modeBreakdown: breakdowns.modeBreakdown,
+    categoryBreakdown: breakdowns.categoryBreakdown,
   });
 });
 
@@ -241,10 +176,10 @@ export const deleteExpense = asyncHandler(async (req, res) => {
  */
 export const listPendingExpenses = asyncHandler(async (req, res) => {
   const { site_id, date_from, date_to, status = 'pending' } = req.query;
-  
+
   let expensesList = [];
   let daybookList = [];
-  
+
   // Use the new findByStatus method for flexibility
   [expensesList, daybookList] = await Promise.all([
     expenseModel.findByStatus(
@@ -262,7 +197,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
       pool
     ),
   ]);
-  
+
   // Transform day_book entries to expense format and mark source
   const transformedDaybook = daybookList.map(entry => ({
     id: entry.id,
@@ -286,13 +221,13 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
     created_at: entry.created_at,
     source: 'daybook', // Mark the source
   }));
-  
+
   // Mark expenses table entries
   const markedExpenses = expensesList.map(e => ({
     ...e,
     source: 'expenses',
   }));
-  
+
   // Combine both sources and sort by date DESC
   const allExpenses = [...markedExpenses, ...transformedDaybook].sort((a, b) => {
     const dateA = new Date(a.date);
@@ -302,7 +237,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
     }
     return b.id - a.id; // DESC by id
   });
-  
+
   res.json({ expenses: allExpenses });
 });
 
@@ -312,23 +247,23 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
  */
 export const getStatusCounts = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
-  
+
   const [expenseCounts, daybookCounts] = await Promise.all([
     expenseModel.getStatusCounts(site_id ? parseInt(site_id) : null, pool),
     dayBookModel.getStatusCounts(site_id ? parseInt(site_id) : null, pool),
   ]);
-  
+
   // Combine counts
   const result = { pending: 0, approved: 0, rejected: 0 };
-  
+
   expenseCounts.forEach(row => {
     result[row.status] = (result[row.status] || 0) + row.count;
   });
-  
+
   daybookCounts.forEach(row => {
     result[row.status] = (result[row.status] || 0) + row.count;
   });
-  
+
   res.json(result);
 });
 
@@ -339,7 +274,7 @@ export const getStatusCounts = asyncHandler(async (req, res) => {
 export const approveExpense = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { source } = req.query; // 'daybook' or 'expenses'
-  
+
   if (source === 'daybook') {
     const existing = await dayBookModel.findById(parseInt(id), pool);
     if (!existing) {
@@ -355,7 +290,7 @@ export const approveExpense = asyncHandler(async (req, res) => {
 
     return res.json({ expense: entry, message: 'Day Book expense approved successfully' });
   }
-  
+
   // Default: expenses table
   const existing = await expenseModel.findById(parseInt(id), pool);
   if (!existing) {
@@ -364,7 +299,7 @@ export const approveExpense = asyncHandler(async (req, res) => {
   if (existing.status === 'approved') {
     return res.status(400).json({ message: 'Expense is already approved' });
   }
-  
+
   const expense = await expenseModel.approveExpense(parseInt(id), req.user.id, pool);
 
   // Deduct from sub-admin's imprest balance on approval
@@ -380,7 +315,7 @@ export const approveExpense = asyncHandler(async (req, res) => {
 export const rejectExpense = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { source } = req.query; // 'daybook' or 'expenses'
-  
+
   if (source === 'daybook') {
     const existing = await dayBookModel.findById(parseInt(id), pool);
     if (!existing) {
@@ -392,7 +327,7 @@ export const rejectExpense = asyncHandler(async (req, res) => {
     const entry = await dayBookModel.rejectEntry(parseInt(id), req.user.id, pool);
     return res.json({ expense: entry, message: 'Day Book expense rejected' });
   }
-  
+
   // Default: expenses table
   const existing = await expenseModel.findById(parseInt(id), pool);
   if (!existing) {
@@ -401,7 +336,7 @@ export const rejectExpense = asyncHandler(async (req, res) => {
   if (existing.status === 'rejected') {
     return res.status(400).json({ message: 'Expense is already rejected' });
   }
-  
+
   const expense = await expenseModel.rejectExpense(parseInt(id), req.user.id, pool);
   res.json({ expense, message: 'Expense rejected' });
 });
@@ -412,7 +347,7 @@ export const rejectExpense = asyncHandler(async (req, res) => {
  */
 export const bulkApproveExpenses = asyncHandler(async (req, res) => {
   const { items } = req.body; // Array of { id, source }
-  
+
   // Support legacy format (expense_ids array)
   if (req.body.expense_ids) {
     const expense_ids = req.body.expense_ids;
@@ -435,16 +370,16 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
       message: `${expenses.length} expense(s) approved successfully`,
     });
   }
-  
+
   // New format with source support
   if (!items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: 'items array is required' });
   }
-  
+
   // Separate by source
   const expenseIds = items.filter(i => i.source !== 'daybook').map(i => parseInt(i.id));
   const daybookIds = items.filter(i => i.source === 'daybook').map(i => parseInt(i.id));
-  
+
   const results = await Promise.all([
     expenseIds.length > 0 ? expenseModel.bulkApprove(expenseIds, req.user.id, pool) : [],
     daybookIds.length > 0 ? dayBookModel.bulkApprove(daybookIds, req.user.id, pool) : [],
@@ -458,9 +393,9 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
   for (const entry of results[1]) {
     await deductImprestOnApproval(entry.created_by, parseFloat(entry.debit) || 0, entry.id, `DAYBOOK #${entry.id}: ${entry.entry_type || 'EXPENSE'}`, req.user.id);
   }
-  
+
   const totalApproved = results[0].length + results[1].length;
-  
+
   res.json({
     expenses: [...results[0], ...results[1]],
     message: `${totalApproved} item(s) approved successfully`,

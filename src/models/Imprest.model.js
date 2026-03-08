@@ -120,24 +120,36 @@ class ImprestLedgerModel extends MasterModel {
   }
 
   /**
-   * All ledger entries for a user, ordered DESC
+   * All ledger entries for a user, ordered DESC (with pagination)
    */
-  async findByUserId(userId, pool) {
-    const query = `
+  async findByUserId(userId, limit = null, offset = null, pool) {
+    let query = `
       SELECT il.*, u.name as created_by_name
       FROM imprest_ledger il
       LEFT JOIN users u ON il.created_by = u.id
       WHERE il.user_id = $1
       ORDER BY il.created_at DESC, il.id DESC
     `;
-    const result = await pool.query(query, [userId]);
+    const params = [userId];
+    let paramIndex = 2;
+
+    if (limit) {
+      query += ` LIMIT $${paramIndex++}`;
+      params.push(limit);
+    }
+    if (offset) {
+      query += ` OFFSET $${paramIndex++}`;
+      params.push(offset);
+    }
+
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
   /**
-   * Ledger entries for a user within a date range
+   * Ledger entries for a user within a date range (with pagination)
    */
-  async findByUserIdAndDateRange(userId, dateFrom, dateTo, pool) {
+  async findByUserIdAndDateRange(userId, dateFrom, dateTo, limit = null, offset = null, pool) {
     let query = `
       SELECT il.*, u.name as created_by_name
       FROM imprest_ledger il
@@ -157,8 +169,43 @@ class ImprestLedgerModel extends MasterModel {
     }
 
     query += ` ORDER BY il.created_at DESC, il.id DESC`;
+
+    if (limit) {
+      query += ` LIMIT $${paramIndex++}`;
+      params.push(limit);
+    }
+    if (offset) {
+      query += ` OFFSET $${paramIndex++}`;
+      params.push(offset);
+    }
+
     const result = await pool.query(query, params);
     return result.rows;
+  }
+
+  /**
+   * Count ledger entries for pagination
+   */
+  async countByUserIdAndDateRange(userId, dateFrom, dateTo, pool) {
+    let query = `
+      SELECT COUNT(*)::int AS total
+      FROM imprest_ledger
+      WHERE user_id = $1
+    `;
+    const params = [userId];
+    let paramIndex = 2;
+
+    if (dateFrom) {
+      query += ` AND created_at >= $${paramIndex++}`;
+      params.push(dateFrom);
+    }
+    if (dateTo) {
+      query += ` AND created_at <= $${paramIndex++}`;
+      params.push(dateTo);
+    }
+
+    const result = await pool.query(query, params);
+    return result.rows[0].total;
   }
 
   /**

@@ -15,6 +15,7 @@ import {
 } from '../controllers/farmer.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
+import requirePermission from '../middlewares/permission.middleware.js';
 
 // All farmer routes require auth
 router.use(authMiddleware);
@@ -23,16 +24,16 @@ router.use(authMiddleware);
 router.get('/members', listFarmerMembers);
 
 // Farmer CRUD
-router.get('/', listFarmers);                                     // ?site_id=X
-router.get('/:id', getFarmer);
-router.post('/', requireRole('admin', 'sub_admin'), createFarmer);
-router.put('/:id', requireRole('admin', 'sub_admin'), updateFarmer);
-router.delete('/:id', requireRole('admin', 'sub_admin'), deleteFarmer);
+router.get('/', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), listFarmers);                                     // ?site_id=X
+router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), getFarmer);
+router.post('/', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), createFarmer);
+router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), updateFarmer);
+router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), deleteFarmer);
 
 // Farmer Payments (installments)
-router.get('/:farmerId/payments', listPayments);
-router.post('/:farmerId/payments', requireRole('admin', 'sub_admin'), createPayment);
-router.put('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), updatePayment);
-router.delete('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), deletePayment);
+router.get('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), listPayments);
+router.post('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), createPayment);
+router.put('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), updatePayment);
+router.delete('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), deletePayment);
 
 export default router;

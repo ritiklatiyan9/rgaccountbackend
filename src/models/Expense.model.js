@@ -269,13 +269,13 @@ class ExpenseModel extends MasterModel {
    */
   async getAutocomplete(siteId, pool) {
     const queries = {
-      fromEntities:  `SELECT DISTINCT from_entity  AS val FROM expenses WHERE site_id = $1 AND from_entity  IS NOT NULL AND from_entity  != '' ORDER BY val`,
-      toEntities:    `SELECT DISTINCT to_entity    AS val FROM expenses WHERE site_id = $1 AND to_entity    IS NOT NULL AND to_entity    != '' ORDER BY val`,
-      paymentModes:  `SELECT DISTINCT payment_mode AS val FROM expenses WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val`,
-      remarks:       `SELECT DISTINCT remark       AS val FROM expenses WHERE site_id = $1 AND remark       IS NOT NULL AND remark       != '' ORDER BY val`,
-      accountNos:    `SELECT DISTINCT account_no   AS val FROM expenses WHERE site_id = $1 AND account_no   IS NOT NULL AND account_no   != '' ORDER BY val`,
-      branches:      `SELECT DISTINCT branch       AS val FROM expenses WHERE site_id = $1 AND branch       IS NOT NULL AND branch       != '' ORDER BY val`,
-      categories:    `SELECT DISTINCT category     AS val FROM expenses WHERE site_id = $1 AND category     IS NOT NULL AND category     != '' ORDER BY val`,
+      fromEntities: `SELECT DISTINCT from_entity  AS val FROM expenses WHERE site_id = $1 AND from_entity  IS NOT NULL AND from_entity  != '' ORDER BY val`,
+      toEntities: `SELECT DISTINCT to_entity    AS val FROM expenses WHERE site_id = $1 AND to_entity    IS NOT NULL AND to_entity    != '' ORDER BY val`,
+      paymentModes: `SELECT DISTINCT payment_mode AS val FROM expenses WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val`,
+      remarks: `SELECT DISTINCT remark       AS val FROM expenses WHERE site_id = $1 AND remark       IS NOT NULL AND remark       != '' ORDER BY val`,
+      accountNos: `SELECT DISTINCT account_no   AS val FROM expenses WHERE site_id = $1 AND account_no   IS NOT NULL AND account_no   != '' ORDER BY val`,
+      branches: `SELECT DISTINCT branch       AS val FROM expenses WHERE site_id = $1 AND branch       IS NOT NULL AND branch       != '' ORDER BY val`,
+      categories: `SELECT DISTINCT category     AS val FROM expenses WHERE site_id = $1 AND category     IS NOT NULL AND category     != '' ORDER BY val`,
     };
 
     const keys = Object.keys(queries);
@@ -284,6 +284,266 @@ class ExpenseModel extends MasterModel {
     const results = {};
     keys.forEach((k, i) => { results[k] = rows[i].rows.map(r => r.val); });
     return results;
+  }
+
+  // ══════════════════════════════════════════════════
+  //  UNIFIED QUERIES (Expenses + Day Book)
+  // ══════════════════════════════════════════════════
+
+  /**
+   * Complex Paginated Unified query for fetching merged expenses & day_book
+   * Calculates running balance dynamically across both tables.
+   */
+  async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
+    const { search, mode, category, to_entity, dateFrom, dateTo } = filters;
+    const offset = (Math.max(1, page) - 1) * limit;
+
+    const baseQuery = `
+      WITH unified AS (
+        SELECT 
+          id::text as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
+          payment_mode, debit, credit, remark, account_no, branch, category, 
+          status, approved_by, approved_at, created_by, created_at, updated_at, 
+          'expenses' as source
+        FROM expenses
+        WHERE site_id = $1
+        
+        UNION ALL
+        
+        SELECT 
+          'daybook_' || id as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
+          payment_mode, debit, credit, particular || CASE WHEN remarks IS NOT NULL AND remarks != '' THEN ' - ' || remarks ELSE '' END as remark,
+          account_no, branch, category, 
+          status, approved_by, approved_at, created_by, created_at, updated_at, 
+          'daybook' as source
+        FROM day_book
+        WHERE site_id = $1 AND entry_type = 'EXPENSE'
+      ),
+      filtered AS (
+        SELECT u.*, us.name as approved_by_name
+        FROM unified u
+        LEFT JOIN users us ON u.approved_by = us.id
+        WHERE 1=1
+        ${mode ? `AND u.payment_mode = $2` : ''}
+        ${category ? `AND u.category = $3` : ''}
+        ${to_entity ? `AND u.to_entity = $4` : ''}
+        ${dateFrom ? `AND u.date >= $5` : ''}
+        ${dateTo ? `AND u.date <= $6` : ''}
+        ${search ? `
+          AND (
+            u.from_entity ILIKE $7 OR 
+            u.to_entity ILIKE $7 OR 
+            u.remark ILIKE $7 OR 
+            u.account_no ILIKE $7 OR 
+            u.branch ILIKE $7 OR 
+            u.category ILIKE $7
+          )
+        ` : ''}
+      ),
+      with_balance AS (
+        SELECT 
+          f.*,
+          SUM(COALESCE(credit, 0) - COALESCE(debit, 0)) OVER (
+            ORDER BY date ASC, 
+            CASE WHEN source = 'daybook' THEN 1 ELSE 0 END ASC, 
+            original_id ASC
+          ) as running_balance
+        FROM filtered f
+      ),
+      total_count AS (
+        SELECT COUNT(*) as total FROM filtered
+      )
+      SELECT wb.*, tc.total as full_count
+      FROM with_balance wb
+      CROSS JOIN total_count tc
+      ORDER BY wb.date DESC, 
+               CASE WHEN wb.source = 'daybook' THEN 1 ELSE 0 END DESC, 
+               wb.original_id DESC
+    `;
+
+    // Build params array dynamically because the $ indexes must match
+    const params = [siteId];
+    let pIdx = 2; // Next param index
+
+    // We add dummy string 'NULL' if param is missing to keep the query string indexing simple,
+    // but a better way is replacing $X with the exact incremented param.
+    // Instead of complex parsing, let's just use exact positional mapping.
+
+    // Actually, to make parameterized queries safe with optional filters, 
+    // we should build both query string and params together. Let's rewrite the query builder.
+
+    let whereClause = '';
+
+    if (mode) { whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode); }
+    if (category) { whereClause += ` AND u.category = $${pIdx++}`; params.push(category); }
+    if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
+    if (dateFrom) { whereClause += ` AND u.date >= $${pIdx++}`; params.push(dateFrom); }
+    if (dateTo) { whereClause += ` AND u.date <= $${pIdx++}`; params.push(dateTo); }
+    if (search) {
+      whereClause += ` AND (u.from_entity ILIKE $${pIdx} OR u.to_entity ILIKE $${pIdx} OR u.remark ILIKE $${pIdx} OR u.account_no ILIKE $${pIdx} OR u.branch ILIKE $${pIdx} OR u.category ILIKE $${pIdx})`;
+      params.push(`%${search}%`);
+      pIdx++;
+    }
+
+    const finalQuery = `
+      WITH unified AS (
+        SELECT 
+          id::text as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
+          payment_mode, debit, credit, remark, account_no, branch, category, 
+          status, approved_by, approved_at, created_by, created_at, updated_at, 
+          'expenses' as source
+        FROM expenses
+        WHERE site_id = $1
+        
+        UNION ALL
+        
+        SELECT 
+          'daybook_' || id as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
+          payment_mode, debit, credit, particular || CASE WHEN remarks IS NOT NULL AND remarks != '' THEN ' - ' || remarks ELSE '' END as remark,
+          account_no, branch, category, 
+          status, approved_by, approved_at, created_by, created_at, updated_at, 
+          'daybook' as source
+        FROM day_book
+        WHERE site_id = $1 AND entry_type = 'EXPENSE'
+      ),
+      filtered AS (
+        SELECT u.*, us.name as approved_by_name
+        FROM unified u
+        LEFT JOIN users us ON u.approved_by = us.id
+        WHERE 1=1 ${whereClause}
+      ),
+      with_balance AS (
+        SELECT 
+          f.*,
+          SUM(COALESCE(credit, 0) - COALESCE(debit, 0)) OVER (
+            ORDER BY date ASC, 
+            CASE WHEN source = 'daybook' THEN 1 ELSE 0 END ASC, 
+            original_id ASC
+          ) as running_balance
+        FROM filtered f
+      ),
+      total_count AS (
+        SELECT COUNT(*) as total FROM filtered
+      )
+      SELECT wb.*, tc.total as full_count
+      FROM with_balance wb
+      CROSS JOIN total_count tc
+      ORDER BY wb.date DESC, 
+               CASE WHEN wb.source = 'daybook' THEN 1 ELSE 0 END DESC, 
+               wb.original_id DESC
+      ${limit > 0 ? `LIMIT $${pIdx++} OFFSET $${pIdx++}` : ''}
+    `;
+
+    if (limit > 0) {
+      params.push(limit, offset);
+    }
+
+    const result = await pool.query(finalQuery, params);
+
+    // Summary Query for filtered totals
+    const summaryQuery = `
+      WITH unified AS (
+        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
+        FROM expenses WHERE site_id = $1
+        UNION ALL
+        SELECT date, payment_mode, category, to_entity, from_entity, particular || CASE WHEN remarks IS NOT NULL AND remarks != '' THEN ' - ' || remarks ELSE '' END as remark, account_no, branch, debit, credit
+        FROM day_book WHERE site_id = $1 AND entry_type = 'EXPENSE'
+      )
+      SELECT 
+        COALESCE(SUM(debit), 0)::numeric as total_debit, 
+        COALESCE(SUM(credit), 0)::numeric as total_credit,
+        COUNT(*)::int as total_count
+      FROM unified u
+      WHERE 1=1 ${whereClause}
+    `;
+
+    // We slice the params to exclude LIMIT and OFFSET which we added at the very end
+    const summaryParams = limit > 0 ? params.slice(0, -2) : params;
+    const summaryResult = await pool.query(summaryQuery, summaryParams);
+
+    return {
+      items: result.rows.map(row => {
+        // Renaming to match frontend expectations
+        const { virtual_id, full_count, running_balance, ...rest } = row;
+        return {
+          ...rest,
+          id: virtual_id,
+          balance: parseFloat(running_balance),
+          full_count: parseInt(full_count) || 0
+        };
+      }),
+      summary: summaryResult.rows[0],
+      totalItems: result.rows.length > 0 ? parseInt(result.rows[0].full_count) : 0
+    };
+  }
+
+  /**
+   * Unified Breakdown stats based on the active filters
+   */
+  async getUnifiedBreakdowns(siteId, filters, pool) {
+    const { search, mode, category, to_entity, dateFrom, dateTo } = filters;
+    const params = [siteId];
+    let pIdx = 2;
+    let whereClause = '';
+
+    if (mode) { whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode); }
+    if (category) { whereClause += ` AND u.category = $${pIdx++}`; params.push(category); }
+    if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
+    if (dateFrom) { whereClause += ` AND u.date >= $${pIdx++}`; params.push(dateFrom); }
+    if (dateTo) { whereClause += ` AND u.date <= $${pIdx++}`; params.push(dateTo); }
+    if (search) {
+      whereClause += ` AND (u.from_entity ILIKE $${pIdx} OR u.to_entity ILIKE $${pIdx} OR u.remark ILIKE $${pIdx} OR u.account_no ILIKE $${pIdx} OR u.branch ILIKE $${pIdx} OR u.category ILIKE $${pIdx})`;
+      params.push(`%${search}%`);
+      pIdx++;
+    }
+
+    const modeQuery = `
+      WITH unified AS (
+        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
+        FROM expenses WHERE site_id = $1
+        UNION ALL
+        SELECT date, payment_mode, category, to_entity, from_entity, particular as remark, account_no, branch, debit, credit
+        FROM day_book WHERE site_id = $1 AND entry_type = 'EXPENSE'
+      )
+      SELECT 
+        COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode, 
+        COALESCE(SUM(debit), 0)::numeric as total_debit, 
+        COALESCE(SUM(credit), 0)::numeric as total_credit, 
+        COUNT(*)::int as entries
+      FROM unified u
+      WHERE 1=1 ${whereClause}
+      GROUP BY COALESCE(payment_mode, 'UNSPECIFIED')
+      ORDER BY total_debit DESC
+    `;
+
+    const catQuery = `
+      WITH unified AS (
+        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
+        FROM expenses WHERE site_id = $1
+        UNION ALL
+        SELECT date, payment_mode, category, to_entity, from_entity, particular as remark, account_no, branch, debit, credit
+        FROM day_book WHERE site_id = $1 AND entry_type = 'EXPENSE'
+      )
+      SELECT 
+        COALESCE(category, 'UNCATEGORIZED') as category, 
+        COALESCE(SUM(debit), 0)::numeric as total_debit, 
+        COALESCE(SUM(credit), 0)::numeric as total_credit, 
+        COUNT(*)::int as entries
+      FROM unified u
+      WHERE 1=1 ${whereClause}
+      GROUP BY COALESCE(category, 'UNCATEGORIZED')
+      ORDER BY total_debit DESC
+    `;
+
+    const [modeRes, catRes] = await Promise.all([
+      pool.query(modeQuery, params),
+      pool.query(catQuery, params)
+    ]);
+
+    return {
+      modeBreakdown: modeRes.rows,
+      categoryBreakdown: catRes.rows
+    };
   }
 }
 

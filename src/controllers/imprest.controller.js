@@ -194,23 +194,39 @@ export const getBalance = asyncHandler(async (req, res) => {
  */
 export const getLedger = asyncHandler(async (req, res) => {
   const userId = req.query.user_id ? parseInt(req.query.user_id) : req.user.id;
-  const { date_from, date_to } = req.query;
+  const { date_from, date_to, page = 1, limit = 20 } = req.query;
 
   if (req.user.role !== 'admin' && userId !== req.user.id) {
     return res.status(403).json({ message: 'Insufficient permissions' });
   }
 
+  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const parsedLimit = parseInt(limit);
+
   let entries;
   if (date_from || date_to) {
-    entries = await imprestLedgerModel.findByUserIdAndDateRange(userId, date_from, date_to, pool);
+    entries = await imprestLedgerModel.findByUserIdAndDateRange(userId, date_from, date_to, parsedLimit, offset, pool);
   } else {
-    entries = await imprestLedgerModel.findByUserId(userId, pool);
+    entries = await imprestLedgerModel.findByUserId(userId, parsedLimit, offset, pool);
   }
+
+  const totalItems = await imprestLedgerModel.countByUserIdAndDateRange(userId, date_from, date_to, pool);
+  const totalPages = Math.ceil(totalItems / parsedLimit);
 
   const balance = await imprestLedgerModel.getBalance(userId, pool);
   const monthly = await imprestLedgerModel.getMonthlySummary(userId, pool);
 
-  res.json({ entries, balance, monthly });
+  res.json({
+    entries,
+    balance,
+    monthly,
+    pagination: {
+      totalItems,
+      totalPages,
+      currentPage: parseInt(page),
+      itemsPerPage: parsedLimit
+    }
+  });
 });
 
 /**

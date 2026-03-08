@@ -3,6 +3,7 @@ import { signAccessToken, signRefreshToken, verifyToken, hashPassword, comparePa
 import { uploadSingle } from '../utils/upload.js';
 import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
+import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
 
 /**
@@ -79,11 +80,18 @@ export const login = asyncHandler(async (req, res) => {
     sites = await siteModel.findByUserId(user.id, pool);
   }
 
+  // Fetch permissions for sub_admin
+  let permissions = null;
+  if (user.role === 'sub_admin') {
+    permissions = await permissionModel.getByUserId(user.id);
+  }
+
   res.json({
     user: userModel.sanitize(user),
     accessToken,
     refreshToken,
     sites,
+    permissions,
   });
 });
 
@@ -140,7 +148,13 @@ export const getMe = asyncHandler(async (req, res) => {
     sites = await siteModel.findByUserId(user.id, pool);
   }
 
-  res.json({ user: userModel.sanitize(user), sites });
+  // Fetch permissions for sub_admin
+  let permissions = null;
+  if (user.role === 'sub_admin') {
+    permissions = await permissionModel.getByUserId(user.id);
+  }
+
+  res.json({ user: userModel.sanitize(user), sites, permissions });
 });
 
 /**

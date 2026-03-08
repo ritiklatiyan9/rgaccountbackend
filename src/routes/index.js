@@ -16,6 +16,7 @@ import memberRoutes from './member.routes.js';
 import daybookRoutes from './daybook.routes.js';
 import imprestRoutes from './imprest.routes.js';
 import editRequestRoutes from './editRequest.routes.js';
+import permissionRoutes from './permission.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -32,5 +33,6 @@ router.use('/members', memberRoutes);
 router.use('/daybook', daybookRoutes);
 router.use('/imprest', imprestRoutes);
 router.use('/edit-requests', editRequestRoutes);
+router.use('/permissions', permissionRoutes);
 
 export default router;

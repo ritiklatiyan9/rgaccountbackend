@@ -7,6 +7,7 @@ import {
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
+import requirePermission from '../middlewares/permission.middleware.js';
 import upload from '../middlewares/multer.middleware.js';
 
 router.use(authMiddleware);
@@ -32,16 +33,16 @@ const memberUpload = upload.fields([
 ]);
 
 // Static routes first
-router.get('/search', searchMembers);
-router.get('/autocomplete', getMemberAutocomplete);
-router.get('/', listMembers);
+router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), searchMembers);
+router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberAutocomplete);
+router.get('/', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), listMembers);
 
 // With file upload for documents
-router.post('/', requireRole('admin', 'sub_admin'), memberUpload, createMember);
-router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, updateMember);
-router.delete('/:id', requireRole('admin', 'sub_admin'), deleteMember);
+router.post('/', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'write'), createMember);
+router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'update'), updateMember);
+router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), deleteMember);
 
 // Dynamic param last
-router.get('/:id', getMember);
+router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMember);
 
 export default router;

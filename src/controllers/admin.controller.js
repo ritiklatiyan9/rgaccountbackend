@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { hashPassword } from '../config/jwt.js';
 import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
+import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
 
 /**
@@ -32,6 +33,9 @@ export const createSubAdmin = asyncHandler(async (req, res) => {
   };
 
   const user = await userModel.create(userData, pool);
+
+  // Seed default permissions (delete OFF by default)
+  await permissionModel.createDefaults(user.id);
 
   // If site_ids provided, assign them
   if (req.body.site_ids && Array.isArray(req.body.site_ids)) {
