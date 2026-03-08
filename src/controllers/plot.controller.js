@@ -8,10 +8,11 @@ import pool from '../config/db.js';
 
 /** POST /plots — Create a new plot */
 export const createPlot = asyncHandler(async (req, res) => {
-  const { site_id, plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes } = req.body;
+  const { site_id, plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   if (!plot_no || !plot_no.trim()) return res.status(400).json({ message: 'Plot number is required' });
+  if (!plot_size && plot_size !== 0) return res.status(400).json({ message: 'Plot size is required' });
 
   const trimmedPlotNo = plot_no.trim().toUpperCase();
 
@@ -35,6 +36,8 @@ export const createPlot = asyncHandler(async (req, res) => {
     booking_date: booking_date || null,
     status: status || 'BOOKED',
     notes: notes ? notes.trim() : null,
+    plc_charges: parseFloat(plc_charges) || 0,
+    team: team ? team.trim().toUpperCase() : null,
     created_by: req.user.id,
   };
 
@@ -62,7 +65,7 @@ export const getPlot = asyncHandler(async (req, res) => {
 /** PUT /plots/:id — Update plot details */
 export const updatePlot = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes } = req.body;
+  const { plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team } = req.body;
 
   const existing = await plotModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
@@ -89,6 +92,8 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (booking_date !== undefined) updateData.booking_date = booking_date || null;
   if (status !== undefined) updateData.status = status;
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
+  if (plc_charges !== undefined) updateData.plc_charges = parseFloat(plc_charges) || 0;
+  if (team !== undefined) updateData.team = team ? team.trim().toUpperCase() : null;
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
@@ -197,6 +202,13 @@ export const getAutocomplete = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const data = await plotPaymentModel.getAutocomplete(parseInt(site_id), pool);
+  const [data, membersResult] = await Promise.all([
+    plotPaymentModel.getAutocomplete(parseInt(site_id), pool),
+    pool.query(
+      `SELECT full_name, phone FROM members WHERE site_id = $1 AND full_name IS NOT NULL AND full_name != '' ORDER BY full_name ASC`,
+      [parseInt(site_id)]
+    ),
+  ]);
+  data.members = membersResult.rows.map(r => ({ name: r.full_name, phone: r.phone || '' }));
   res.json(data);
 });
