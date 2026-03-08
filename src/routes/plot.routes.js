@@ -16,15 +16,15 @@ router.use(authMiddleware);
 router.get('/', listPlots);                                        // ?site_id=X
 router.get('/autocomplete', getAutocomplete);                      // ?site_id=X
 router.get('/:id', getPlot);
-router.post('/', requireRole('admin'), createPlot);
-router.put('/:id', requireRole('admin'), updatePlot);
-router.delete('/:id', requireRole('admin'), deletePlot);
+router.post('/', requireRole('admin', 'sub_admin'), createPlot);
+router.put('/:id', requireRole('admin', 'sub_admin'), updatePlot);
+router.delete('/:id', requireRole('admin', 'sub_admin'), deletePlot);
 
 // ── Payment endpoints ──
 router.get('/payments/list', listPayments);                        // ?plot_id=X
 router.get('/payments/:id', getPayment);
-router.post('/payments', requireRole('admin'), createPayment);
-router.put('/payments/:id', requireRole('admin'), updatePayment);
-router.delete('/payments/:id', requireRole('admin'), deletePayment);
+router.post('/payments', requireRole('admin', 'sub_admin'), createPayment);
+router.put('/payments/:id', requireRole('admin', 'sub_admin'), updatePayment);
+router.delete('/payments/:id', requireRole('admin', 'sub_admin'), deletePayment);
 
 export default router;

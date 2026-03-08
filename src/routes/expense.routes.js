@@ -19,9 +19,9 @@ router.get('/autocomplete', getAutocomplete);             // ?site_id=X
 router.get('/pending', requireRole('admin'), listPendingExpenses);     // Admin: get pending expenses
 router.get('/status-counts', requireRole('admin'), getStatusCounts);   // Admin: get status counts
 router.get('/:id', getExpense);
-router.post('/', requireRole('admin'), createExpense);
-router.put('/:id', requireRole('admin'), updateExpense);
-router.delete('/:id', requireRole('admin'), deleteExpense);
+router.post('/', requireRole('admin', 'sub_admin'), createExpense);
+router.put('/:id', requireRole('admin', 'sub_admin'), updateExpense);
+router.delete('/:id', requireRole('admin', 'sub_admin'), deleteExpense);
 
 // Approval routes (admin only)
 router.put('/:id/approve', requireRole('admin'), approveExpense);

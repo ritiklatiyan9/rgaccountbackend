@@ -15,16 +15,16 @@ router.use(authMiddleware);
 // ── Registry Payment endpoints (BEFORE /:id to avoid route conflict) ──
 router.get('/payments/list', listRegistryPayments);                        // ?registry_id=X
 router.get('/payments/:id', getRegistryPayment);
-router.post('/payments', requireRole('admin'), createRegistryPayment);
-router.put('/payments/:id', requireRole('admin'), updateRegistryPayment);
-router.delete('/payments/:id', requireRole('admin'), deleteRegistryPayment);
+router.post('/payments', requireRole('admin', 'sub_admin'), createRegistryPayment);
+router.put('/payments/:id', requireRole('admin', 'sub_admin'), updateRegistryPayment);
+router.delete('/payments/:id', requireRole('admin', 'sub_admin'), deleteRegistryPayment);
 
 // ── Registry endpoints ──
 router.get('/', listRegistries);                                           // ?site_id=X
 router.get('/autocomplete', getRegistryAutocomplete);                      // ?site_id=X
 router.get('/:id', getRegistry);
-router.post('/', requireRole('admin'), createRegistry);
-router.put('/:id', requireRole('admin'), updateRegistry);
-router.delete('/:id', requireRole('admin'), deleteRegistry);
+router.post('/', requireRole('admin', 'sub_admin'), createRegistry);
+router.put('/:id', requireRole('admin', 'sub_admin'), updateRegistry);
+router.delete('/:id', requireRole('admin', 'sub_admin'), deleteRegistry);
 
 export default router;

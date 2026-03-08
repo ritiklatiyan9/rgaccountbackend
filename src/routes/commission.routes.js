@@ -18,8 +18,8 @@ router.use(authMiddleware);
 router.get('/', listCommissions);                           // ?site_id=X
 router.get('/autocomplete', getAutocomplete);               // ?site_id=X
 router.get('/:id', getCommission);
-router.post('/', requireRole('admin'), createCommission);
-router.put('/:id', requireRole('admin'), updateCommission);
-router.delete('/:id', requireRole('admin'), deleteCommission);
+router.post('/', requireRole('admin', 'sub_admin'), createCommission);
+router.put('/:id', requireRole('admin', 'sub_admin'), updateCommission);
+router.delete('/:id', requireRole('admin', 'sub_admin'), deleteCommission);
 
 export default router;

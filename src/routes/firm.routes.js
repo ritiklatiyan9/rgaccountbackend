@@ -17,15 +17,15 @@ router.get('/', listFirms);                                       // ?site_id=X
 router.get('/autocomplete', getAutocomplete);                     // ?site_id=X
 router.get('/cashflow-ledgers', listCashFlowLedgersForFirm);     // ?site_id=X
 router.get('/:id', getFirm);
-router.post('/', requireRole('admin'), createFirm);
-router.put('/:id', requireRole('admin'), updateFirm);
-router.delete('/:id', requireRole('admin'), deleteFirm);
+router.post('/', requireRole('admin', 'sub_admin'), createFirm);
+router.put('/:id', requireRole('admin', 'sub_admin'), updateFirm);
+router.delete('/:id', requireRole('admin', 'sub_admin'), deleteFirm);
 
 // ── Transaction endpoints ──
 router.get('/transactions/list', listTransactions);               // ?firm_id=X
 router.get('/transactions/:id', getTransaction);
-router.post('/transactions', requireRole('admin'), createTransaction);
-router.put('/transactions/:id', requireRole('admin'), updateTransaction);
-router.delete('/transactions/:id', requireRole('admin'), deleteTransaction);
+router.post('/transactions', requireRole('admin', 'sub_admin'), createTransaction);
+router.put('/transactions/:id', requireRole('admin', 'sub_admin'), updateTransaction);
+router.delete('/transactions/:id', requireRole('admin', 'sub_admin'), deleteTransaction);
 
 export default router;

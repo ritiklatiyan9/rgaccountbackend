@@ -25,14 +25,14 @@ router.get('/members', listFarmerMembers);
 // Farmer CRUD
 router.get('/', listFarmers);                                     // ?site_id=X
 router.get('/:id', getFarmer);
-router.post('/', requireRole('admin'), createFarmer);
-router.put('/:id', requireRole('admin'), updateFarmer);
-router.delete('/:id', requireRole('admin'), deleteFarmer);
+router.post('/', requireRole('admin', 'sub_admin'), createFarmer);
+router.put('/:id', requireRole('admin', 'sub_admin'), updateFarmer);
+router.delete('/:id', requireRole('admin', 'sub_admin'), deleteFarmer);
 
 // Farmer Payments (installments)
 router.get('/:farmerId/payments', listPayments);
-router.post('/:farmerId/payments', requireRole('admin'), createPayment);
-router.put('/:farmerId/payments/:paymentId', requireRole('admin'), updatePayment);
-router.delete('/:farmerId/payments/:paymentId', requireRole('admin'), deletePayment);
+router.post('/:farmerId/payments', requireRole('admin', 'sub_admin'), createPayment);
+router.put('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), updatePayment);
+router.delete('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), deletePayment);
 
 export default router;

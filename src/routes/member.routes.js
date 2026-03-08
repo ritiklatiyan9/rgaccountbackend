@@ -37,9 +37,9 @@ router.get('/autocomplete', getMemberAutocomplete);
 router.get('/', listMembers);
 
 // With file upload for documents
-router.post('/', requireRole('admin'), memberUpload, createMember);
-router.put('/:id', requireRole('admin'), memberUpload, updateMember);
-router.delete('/:id', requireRole('admin'), deleteMember);
+router.post('/', requireRole('admin', 'sub_admin'), memberUpload, createMember);
+router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, updateMember);
+router.delete('/:id', requireRole('admin', 'sub_admin'), deleteMember);
 
 // Dynamic param last
 router.get('/:id', getMember);

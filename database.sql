@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS cash_flow_entries (
   particular          VARCHAR(500) NOT NULL,
   debit               NUMERIC(15,2) NOT NULL DEFAULT 0,
   credit              NUMERIC(15,2) NOT NULL DEFAULT 0,
+  cash_type           VARCHAR(20) NOT NULL DEFAULT 'bank' CHECK (cash_type IN ('cash', 'bank')),
   remarks             TEXT,
   created_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at          TIMESTAMPTZ DEFAULT NOW(),
@@ -231,6 +232,10 @@ CREATE INDEX IF NOT EXISTS idx_cfe_date  ON cash_flow_entries(date);
 CREATE TRIGGER trg_cash_flow_entries_updated_at
   BEFORE UPDATE ON cash_flow_entries
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Add cash_type column if it doesn't exist (for migration)
+ALTER TABLE cash_flow_entries
+ADD COLUMN IF NOT EXISTS cash_type VARCHAR(20) NOT NULL DEFAULT 'bank' CHECK (cash_type IN ('cash', 'bank'));
 
 -- ──────────────────────────────────────────────────────────────
 -- 9. FIRMS (bank accounts / entities per site)

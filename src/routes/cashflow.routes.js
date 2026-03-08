@@ -14,16 +14,16 @@ router.use(authMiddleware);
 // ── Month endpoints ──
 router.get('/months', listMonths);                                // ?site_id=X
 router.get('/months/:id', getMonth);
-router.post('/months', requireRole('admin'), createMonth);
-router.put('/months/:id', requireRole('admin'), updateMonth);
-router.delete('/months/:id', requireRole('admin'), deleteMonth);
+router.post('/months', requireRole('admin', 'sub_admin'), createMonth);
+router.put('/months/:id', requireRole('admin', 'sub_admin'), updateMonth);
+router.delete('/months/:id', requireRole('admin', 'sub_admin'), deleteMonth);
 
 // ── Entry endpoints ──
 router.get('/entries', listEntries);                              // ?month_id=X
 router.get('/entries/:id', getEntry);
-router.post('/entries', requireRole('admin'), createEntry);
-router.put('/entries/:id', requireRole('admin'), updateEntry);
-router.delete('/entries/:id', requireRole('admin'), deleteEntry);
+router.post('/entries', requireRole('admin', 'sub_admin'), createEntry);
+router.put('/entries/:id', requireRole('admin', 'sub_admin'), updateEntry);
+router.delete('/entries/:id', requireRole('admin', 'sub_admin'), deleteEntry);
 
 // ── Autocomplete ──
 router.get('/autocomplete', getAutocomplete);                     // ?site_id=X
