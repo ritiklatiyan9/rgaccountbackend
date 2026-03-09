@@ -86,12 +86,28 @@ export const login = asyncHandler(async (req, res) => {
     permissions = await permissionModel.getByUserId(user.id);
   }
 
+  // Record login session
+  const ipAddress = req.ip || req.connection.remoteAddress;
+
+  // First, close any prior active sessions for this user to avoid duplicate "Active" tags
+  await pool.query(
+    'UPDATE user_sessions SET logout_time = CURRENT_TIMESTAMP WHERE user_id = $1 AND logout_time IS NULL',
+    [user.id]
+  );
+
+  const sessionResult = await pool.query(
+    'INSERT INTO user_sessions (user_id, ip_address) VALUES ($1, $2) RETURNING id',
+    [user.id, ipAddress]
+  );
+  const sessionId = sessionResult.rows[0].id;
+
   res.json({
     user: userModel.sanitize(user),
     accessToken,
     refreshToken,
     sites,
     permissions,
+    sessionId,
   });
 });
 
@@ -129,7 +145,17 @@ export const refresh = asyncHandler(async (req, res) => {
  */
 export const logout = asyncHandler(async (req, res) => {
   const userId = req.user.id;
+  const { sessionId } = req.body; // Expect frontend to send the session ID
+
   await userModel.update(userId, { refresh_token: null }, pool);
+
+  if (sessionId) {
+    await pool.query(
+      'UPDATE user_sessions SET logout_time = CURRENT_TIMESTAMP WHERE id = $1 AND user_id = $2',
+      [sessionId, userId]
+    );
+  }
+
   res.json({ message: 'Logged out' });
 });
 

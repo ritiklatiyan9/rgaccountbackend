@@ -17,6 +17,12 @@ import daybookRoutes from './daybook.routes.js';
 import imprestRoutes from './imprest.routes.js';
 import editRequestRoutes from './editRequest.routes.js';
 import permissionRoutes from './permission.routes.js';
+import memberCategoryRoutes from './memberCategory.routes.js';
+import expenseCategoryRoutes from './expenseCategory.routes.js';
+import activityRoutes from './activity.routes.js';
+import excelRoutes from './excel.routes.js';
+import folderRoutes from './folder.routes.js';
+import approvalRoutes from './approval.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -34,5 +40,11 @@ router.use('/daybook', daybookRoutes);
 router.use('/imprest', imprestRoutes);
 router.use('/edit-requests', editRequestRoutes);
 router.use('/permissions', permissionRoutes);
+router.use('/member-categories', memberCategoryRoutes);
+router.use('/expense-categories', expenseCategoryRoutes);
+router.use('/activity', activityRoutes);
+router.use('/excel', excelRoutes);
+router.use('/folders', folderRoutes);
+router.use('/approvals', approvalRoutes);
 
 export default router;

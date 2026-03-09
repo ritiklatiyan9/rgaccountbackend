@@ -11,8 +11,9 @@ class DayBookModel extends MasterModel {
    */
   async findBySiteId(siteId, pool) {
     const query = `
-      SELECT d.*
+      SELECT d.*, m.full_name as assigned_user_name
       FROM day_book d
+      LEFT JOIN members m ON d.assigned_user_id = m.id
       WHERE d.site_id = $1
       ORDER BY d.date DESC, d.id DESC
     `;
@@ -25,8 +26,9 @@ class DayBookModel extends MasterModel {
    */
   async findBySiteIdAsc(siteId, pool) {
     const query = `
-      SELECT d.*
+      SELECT d.*, m.full_name as assigned_user_name
       FROM day_book d
+      LEFT JOIN members m ON d.assigned_user_id = m.id
       WHERE d.site_id = $1
       ORDER BY d.date ASC, d.id ASC
     `;
@@ -39,8 +41,9 @@ class DayBookModel extends MasterModel {
    */
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
-      SELECT d.*
+      SELECT d.*, m.full_name as assigned_user_name
       FROM day_book d
+      LEFT JOIN members m ON d.assigned_user_id = m.id
       WHERE d.site_id = $1 AND d.date = $2
       ORDER BY d.id ASC
     `;
@@ -53,8 +56,9 @@ class DayBookModel extends MasterModel {
    */
   async findByType(siteId, entryType, pool) {
     const query = `
-      SELECT d.*
+      SELECT d.*, m.full_name as assigned_user_name
       FROM day_book d
+      LEFT JOIN members m ON d.assigned_user_id = m.id
       WHERE d.site_id = $1 AND d.entry_type = $2
       ORDER BY d.date DESC, d.id DESC
     `;
@@ -140,14 +144,14 @@ class DayBookModel extends MasterModel {
    */
   async getAutocomplete(siteId, pool) {
     const queries = {
-      particulars:   `SELECT DISTINCT particular   AS val FROM day_book WHERE site_id = $1 AND particular   IS NOT NULL AND particular   != '' ORDER BY val LIMIT 50`,
-      fromEntities:  `SELECT DISTINCT from_entity  AS val FROM day_book WHERE site_id = $1 AND from_entity  IS NOT NULL AND from_entity  != '' ORDER BY val LIMIT 50`,
-      toEntities:    `SELECT DISTINCT to_entity    AS val FROM day_book WHERE site_id = $1 AND to_entity    IS NOT NULL AND to_entity    != '' ORDER BY val LIMIT 50`,
-      paymentModes:  `SELECT DISTINCT payment_mode AS val FROM day_book WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val LIMIT 50`,
-      remarks:       `SELECT DISTINCT remarks      AS val FROM day_book WHERE site_id = $1 AND remarks      IS NOT NULL AND remarks      != '' ORDER BY val LIMIT 50`,
-      accountNos:    `SELECT DISTINCT account_no   AS val FROM day_book WHERE site_id = $1 AND account_no   IS NOT NULL AND account_no   != '' ORDER BY val LIMIT 50`,
-      branches:      `SELECT DISTINCT branch       AS val FROM day_book WHERE site_id = $1 AND branch       IS NOT NULL AND branch       != '' ORDER BY val LIMIT 50`,
-      categories:    `SELECT DISTINCT category     AS val FROM day_book WHERE site_id = $1 AND category     IS NOT NULL AND category     != '' ORDER BY val LIMIT 50`,
+      particulars: `SELECT DISTINCT particular   AS val FROM day_book WHERE site_id = $1 AND particular   IS NOT NULL AND particular   != '' ORDER BY val LIMIT 50`,
+      fromEntities: `SELECT DISTINCT from_entity  AS val FROM day_book WHERE site_id = $1 AND from_entity  IS NOT NULL AND from_entity  != '' ORDER BY val LIMIT 50`,
+      toEntities: `SELECT DISTINCT to_entity    AS val FROM day_book WHERE site_id = $1 AND to_entity    IS NOT NULL AND to_entity    != '' ORDER BY val LIMIT 50`,
+      paymentModes: `SELECT DISTINCT payment_mode AS val FROM day_book WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val LIMIT 50`,
+      remarks: `SELECT DISTINCT remarks      AS val FROM day_book WHERE site_id = $1 AND remarks      IS NOT NULL AND remarks      != '' ORDER BY val LIMIT 50`,
+      accountNos: `SELECT DISTINCT account_no   AS val FROM day_book WHERE site_id = $1 AND account_no   IS NOT NULL AND account_no   != '' ORDER BY val LIMIT 50`,
+      branches: `SELECT DISTINCT branch       AS val FROM day_book WHERE site_id = $1 AND branch       IS NOT NULL AND branch       != '' ORDER BY val LIMIT 50`,
+      categories: `SELECT DISTINCT category     AS val FROM day_book WHERE site_id = $1 AND category     IS NOT NULL AND category     != '' ORDER BY val LIMIT 50`,
     };
 
     const keys = Object.keys(queries);
@@ -176,19 +180,21 @@ class DayBookModel extends MasterModel {
   async findPendingExpenses(siteId, pool) {
     const query = siteId
       ? `
-          SELECT d.*, s.name as site_name, c.name as created_by_name
+          SELECT d.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
           FROM day_book d
           JOIN sites s ON d.site_id = s.id
           LEFT JOIN users c ON d.created_by = c.id
-          WHERE d.status = 'pending' AND d.entry_type = 'EXPENSE' AND d.site_id = $1
+          LEFT JOIN members m ON d.assigned_user_id = m.id
+          WHERE d.status = 'pending' AND d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION') AND d.site_id = $1
           ORDER BY d.date DESC, d.id DESC
         `
       : `
-          SELECT d.*, s.name as site_name, c.name as created_by_name
+          SELECT d.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
           FROM day_book d
           JOIN sites s ON d.site_id = s.id
           LEFT JOIN users c ON d.created_by = c.id
-          WHERE d.status = 'pending' AND d.entry_type = 'EXPENSE'
+          LEFT JOIN members m ON d.assigned_user_id = m.id
+          WHERE d.status = 'pending' AND d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
           ORDER BY d.date DESC, d.id DESC
         `;
     const result = siteId
@@ -202,11 +208,12 @@ class DayBookModel extends MasterModel {
    */
   async findPendingByDateRange(siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT d.*, s.name as site_name, c.name as created_by_name
+      SELECT d.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
       FROM day_book d
       JOIN sites s ON d.site_id = s.id
       LEFT JOIN users c ON d.created_by = c.id
-      WHERE d.status = 'pending' AND d.entry_type = 'EXPENSE'
+      LEFT JOIN members m ON d.assigned_user_id = m.id
+      WHERE d.status = 'pending' AND d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
     `;
     const params = [];
     let paramIndex = 1;
@@ -280,13 +287,13 @@ class DayBookModel extends MasterModel {
       ? `
           SELECT status, COUNT(*)::int as count
           FROM day_book
-          WHERE site_id = $1 AND entry_type = 'EXPENSE'
+          WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
           GROUP BY status
         `
       : `
           SELECT status, COUNT(*)::int as count
           FROM day_book
-          WHERE entry_type = 'EXPENSE'
+          WHERE entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
           GROUP BY status
         `;
     const result = siteId
@@ -300,11 +307,12 @@ class DayBookModel extends MasterModel {
    */
   async findByStatus(status, siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT d.*, s.name as site_name, u.name as created_by_name
+      SELECT d.*, s.name as site_name, u.name as created_by_name, m.full_name as assigned_user_name
       FROM day_book d
       JOIN sites s ON d.site_id = s.id
       LEFT JOIN users u ON d.created_by = u.id
-      WHERE d.entry_type = 'EXPENSE'
+      LEFT JOIN members m ON d.assigned_user_id = m.id
+      WHERE d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
     `;
     const params = [];
     let paramIndex = 1;

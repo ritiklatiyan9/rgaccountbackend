@@ -18,6 +18,23 @@ class MemberModel extends MasterModel {
     return result.rows;
   }
 
+  /** Lightweight list – only columns needed for the table view */
+  async findBySiteIdList(siteId, pool, memberType = null) {
+    let query = `SELECT id, member_type, full_name, father_name, phone, email, city, state, status, photo,
+      alt_phone, whatsapp, address, pincode,
+      aadhar_no, pan_no, voter_id, passport_no, driving_license_no,
+      aadhar_front_url, aadhar_back_url, pan_card_url, voter_id_url, passport_url, driving_license_url, cheque_url, other_kyc_url
+      FROM members WHERE site_id = $1`;
+    const params = [siteId];
+    if (memberType && memberType !== 'ALL') {
+      query += ` AND member_type = $2`;
+      params.push(memberType);
+    }
+    query += ` ORDER BY full_name ASC`;
+    const result = await pool.query(query, params);
+    return result.rows;
+  }
+
   /** Search members */
   async search(siteId, q, pool) {
     const query = `

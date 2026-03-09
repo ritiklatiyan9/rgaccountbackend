@@ -54,7 +54,8 @@ class PlotPaymentModel extends MasterModel {
   /** All payments for a plot, ordered by date ASC */
   async findByPlotId(plotId, pool) {
     const query = `
-      SELECT * FROM plot_payments
+      SELECT *, 'payment' AS source
+      FROM plot_payments
       WHERE plot_id = $1
       ORDER BY date ASC, created_at ASC
     `;

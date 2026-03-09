@@ -121,7 +121,7 @@ export const deleteMonth = asyncHandler(async (req, res) => {
  * Add a new entry to a month
  */
 export const createEntry = asyncHandler(async (req, res) => {
-  const { cash_flow_month_id, date, particular, debit, credit, remarks, cash_type } = req.body;
+  const { cash_flow_month_id, date, particular, debit, credit, remarks, cash_type, voucher_url } = req.body;
 
   if (!cash_flow_month_id) return res.status(400).json({ message: 'Cash flow month is required' });
   if (!particular) return res.status(400).json({ message: 'Particular is required' });
@@ -140,6 +140,8 @@ export const createEntry = asyncHandler(async (req, res) => {
     cash_type: (cash_type && ['cash', 'bank'].includes(String(cash_type).toLowerCase())) ? String(cash_type).toLowerCase() : 'bank',
     remarks: remarks ? remarks.trim() : null,
     created_by: req.user.id,
+    voucher_url: voucher_url || null,
+    status: 'pending',
   };
 
   const entry = await cashFlowEntryModel.create(data, pool);
@@ -192,7 +194,7 @@ export const getEntry = asyncHandler(async (req, res) => {
  */
 export const updateEntry = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, particular, debit, credit, remarks, cash_type } = req.body;
+  const { date, particular, debit, credit, remarks, cash_type, voucher_url } = req.body;
 
   const existing = await cashFlowEntryModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Entry not found' });
@@ -208,6 +210,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
   if (credit !== undefined) updateData.credit = parseFloat(credit) || 0;
   if (cash_type !== undefined) updateData.cash_type = (['cash', 'bank'].includes(String(cash_type).toLowerCase())) ? String(cash_type).toLowerCase() : 'bank';
   if (remarks !== undefined) updateData.remarks = remarks ? remarks.trim() : null;
+  if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
 
   const updated = await cashFlowEntryModel.update(parseInt(id), updateData, pool);
   res.json({ entry: updated });

@@ -3,7 +3,7 @@ const router = express.Router();
 
 import {
   createMember, listMembers, searchMembers, getMemberAutocomplete,
-  getMember, updateMember, deleteMember,
+  getMember, updateMember, deleteMember, getMemberTransactions, getMemberFinancialInfo,
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -41,6 +41,10 @@ router.get('/', requireRole('admin', 'sub_admin'), requirePermission('clients', 
 router.post('/', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'write'), createMember);
 router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'update'), updateMember);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), deleteMember);
+
+// Member transactions
+router.get('/:id/transactions', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberTransactions);
+router.get('/:id/financial-info', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberFinancialInfo);
 
 // Dynamic param last
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMember);

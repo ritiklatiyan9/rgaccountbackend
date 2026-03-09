@@ -16,11 +16,11 @@ router.use(authMiddleware);
 
 // Standard expense CRUD
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), listExpenses);                            // ?site_id=X
-router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), getAutocomplete);             // ?site_id=X
+router.get('/autocomplete', requireRole('admin', 'sub_admin'), getAutocomplete);             // ?site_id=X
 router.get('/pending', requireRole('admin'), listPendingExpenses);     // Admin: get pending expenses
 router.get('/status-counts', requireRole('admin'), getStatusCounts);   // Admin: get status counts
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), getExpense);
-router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'write'), createExpense);
+router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'create'), createExpense);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), updateExpense);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), deleteExpense);
 

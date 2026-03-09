@@ -12,6 +12,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+import path from 'path';
+// Serve fallback local excel files if AWS S3 isn't configured
+app.use('/uploads/excel', express.static(path.join(process.cwd(), 'uploads', 'excel')));
+
 // routes
 import indexRoutes from './routes/index.js';
 app.use('/', indexRoutes);

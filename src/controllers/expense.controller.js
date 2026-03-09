@@ -43,6 +43,7 @@ export const createExpense = asyncHandler(async (req, res) => {
   const {
     site_id, date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
+    assigned_user_id, voucher_url
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -59,6 +60,8 @@ export const createExpense = asyncHandler(async (req, res) => {
     account_no: account_no ? account_no.trim().toUpperCase() : null,
     branch: branch ? branch.trim().toUpperCase() : null,
     category: category ? category.trim().toUpperCase() : null,
+    assigned_user_id: assigned_user_id ? parseInt(assigned_user_id) : null,
+    voucher_url: voucher_url || null,
     status: 'pending', // New expenses are pending by default
     created_by: req.user.id,
   };
@@ -136,6 +139,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
   const {
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
+    assigned_user_id, voucher_url
   } = req.body;
 
   const data = {
@@ -149,6 +153,8 @@ export const updateExpense = asyncHandler(async (req, res) => {
     account_no: account_no !== undefined ? (account_no ? account_no.trim().toUpperCase() : null) : existing.account_no,
     branch: branch !== undefined ? (branch ? branch.trim().toUpperCase() : null) : existing.branch,
     category: category !== undefined ? (category ? category.trim().toUpperCase() : null) : existing.category,
+    assigned_user_id: assigned_user_id !== undefined ? (assigned_user_id ? parseInt(assigned_user_id) : null) : existing.assigned_user_id,
+    voucher_url: voucher_url !== undefined ? (voucher_url || null) : existing.voucher_url,
   };
 
   const updated = await expenseModel.update(parseInt(id), data, pool);
@@ -219,7 +225,8 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
     created_by: entry.created_by,
     created_by_name: entry.created_by_name,
     created_at: entry.created_at,
-    source: 'daybook', // Mark the source
+    source: entry.entry_type === 'FARMER PAYMENT' ? 'farmer_payment' : entry.entry_type === 'PLOT COMMISSION' ? 'commission' : 'daybook',
+    entry_type: entry.entry_type, // Preserve entry type for UI labeling
   }));
 
   // Mark expenses table entries
@@ -376,9 +383,10 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'items array is required' });
   }
 
-  // Separate by source
-  const expenseIds = items.filter(i => i.source !== 'daybook').map(i => parseInt(i.id));
-  const daybookIds = items.filter(i => i.source === 'daybook').map(i => parseInt(i.id));
+  // Separate by source (farmer_payment and commission entries live in day_book table)
+  const daybookSources = ['daybook', 'farmer_payment', 'commission'];
+  const expenseIds = items.filter(i => !daybookSources.includes(i.source)).map(i => parseInt(i.id));
+  const daybookIds = items.filter(i => daybookSources.includes(i.source)).map(i => parseInt(i.id));
 
   const results = await Promise.all([
     expenseIds.length > 0 ? expenseModel.bulkApprove(expenseIds, req.user.id, pool) : [],

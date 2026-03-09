@@ -6,6 +6,12 @@ import {
   createPayment, listPayments, getPayment, updatePayment, deletePayment,
   getAutocomplete,
 } from '../controllers/plot.controller.js';
+import {
+  updateInstallmentSettings, listInstallments, createInstallments,
+  updateInstallment, deleteInstallment,
+  recordInstallmentPayment, listInstallmentPayments,
+  paymentManagementList, paymentReminders,
+} from '../controllers/installment.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
@@ -16,6 +22,8 @@ router.use(authMiddleware);
 // ── Plot endpoints ──
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), listPlots);                                        // ?site_id=X
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), getAutocomplete);                      // ?site_id=X
+router.get('/payment-management', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), paymentManagementList);           // ?site_id=X
+router.get('/payment-reminders', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), paymentReminders);                  // ?site_id=X&page=1&limit=10
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), getPlot);
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), createPlot);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), updatePlot);
@@ -27,5 +35,14 @@ router.get('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission
 router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), createPayment);
 router.put('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), updatePayment);
 router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), deletePayment);
+
+// ── Installment management endpoints ──
+router.get('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), listInstallments);
+router.post('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), createInstallments);
+router.put('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), updateInstallment);
+router.delete('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), deleteInstallment);
+router.put('/:id/installment-settings', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), updateInstallmentSettings);
+router.post('/:id/installment-payment', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), recordInstallmentPayment);
+router.get('/:id/installment-payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), listInstallmentPayments);
 
 export default router;

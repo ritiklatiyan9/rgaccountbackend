@@ -22,6 +22,12 @@ const MEMBER_FIELDS = [
   'nominee_name', 'nominee_relation', 'nominee_phone',
   // Employee-specific
   'employee_id', 'designation', 'department', 'date_of_joining', 'salary', 'employment_type',
+  // Farmer-specific
+  'land_area', 'crop_type', 'farm_location', 'irrigation_type', 'farming_experience',
+  // Broker-specific
+  'license_number', 'commission_rate', 'operating_areas',
+  // Vendor-specific
+  'business_name', 'service_type', 'payment_terms',
 ];
 
 const sanitize = (body) => {
@@ -32,13 +38,13 @@ const sanitize = (body) => {
       if (typeof val === 'string') val = val.trim();
       // Uppercase certain fields
       if (['full_name', 'father_name', 'member_type', 'gender', 'blood_group',
-           'city', 'state', 'aadhar_no', 'pan_no', 'voter_id', 'ifsc_code',
-           'occupation', 'company_name', 'reference', 'status',
-           'mother_name', 'spouse_name', 'nationality', 'religion', 'caste',
-           'marital_status', 'qualification', 'passport_no', 'driving_license_no',
-           'gst_no', 'tin_no', 'emergency_contact_name', 'emergency_contact_relation',
-           'nominee_name', 'nominee_relation', 'designation', 'department',
-           'employment_type'].includes(f) && val) {
+        'city', 'state', 'aadhar_no', 'pan_no', 'voter_id', 'ifsc_code',
+        'occupation', 'company_name', 'reference', 'status',
+        'mother_name', 'spouse_name', 'nationality', 'religion', 'caste',
+        'marital_status', 'qualification', 'passport_no', 'driving_license_no',
+        'gst_no', 'tin_no', 'emergency_contact_name', 'emergency_contact_relation',
+        'nominee_name', 'nominee_relation', 'designation', 'department',
+        'employment_type'].includes(f) && val) {
         val = val.toUpperCase();
       }
       data[f] = val || null;
@@ -98,7 +104,7 @@ export const listMembers = asyncHandler(async (req, res) => {
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
   const [members, summary] = await Promise.all([
-    memberModel.findBySiteId(parseInt(site_id), pool, type || null),
+    memberModel.findBySiteIdList(parseInt(site_id), pool, type || null),
     memberModel.getSummary(parseInt(site_id), pool),
   ]);
   res.json({ members, summary });
@@ -158,4 +164,169 @@ export const deleteMember = asyncHandler(async (req, res) => {
   if (!existing) return res.status(404).json({ message: 'Member not found' });
   await memberModel.delete(parseInt(req.params.id), pool);
   res.json({ message: 'Member deleted' });
+});
+
+/** GET /members/:id/transactions?site_id=X */
+export const getMemberTransactions = asyncHandler(async (req, res) => {
+  const memberId = parseInt(req.params.id);
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const member = await memberModel.findById(memberId, pool);
+  if (!member) return res.status(404).json({ message: 'Member not found' });
+
+  const siteId = parseInt(site_id);
+  const memberName = member.full_name;
+
+  // Fetch expenses linked by assigned_user_id OR by name match
+  const expensesQuery = `
+    SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
+           e.debit, e.credit, e.remark, e.category, e.account_no, e.branch,
+           e.voucher_url, e.status, e.created_at,
+           'EXPENSE' as source
+    FROM expenses e
+    WHERE e.site_id = $1
+      AND (e.assigned_user_id = $2 OR UPPER(e.to_entity) = UPPER($3) OR UPPER(e.from_entity) = UPPER($3))
+    ORDER BY e.date DESC, e.id DESC
+  `;
+
+  // Fetch daybook entries linked by assigned_user_id OR by name match
+  const daybookQuery = `
+    SELECT d.id, d.date, d.from_entity, d.to_entity, d.payment_mode,
+           d.debit, d.credit, d.remark, d.category, d.account_no, d.branch,
+           d.entry_type, d.status, d.created_at,
+           'DAYBOOK' as source
+    FROM day_book d
+    WHERE d.site_id = $1
+      AND d.entry_type != 'EXPENSE'
+      AND (d.assigned_user_id = $2 OR UPPER(d.to_entity) = UPPER($3) OR UPPER(d.from_entity) = UPPER($3))
+    ORDER BY d.date DESC, d.id DESC
+  `;
+
+  const [expResult, dbResult] = await Promise.all([
+    pool.query(expensesQuery, [siteId, memberId, memberName]),
+    pool.query(daybookQuery, [siteId, memberId, memberName]),
+  ]);
+
+  const expenses = expResult.rows;
+  const daybook = dbResult.rows;
+
+  // Combine and sort by date DESC
+  const all = [...expenses, ...daybook].sort((a, b) => {
+    const da = new Date(a.date), db = new Date(b.date);
+    return db - da || b.id - a.id;
+  });
+
+  // Summary
+  const totalDebit = all.reduce((s, t) => s + (parseFloat(t.debit) || 0), 0);
+  const totalCredit = all.reduce((s, t) => s + (parseFloat(t.credit) || 0), 0);
+
+  res.json({
+    transactions: all,
+    summary: {
+      total_debit: totalDebit,
+      total_credit: totalCredit,
+      net: totalCredit - totalDebit,
+      count: all.length,
+    },
+  });
+});
+
+/** GET /members/:id/financial-info?site_id=X */
+export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
+  const memberId = parseInt(req.params.id);
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const member = await memberModel.findById(memberId, pool);
+  if (!member) return res.status(404).json({ message: 'Member not found' });
+
+  const siteId = parseInt(site_id);
+  const memberName = member.full_name;
+
+  // Run all queries in parallel using name matching + FK where available
+  const [expRes, commRes, plotPayRes, farmerPayRes, firmRes] = await Promise.all([
+    // 1. Expenses — by assigned_user_id or name match
+    pool.query(
+      `SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
+              e.debit, e.credit, e.remark, e.category, e.status, e.voucher_url
+       FROM expenses e
+       WHERE e.site_id = $1
+         AND (e.assigned_user_id = $2 OR UPPER(e.to_entity) = UPPER($3) OR UPPER(e.from_entity) = UPPER($3))
+       ORDER BY e.date DESC, e.id DESC`,
+      [siteId, memberId, memberName]
+    ),
+    // 2. Plot Commissions — by particular (person name)
+    pool.query(
+      `SELECT pc.id, pc.date, pc.particular, pc.amount, pc.plot_no, pc.plot_size,
+              pc.by_note, pc.remarks, pc.status, pc.voucher_url
+       FROM plot_commissions pc
+       WHERE pc.site_id = $1 AND UPPER(pc.particular) = UPPER($2)
+       ORDER BY pc.date DESC, pc.id DESC`,
+      [siteId, memberName]
+    ),
+    // 3. Plot Payments — by payment_from (buyer name) or buyer_name on plot
+    pool.query(
+      `SELECT pp.id, pp.date, pp.amount, pp.payment_type, pp.bank_details,
+              pp.narration, pp.payment_from, pp.received_by,
+              p.plot_no, p.block, p.buyer_name
+       FROM plot_payments pp
+       JOIN plots p ON p.id = pp.plot_id
+       WHERE pp.site_id = $1
+         AND (UPPER(pp.payment_from) = UPPER($2) OR UPPER(p.buyer_name) = UPPER($2))
+       ORDER BY pp.date DESC, pp.id DESC`,
+      [siteId, memberName]
+    ),
+    // 4. Farmer Payments — via farmers.member_id
+    pool.query(
+      `SELECT fp.id, fp.date, fp.amount, fp.particular, fp.payment_mode,
+              fp.cash_amount, fp.bank_amount, fp.remarks, fp.by_note,
+              f.name AS farmer_name
+       FROM farmer_payments fp
+       JOIN farmers f ON f.id = fp.farmer_id
+       WHERE f.site_id = $1 AND f.member_id = $2
+       ORDER BY fp.date DESC, fp.id DESC`,
+      [siteId, memberId]
+    ),
+    // 5. Firm Transactions — by name
+    pool.query(
+      `SELECT ft.id, ft.date, ft.debit, ft.credit, ft.description, ft.purpose,
+              ft.remark, ft.cheque_no, ft.name,
+              fi.name AS firm_name
+       FROM firm_transactions ft
+       JOIN firms fi ON fi.id = ft.firm_id
+       WHERE fi.site_id = $1 AND UPPER(ft.name) = UPPER($2)
+       ORDER BY ft.date DESC, ft.id DESC`,
+      [siteId, memberName]
+    ),
+  ]);
+
+  const expenses = expRes.rows;
+  const commissions = commRes.rows;
+  const plotPayments = plotPayRes.rows;
+  const farmerPayments = farmerPayRes.rows;
+  const firmTransactions = firmRes.rows;
+
+  // Summaries per category
+  const expTotal = expenses.reduce((s, e) => ({ debit: s.debit + (parseFloat(e.debit) || 0), credit: s.credit + (parseFloat(e.credit) || 0) }), { debit: 0, credit: 0 });
+  const commTotal = commissions.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+  const plotPayTotal = plotPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const farmerPayTotal = farmerPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const firmTotal = firmTransactions.reduce((s, f) => ({ debit: s.debit + (parseFloat(f.debit) || 0), credit: s.credit + (parseFloat(f.credit) || 0) }), { debit: 0, credit: 0 });
+
+  res.json({
+    expenses,
+    commissions,
+    plot_payments: plotPayments,
+    farmer_payments: farmerPayments,
+    firm_transactions: firmTransactions,
+    summary: {
+      expenses: { count: expenses.length, debit: expTotal.debit, credit: expTotal.credit },
+      commissions: { count: commissions.length, total: commTotal },
+      plot_payments: { count: plotPayments.length, total: plotPayTotal },
+      farmer_payments: { count: farmerPayments.length, total: farmerPayTotal },
+      firm_transactions: { count: firmTransactions.length, debit: firmTotal.debit, credit: firmTotal.credit },
+      grand_total_entries: expenses.length + commissions.length + plotPayments.length + farmerPayments.length + firmTransactions.length,
+    },
+  });
 });

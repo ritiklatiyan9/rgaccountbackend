@@ -11,9 +11,10 @@ class ExpenseModel extends MasterModel {
    */
   async findBySiteId(siteId, pool) {
     const query = `
-      SELECT e.*, u.name as approved_by_name
+      SELECT e.*, u.name as approved_by_name, m.full_name as assigned_user_name
       FROM expenses e
       LEFT JOIN users u ON e.approved_by = u.id
+      LEFT JOIN members m ON e.assigned_user_id = m.id
       WHERE e.site_id = $1
       ORDER BY e.date DESC, e.id DESC
     `;
@@ -26,9 +27,10 @@ class ExpenseModel extends MasterModel {
    */
   async findBySiteIdAsc(siteId, pool) {
     const query = `
-      SELECT e.*, u.name as approved_by_name
+      SELECT e.*, u.name as approved_by_name, m.full_name as assigned_user_name
       FROM expenses e
       LEFT JOIN users u ON e.approved_by = u.id
+      LEFT JOIN members m ON e.assigned_user_id = m.id
       WHERE e.site_id = $1
       ORDER BY e.date ASC, e.id ASC
     `;
@@ -42,18 +44,20 @@ class ExpenseModel extends MasterModel {
   async findPendingExpenses(siteId, pool) {
     const query = siteId
       ? `
-          SELECT e.*, s.name as site_name, c.name as created_by_name
+          SELECT e.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
           FROM expenses e
           JOIN sites s ON e.site_id = s.id
           LEFT JOIN users c ON e.created_by = c.id
+          LEFT JOIN members m ON e.assigned_user_id = m.id
           WHERE e.status = 'pending' AND e.site_id = $1
           ORDER BY e.date DESC, e.id DESC
         `
       : `
-          SELECT e.*, s.name as site_name, c.name as created_by_name
+          SELECT e.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
           FROM expenses e
           JOIN sites s ON e.site_id = s.id
           LEFT JOIN users c ON e.created_by = c.id
+          LEFT JOIN members m ON e.assigned_user_id = m.id
           WHERE e.status = 'pending'
           ORDER BY e.date DESC, e.id DESC
         `;
@@ -68,10 +72,11 @@ class ExpenseModel extends MasterModel {
    */
   async findPendingByDateRange(siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT e.*, s.name as site_name, c.name as created_by_name
+      SELECT e.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
       FROM expenses e
       JOIN sites s ON e.site_id = s.id
       LEFT JOIN users c ON e.created_by = c.id
+      LEFT JOIN members m ON e.assigned_user_id = m.id
       WHERE e.status = 'pending'
     `;
     const params = [];
@@ -165,10 +170,11 @@ class ExpenseModel extends MasterModel {
    */
   async findByStatus(status, siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT e.*, s.name as site_name, u.name as created_by_name
+      SELECT e.*, s.name as site_name, u.name as created_by_name, m.full_name as assigned_user_name
       FROM expenses e
       JOIN sites s ON e.site_id = s.id
       LEFT JOIN users u ON e.created_by = u.id
+      LEFT JOIN members m ON e.assigned_user_id = m.id
       WHERE 1=1
     `;
     const params = [];
@@ -298,80 +304,9 @@ class ExpenseModel extends MasterModel {
     const { search, mode, category, to_entity, dateFrom, dateTo } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
 
-    const baseQuery = `
-      WITH unified AS (
-        SELECT 
-          id::text as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
-          payment_mode, debit, credit, remark, account_no, branch, category, 
-          status, approved_by, approved_at, created_by, created_at, updated_at, 
-          'expenses' as source
-        FROM expenses
-        WHERE site_id = $1
-        
-        UNION ALL
-        
-        SELECT 
-          'daybook_' || id as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
-          payment_mode, debit, credit, particular || CASE WHEN remarks IS NOT NULL AND remarks != '' THEN ' - ' || remarks ELSE '' END as remark,
-          account_no, branch, category, 
-          status, approved_by, approved_at, created_by, created_at, updated_at, 
-          'daybook' as source
-        FROM day_book
-        WHERE site_id = $1 AND entry_type = 'EXPENSE'
-      ),
-      filtered AS (
-        SELECT u.*, us.name as approved_by_name
-        FROM unified u
-        LEFT JOIN users us ON u.approved_by = us.id
-        WHERE 1=1
-        ${mode ? `AND u.payment_mode = $2` : ''}
-        ${category ? `AND u.category = $3` : ''}
-        ${to_entity ? `AND u.to_entity = $4` : ''}
-        ${dateFrom ? `AND u.date >= $5` : ''}
-        ${dateTo ? `AND u.date <= $6` : ''}
-        ${search ? `
-          AND (
-            u.from_entity ILIKE $7 OR 
-            u.to_entity ILIKE $7 OR 
-            u.remark ILIKE $7 OR 
-            u.account_no ILIKE $7 OR 
-            u.branch ILIKE $7 OR 
-            u.category ILIKE $7
-          )
-        ` : ''}
-      ),
-      with_balance AS (
-        SELECT 
-          f.*,
-          SUM(COALESCE(credit, 0) - COALESCE(debit, 0)) OVER (
-            ORDER BY date ASC, 
-            CASE WHEN source = 'daybook' THEN 1 ELSE 0 END ASC, 
-            original_id ASC
-          ) as running_balance
-        FROM filtered f
-      ),
-      total_count AS (
-        SELECT COUNT(*) as total FROM filtered
-      )
-      SELECT wb.*, tc.total as full_count
-      FROM with_balance wb
-      CROSS JOIN total_count tc
-      ORDER BY wb.date DESC, 
-               CASE WHEN wb.source = 'daybook' THEN 1 ELSE 0 END DESC, 
-               wb.original_id DESC
-    `;
-
-    // Build params array dynamically because the $ indexes must match
+    // ── Build WHERE clause once, reuse across queries ──
     const params = [siteId];
-    let pIdx = 2; // Next param index
-
-    // We add dummy string 'NULL' if param is missing to keep the query string indexing simple,
-    // but a better way is replacing $X with the exact incremented param.
-    // Instead of complex parsing, let's just use exact positional mapping.
-
-    // Actually, to make parameterized queries safe with optional filters, 
-    // we should build both query string and params together. Let's rewrite the query builder.
-
+    let pIdx = 2;
     let whereClause = '';
 
     if (mode) { whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode); }
@@ -385,12 +320,16 @@ class ExpenseModel extends MasterModel {
       pIdx++;
     }
 
-    const finalQuery = `
+    const filterParams = [...params]; // snapshot before LIMIT/OFFSET
+
+    // ── Unified CTE fragment (reused) ──
+    const unifiedCTE = `
       WITH unified AS (
         SELECT 
           id::text as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
           payment_mode, debit, credit, remark, account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
+          assigned_user_id, voucher_url,
           'expenses' as source
         FROM expenses
         WHERE site_id = $1
@@ -402,53 +341,46 @@ class ExpenseModel extends MasterModel {
           payment_mode, debit, credit, particular || CASE WHEN remarks IS NOT NULL AND remarks != '' THEN ' - ' || remarks ELSE '' END as remark,
           account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
-          'daybook' as source
+          assigned_user_id, voucher_url,
+          CASE 
+            WHEN entry_type = 'FARMER PAYMENT' THEN 'farmer_payment'
+            WHEN entry_type = 'PLOT COMMISSION' THEN 'commission'
+            ELSE 'daybook'
+          END as source
         FROM day_book
-        WHERE site_id = $1 AND entry_type = 'EXPENSE'
-      ),
-      filtered AS (
-        SELECT u.*, us.name as approved_by_name
-        FROM unified u
-        LEFT JOIN users us ON u.approved_by = us.id
-        WHERE 1=1 ${whereClause}
-      ),
-      with_balance AS (
-        SELECT 
-          f.*,
-          SUM(COALESCE(credit, 0) - COALESCE(debit, 0)) OVER (
-            ORDER BY date ASC, 
-            CASE WHEN source = 'daybook' THEN 1 ELSE 0 END ASC, 
-            original_id ASC
-          ) as running_balance
-        FROM filtered f
-      ),
-      total_count AS (
-        SELECT COUNT(*) as total FROM filtered
+        WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
       )
-      SELECT wb.*, tc.total as full_count
-      FROM with_balance wb
-      CROSS JOIN total_count tc
-      ORDER BY wb.date DESC, 
-               CASE WHEN wb.source = 'daybook' THEN 1 ELSE 0 END DESC, 
-               wb.original_id DESC
-      ${limit > 0 ? `LIMIT $${pIdx++} OFFSET $${pIdx++}` : ''}
     `;
 
+    // ── Q1: Data ──
+    let dataQuery = `
+      ${unifiedCTE}
+      SELECT u.*, us.name as approved_by_name, m.full_name as assigned_user_name
+      FROM unified u
+      LEFT JOIN users us ON u.approved_by = us.id
+      LEFT JOIN members m ON u.assigned_user_id = m.id
+      WHERE 1=1 ${whereClause}
+      ORDER BY u.date DESC, u.created_at DESC,
+               CASE WHEN u.source = 'daybook' THEN 1 ELSE 0 END DESC, 
+               u.original_id DESC
+    `;
+    const dataParams = [...params];
     if (limit > 0) {
-      params.push(limit, offset);
+      dataQuery += ` LIMIT $${pIdx++} OFFSET $${pIdx++}`;
+      dataParams.push(limit, offset);
     }
 
-    const result = await pool.query(finalQuery, params);
+    // ── Q2: Count (lightweight) ──
+    const countQuery = `
+      ${unifiedCTE}
+      SELECT COUNT(*)::int as total
+      FROM unified u
+      WHERE 1=1 ${whereClause}
+    `;
 
-    // Summary Query for filtered totals
+    // ── Q3: Summary aggregates ──
     const summaryQuery = `
-      WITH unified AS (
-        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
-        FROM expenses WHERE site_id = $1
-        UNION ALL
-        SELECT date, payment_mode, category, to_entity, from_entity, particular || CASE WHEN remarks IS NOT NULL AND remarks != '' THEN ' - ' || remarks ELSE '' END as remark, account_no, branch, debit, credit
-        FROM day_book WHERE site_id = $1 AND entry_type = 'EXPENSE'
-      )
+      ${unifiedCTE}
       SELECT 
         COALESCE(SUM(debit), 0)::numeric as total_debit, 
         COALESCE(SUM(credit), 0)::numeric as total_credit,
@@ -457,23 +389,20 @@ class ExpenseModel extends MasterModel {
       WHERE 1=1 ${whereClause}
     `;
 
-    // We slice the params to exclude LIMIT and OFFSET which we added at the very end
-    const summaryParams = limit > 0 ? params.slice(0, -2) : params;
-    const summaryResult = await pool.query(summaryQuery, summaryParams);
+    // ── Run all 3 in parallel ──
+    const [dataResult, countResult, summaryResult] = await Promise.all([
+      pool.query(dataQuery, dataParams),
+      pool.query(countQuery, filterParams),
+      pool.query(summaryQuery, filterParams),
+    ]);
 
     return {
-      items: result.rows.map(row => {
-        // Renaming to match frontend expectations
-        const { virtual_id, full_count, running_balance, ...rest } = row;
-        return {
-          ...rest,
-          id: virtual_id,
-          balance: parseFloat(running_balance),
-          full_count: parseInt(full_count) || 0
-        };
+      items: dataResult.rows.map(row => {
+        const { virtual_id, ...rest } = row;
+        return { ...rest, id: virtual_id };
       }),
       summary: summaryResult.rows[0],
-      totalItems: result.rows.length > 0 ? parseInt(result.rows[0].full_count) : 0
+      totalItems: countResult.rows[0]?.total || 0
     };
   }
 
@@ -503,7 +432,7 @@ class ExpenseModel extends MasterModel {
         FROM expenses WHERE site_id = $1
         UNION ALL
         SELECT date, payment_mode, category, to_entity, from_entity, particular as remark, account_no, branch, debit, credit
-        FROM day_book WHERE site_id = $1 AND entry_type = 'EXPENSE'
+        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
       )
       SELECT 
         COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode, 
@@ -522,7 +451,7 @@ class ExpenseModel extends MasterModel {
         FROM expenses WHERE site_id = $1
         UNION ALL
         SELECT date, payment_mode, category, to_entity, from_entity, particular as remark, account_no, branch, debit, credit
-        FROM day_book WHERE site_id = $1 AND entry_type = 'EXPENSE'
+        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
       )
       SELECT 
         COALESCE(category, 'UNCATEGORIZED') as category, 

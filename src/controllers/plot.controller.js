@@ -117,7 +117,7 @@ export const deletePlot = asyncHandler(async (req, res) => {
 
 /** POST /plots/payments — Create a payment */
 export const createPayment = asyncHandler(async (req, res) => {
-  const { plot_id, date, payment_from, payment_type, bank_details, narration, received_by, amount } = req.body;
+  const { plot_id, date, payment_from, payment_type, bank_details, narration, received_by, amount, voucher_url } = req.body;
 
   if (!plot_id) return res.status(400).json({ message: 'Plot is required' });
 
@@ -135,6 +135,8 @@ export const createPayment = asyncHandler(async (req, res) => {
     received_by: received_by ? received_by.trim().toUpperCase() : null,
     amount: parseFloat(amount) || 0,
     created_by: req.user.id,
+    voucher_url: voucher_url || null,
+    status: 'pending',
   };
 
   const payment = await plotPaymentModel.create(data, pool);
@@ -167,7 +169,7 @@ export const getPayment = asyncHandler(async (req, res) => {
 /** PUT /plots/payments/:id — Update a payment */
 export const updatePayment = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, payment_from, payment_type, bank_details, narration, received_by, amount } = req.body;
+  const { date, payment_from, payment_type, bank_details, narration, received_by, amount, voucher_url } = req.body;
 
   const existing = await plotPaymentModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Payment not found' });
@@ -180,6 +182,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (narration !== undefined) updateData.narration = narration ? narration.trim().toUpperCase() : null;
   if (received_by !== undefined) updateData.received_by = received_by ? received_by.trim().toUpperCase() : null;
   if (amount !== undefined) updateData.amount = parseFloat(amount) || 0;
+  if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 

@@ -150,6 +150,7 @@ export const createPayment = asyncHandler(async (req, res) => {
   const {
     date, particular, amount, by_note, interest_rate, interest_amount, remarks,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
+    voucher_url,
   } = req.body;
 
   const farmer = await farmerModel.findById(parseInt(farmerId), pool);
@@ -184,6 +185,8 @@ export const createPayment = asyncHandler(async (req, res) => {
     bank_account_no: bank_account_no || null,
     bank_reference: bank_reference || null,
     bank_ifsc: bank_ifsc || null,
+    voucher_url: voucher_url || null,
+    status: 'pending',
   };
 
   const payment = await farmerPaymentModel.create(paymentData, pool);
@@ -202,8 +205,8 @@ export const createPayment = asyncHandler(async (req, res) => {
       remarks: remarks ? remarks.trim() : null,
       payment_mode: 'CASH',
       category: 'FARMER PAYMENT',
-      from_entity: farmer.name.toUpperCase(),
-      to_entity: null,
+      from_entity: null,
+      to_entity: farmer.name.toUpperCase(),
       created_by: req.user.id,
       farmer_payment_id: payment.id,
     }, pool);
@@ -221,8 +224,8 @@ export const createPayment = asyncHandler(async (req, res) => {
       remarks: [remarks, bank_reference ? `Ref: ${bank_reference}` : null, bank_name ? `Bank: ${bank_name}` : null].filter(Boolean).join(' | ') || null,
       payment_mode: particular.toUpperCase(),
       category: 'FARMER PAYMENT',
-      from_entity: farmer.name.toUpperCase(),
-      to_entity: bank_name ? bank_name.toUpperCase() : null,
+      from_entity: bank_name ? bank_name.toUpperCase() : null,
+      to_entity: farmer.name.toUpperCase(),
       account_no: bank_account_no || null,
       branch: bank_ifsc || null,
       created_by: req.user.id,
@@ -284,6 +287,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
   const {
     date, particular, amount, by_note, interest_rate, interest_amount, remarks,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
+    voucher_url,
   } = req.body;
 
   const payment = await farmerPaymentModel.findById(parseInt(paymentId), pool);
@@ -306,6 +310,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (bank_account_no !== undefined) updateData.bank_account_no = bank_account_no;
   if (bank_reference !== undefined) updateData.bank_reference = bank_reference;
   if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
+  if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
 
   const updated = await farmerPaymentModel.update(parseInt(paymentId), updateData, pool);
   res.json({ payment: updated });
@@ -321,6 +326,13 @@ export const deletePayment = asyncHandler(async (req, res) => {
   const payment = await farmerPaymentModel.findById(parseInt(paymentId), pool);
   if (!payment || payment.farmer_id !== parseInt(farmerId)) {
     return res.status(404).json({ message: 'Payment not found' });
+  }
+
+  // Delete linked DayBook entries
+  try {
+    await pool.query(`DELETE FROM day_book WHERE farmer_payment_id = $1`, [parseInt(paymentId)]);
+  } catch (err) {
+    console.error('[FarmerPayment] Failed to delete DayBook entries:', err.message);
   }
 
   await farmerPaymentModel.delete(parseInt(paymentId), pool);

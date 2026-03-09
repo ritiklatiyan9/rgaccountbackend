@@ -116,7 +116,7 @@ export const deleteFirm = asyncHandler(async (req, res) => {
  */
 export const createTransaction = asyncHandler(async (req, res) => {
   const { firm_id, date, description, debit, credit, name, purpose, remark, cheque_no,
-          cash_flow_month_id, ledger_name, ledger_type } = req.body;
+          cash_flow_month_id, ledger_name, ledger_type, voucher_url } = req.body;
 
   if (!firm_id) return res.status(400).json({ message: 'Firm is required' });
   if (!description || !description.trim()) return res.status(400).json({ message: 'Description is required' });
@@ -199,6 +199,8 @@ export const createTransaction = asyncHandler(async (req, res) => {
     remark: remark ? remark.trim().toUpperCase() : null,
     cheque_no: cheque_no ? cheque_no.trim() : null,
     created_by: req.user.id,
+    voucher_url: voucher_url || null,
+    status: 'pending',
     ...(cfEntryId && { cash_flow_entry_id: cfEntryId }),
   };
 
@@ -265,7 +267,7 @@ export const getTransaction = asyncHandler(async (req, res) => {
  */
 export const updateTransaction = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, description, debit, credit, name, purpose, remark, cheque_no } = req.body;
+  const { date, description, debit, credit, name, purpose, remark, cheque_no, voucher_url } = req.body;
 
   const existing = await firmTransactionModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Transaction not found' });
@@ -279,6 +281,7 @@ export const updateTransaction = asyncHandler(async (req, res) => {
   if (purpose !== undefined) updateData.purpose = purpose ? purpose.trim().toUpperCase() : null;
   if (remark !== undefined) updateData.remark = remark ? remark.trim().toUpperCase() : null;
   if (cheque_no !== undefined) updateData.cheque_no = cheque_no ? cheque_no.trim() : null;
+  if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
 
   const updated = await firmTransactionModel.update(parseInt(id), updateData, pool);
 

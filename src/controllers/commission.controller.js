@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import plotCommissionModel from '../models/PlotCommission.model.js';
+import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
 
 /**
@@ -7,7 +8,7 @@ import pool from '../config/db.js';
  * Create a new commission entry
  */
 export const createCommission = asyncHandler(async (req, res) => {
-  const { site_id, date, particular, father_name, plot_no, plot_size, plot_rate, amount, by_note, remarks } = req.body;
+  const { site_id, date, particular, father_name, plot_no, plot_size, plot_rate, amount, by_note, remarks, voucher_url } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   if (!particular) return res.status(400).json({ message: 'Particular (person name) is required' });
@@ -24,9 +25,33 @@ export const createCommission = asyncHandler(async (req, res) => {
     by_note: by_note ? by_note.trim() : null,
     remarks: remarks ? remarks.trim() : null,
     created_by: req.user.id,
+    voucher_url: voucher_url || null,
+    status: 'pending',
   };
 
   const commission = await plotCommissionModel.create(data, pool);
+
+  // ── Auto-create DayBook entry for expense integration ──
+  const commissionAmount = parseFloat(amount) || 0;
+  if (commissionAmount > 0) {
+    const plotInfo = plot_no ? ` (Plot: ${plot_no.trim().toUpperCase()})` : '';
+    await dayBookModel.create({
+      site_id: parseInt(site_id),
+      date: data.date,
+      particular: `${data.particular}${plotInfo} - COMMISSION`.toUpperCase(),
+      entry_type: 'PLOT COMMISSION',
+      debit: commissionAmount,
+      credit: 0,
+      remarks: remarks ? remarks.trim() : null,
+      payment_mode: by_note ? by_note.trim().toUpperCase() : 'CASH',
+      category: 'COMMISSION',
+      from_entity: null,
+      to_entity: data.particular,
+      created_by: req.user.id,
+      commission_id: commission.id,
+    }, pool);
+  }
+
   res.status(201).json({ commission });
 });
 
@@ -82,7 +107,7 @@ export const getCommission = asyncHandler(async (req, res) => {
  */
 export const updateCommission = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, particular, father_name, plot_no, plot_size, plot_rate, amount, by_note, remarks } = req.body;
+  const { date, particular, father_name, plot_no, plot_size, plot_rate, amount, by_note, remarks, voucher_url } = req.body;
 
   const existing = await plotCommissionModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Commission entry not found' });
@@ -97,8 +122,32 @@ export const updateCommission = asyncHandler(async (req, res) => {
   if (amount !== undefined) updateData.amount = parseFloat(amount) || 0;
   if (by_note !== undefined) updateData.by_note = by_note ? by_note.trim() : null;
   if (remarks !== undefined) updateData.remarks = remarks ? remarks.trim() : null;
+  if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
 
   const updated = await plotCommissionModel.update(parseInt(id), updateData, pool);
+
+  // ── Sync DayBook entry ──
+  try {
+    const dayBookResult = await pool.query(
+      `SELECT id FROM day_book WHERE commission_id = $1 LIMIT 1`,
+      [parseInt(id)]
+    );
+    if (dayBookResult.rows.length > 0) {
+      const dbId = dayBookResult.rows[0].id;
+      const plotInfo = updated.plot_no ? ` (Plot: ${updated.plot_no})` : '';
+      await dayBookModel.update(dbId, {
+        date: updated.date,
+        particular: `${updated.particular}${plotInfo} - COMMISSION`.toUpperCase(),
+        debit: parseFloat(updated.amount) || 0,
+        remarks: updated.remarks || null,
+        payment_mode: updated.by_note ? updated.by_note.toUpperCase() : 'CASH',
+        to_entity: updated.particular,
+      }, pool);
+    }
+  } catch (err) {
+    console.error('[Commission] Failed to sync DayBook entry:', err.message);
+  }
+
   res.json({ commission: updated });
 });
 
@@ -110,6 +159,13 @@ export const deleteCommission = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const existing = await plotCommissionModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Commission entry not found' });
+
+  // ── Delete linked DayBook entry first ──
+  try {
+    await pool.query(`DELETE FROM day_book WHERE commission_id = $1`, [parseInt(id)]);
+  } catch (err) {
+    console.error('[Commission] Failed to delete DayBook entry:', err.message);
+  }
 
   await plotCommissionModel.delete(parseInt(id), pool);
   res.json({ message: 'Commission entry deleted' });
