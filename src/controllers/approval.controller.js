@@ -10,7 +10,8 @@ import pool from '../config/db.js';
 
 const ALLOWED_TABLES = {
   farmer_payment: 'farmer_payments',
-  plot_commission: 'plot_commissions',
+  plot_commission: 'plot_commissions', // Legacy
+  plot_commission_payment: 'plot_commission_payments', // New v2
   cash_flow_entry: 'cash_flow_entries',
   firm_transaction: 'firm_transactions',
   plot_payment: 'plot_payments',
@@ -76,7 +77,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
     })));
   }
 
-  // 2. Plot Commissions
+  // 2. Plot Commissions (Legacy)
   if (!module || module === 'plot_commission') {
     const { where, params } = buildWhere('pc', 'pc');
     const q = `
@@ -92,7 +93,31 @@ export const listAllPending = asyncHandler(async (req, res) => {
     results.push(...r.rows.map(row => ({
       ...row,
       entry_label: `${row.particular} - ₹${row.amount}`,
-      module_label: 'Plot Commission',
+      module_label: 'Plot Commission (Legacy)',
+    })));
+  }
+
+  // 2.5 Plot Commission Payments (V2)
+  if (!module || module === 'plot_commission_payment') {
+    const { where, params } = buildWhere('pcp', 'pcp');
+    const q = `
+      SELECT pcp.*, s.name AS site_name, u.name AS created_by_name,
+             p.plot_no, p.buyer_name, ag.full_name AS agent_name,
+             'plot_commission_payment' AS source
+      FROM plot_commission_payments pcp
+      JOIN sites s ON pcp.site_id = s.id
+      JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
+      JOIN plots p ON pcm.plot_id = p.id
+      JOIN members ag ON pcm.agent_id = ag.id
+      LEFT JOIN users u ON pcp.created_by = u.id
+      WHERE ${where}
+      ORDER BY pcp.date DESC, pcp.id DESC
+    `;
+    const r = await pool.query(q, params);
+    results.push(...r.rows.map(row => ({
+      ...row,
+      entry_label: `${row.agent_name} (Plot ${row.plot_no}) - ₹${row.amount}`,
+      module_label: 'Plot Commission payment',
     })));
   }
 
@@ -249,6 +274,7 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   const queries = [
     pool.query(`SELECT COUNT(*)::int AS count FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE fp.status = 'pending' ${fSiteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM plot_commissions WHERE status = 'pending' ${siteFilter}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM plot_commission_payments WHERE status = 'pending' ${siteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM cash_flow_entries WHERE status = 'pending' ${siteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM firm_transactions WHERE status = 'pending' ${siteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM plot_payments WHERE status = 'pending' ${siteFilter}`, params),
@@ -256,14 +282,14 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book WHERE status = 'pending' AND entry_type IN ('FARMER PAYMENT', 'PLOT COMMISSION', 'EXPENSE') ${siteFilter} GROUP BY entry_type`, params),
   ];
 
-  const [fp, pc, cf, ft, pp, ex, db] = await Promise.all(queries);
+  const [fp, pc, pcp, cf, ft, pp, ex, db] = await Promise.all(queries);
 
   // Day book counts by entry_type
   const dbMap = {};
   for (const row of db.rows) dbMap[row.entry_type] = row.count;
 
   const fpCount = fp.rows[0].count + (dbMap['FARMER PAYMENT'] || 0);
-  const pcCount = pc.rows[0].count + (dbMap['PLOT COMMISSION'] || 0);
+  const pcCount = pc.rows[0].count + pcp.rows[0].count + (dbMap['PLOT COMMISSION'] || 0);
   const exCount = ex.rows[0].count + (dbMap['EXPENSE'] || 0);
 
   const counts = {
@@ -304,8 +330,76 @@ export const approveEntry = asyncHandler(async (req, res) => {
     `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`,
     [entryId, req.user.id]
   );
+  
+  const entry = result.rows[0];
 
-  res.json({ entry: result.rows[0], message: `${source} approved successfully` });
+  // Auto-generate DayBook entry for new V2 commission payments
+  if (source === 'plot_commission_payment' && parseFloat(entry.amount) > 0) {
+    try {
+      const pcpQuery = `
+        SELECT pcp.*, p.plot_no, ag.full_name AS agent_name
+        FROM plot_commission_payments pcp
+        JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
+        JOIN plots p ON pcm.plot_id = p.id
+        JOIN members ag ON pcm.agent_id = ag.id
+        WHERE pcp.id = $1
+      `;
+      const pcpData = await pool.query(pcpQuery, [entryId]);
+      
+      if (pcpData.rows.length > 0) {
+        const pcpRow = pcpData.rows[0];
+        const plotInfo = pcpRow.plot_no ? ` (Plot: ${pcpRow.plot_no})` : '';
+        const dayBookQuery = `
+          INSERT INTO day_book (site_id, date, particular, entry_type, debit, credit, remarks, payment_mode, category, to_entity, created_by, status)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'approved')
+        `;
+        await pool.query(dayBookQuery, [
+          pcpRow.site_id,
+          pcpRow.date,
+          `${pcpRow.agent_name}${plotInfo} - COMMISSION`.toUpperCase(),
+          'PLOT COMMISSION',
+          pcpRow.amount,
+          0,
+          pcpRow.remarks,
+          pcpRow.payment_mode ? pcpRow.payment_mode.toUpperCase() : 'CASH',
+          'COMMISSION',
+          pcpRow.agent_name,
+          req.user.id
+        ]);
+      }
+    } catch (dbErr) {
+       console.error('[Approval] Failed to sync DayBook for Commission Payment:', dbErr.message);
+    }
+  }
+
+  // Update overall commission status if full amount paid
+  if (source === 'plot_commission_payment') {
+      try {
+          // get the total paid vs total commission
+          const sumQuery = `
+             SELECT 
+                pcm.id, pcm.total_commission, 
+                COALESCE(SUM(pcp.amount), 0) as total_paid
+             FROM plot_commissions_v2 pcm
+             LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved'
+             WHERE pcm.id = $1
+             GROUP BY pcm.id
+          `;
+          const sumRes = await pool.query(sumQuery, [entry.plot_commission_id]);
+          if (sumRes.rows.length > 0) {
+              const { id, total_commission, total_paid } = sumRes.rows[0];
+              let newStatus = 'Pending';
+              if (Number(total_paid) > 0) {
+                  newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : 'Partial';
+              }
+              await pool.query(`UPDATE plot_commissions_v2 SET status = $1 WHERE id = $2`, [newStatus, id]);
+          }
+      } catch (err) {
+         console.error('[Approval] Failed to calculate commission master status:', err.message);
+      }
+  }
+
+  res.json({ entry, message: `${source} approved successfully` });
 });
 
 /**

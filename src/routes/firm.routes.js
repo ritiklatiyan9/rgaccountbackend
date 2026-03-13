@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   createFirm, listFirms, getFirm, updateFirm, deleteFirm,
   createTransaction, listTransactions, getTransaction, updateTransaction, deleteTransaction,
-  getAutocomplete, listCashFlowLedgersForFirm,
+  getAutocomplete, listCashFlowLedgersForFirm, getFirmHistoryAnalytics,
 } from '../controllers/firm.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -14,9 +14,11 @@ import requirePermission from '../middlewares/permission.middleware.js';
 router.use(authMiddleware);
 
 // ── Firm endpoints ──
+router.get('/', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), listFirms);                           // ?site_id=X
 router.get('/list', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), listFirms);                        // ?site_id=X
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), getAutocomplete);                     // ?site_id=X
 router.get('/cashflow-ledgers', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), listCashFlowLedgersForFirm);     // ?site_id=X
+router.get('/history/analytics', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), getFirmHistoryAnalytics);        // ?site_id=X
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), getFirm);
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), createFirm);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'update'), updateFirm);

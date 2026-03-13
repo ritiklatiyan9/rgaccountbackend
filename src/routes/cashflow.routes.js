@@ -3,7 +3,7 @@ const router = express.Router();
 
 import {
   createMonth, listMonths, getMonth, updateMonth, deleteMonth,
-  createEntry, listEntries, getAutocomplete, getEntry, updateEntry, deleteEntry,
+  createEntry, listEntries, getAutocomplete, getEntry, updateEntry, deleteEntry, listFirmsForCashFlow,
 } from '../controllers/cashflow.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -28,5 +28,6 @@ router.delete('/entries/:id', requireRole('admin', 'sub_admin'), requirePermissi
 
 // ── Autocomplete ──
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), getAutocomplete);                     // ?site_id=X
+router.get('/firms', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), listFirmsForCashFlow);                      // ?site_id=X
 
 export default router;

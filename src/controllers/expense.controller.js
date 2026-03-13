@@ -185,6 +185,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
 
   let expensesList = [];
   let daybookList = [];
+  let vendorPayments = [];
 
   // Use the new findByStatus method for flexibility
   [expensesList, daybookList] = await Promise.all([
@@ -202,6 +203,41 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
       date_to || null,
       pool
     ),
+    pool
+      .query(
+        `SELECT
+          vp.id,
+          vp.site_id,
+          s.name AS site_name,
+          vp.payment_date AS date,
+          'COMPANY'::varchar AS from_entity,
+          COALESCE(vc.vendor_name, 'VENDOR')::varchar AS to_entity,
+          UPPER(COALESCE(vp.payment_mode, 'CASH'))::varchar AS payment_mode,
+          vp.amount AS debit,
+          0::numeric AS credit,
+          COALESCE(vp.note, 'VENDOR PAYMENT')::text AS remark,
+          NULL::varchar AS account_no,
+          NULL::varchar AS branch,
+          'VENDOR'::varchar AS category,
+          vp.status,
+          vp.approved_by,
+          vp.approved_at,
+          vp.created_by,
+          u.name AS created_by_name,
+          vp.created_at,
+          vp.voucher_url
+         FROM vendor_payments vp
+         JOIN vendor_commitments vc ON vc.id = vp.commitment_id
+         JOIN sites s ON s.id = vp.site_id
+         LEFT JOIN users u ON u.id = vp.created_by
+         WHERE ($1::text = 'all' OR vp.status = $1)
+           AND ($2::int IS NULL OR vp.site_id = $2)
+           AND ($3::date IS NULL OR vp.payment_date >= $3)
+           AND ($4::date IS NULL OR vp.payment_date <= $4)
+         ORDER BY vp.payment_date DESC, vp.id DESC`,
+        [status, site_id ? parseInt(site_id) : null, date_from || null, date_to || null]
+      )
+      .then((r) => r.rows),
   ]);
 
   // Transform day_book entries to expense format and mark source
@@ -235,8 +271,13 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
     source: 'expenses',
   }));
 
+  const markedVendorPayments = vendorPayments.map((vp) => ({
+    ...vp,
+    source: 'vendor_payment',
+  }));
+
   // Combine both sources and sort by date DESC
-  const allExpenses = [...markedExpenses, ...transformedDaybook].sort((a, b) => {
+  const allExpenses = [...markedExpenses, ...transformedDaybook, ...markedVendorPayments].sort((a, b) => {
     const dateA = new Date(a.date);
     const dateB = new Date(b.date);
     if (dateB.getTime() !== dateA.getTime()) {
@@ -255,9 +296,18 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
 export const getStatusCounts = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
 
-  const [expenseCounts, daybookCounts] = await Promise.all([
+  const [expenseCounts, daybookCounts, vendorCounts] = await Promise.all([
     expenseModel.getStatusCounts(site_id ? parseInt(site_id) : null, pool),
     dayBookModel.getStatusCounts(site_id ? parseInt(site_id) : null, pool),
+    pool
+      .query(
+        `SELECT status, COUNT(*)::int AS count
+         FROM vendor_payments
+         WHERE ($1::int IS NULL OR site_id = $1)
+         GROUP BY status`,
+        [site_id ? parseInt(site_id) : null]
+      )
+      .then((r) => r.rows),
   ]);
 
   // Combine counts
@@ -271,6 +321,10 @@ export const getStatusCounts = asyncHandler(async (req, res) => {
     result[row.status] = (result[row.status] || 0) + row.count;
   });
 
+  vendorCounts.forEach(row => {
+    result[row.status] = (result[row.status] || 0) + row.count;
+  });
+
   res.json(result);
 });
 
@@ -281,6 +335,35 @@ export const getStatusCounts = asyncHandler(async (req, res) => {
 export const approveExpense = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { source } = req.query; // 'daybook' or 'expenses'
+
+  if (source === 'vendor_payment') {
+    const existing = await pool.query('SELECT * FROM vendor_payments WHERE id = $1', [parseInt(id)]);
+    const payment = existing.rows[0];
+    if (!payment) return res.status(404).json({ message: 'Vendor payment not found' });
+    if (payment.status === 'approved') {
+      return res.status(400).json({ message: 'Vendor payment is already approved' });
+    }
+
+    const approvedResult = await pool.query(
+      `UPDATE vendor_payments
+       SET status = 'approved', approved_by = $2, approved_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [parseInt(id), req.user.id]
+    );
+
+    const approvedPayment = approvedResult.rows[0];
+
+    await deductImprestOnApproval(
+      approvedPayment.created_by,
+      parseFloat(approvedPayment.amount) || 0,
+      approvedPayment.id,
+      `VENDOR PAYMENT #${approvedPayment.id}`,
+      req.user.id
+    );
+
+    return res.json({ expense: approvedPayment, message: 'Vendor payment approved successfully' });
+  }
 
   if (source === 'daybook') {
     const existing = await dayBookModel.findById(parseInt(id), pool);
@@ -322,6 +405,25 @@ export const approveExpense = asyncHandler(async (req, res) => {
 export const rejectExpense = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { source } = req.query; // 'daybook' or 'expenses'
+
+  if (source === 'vendor_payment') {
+    const existing = await pool.query('SELECT * FROM vendor_payments WHERE id = $1', [parseInt(id)]);
+    const payment = existing.rows[0];
+    if (!payment) return res.status(404).json({ message: 'Vendor payment not found' });
+    if (payment.status === 'rejected') {
+      return res.status(400).json({ message: 'Vendor payment is already rejected' });
+    }
+
+    const rejectedResult = await pool.query(
+      `UPDATE vendor_payments
+       SET status = 'rejected', approved_by = $2, approved_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [parseInt(id), req.user.id]
+    );
+
+    return res.json({ expense: rejectedResult.rows[0], message: 'Vendor payment rejected' });
+  }
 
   if (source === 'daybook') {
     const existing = await dayBookModel.findById(parseInt(id), pool);
@@ -385,12 +487,27 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
 
   // Separate by source (farmer_payment and commission entries live in day_book table)
   const daybookSources = ['daybook', 'farmer_payment', 'commission'];
-  const expenseIds = items.filter(i => !daybookSources.includes(i.source)).map(i => parseInt(i.id));
   const daybookIds = items.filter(i => daybookSources.includes(i.source)).map(i => parseInt(i.id));
+  const vendorPaymentIds = items.filter(i => i.source === 'vendor_payment').map(i => parseInt(i.id));
+
+  const pureExpenseIds = items
+    .filter(i => !daybookSources.includes(i.source) && i.source !== 'vendor_payment')
+    .map(i => parseInt(i.id));
 
   const results = await Promise.all([
-    expenseIds.length > 0 ? expenseModel.bulkApprove(expenseIds, req.user.id, pool) : [],
+    pureExpenseIds.length > 0 ? expenseModel.bulkApprove(pureExpenseIds, req.user.id, pool) : [],
     daybookIds.length > 0 ? dayBookModel.bulkApprove(daybookIds, req.user.id, pool) : [],
+    vendorPaymentIds.length > 0
+      ? pool
+          .query(
+            `UPDATE vendor_payments
+             SET status = 'approved', approved_by = $2, approved_at = NOW()
+             WHERE id = ANY($1::int[])
+             RETURNING *`,
+            [vendorPaymentIds, req.user.id]
+          )
+          .then((r) => r.rows)
+      : [],
   ]);
 
   // Deduct imprest for each approved expense entry
@@ -401,11 +518,14 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
   for (const entry of results[1]) {
     await deductImprestOnApproval(entry.created_by, parseFloat(entry.debit) || 0, entry.id, `DAYBOOK #${entry.id}: ${entry.entry_type || 'EXPENSE'}`, req.user.id);
   }
+  for (const vp of results[2]) {
+    await deductImprestOnApproval(vp.created_by, parseFloat(vp.amount) || 0, vp.id, `VENDOR PAYMENT #${vp.id}`, req.user.id);
+  }
 
-  const totalApproved = results[0].length + results[1].length;
+  const totalApproved = results[0].length + results[1].length + results[2].length;
 
   res.json({
-    expenses: [...results[0], ...results[1]],
+    expenses: [...results[0], ...results[1], ...results[2]],
     message: `${totalApproved} item(s) approved successfully`,
   });
 });

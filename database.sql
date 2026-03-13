@@ -219,6 +219,12 @@ CREATE TABLE IF NOT EXISTS cash_flow_entries (
   debit               NUMERIC(15,2) NOT NULL DEFAULT 0,
   credit              NUMERIC(15,2) NOT NULL DEFAULT 0,
   cash_type           VARCHAR(20) NOT NULL DEFAULT 'bank' CHECK (cash_type IN ('cash', 'bank')),
+  is_firm_transaction BOOLEAN NOT NULL DEFAULT FALSE,
+  from_firm_id        INTEGER,
+  to_firm_id          INTEGER,
+  to_name             VARCHAR(255),
+  source_module       VARCHAR(50),
+  source_id           INTEGER,
   remarks             TEXT,
   created_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at          TIMESTAMPTZ DEFAULT NOW(),
@@ -228,14 +234,87 @@ CREATE TABLE IF NOT EXISTS cash_flow_entries (
 CREATE INDEX IF NOT EXISTS idx_cfe_month ON cash_flow_entries(cash_flow_month_id);
 CREATE INDEX IF NOT EXISTS idx_cfe_site  ON cash_flow_entries(site_id);
 CREATE INDEX IF NOT EXISTS idx_cfe_date  ON cash_flow_entries(date);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cfe_source_module_source_id ON cash_flow_entries(source_module, source_id);
+CREATE INDEX IF NOT EXISTS idx_cfe_from_firm_id ON cash_flow_entries(from_firm_id);
+CREATE INDEX IF NOT EXISTS idx_cfe_to_firm_id ON cash_flow_entries(to_firm_id);
+CREATE INDEX IF NOT EXISTS idx_cfe_is_firm_transaction ON cash_flow_entries(is_firm_transaction);
 
 CREATE TRIGGER trg_cash_flow_entries_updated_at
   BEFORE UPDATE ON cash_flow_entries
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+-- ──────────────────────────────────────────────────────────────
+-- 20. VENDOR MANAGEMENT (site-based commitments + deductions)
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS vendor_heads (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  name            VARCHAR(120) NOT NULL,
+  is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_vendor_heads_site_name
+  ON vendor_heads(site_id, name);
+
+CREATE TABLE IF NOT EXISTS vendor_commitments (
+  id              SERIAL PRIMARY KEY,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  vendor_member_id INTEGER REFERENCES members(id) ON DELETE SET NULL,
+  vendor_name     VARCHAR(200) NOT NULL,
+  head_id         INTEGER REFERENCES vendor_heads(id) ON DELETE SET NULL,
+  head_name       VARCHAR(120),
+  work_title      VARCHAR(220) NOT NULL,
+  contract_amount NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (contract_amount >= 0),
+  start_date      DATE,
+  due_date        DATE,
+  note            TEXT,
+  status          VARCHAR(20) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed', 'cancelled')),
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_commitments_site_id ON vendor_commitments(site_id);
+CREATE INDEX IF NOT EXISTS idx_vendor_commitments_vendor_member_id ON vendor_commitments(vendor_member_id);
+
+CREATE TABLE IF NOT EXISTS vendor_payments (
+  id              SERIAL PRIMARY KEY,
+  commitment_id   INTEGER NOT NULL REFERENCES vendor_commitments(id) ON DELETE CASCADE,
+  site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  payment_date    DATE NOT NULL,
+  amount          NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  payment_mode    VARCHAR(20) NOT NULL DEFAULT 'cash' CHECK (payment_mode IN ('cash', 'bank', 'upi', 'cheque', 'neft', 'rtgs', 'imps', 'other')),
+  reference_no    VARCHAR(120),
+  note            TEXT,
+  voucher_url     TEXT,
+  created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_payments_commitment_id ON vendor_payments(commitment_id);
+CREATE INDEX IF NOT EXISTS idx_vendor_payments_site_id ON vendor_payments(site_id);
+CREATE INDEX IF NOT EXISTS idx_vendor_payments_date ON vendor_payments(payment_date);
+
+CREATE TRIGGER trg_vendor_heads_updated_at
+  BEFORE UPDATE ON vendor_heads
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER trg_vendor_commitments_updated_at
+  BEFORE UPDATE ON vendor_commitments
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
 -- Add cash_type column if it doesn't exist (for migration)
 ALTER TABLE cash_flow_entries
 ADD COLUMN IF NOT EXISTS cash_type VARCHAR(20) NOT NULL DEFAULT 'bank' CHECK (cash_type IN ('cash', 'bank'));
+
+ALTER TABLE cash_flow_entries
+ADD COLUMN IF NOT EXISTS is_firm_transaction BOOLEAN NOT NULL DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS from_firm_id INTEGER,
+ADD COLUMN IF NOT EXISTS to_firm_id INTEGER,
+ADD COLUMN IF NOT EXISTS to_name VARCHAR(255);
 
 -- ──────────────────────────────────────────────────────────────
 -- 9. FIRMS (bank accounts / entities per site)
@@ -273,6 +352,7 @@ CREATE TABLE IF NOT EXISTS firm_transactions (
   site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   date            DATE NOT NULL DEFAULT CURRENT_DATE,
   description     TEXT NOT NULL,
+  payment_mode    VARCHAR(20) NOT NULL DEFAULT 'cash' CHECK (payment_mode IN ('cash', 'bank')),
   debit           NUMERIC(15,2) NOT NULL DEFAULT 0,
   credit          NUMERIC(15,2) NOT NULL DEFAULT 0,
   name            VARCHAR(255),
@@ -289,6 +369,7 @@ CREATE INDEX IF NOT EXISTS idx_ft_firm   ON firm_transactions(firm_id);
 CREATE INDEX IF NOT EXISTS idx_ft_site   ON firm_transactions(site_id);
 CREATE INDEX IF NOT EXISTS idx_ft_date   ON firm_transactions(date);
 CREATE INDEX IF NOT EXISTS idx_ft_remark ON firm_transactions(remark);
+CREATE INDEX IF NOT EXISTS idx_ft_payment_mode ON firm_transactions(payment_mode);
 CREATE INDEX IF NOT EXISTS idx_ft_cash_flow_entry_id ON firm_transactions(cash_flow_entry_id);
 
 CREATE TRIGGER trg_firm_transactions_updated_at

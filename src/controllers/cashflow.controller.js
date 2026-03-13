@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model.js';
+import { firmModel } from '../models/Firm.model.js';
 import pool from '../config/db.js';
 
 // ══════════════════════════════════════════════════
@@ -121,7 +122,20 @@ export const deleteMonth = asyncHandler(async (req, res) => {
  * Add a new entry to a month
  */
 export const createEntry = asyncHandler(async (req, res) => {
-  const { cash_flow_month_id, date, particular, debit, credit, remarks, cash_type, voucher_url } = req.body;
+  const {
+    cash_flow_month_id,
+    date,
+    particular,
+    debit,
+    credit,
+    remarks,
+    cash_type,
+    voucher_url,
+    is_firm_transaction,
+    from_firm_id,
+    to_firm_id,
+    to_name,
+  } = req.body;
 
   if (!cash_flow_month_id) return res.status(400).json({ message: 'Cash flow month is required' });
   if (!particular) return res.status(400).json({ message: 'Particular is required' });
@@ -129,6 +143,37 @@ export const createEntry = asyncHandler(async (req, res) => {
   const cfMonth = await cashFlowMonthModel.findById(parseInt(cash_flow_month_id), pool);
   if (!cfMonth) return res.status(404).json({ message: 'Cash flow month not found' });
   if (cfMonth.is_locked) return res.status(403).json({ message: 'This month is locked. Unlock it to add entries.' });
+
+  const isFirmTxn = Boolean(is_firm_transaction);
+  let fromFirmId = null;
+  let toFirmId = null;
+  let toName = null;
+
+  if (isFirmTxn) {
+    if (!from_firm_id) return res.status(400).json({ message: 'From firm is required for firm-linked entries' });
+
+    const fromFirm = await firmModel.findById(parseInt(from_firm_id), pool);
+    if (!fromFirm || fromFirm.site_id !== cfMonth.site_id) {
+      return res.status(400).json({ message: 'Invalid from firm for this site' });
+    }
+    fromFirmId = parseInt(from_firm_id);
+
+    if (to_firm_id && to_name) {
+      return res.status(400).json({ message: 'Choose either To Firm or To Name, not both' });
+    }
+
+    if (to_firm_id) {
+      const toFirm = await firmModel.findById(parseInt(to_firm_id), pool);
+      if (!toFirm || toFirm.site_id !== cfMonth.site_id) {
+        return res.status(400).json({ message: 'Invalid to firm for this site' });
+      }
+      toFirmId = parseInt(to_firm_id);
+    } else if (to_name && String(to_name).trim()) {
+      toName = String(to_name).trim().toUpperCase();
+    } else {
+      return res.status(400).json({ message: 'To Firm or To Name is required for firm-linked entries' });
+    }
+  }
 
   const data = {
     cash_flow_month_id: parseInt(cash_flow_month_id),
@@ -142,6 +187,10 @@ export const createEntry = asyncHandler(async (req, res) => {
     created_by: req.user.id,
     voucher_url: voucher_url || null,
     status: 'pending',
+    is_firm_transaction: isFirmTxn,
+    from_firm_id: fromFirmId,
+    to_firm_id: toFirmId,
+    to_name: toName,
   };
 
   const entry = await cashFlowEntryModel.create(data, pool);
@@ -194,7 +243,19 @@ export const getEntry = asyncHandler(async (req, res) => {
  */
 export const updateEntry = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, particular, debit, credit, remarks, cash_type, voucher_url } = req.body;
+  const {
+    date,
+    particular,
+    debit,
+    credit,
+    remarks,
+    cash_type,
+    voucher_url,
+    is_firm_transaction,
+    from_firm_id,
+    to_firm_id,
+    to_name,
+  } = req.body;
 
   const existing = await cashFlowEntryModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Entry not found' });
@@ -212,8 +273,67 @@ export const updateEntry = asyncHandler(async (req, res) => {
   if (remarks !== undefined) updateData.remarks = remarks ? remarks.trim() : null;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
 
+  const shouldBeFirmTxn = (is_firm_transaction !== undefined)
+    ? Boolean(is_firm_transaction)
+    : Boolean(existing.is_firm_transaction);
+
+  if (is_firm_transaction !== undefined) {
+    updateData.is_firm_transaction = shouldBeFirmTxn;
+  }
+
+  if (shouldBeFirmTxn) {
+    const resolvedFromFirmId = from_firm_id !== undefined ? from_firm_id : existing.from_firm_id;
+    const resolvedToFirmId = to_firm_id !== undefined ? to_firm_id : existing.to_firm_id;
+    const resolvedToName = to_name !== undefined ? to_name : existing.to_name;
+
+    if (!resolvedFromFirmId) {
+      return res.status(400).json({ message: 'From firm is required for firm-linked entries' });
+    }
+
+    const fromFirm = await firmModel.findById(parseInt(resolvedFromFirmId), pool);
+    if (!fromFirm || fromFirm.site_id !== existing.site_id) {
+      return res.status(400).json({ message: 'Invalid from firm for this site' });
+    }
+
+    if (resolvedToFirmId && resolvedToName && String(resolvedToName).trim()) {
+      return res.status(400).json({ message: 'Choose either To Firm or To Name, not both' });
+    }
+
+    updateData.from_firm_id = parseInt(resolvedFromFirmId);
+
+    if (resolvedToFirmId) {
+      const toFirm = await firmModel.findById(parseInt(resolvedToFirmId), pool);
+      if (!toFirm || toFirm.site_id !== existing.site_id) {
+        return res.status(400).json({ message: 'Invalid to firm for this site' });
+      }
+      updateData.to_firm_id = parseInt(resolvedToFirmId);
+      updateData.to_name = null;
+    } else if (resolvedToName && String(resolvedToName).trim()) {
+      updateData.to_firm_id = null;
+      updateData.to_name = String(resolvedToName).trim().toUpperCase();
+    } else {
+      return res.status(400).json({ message: 'To Firm or To Name is required for firm-linked entries' });
+    }
+  } else if (is_firm_transaction !== undefined && !shouldBeFirmTxn) {
+    updateData.from_firm_id = null;
+    updateData.to_firm_id = null;
+    updateData.to_name = null;
+  }
+
   const updated = await cashFlowEntryModel.update(parseInt(id), updateData, pool);
   res.json({ entry: updated });
+});
+
+/**
+ * GET /cashflow/firms?site_id=X
+ * List firms for cashflow modal firm tracking controls
+ */
+export const listFirmsForCashFlow = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const firms = await firmModel.findBySiteId(parseInt(site_id), pool);
+  res.json({ firms: firms.map((f) => ({ id: f.id, name: f.name })) });
 });
 
 /**

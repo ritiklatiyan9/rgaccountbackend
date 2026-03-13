@@ -116,7 +116,7 @@ export const deleteFirm = asyncHandler(async (req, res) => {
  */
 export const createTransaction = asyncHandler(async (req, res) => {
   const { firm_id, date, description, debit, credit, name, purpose, remark, cheque_no,
-          cash_flow_month_id, ledger_name, ledger_type, voucher_url } = req.body;
+          cash_flow_month_id, ledger_name, ledger_type, voucher_url, payment_mode } = req.body;
 
   if (!firm_id) return res.status(400).json({ message: 'Firm is required' });
   if (!description || !description.trim()) return res.status(400).json({ message: 'Description is required' });
@@ -127,6 +127,7 @@ export const createTransaction = asyncHandler(async (req, res) => {
   const txnDate = date || new Date().toISOString().split('T')[0];
   const txnDebit = parseFloat(debit) || 0;
   const txnCredit = parseFloat(credit) || 0;
+  const txnPaymentMode = (payment_mode || 'cash').toLowerCase() === 'bank' ? 'bank' : 'cash';
 
   let cfEntryId = null;
 
@@ -179,6 +180,7 @@ export const createTransaction = asyncHandler(async (req, res) => {
       site_id: firm.site_id,
       date: txnDate,
       particular: description.trim().toUpperCase(),
+      cash_type: txnPaymentMode,
       debit: txnDebit,
       credit: txnCredit,
       remarks: [firm.name, remark, purpose, name].filter(Boolean).join(' | '),
@@ -192,6 +194,7 @@ export const createTransaction = asyncHandler(async (req, res) => {
     site_id: firm.site_id,
     date: txnDate,
     description: description.trim(),
+    payment_mode: txnPaymentMode,
     debit: txnDebit,
     credit: txnCredit,
     name: name ? name.trim().toUpperCase() : null,
@@ -248,7 +251,58 @@ export const listTransactions = asyncHandler(async (req, res) => {
     return t;
   });
 
-  res.json({ transactions: enriched, summary, remarkBreakdown, nameBreakdown, firm: firmData });
+  // Also fetch cashflow entries that directly reference this firm via from_firm_id / to_firm_id
+  const cfFirmQuery = `
+    SELECT
+      cfe.id,
+      cfe.date,
+      cfe.particular AS description,
+      CASE WHEN cfe.from_firm_id = $1
+        THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)
+        ELSE 0
+      END AS debit,
+      CASE WHEN cfe.to_firm_id = $1
+        THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)
+        ELSE 0
+      END AS credit,
+      cfe.cash_type AS payment_mode,
+      cfe.status,
+      cfe.remarks AS remark,
+      CASE
+        WHEN cfe.from_firm_id = $1 AND cfe.to_name IS NOT NULL THEN cfe.to_name
+        WHEN cfe.from_firm_id = $1 THEN tf.name
+        ELSE ff.name
+      END AS name,
+      cfm.ledger_name AS cf_ledger_name,
+      cfm.ledger_type AS cf_ledger_type,
+      cfm.month AS cf_month,
+      cfm.year AS cf_year
+    FROM cash_flow_entries cfe
+    JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+    LEFT JOIN firms ff ON ff.id = cfe.from_firm_id
+    LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
+    WHERE cfe.is_firm_transaction = true
+      AND (cfe.from_firm_id = $1 OR cfe.to_firm_id = $1)
+    ORDER BY cfe.date ASC, cfe.created_at ASC
+  `;
+  const cfFirmResult = await pool.query(cfFirmQuery, [fId]);
+  const cfFirmEntries = cfFirmResult.rows.map(row => ({
+    ...row,
+    payment_mode: (row.payment_mode || 'cash').toLowerCase() === 'bank' ? 'bank' : 'cash',
+    id: `cf_${row.id}`,
+    is_cashflow_entry: true,
+    balance: null,
+  }));
+
+  // Merge and sort by date
+  const allTransactions = [...enriched, ...cfFirmEntries].sort((a, b) => {
+    const da = new Date(a.date);
+    const db = new Date(b.date);
+    return da - db || 0;
+  });
+
+  // summary already includes cashflow entries (getFirmSummary was updated to include them)
+  res.json({ transactions: allTransactions, summary, remarkBreakdown, nameBreakdown, firm: firmData });
 });
 
 /**
@@ -267,7 +321,7 @@ export const getTransaction = asyncHandler(async (req, res) => {
  */
 export const updateTransaction = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, description, debit, credit, name, purpose, remark, cheque_no, voucher_url } = req.body;
+  const { date, description, debit, credit, name, purpose, remark, cheque_no, voucher_url, payment_mode } = req.body;
 
   const existing = await firmTransactionModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Transaction not found' });
@@ -277,6 +331,7 @@ export const updateTransaction = asyncHandler(async (req, res) => {
   if (description !== undefined) updateData.description = description.trim();
   if (debit !== undefined) updateData.debit = parseFloat(debit) || 0;
   if (credit !== undefined) updateData.credit = parseFloat(credit) || 0;
+  if (payment_mode !== undefined) updateData.payment_mode = payment_mode.toLowerCase() === 'bank' ? 'bank' : 'cash';
   if (name !== undefined) updateData.name = name ? name.trim().toUpperCase() : null;
   if (purpose !== undefined) updateData.purpose = purpose ? purpose.trim().toUpperCase() : null;
   if (remark !== undefined) updateData.remark = remark ? remark.trim().toUpperCase() : null;
@@ -295,6 +350,7 @@ export const updateTransaction = asyncHandler(async (req, res) => {
         const cfUpdate = {};
         if (date !== undefined) cfUpdate.date = date;
         if (description !== undefined) cfUpdate.particular = description.trim().toUpperCase();
+        if (payment_mode !== undefined) cfUpdate.cash_type = payment_mode.toLowerCase() === 'bank' ? 'bank' : 'cash';
         if (debit !== undefined) cfUpdate.debit = parseFloat(debit) || 0;
         if (credit !== undefined) cfUpdate.credit = parseFloat(credit) || 0;
         cfUpdate.remarks = [firm?.name, remark ?? existing.remark, purpose ?? existing.purpose, name ?? existing.name].filter(Boolean).join(' | ');
@@ -356,4 +412,83 @@ export const listCashFlowLedgersForFirm = asyncHandler(async (req, res) => {
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
   const months = await cashFlowMonthModel.findBySiteId(parseInt(site_id), pool);
   res.json({ ledgers: months });
+});
+
+/**
+ * GET /firms/history/analytics?site_id=X
+ * Site-wide firm transaction history + analytics (including firm-to-firm view)
+ */
+export const getFirmHistoryAnalytics = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const siteId = parseInt(site_id);
+
+  const [transactionsResult, summaryResult, byFirmResult, firmToFirmResult] = await Promise.all([
+    pool.query(
+      `
+      SELECT
+        ft.*,
+        f.name AS firm_name,
+        f2.name AS matched_counterparty_firm_name
+      FROM firm_transactions ft
+      JOIN firms f ON f.id = ft.firm_id
+      LEFT JOIN firms f2 ON f2.site_id = ft.site_id AND UPPER(f2.name) = UPPER(COALESCE(ft.name, ''))
+      WHERE ft.site_id = $1
+      ORDER BY ft.date DESC, ft.created_at DESC
+      `,
+      [siteId]
+    ),
+    pool.query(
+      `
+      SELECT
+        COUNT(*)::int AS total_entries,
+        COALESCE(SUM(debit), 0) AS total_debit,
+        COALESCE(SUM(credit), 0) AS total_credit
+      FROM firm_transactions
+      WHERE site_id = $1
+      `,
+      [siteId]
+    ),
+    pool.query(
+      `
+      SELECT
+        f.id AS firm_id,
+        f.name AS firm_name,
+        COUNT(ft.id)::int AS entries,
+        COALESCE(SUM(ft.debit), 0) AS total_debit,
+        COALESCE(SUM(ft.credit), 0) AS total_credit
+      FROM firms f
+      LEFT JOIN firm_transactions ft ON ft.firm_id = f.id
+      WHERE f.site_id = $1
+      GROUP BY f.id, f.name
+      ORDER BY f.name ASC
+      `,
+      [siteId]
+    ),
+    pool.query(
+      `
+      SELECT
+        f.name AS from_firm,
+        f2.name AS to_firm,
+        COUNT(ft.id)::int AS entries,
+        COALESCE(SUM(ft.debit), 0) AS total_debit,
+        COALESCE(SUM(ft.credit), 0) AS total_credit
+      FROM firm_transactions ft
+      JOIN firms f ON f.id = ft.firm_id
+      JOIN firms f2 ON f2.site_id = ft.site_id AND UPPER(f2.name) = UPPER(COALESCE(ft.name, ''))
+      WHERE ft.site_id = $1
+      GROUP BY f.name, f2.name
+      ORDER BY entries DESC, f.name ASC
+      `,
+      [siteId]
+    ),
+  ]);
+
+  res.json({
+    summary: summaryResult.rows[0] || { total_entries: 0, total_debit: 0, total_credit: 0 },
+    byFirm: byFirmResult.rows,
+    firmToFirm: firmToFirmResult.rows,
+    transactions: transactionsResult.rows,
+  });
 });

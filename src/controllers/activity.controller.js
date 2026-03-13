@@ -55,3 +55,49 @@ export const getTodayActivity = asyncHandler(async (req, res) => {
         }
     });
 });
+
+  /**
+   * POST /activity/logout-session
+   * Admin can force logout any active session.
+   */
+  export const forceLogoutSession = asyncHandler(async (req, res) => {
+    const sessionId = parseInt(req.body?.sessionId, 10);
+
+    if (!Number.isInteger(sessionId) || sessionId <= 0) {
+      return res.status(400).json({ message: 'Valid sessionId is required' });
+    }
+
+    const sessionResult = await pool.query(
+      `SELECT id, user_id, logout_time
+       FROM user_sessions
+       WHERE id = $1`,
+      [sessionId]
+    );
+
+    if (sessionResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Session not found' });
+    }
+
+    const targetSession = sessionResult.rows[0];
+    if (targetSession.logout_time) {
+      return res.json({ message: 'Session already logged out' });
+    }
+
+    await pool.query(
+      `UPDATE user_sessions
+       SET logout_time = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [sessionId]
+    );
+
+    // Invalidate refresh token so the terminated client cannot silently re-authenticate.
+    await pool.query(
+      `UPDATE users
+       SET refresh_token = NULL,
+         token_version = token_version + 1
+       WHERE id = $1`,
+      [targetSession.user_id]
+    );
+
+    res.json({ message: 'Session logged out successfully', sessionId });
+  });

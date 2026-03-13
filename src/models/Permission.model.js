@@ -2,7 +2,7 @@ import pool from '../config/db.js';
 
 // All modules that sub-admins can access
 const ALL_MODULES = [
-    'dashboard', 'clients', 'farmers', 'commissions', 'daybook',
+    'dashboard', 'clients', 'vendors', 'farmers', 'commissions', 'daybook',
     'cashflow', 'firm_transactions', 'plot_payments', 'plot_registry',
     'expenses', 'imprest', 'reports', 'settings',
 ];

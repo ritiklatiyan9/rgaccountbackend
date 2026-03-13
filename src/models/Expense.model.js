@@ -348,7 +348,7 @@ class ExpenseModel extends MasterModel {
             ELSE 'daybook'
           END as source
         FROM day_book
-        WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
+        WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT')
       )
     `;
 
@@ -432,7 +432,7 @@ class ExpenseModel extends MasterModel {
         FROM expenses WHERE site_id = $1
         UNION ALL
         SELECT date, payment_mode, category, to_entity, from_entity, particular as remark, account_no, branch, debit, credit
-        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
+        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT')
       )
       SELECT 
         COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode, 
@@ -451,7 +451,7 @@ class ExpenseModel extends MasterModel {
         FROM expenses WHERE site_id = $1
         UNION ALL
         SELECT date, payment_mode, category, to_entity, from_entity, particular as remark, account_no, branch, debit, credit
-        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
+        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT')
       )
       SELECT 
         COALESCE(category, 'UNCATEGORIZED') as category, 
