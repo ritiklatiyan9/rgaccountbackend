@@ -9,6 +9,10 @@ import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import upload from '../middlewares/multer.middleware.js';
+import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
+
+const memberReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'members' });
+const bustMemberCache = invalidateCacheOnSuccess(['/members']);
 
 router.use(authMiddleware);
 
@@ -33,20 +37,20 @@ const memberUpload = upload.fields([
 ]);
 
 // Static routes first
-router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), searchMembers);
-router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberAutocomplete);
-router.get('/', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), listMembers);
+router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, searchMembers);
+router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberAutocomplete);
+router.get('/', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, listMembers);
 
 // With file upload for documents
-router.post('/', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'write'), createMember);
-router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'update'), updateMember);
-router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), deleteMember);
+router.post('/', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'write'), bustMemberCache, createMember);
+router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'update'), bustMemberCache, updateMember);
+router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), bustMemberCache, deleteMember);
 
 // Member transactions
-router.get('/:id/transactions', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberTransactions);
-router.get('/:id/financial-info', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberFinancialInfo);
+router.get('/:id/transactions', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberTransactions);
+router.get('/:id/financial-info', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberFinancialInfo);
 
 // Dynamic param last
-router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMember);
+router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMember);
 
 export default router;

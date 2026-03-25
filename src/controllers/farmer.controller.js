@@ -186,6 +186,7 @@ export const createPayment = asyncHandler(async (req, res) => {
     bank_reference: bank_reference || null,
     bank_ifsc: bank_ifsc || null,
     voucher_url: voucher_url || null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
   };
 
@@ -208,6 +209,7 @@ export const createPayment = asyncHandler(async (req, res) => {
       from_entity: null,
       to_entity: farmer.name.toUpperCase(),
       created_by: req.user.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       farmer_payment_id: payment.id,
     }, pool);
     dayBookEntries.push(cashEntry);
@@ -229,6 +231,7 @@ export const createPayment = asyncHandler(async (req, res) => {
       account_no: bank_account_no || null,
       branch: bank_ifsc || null,
       created_by: req.user.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       farmer_payment_id: payment.id,
     }, pool);
     dayBookEntries.push(bankEntry);

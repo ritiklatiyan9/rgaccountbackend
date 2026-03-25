@@ -148,9 +148,11 @@ class CashFlowEntryModel extends MasterModel {
              cfm.ledger_name,
              cfm.ledger_type,
              cfm.month AS cf_month,
-             cfm.year  AS cf_year
+             cfm.year  AS cf_year,
+             u.name as assigned_admin_name
       FROM cash_flow_entries cfe
       JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+      LEFT JOIN users u ON cfe.assigned_admin_id = u.id
       WHERE cfe.site_id = $1 AND cfe.date = $2
       ORDER BY cfe.created_at ASC
     `;

@@ -258,6 +258,7 @@ export const up = async () => {
         v_month_id INTEGER;
         v_source_module VARCHAR(50);
         v_source_id INTEGER;
+        v_assigned_admin_id INTEGER;
         v_voucher_url TEXT;
         v_status VARCHAR(20) := 'pending';
         v_approved_by INTEGER;
@@ -280,6 +281,7 @@ export const up = async () => {
           v_created_by := NULL;
           v_source_module := 'farmer_payments';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
@@ -299,6 +301,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'plot_commissions';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
@@ -321,6 +324,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'day_book';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
           v_approved_at := NEW.approved_at;
@@ -339,6 +343,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'firm_transactions';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
@@ -358,6 +363,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'plot_payments';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
@@ -377,6 +383,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'expenses';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
@@ -400,6 +407,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'vendor_payments';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
@@ -428,6 +436,7 @@ export const up = async () => {
           cash_type,
           remarks,
           created_by,
+          assigned_admin_id,
           source_module,
           source_id,
           voucher_url,
@@ -444,6 +453,7 @@ export const up = async () => {
           v_cash_type,
           v_remarks,
           v_created_by,
+          v_assigned_admin_id,
           v_source_module,
           v_source_id,
           v_voucher_url,
@@ -518,6 +528,7 @@ export const up = async () => {
             status = COALESCE(NEW.status, cfe.status),
             approved_by = NEW.approved_by,
             approved_at = NEW.approved_at,
+            assigned_admin_id = NEW.assigned_admin_id,
             updated_at = NOW()
           WHERE cfe.source_module = 'day_book'
             AND cfe.source_id = NEW.id;

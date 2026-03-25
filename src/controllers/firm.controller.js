@@ -3,6 +3,47 @@ import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model.js';
 import pool from '../config/db.js';
 
+const normalizeTxnText = (value) => (value || '').toString().trim().replace(/\s+/g, ' ').toUpperCase();
+
+const normalizeTxnDate = (value) => {
+  if (!value) return '';
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  const raw = value.toString().trim();
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) return raw.slice(0, 10);
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  return raw;
+};
+
+const txnSignature = ({ date, description, debit, credit }) => {
+  const amtDebit = Number.parseFloat(debit || 0).toFixed(2);
+  const amtCredit = Number.parseFloat(credit || 0).toFixed(2);
+  return [
+    normalizeTxnDate(date),
+    normalizeTxnText(description),
+    amtDebit,
+    amtCredit,
+  ].join('|');
+};
+
+const buildTransferGroupId = () => `FTF-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+
 // ══════════════════════════════════════════════════
 //  FIRM (ACCOUNT) ENDPOINTS
 // ══════════════════════════════════════════════════
@@ -116,7 +157,7 @@ export const deleteFirm = asyncHandler(async (req, res) => {
  */
 export const createTransaction = asyncHandler(async (req, res) => {
   const { firm_id, date, description, debit, credit, name, purpose, remark, cheque_no,
-          cash_flow_month_id, ledger_name, ledger_type, voucher_url, payment_mode } = req.body;
+          cash_flow_month_id, ledger_name, ledger_type, voucher_url, payment_mode, assigned_admin_id } = req.body;
 
   if (!firm_id) return res.status(400).json({ message: 'Firm is required' });
   if (!description || !description.trim()) return res.status(400).json({ message: 'Description is required' });
@@ -185,6 +226,7 @@ export const createTransaction = asyncHandler(async (req, res) => {
       credit: txnCredit,
       remarks: [firm.name, remark, purpose, name].filter(Boolean).join(' | '),
       created_by: req.user.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     }, pool);
     cfEntryId = cfEntry.id;
   }
@@ -203,12 +245,256 @@ export const createTransaction = asyncHandler(async (req, res) => {
     cheque_no: cheque_no ? cheque_no.trim() : null,
     created_by: req.user.id,
     voucher_url: voucher_url || null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
     ...(cfEntryId && { cash_flow_entry_id: cfEntryId }),
   };
 
   const txn = await firmTransactionModel.create(data, pool);
   res.status(201).json({ transaction: txn, message: cfEntryId ? 'Transaction recorded in Firm & Cash Flow' : 'Transaction added' });
+});
+
+/**
+ * POST /firms/transactions/firm-to-firm
+ * Create a pending firm-to-firm transfer request (approved later by admin approvals flow)
+ */
+export const createFirmToFirmTransfer = asyncHandler(async (req, res) => {
+  const {
+    from_firm_id,
+    to_site_id,
+    to_firm_id,
+    amount,
+    date,
+    payment_mode,
+    description,
+    purpose,
+    remark,
+    cheque_no,
+    voucher_url,
+    assigned_admin_id,
+  } = req.body;
+
+  if (!from_firm_id) return res.status(400).json({ message: 'Source firm is required' });
+  if (!to_site_id) return res.status(400).json({ message: 'Target site is required' });
+  if (!to_firm_id) return res.status(400).json({ message: 'Target firm is required' });
+
+  const transferAmount = parseFloat(amount) || 0;
+  if (transferAmount <= 0) return res.status(400).json({ message: 'Transfer amount must be greater than 0' });
+
+  const sourceFirm = await firmModel.findById(parseInt(from_firm_id), pool);
+  if (!sourceFirm) return res.status(404).json({ message: 'Source firm not found' });
+
+  const targetFirm = await firmModel.findById(parseInt(to_firm_id), pool);
+  if (!targetFirm) return res.status(404).json({ message: 'Target firm not found' });
+
+  if (parseInt(sourceFirm.id) === parseInt(targetFirm.id)) {
+    return res.status(400).json({ message: 'Source and target firm cannot be same' });
+  }
+
+  if (parseInt(targetFirm.site_id) !== parseInt(to_site_id)) {
+    return res.status(400).json({ message: 'Selected target firm does not belong to selected site' });
+  }
+
+  const targetSiteRes = await pool.query('SELECT id, name FROM sites WHERE id = $1', [parseInt(to_site_id)]);
+  if (!targetSiteRes.rows[0]) return res.status(404).json({ message: 'Target site not found' });
+
+  const transferDate = date || new Date().toISOString().split('T')[0];
+  const mode = (payment_mode || 'bank').toLowerCase() === 'cash' ? 'cash' : 'bank';
+  const transferGroupId = buildTransferGroupId();
+
+  const sourceDescription = description && description.trim()
+    ? description.trim()
+    : `TRANSFER TO ${targetFirm.name} (${targetSiteRes.rows[0].name})`;
+
+  const txn = await firmTransactionModel.create({
+    firm_id: parseInt(sourceFirm.id),
+    site_id: parseInt(sourceFirm.site_id),
+    date: transferDate,
+    description: sourceDescription,
+    payment_mode: mode,
+    debit: transferAmount,
+    credit: 0,
+    name: targetFirm.name,
+    purpose: purpose ? purpose.trim().toUpperCase() : 'FIRM TO FIRM TRANSFER',
+    remark: remark ? remark.trim().toUpperCase() : 'FIRM TO FIRM TRANSFER',
+    cheque_no: cheque_no ? cheque_no.trim() : null,
+    voucher_url: voucher_url || null,
+    created_by: req.user.id,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+    status: 'pending',
+    is_firm_to_firm_transfer: true,
+    transfer_to_site_id: parseInt(targetSiteRes.rows[0].id),
+    transfer_to_firm_id: parseInt(targetFirm.id),
+    transfer_group_id: transferGroupId,
+    transfer_direction: 'OUT',
+  }, pool);
+
+  res.status(201).json({
+    transaction: txn,
+    message: 'Firm-to-firm transfer submitted for admin approval',
+  });
+});
+
+/**
+ * POST /firms/transactions/bulk
+ * Bulk create transactions from Excel import
+ */
+export const bulkCreateTransactions = asyncHandler(async (req, res) => {
+  const { transactions } = req.body;
+
+  if (!Array.isArray(transactions) || transactions.length === 0) {
+    return res.status(400).json({ message: 'transactions array is required and must not be empty' });
+  }
+
+  const results = [];
+  const errors = [];
+  const duplicates = [];
+  const firmCache = new Map();
+  const existingSignatureCache = new Map();
+  const batchSignatures = new Set();
+
+  const getFirm = async (firmId) => {
+    if (firmCache.has(firmId)) return firmCache.get(firmId);
+    const firm = await firmModel.findById(firmId, pool);
+    firmCache.set(firmId, firm || null);
+    return firm || null;
+  };
+
+  const getExistingSignatures = async (firmId) => {
+    if (existingSignatureCache.has(firmId)) return existingSignatureCache.get(firmId);
+
+    const existingRows = await pool.query(
+      `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date, description, debit, credit
+       FROM firm_transactions
+       WHERE firm_id = $1`,
+      [firmId],
+    );
+
+    const signatureSet = new Set(
+      existingRows.rows.map((row) => txnSignature({
+        date: row.date || '',
+        description: row.description,
+        debit: row.debit,
+        credit: row.credit,
+      })),
+    );
+
+    existingSignatureCache.set(firmId, signatureSet);
+    return signatureSet;
+  };
+
+  const existsInDb = async (firmId, txnDate, description, txnDebit, txnCredit) => {
+    const duplicateQuery = `
+      SELECT id
+      FROM firm_transactions
+      WHERE firm_id = $1
+        AND date = $2::date
+        AND UPPER(REGEXP_REPLACE(TRIM(description), '\\s+', ' ', 'g')) = UPPER(REGEXP_REPLACE(TRIM($3), '\\s+', ' ', 'g'))
+        AND COALESCE(debit, 0)::numeric = $4::numeric
+        AND COALESCE(credit, 0)::numeric = $5::numeric
+      LIMIT 1
+    `;
+
+    const result = await pool.query(duplicateQuery, [firmId, txnDate, description, txnDebit, txnCredit]);
+    return result.rows.length > 0;
+  };
+
+  for (let i = 0; i < transactions.length; i++) {
+    try {
+      const txn = transactions[i];
+      const { firm_id, date, description, debit, credit, name, purpose, remark, payment_mode } = txn;
+
+      // Validate
+      if (!firm_id) {
+        errors.push({ row: i + 1, error: 'Firm ID is required' });
+        continue;
+      }
+      if (!description || !description.toString().trim()) {
+        errors.push({ row: i + 1, error: 'Description is required' });
+        continue;
+      }
+      const txnDebit = parseFloat(debit) || 0;
+      const txnCredit = parseFloat(credit) || 0;
+      if (txnDebit === 0 && txnCredit === 0) {
+        errors.push({ row: i + 1, error: 'Either debit or credit amount is required' });
+        continue;
+      }
+
+      const parsedFirmId = parseInt(firm_id);
+      const firm = await getFirm(parsedFirmId);
+      if (!firm) {
+        errors.push({ row: i + 1, error: 'Firm not found' });
+        continue;
+      }
+
+      const txnDate = normalizeTxnDate(date || new Date());
+      const txnPaymentMode = (payment_mode || 'bank').toLowerCase() === 'cash' ? 'cash' : 'bank';
+      const normalizedDescription = description.toString().trim();
+      const normalizedName = name ? name.toString().trim().toUpperCase() : null;
+      const normalizedPurpose = purpose ? purpose.toString().trim().toUpperCase() : null;
+
+      const signature = txnSignature({
+        date: txnDate,
+        description: normalizedDescription,
+        debit: txnDebit,
+        credit: txnCredit,
+      });
+
+      const batchSignatureKey = `${parsedFirmId}|${signature}`;
+      if (batchSignatures.has(batchSignatureKey)) {
+        duplicates.push({ row: i + 1, reason: 'Duplicate in uploaded file' });
+        continue;
+      }
+
+      const existingSignatures = await getExistingSignatures(parsedFirmId);
+      if (existingSignatures.has(signature)) {
+        duplicates.push({ row: i + 1, reason: 'Already exists in firm transactions' });
+        continue;
+      }
+
+      // Final DB-level duplicate guard for format/normalization edge cases.
+      if (await existsInDb(parsedFirmId, txnDate, normalizedDescription, txnDebit, txnCredit)) {
+        duplicates.push({ row: i + 1, reason: 'Already exists in firm transactions' });
+        existingSignatures.add(signature);
+        continue;
+      }
+
+      batchSignatures.add(batchSignatureKey);
+
+      const data = {
+        firm_id: parsedFirmId,
+        site_id: firm.site_id,
+        date: txnDate,
+        description: normalizedDescription,
+        payment_mode: txnPaymentMode,
+        debit: txnDebit,
+        credit: txnCredit,
+        name: normalizedName,
+        purpose: normalizedPurpose,
+        remark: remark ? remark.toString().trim().toUpperCase() : null,
+        created_by: req.user.id,
+        voucher_url: null,
+        assigned_admin_id: null,
+        status: 'pending',
+      };
+
+      const created = await firmTransactionModel.create(data, pool);
+      results.push({ row: i + 1, id: created.id, status: 'success' });
+      existingSignatures.add(signature);
+    } catch (err) {
+      errors.push({ row: i + 1, error: err.message });
+    }
+  }
+
+  res.status(201).json({
+    count: results.length,
+    total: transactions.length,
+    duplicateCount: duplicates.length,
+    results,
+    duplicates: duplicates.length > 0 ? duplicates : undefined,
+    errors: errors.length > 0 ? errors : undefined,
+    message: `Imported ${results.length}/${transactions.length} transactions${duplicates.length ? ` (${duplicates.length} duplicates skipped)` : ''}`,
+  });
 });
 
 /**
@@ -321,7 +607,7 @@ export const getTransaction = asyncHandler(async (req, res) => {
  */
 export const updateTransaction = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, description, debit, credit, name, purpose, remark, cheque_no, voucher_url, payment_mode } = req.body;
+  const { date, description, debit, credit, name, purpose, remark, cheque_no, voucher_url, payment_mode, assigned_admin_id } = req.body;
 
   const existing = await firmTransactionModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Transaction not found' });
@@ -337,6 +623,7 @@ export const updateTransaction = asyncHandler(async (req, res) => {
   if (remark !== undefined) updateData.remark = remark ? remark.trim().toUpperCase() : null;
   if (cheque_no !== undefined) updateData.cheque_no = cheque_no ? cheque_no.trim() : null;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
+  if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
 
   const updated = await firmTransactionModel.update(parseInt(id), updateData, pool);
 

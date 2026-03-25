@@ -58,10 +58,12 @@ class ImprestAllocationModel extends MasterModel {
     const query = `
       SELECT ia.*,
              sa.name as sub_admin_name, sa.email as sub_admin_email,
-             ad.name as admin_name
+             ad.name as admin_name,
+             asa.name as assigned_admin_name
       FROM imprest_allocations ia
       LEFT JOIN users sa ON ia.sub_admin_id = sa.id
       LEFT JOIN users ad ON ia.admin_id = ad.id
+      LEFT JOIN users asa ON ia.assigned_admin_id = asa.id
       ORDER BY ia.created_at DESC
     `;
     const result = await pool.query(query);
@@ -279,10 +281,11 @@ class ImprestExpenseRequestModel extends MasterModel {
   async findPending(pool) {
     const query = `
       SELECT ier.*, u.name as sub_admin_name, u.email as sub_admin_email,
-             s.name as site_name
+             s.name as site_name, asa.name as assigned_admin_name
       FROM imprest_expense_requests ier
       LEFT JOIN users u ON ier.sub_admin_id = u.id
       LEFT JOIN sites s ON ier.site_id = s.id
+      LEFT JOIN users asa ON ier.assigned_admin_id = asa.id
       WHERE ier.status = 'PENDING'
       ORDER BY ier.created_at DESC
     `;
@@ -296,11 +299,13 @@ class ImprestExpenseRequestModel extends MasterModel {
   async findAllWithDetails(siteId, pool) {
     let query = `
       SELECT ier.*, u.name as sub_admin_name, u.email as sub_admin_email,
-             s.name as site_name, r.name as reviewer_name
+             s.name as site_name, r.name as reviewer_name,
+             asa.name as assigned_admin_name
       FROM imprest_expense_requests ier
       LEFT JOIN users u ON ier.sub_admin_id = u.id
       LEFT JOIN sites s ON ier.site_id = s.id
       LEFT JOIN users r ON ier.reviewed_by = r.id
+      LEFT JOIN users asa ON ier.assigned_admin_id = asa.id
     `;
     const params = [];
     if (siteId) {
@@ -317,10 +322,12 @@ class ImprestExpenseRequestModel extends MasterModel {
    */
   async findBySubAdminId(subAdminId, pool) {
     const query = `
-      SELECT ier.*, s.name as site_name, r.name as reviewer_name
+      SELECT ier.*, s.name as site_name, r.name as reviewer_name,
+             asa.name as assigned_admin_name
       FROM imprest_expense_requests ier
       LEFT JOIN sites s ON ier.site_id = s.id
       LEFT JOIN users r ON ier.reviewed_by = r.id
+      LEFT JOIN users asa ON ier.assigned_admin_id = asa.id
       WHERE ier.sub_admin_id = $1
       ORDER BY ier.created_at DESC
     `;

@@ -11,10 +11,10 @@ class ExpenseModel extends MasterModel {
    */
   async findBySiteId(siteId, pool) {
     const query = `
-      SELECT e.*, u.name as approved_by_name, m.full_name as assigned_user_name
+      SELECT e.*, u.name as approved_by_name, admin_u.name as assigned_admin_name
       FROM expenses e
       LEFT JOIN users u ON e.approved_by = u.id
-      LEFT JOIN members m ON e.assigned_user_id = m.id
+      LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
       WHERE e.site_id = $1
       ORDER BY e.date DESC, e.id DESC
     `;
@@ -27,10 +27,10 @@ class ExpenseModel extends MasterModel {
    */
   async findBySiteIdAsc(siteId, pool) {
     const query = `
-      SELECT e.*, u.name as approved_by_name, m.full_name as assigned_user_name
+      SELECT e.*, u.name as approved_by_name, admin_u.name as assigned_admin_name
       FROM expenses e
       LEFT JOIN users u ON e.approved_by = u.id
-      LEFT JOIN members m ON e.assigned_user_id = m.id
+      LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
       WHERE e.site_id = $1
       ORDER BY e.date ASC, e.id ASC
     `;
@@ -44,20 +44,20 @@ class ExpenseModel extends MasterModel {
   async findPendingExpenses(siteId, pool) {
     const query = siteId
       ? `
-          SELECT e.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
+          SELECT e.*, s.name as site_name, c.name as created_by_name, admin_u.name as assigned_admin_name
           FROM expenses e
           JOIN sites s ON e.site_id = s.id
           LEFT JOIN users c ON e.created_by = c.id
-          LEFT JOIN members m ON e.assigned_user_id = m.id
+          LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
           WHERE e.status = 'pending' AND e.site_id = $1
           ORDER BY e.date DESC, e.id DESC
         `
       : `
-          SELECT e.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
+          SELECT e.*, s.name as site_name, c.name as created_by_name, admin_u.name as assigned_admin_name
           FROM expenses e
           JOIN sites s ON e.site_id = s.id
           LEFT JOIN users c ON e.created_by = c.id
-          LEFT JOIN members m ON e.assigned_user_id = m.id
+          LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
           WHERE e.status = 'pending'
           ORDER BY e.date DESC, e.id DESC
         `;
@@ -72,11 +72,11 @@ class ExpenseModel extends MasterModel {
    */
   async findPendingByDateRange(siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT e.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
+      SELECT e.*, s.name as site_name, c.name as created_by_name, admin_u.name as assigned_admin_name
       FROM expenses e
       JOIN sites s ON e.site_id = s.id
       LEFT JOIN users c ON e.created_by = c.id
-      LEFT JOIN members m ON e.assigned_user_id = m.id
+      LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
       WHERE e.status = 'pending'
     `;
     const params = [];
@@ -170,11 +170,11 @@ class ExpenseModel extends MasterModel {
    */
   async findByStatus(status, siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT e.*, s.name as site_name, u.name as created_by_name, m.full_name as assigned_user_name
+      SELECT e.*, s.name as site_name, u.name as created_by_name, admin_u.name as assigned_admin_name
       FROM expenses e
       JOIN sites s ON e.site_id = s.id
       LEFT JOIN users u ON e.created_by = u.id
-      LEFT JOIN members m ON e.assigned_user_id = m.id
+      LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
       WHERE 1=1
     `;
     const params = [];
@@ -207,8 +207,9 @@ class ExpenseModel extends MasterModel {
    */
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
-      SELECT e.*
+      SELECT e.*, admin_u.name as assigned_admin_name
       FROM expenses e
+      LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
       WHERE e.site_id = $1 AND e.date = $2
       ORDER BY e.id ASC
     `;
@@ -329,7 +330,7 @@ class ExpenseModel extends MasterModel {
           id::text as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
           payment_mode, debit, credit, remark, account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
-          assigned_user_id, voucher_url,
+          assigned_user_id, assigned_admin_id, voucher_url,
           'expenses' as source
         FROM expenses
         WHERE site_id = $1
@@ -341,7 +342,7 @@ class ExpenseModel extends MasterModel {
           payment_mode, debit, credit, particular || CASE WHEN remarks IS NOT NULL AND remarks != '' THEN ' - ' || remarks ELSE '' END as remark,
           account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
-          assigned_user_id, voucher_url,
+          assigned_user_id, assigned_admin_id, voucher_url,
           CASE 
             WHEN entry_type = 'FARMER PAYMENT' THEN 'farmer_payment'
             WHEN entry_type = 'PLOT COMMISSION' THEN 'commission'
@@ -355,10 +356,11 @@ class ExpenseModel extends MasterModel {
     // ── Q1: Data ──
     let dataQuery = `
       ${unifiedCTE}
-      SELECT u.*, us.name as approved_by_name, m.full_name as assigned_user_name
+      SELECT u.*, us.name as approved_by_name, m.full_name as assigned_user_name, admin_u.name as assigned_admin_name
       FROM unified u
       LEFT JOIN users us ON u.approved_by = us.id
       LEFT JOIN members m ON u.assigned_user_id = m.id
+      LEFT JOIN users admin_u ON u.assigned_admin_id = admin_u.id
       WHERE 1=1 ${whereClause}
       ORDER BY u.date DESC, u.created_at DESC,
                CASE WHEN u.source = 'daybook' THEN 1 ELSE 0 END DESC, 

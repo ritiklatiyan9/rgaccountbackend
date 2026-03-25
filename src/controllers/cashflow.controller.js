@@ -135,6 +135,7 @@ export const createEntry = asyncHandler(async (req, res) => {
     from_firm_id,
     to_firm_id,
     to_name,
+    assigned_admin_id,
   } = req.body;
 
   if (!cash_flow_month_id) return res.status(400).json({ message: 'Cash flow month is required' });
@@ -186,6 +187,7 @@ export const createEntry = asyncHandler(async (req, res) => {
     remarks: remarks ? remarks.trim() : null,
     created_by: req.user.id,
     voucher_url: voucher_url || null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
     is_firm_transaction: isFirmTxn,
     from_firm_id: fromFirmId,
@@ -255,6 +257,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
     from_firm_id,
     to_firm_id,
     to_name,
+    assigned_admin_id,
   } = req.body;
 
   const existing = await cashFlowEntryModel.findById(parseInt(id), pool);
@@ -272,6 +275,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
   if (cash_type !== undefined) updateData.cash_type = (['cash', 'bank'].includes(String(cash_type).toLowerCase())) ? String(cash_type).toLowerCase() : 'bank';
   if (remarks !== undefined) updateData.remarks = remarks ? remarks.trim() : null;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
+  if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
 
   const shouldBeFirmTxn = (is_firm_transaction !== undefined)
     ? Boolean(is_firm_transaction)

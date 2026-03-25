@@ -2,13 +2,110 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 
+let plotCommissionColumnsCache = null;
+const getPlotCommissionColumns = async () => {
+  if (plotCommissionColumnsCache) return plotCommissionColumnsCache;
+  const { rows } = await pool.query(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_name = 'plots'
+       AND column_name IN ('commission_enabled', 'commission_type', 'commission_value')`
+  );
+  plotCommissionColumnsCache = new Set(rows.map((r) => r.column_name));
+  return plotCommissionColumnsCache;
+};
+
+let plotCommissionMasterColumnsCache = null;
+const getPlotCommissionMasterColumns = async () => {
+  if (plotCommissionMasterColumnsCache) return plotCommissionMasterColumnsCache;
+  const { rows } = await pool.query(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_name = 'plot_commissions_v2'`
+  );
+  plotCommissionMasterColumnsCache = new Set(rows.map((r) => r.column_name));
+  return plotCommissionMasterColumnsCache;
+};
+
+const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssignedAdminId = null }) => {
+  if (!plot) return null;
+  const commissionEnabled = !!plot.commission_enabled;
+  const bookingBy = String(plot.booking_by || '').trim();
+  if (!commissionEnabled || !bookingBy) return null;
+
+  // Resolve selected booking member as commission receiver (agent).
+  const memberResult = await pool.query(
+    `SELECT id, full_name
+     FROM members
+     WHERE site_id = $1
+       AND UPPER(full_name) = UPPER($2)
+     ORDER BY id ASC
+     LIMIT 1`,
+    [parseInt(plot.site_id), bookingBy]
+  );
+  const member = memberResult.rows[0];
+  if (!member) return null;
+
+  // Skip if commission already exists for this plot-agent pair.
+  const existingResult = await pool.query(
+    `SELECT id FROM plot_commissions_v2 WHERE plot_id = $1 AND agent_id = $2 LIMIT 1`,
+    [parseInt(plot.id), parseInt(member.id)]
+  );
+  if (existingResult.rows[0]) return existingResult.rows[0];
+
+  const salePrice = parseFloat(plot.sale_price) || 0;
+  const commissionType = String(plot.commission_type || 'PERCENTAGE').toUpperCase();
+  const commissionValue = parseFloat(plot.commission_value) || 0;
+  const totalCommission = commissionType === 'FIXED'
+    ? commissionValue
+    : Math.round((salePrice * commissionValue / 100) * 100) / 100;
+
+  if (totalCommission <= 0) return null;
+
+  const assignedAdmin = plot.assigned_admin_id || fallbackAssignedAdminId || null;
+  const masterCols = await getPlotCommissionMasterColumns();
+  const hasAssignedAdminColumn = masterCols.has('assigned_admin_id');
+
+  const insertColumns = [
+    'site_id',
+    'plot_id',
+    'agent_id',
+    'total_commission',
+    'remarks',
+    'status',
+    ...(hasAssignedAdminColumn ? ['assigned_admin_id'] : []),
+    'created_by',
+  ];
+
+  const insertValues = [
+    parseInt(plot.site_id),
+    parseInt(plot.id),
+    parseInt(member.id),
+    totalCommission,
+    'Auto-created from Plot Payments booking',
+    'Pending',
+    ...(hasAssignedAdminColumn ? [assignedAdmin ? parseInt(assignedAdmin) : null] : []),
+    createdBy ? parseInt(createdBy) : null,
+  ];
+
+  const placeholders = insertColumns.map((_, i) => `$${i + 1}`).join(', ');
+  const insertResult = await pool.query(
+    `INSERT INTO plot_commissions_v2 (${insertColumns.join(', ')})
+     VALUES (${placeholders})
+     RETURNING id`,
+    insertValues
+  );
+
+  return insertResult.rows[0] || null;
+};
+
 // ══════════════════════════════════════════════════
 //  PLOT ENDPOINTS
 // ══════════════════════════════════════════════════
 
 /** POST /plots — Create a new plot */
 export const createPlot = asyncHandler(async (req, res) => {
-  const { site_id, plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team } = req.body;
+  const { site_id, plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   if (!plot_no || !plot_no.trim()) return res.status(400).json({ message: 'Plot number is required' });
@@ -38,11 +135,34 @@ export const createPlot = asyncHandler(async (req, res) => {
     notes: notes ? notes.trim() : null,
     plc_charges: parseFloat(plc_charges) || 0,
     team: team ? team.trim().toUpperCase() : null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     created_by: req.user.id,
   };
 
+  const columns = await getPlotCommissionColumns();
+  if (columns.has('commission_enabled')) data.commission_enabled = !!commission_enabled;
+  if (columns.has('commission_type')) {
+    const validTypes = ['PERCENTAGE', 'FIXED'];
+    const normalizedType = String(commission_type || 'PERCENTAGE').toUpperCase();
+    data.commission_type = validTypes.includes(normalizedType) ? normalizedType : 'PERCENTAGE';
+  }
+  if (columns.has('commission_value')) data.commission_value = parseFloat(commission_value) || 0;
+
   const plot = await plotModel.create(data, pool);
-  res.status(201).json({ plot });
+
+  let autoCommission = null;
+  try {
+    autoCommission = await maybeAutoCreatePlotCommission({
+      plot,
+      createdBy: req.user?.id,
+      fallbackAssignedAdminId: data.assigned_admin_id,
+    });
+  } catch (err) {
+    // Ignore if commission tables are not present yet.
+    if (err?.code !== '42P01') throw err;
+  }
+
+  res.status(201).json({ plot, auto_commission: autoCommission });
 });
 
 /** GET /plots?site_id=X — List all plots for a site */
@@ -65,7 +185,7 @@ export const getPlot = asyncHandler(async (req, res) => {
 /** PUT /plots/:id — Update plot details */
 export const updatePlot = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team } = req.body;
+  const { plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value } = req.body;
 
   const existing = await plotModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
@@ -94,11 +214,52 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
   if (plc_charges !== undefined) updateData.plc_charges = parseFloat(plc_charges) || 0;
   if (team !== undefined) updateData.team = team ? team.trim().toUpperCase() : null;
+  if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+
+  const columns = await getPlotCommissionColumns();
+  if (columns.has('commission_enabled') && commission_enabled !== undefined) updateData.commission_enabled = !!commission_enabled;
+  if (columns.has('commission_type') && commission_type !== undefined) {
+    const validTypes = ['PERCENTAGE', 'FIXED'];
+    const normalizedType = String(commission_type || 'PERCENTAGE').toUpperCase();
+    updateData.commission_type = validTypes.includes(normalizedType) ? normalizedType : 'PERCENTAGE';
+  }
+  if (columns.has('commission_value') && commission_value !== undefined) updateData.commission_value = parseFloat(commission_value) || 0;
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
   const updated = await plotModel.update(parseInt(id), updateData, pool);
-  res.json({ plot: updated });
+
+  // Persist circle rate change history (backward-compatible if table does not exist yet).
+  if (circle_rate !== undefined) {
+    const prevRate = parseFloat(existing.circle_rate) || 0;
+    const nextRate = parseFloat(updateData.circle_rate) || 0;
+    if (prevRate !== nextRate) {
+      try {
+        await pool.query(
+          `INSERT INTO plot_circle_rate_history (plot_id, previous_circle_rate, new_circle_rate, changed_by)
+           VALUES ($1, $2, $3, $4)`,
+          [parseInt(id), prevRate, nextRate, req.user?.id || null]
+        );
+      } catch (err) {
+        // Ignore if migration table is not present yet.
+        if (err?.code !== '42P01') throw err;
+      }
+    }
+  }
+
+  let autoCommission = null;
+  try {
+    autoCommission = await maybeAutoCreatePlotCommission({
+      plot: updated,
+      createdBy: req.user?.id,
+      fallbackAssignedAdminId: updateData.assigned_admin_id,
+    });
+  } catch (err) {
+    // Ignore if commission tables are not present yet.
+    if (err?.code !== '42P01') throw err;
+  }
+
+  res.json({ plot: updated, auto_commission: autoCommission });
 });
 
 /** DELETE /plots/:id — Delete a plot and all its payments */
@@ -117,25 +278,30 @@ export const deletePlot = asyncHandler(async (req, res) => {
 
 /** POST /plots/payments — Create a payment */
 export const createPayment = asyncHandler(async (req, res) => {
-  const { plot_id, date, payment_from, payment_type, bank_details, narration, received_by, amount, voucher_url } = req.body;
+  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, received_by, amount, voucher_url, assigned_admin_id } = req.body;
 
   if (!plot_id) return res.status(400).json({ message: 'Plot is required' });
 
   const plot = await plotModel.findById(parseInt(plot_id), pool);
   if (!plot) return res.status(404).json({ message: 'Plot not found' });
 
+  const normalizedPaymentType = payment_type === 'BANK' ? 'BANK' : 'CASH';
+
   const data = {
     plot_id: parseInt(plot_id),
     site_id: plot.site_id,
     date: date || new Date().toISOString().split('T')[0],
     payment_from: payment_from ? payment_from.trim().toUpperCase() : null,
-    payment_type: payment_type === 'BANK' ? 'BANK' : 'CASH',
+    payment_type: normalizedPaymentType,
     bank_details: bank_details ? bank_details.trim().toUpperCase() : null,
+    bank_name: normalizedPaymentType === 'BANK' ? (bank_name ? bank_name.trim().toUpperCase() : null) : null,
+    branch: normalizedPaymentType === 'BANK' ? (branch ? branch.trim().toUpperCase() : null) : null,
     narration: narration ? narration.trim().toUpperCase() : null,
     received_by: received_by ? received_by.trim().toUpperCase() : null,
     amount: parseFloat(amount) || 0,
     created_by: req.user.id,
     voucher_url: voucher_url || null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
   };
 
@@ -169,20 +335,29 @@ export const getPayment = asyncHandler(async (req, res) => {
 /** PUT /plots/payments/:id — Update a payment */
 export const updatePayment = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, payment_from, payment_type, bank_details, narration, received_by, amount, voucher_url } = req.body;
+  const { date, payment_from, payment_type, bank_details, bank_name, branch, narration, received_by, amount, voucher_url, assigned_admin_id } = req.body;
 
   const existing = await plotPaymentModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Payment not found' });
 
   const updateData = {};
+  const normalizedPaymentType = payment_type !== undefined ? (payment_type === 'BANK' ? 'BANK' : 'CASH') : undefined;
   if (date !== undefined) updateData.date = date;
   if (payment_from !== undefined) updateData.payment_from = payment_from ? payment_from.trim().toUpperCase() : null;
-  if (payment_type !== undefined) updateData.payment_type = payment_type === 'BANK' ? 'BANK' : 'CASH';
+  if (normalizedPaymentType !== undefined) updateData.payment_type = normalizedPaymentType;
   if (bank_details !== undefined) updateData.bank_details = bank_details ? bank_details.trim().toUpperCase() : null;
+  if (bank_name !== undefined) updateData.bank_name = bank_name ? bank_name.trim().toUpperCase() : null;
+  if (branch !== undefined) updateData.branch = branch ? branch.trim().toUpperCase() : null;
   if (narration !== undefined) updateData.narration = narration ? narration.trim().toUpperCase() : null;
   if (received_by !== undefined) updateData.received_by = received_by ? received_by.trim().toUpperCase() : null;
   if (amount !== undefined) updateData.amount = parseFloat(amount) || 0;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
+  if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+
+  if (normalizedPaymentType === 'CASH') {
+    updateData.bank_name = null;
+    updateData.branch = null;
+  }
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 

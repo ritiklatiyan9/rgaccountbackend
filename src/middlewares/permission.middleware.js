@@ -19,12 +19,9 @@ const requirePermission = (module, action) => {
             if (req.user.role === 'sub_admin') {
                 const permission = await permissionModel.getPermission(req.user.id, module);
 
-                // If no permission record exists, deny by default for delete, allow for others
+                // If no permission record exists, deny by default
                 if (!permission) {
-                    if (action === 'delete') {
-                        return res.status(403).json({ message: 'You do not have permission to delete in this module' });
-                    }
-                    return next();
+                    return res.status(403).json({ message: `You do not have permission to ${action} in this module` });
                 }
 
                 const fieldName = `can_${action}`;

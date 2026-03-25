@@ -43,7 +43,7 @@ export const createExpense = asyncHandler(async (req, res) => {
   const {
     site_id, date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
-    assigned_user_id, voucher_url
+    assigned_user_id, assigned_admin_id, voucher_url
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -61,6 +61,7 @@ export const createExpense = asyncHandler(async (req, res) => {
     branch: branch ? branch.trim().toUpperCase() : null,
     category: category ? category.trim().toUpperCase() : null,
     assigned_user_id: assigned_user_id ? parseInt(assigned_user_id) : null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     voucher_url: voucher_url || null,
     status: 'pending', // New expenses are pending by default
     created_by: req.user.id,
@@ -139,7 +140,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
   const {
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
-    assigned_user_id, voucher_url
+    assigned_user_id, assigned_admin_id, voucher_url
   } = req.body;
 
   const data = {
@@ -154,6 +155,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
     branch: branch !== undefined ? (branch ? branch.trim().toUpperCase() : null) : existing.branch,
     category: category !== undefined ? (category ? category.trim().toUpperCase() : null) : existing.category,
     assigned_user_id: assigned_user_id !== undefined ? (assigned_user_id ? parseInt(assigned_user_id) : null) : existing.assigned_user_id,
+    assigned_admin_id: assigned_admin_id !== undefined ? (assigned_admin_id ? parseInt(assigned_admin_id) : null) : existing.assigned_admin_id,
     voucher_url: voucher_url !== undefined ? (voucher_url || null) : existing.voucher_url,
   };
 

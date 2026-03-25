@@ -11,9 +11,9 @@ class DayBookModel extends MasterModel {
    */
   async findBySiteId(siteId, pool) {
     const query = `
-      SELECT d.*, m.full_name as assigned_user_name
+      SELECT d.*, u.name as assigned_admin_name
       FROM day_book d
-      LEFT JOIN members m ON d.assigned_user_id = m.id
+      LEFT JOIN users u ON d.assigned_admin_id = u.id
       WHERE d.site_id = $1
       ORDER BY d.date DESC, d.id DESC
     `;
@@ -26,9 +26,9 @@ class DayBookModel extends MasterModel {
    */
   async findBySiteIdAsc(siteId, pool) {
     const query = `
-      SELECT d.*, m.full_name as assigned_user_name
+      SELECT d.*, u.name as assigned_admin_name
       FROM day_book d
-      LEFT JOIN members m ON d.assigned_user_id = m.id
+      LEFT JOIN users u ON d.assigned_admin_id = u.id
       WHERE d.site_id = $1
       ORDER BY d.date ASC, d.id ASC
     `;
@@ -41,9 +41,9 @@ class DayBookModel extends MasterModel {
    */
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
-      SELECT d.*, m.full_name as assigned_user_name
+      SELECT d.*, u.name as assigned_admin_name
       FROM day_book d
-      LEFT JOIN members m ON d.assigned_user_id = m.id
+      LEFT JOIN users u ON d.assigned_admin_id = u.id
       WHERE d.site_id = $1 AND d.date = $2
       ORDER BY d.id ASC
     `;
@@ -56,9 +56,9 @@ class DayBookModel extends MasterModel {
    */
   async findByType(siteId, entryType, pool) {
     const query = `
-      SELECT d.*, m.full_name as assigned_user_name
+      SELECT d.*, u.name as assigned_admin_name
       FROM day_book d
-      LEFT JOIN members m ON d.assigned_user_id = m.id
+      LEFT JOIN users u ON d.assigned_admin_id = u.id
       WHERE d.site_id = $1 AND d.entry_type = $2
       ORDER BY d.date DESC, d.id DESC
     `;
@@ -180,20 +180,20 @@ class DayBookModel extends MasterModel {
   async findPendingExpenses(siteId, pool) {
     const query = siteId
       ? `
-          SELECT d.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
+          SELECT d.*, s.name as site_name, c.name as created_by_name, u.name as assigned_admin_name
           FROM day_book d
           JOIN sites s ON d.site_id = s.id
           LEFT JOIN users c ON d.created_by = c.id
-          LEFT JOIN members m ON d.assigned_user_id = m.id
+          LEFT JOIN users u ON d.assigned_admin_id = u.id
           WHERE d.status = 'pending' AND d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION') AND d.site_id = $1
           ORDER BY d.date DESC, d.id DESC
         `
       : `
-          SELECT d.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
+          SELECT d.*, s.name as site_name, c.name as created_by_name, u.name as assigned_admin_name
           FROM day_book d
           JOIN sites s ON d.site_id = s.id
           LEFT JOIN users c ON d.created_by = c.id
-          LEFT JOIN members m ON d.assigned_user_id = m.id
+          LEFT JOIN users u ON d.assigned_admin_id = u.id
           WHERE d.status = 'pending' AND d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
           ORDER BY d.date DESC, d.id DESC
         `;
@@ -208,11 +208,11 @@ class DayBookModel extends MasterModel {
    */
   async findPendingByDateRange(siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT d.*, s.name as site_name, c.name as created_by_name, m.full_name as assigned_user_name
+      SELECT d.*, s.name as site_name, c.name as created_by_name, u.name as assigned_admin_name
       FROM day_book d
       JOIN sites s ON d.site_id = s.id
       LEFT JOIN users c ON d.created_by = c.id
-      LEFT JOIN members m ON d.assigned_user_id = m.id
+      LEFT JOIN users u ON d.assigned_admin_id = u.id
       WHERE d.status = 'pending' AND d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
     `;
     const params = [];
@@ -307,11 +307,11 @@ class DayBookModel extends MasterModel {
    */
   async findByStatus(status, siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT d.*, s.name as site_name, u.name as created_by_name, m.full_name as assigned_user_name
+      SELECT d.*, s.name as site_name, u.name as created_by_name, admin_u.name as assigned_admin_name
       FROM day_book d
       JOIN sites s ON d.site_id = s.id
       LEFT JOIN users u ON d.created_by = u.id
-      LEFT JOIN members m ON d.assigned_user_id = m.id
+      LEFT JOIN users admin_u ON d.assigned_admin_id = admin_u.id
       WHERE d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
     `;
     const params = [];

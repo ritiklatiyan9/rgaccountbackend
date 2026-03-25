@@ -360,6 +360,11 @@ CREATE TABLE IF NOT EXISTS firm_transactions (
   remark          VARCHAR(100),
   cheque_no       VARCHAR(50),
   cash_flow_entry_id INTEGER REFERENCES cash_flow_entries(id) ON DELETE SET NULL,
+  is_firm_to_firm_transfer BOOLEAN NOT NULL DEFAULT false,
+  transfer_to_site_id INTEGER REFERENCES sites(id) ON DELETE SET NULL,
+  transfer_to_firm_id INTEGER REFERENCES firms(id) ON DELETE SET NULL,
+  transfer_group_id VARCHAR(80),
+  transfer_direction VARCHAR(10) CHECK (transfer_direction IS NULL OR transfer_direction IN ('OUT', 'IN')),
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
   updated_at      TIMESTAMPTZ DEFAULT NOW()
@@ -371,6 +376,9 @@ CREATE INDEX IF NOT EXISTS idx_ft_date   ON firm_transactions(date);
 CREATE INDEX IF NOT EXISTS idx_ft_remark ON firm_transactions(remark);
 CREATE INDEX IF NOT EXISTS idx_ft_payment_mode ON firm_transactions(payment_mode);
 CREATE INDEX IF NOT EXISTS idx_ft_cash_flow_entry_id ON firm_transactions(cash_flow_entry_id);
+CREATE INDEX IF NOT EXISTS idx_ft_transfer_group_id ON firm_transactions(transfer_group_id);
+CREATE INDEX IF NOT EXISTS idx_ft_transfer_to_firm_id ON firm_transactions(transfer_to_firm_id);
+CREATE INDEX IF NOT EXISTS idx_ft_is_firm_to_firm_transfer ON firm_transactions(is_firm_to_firm_transfer);
 
 CREATE TRIGGER trg_firm_transactions_updated_at
   BEFORE UPDATE ON firm_transactions
@@ -424,6 +432,8 @@ CREATE TABLE IF NOT EXISTS plot_payments (
   payment_from    VARCHAR(100),
   payment_type    VARCHAR(20) DEFAULT 'CASH'
                     CHECK (payment_type IN ('BANK', 'CASH')),
+  bank_name       VARCHAR(150),
+  branch          VARCHAR(150),
   bank_details    VARCHAR(255),
   narration       TEXT,
   received_by     VARCHAR(255),
@@ -486,12 +496,18 @@ DROP TABLE IF EXISTS plot_registries CASCADE;
 CREATE TABLE IF NOT EXISTS plot_registries (
   id                SERIAL PRIMARY KEY,
   site_id           INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  plot_id           INTEGER REFERENCES plots(id) ON DELETE SET NULL,
   plot_no           VARCHAR(50) NOT NULL,
   customer_name     VARCHAR(255),
   size_meter        NUMERIC(10,2),
   size_sqyard       NUMERIC(10,2),
+  circle_rate       NUMERIC(15,2),
   registry_date     DATE,
+  created_entry_date DATE,
   farmer_name       VARCHAR(255),
+  seller_name       VARCHAR(255),
+  firm_name         VARCHAR(255),
+  bank_amount       NUMERIC(15,2),
   registry_payment  NUMERIC(15,2) NOT NULL DEFAULT 0,
   notes             TEXT,
   created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -501,6 +517,7 @@ CREATE TABLE IF NOT EXISTS plot_registries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pr_site ON plot_registries(site_id);
+CREATE INDEX IF NOT EXISTS idx_pr_plot_id ON plot_registries(plot_id);
 CREATE INDEX IF NOT EXISTS idx_pr_plot_no ON plot_registries(plot_no);
 
 CREATE TRIGGER trg_plot_registries_updated_at
@@ -514,6 +531,7 @@ CREATE TABLE IF NOT EXISTS plot_registry_payments (
   id              SERIAL PRIMARY KEY,
   registry_id     INTEGER NOT NULL REFERENCES plot_registries(id) ON DELETE CASCADE,
   site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  source_plot_payment_id INTEGER REFERENCES plot_payments(id) ON DELETE SET NULL,
   payment_date    DATE NOT NULL DEFAULT CURRENT_DATE,
   amount          NUMERIC(15,2) NOT NULL DEFAULT 0,
   payment_mode    VARCHAR(50),
@@ -528,6 +546,7 @@ CREATE TABLE IF NOT EXISTS plot_registry_payments (
 CREATE INDEX IF NOT EXISTS idx_prp_registry ON plot_registry_payments(registry_id);
 CREATE INDEX IF NOT EXISTS idx_prp_site ON plot_registry_payments(site_id);
 CREATE INDEX IF NOT EXISTS idx_prp_date ON plot_registry_payments(payment_date);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_prp_source_plot_payment ON plot_registry_payments(source_plot_payment_id) WHERE source_plot_payment_id IS NOT NULL;
 
 CREATE TRIGGER trg_plot_registry_payments_updated_at
   BEFORE UPDATE ON plot_registry_payments

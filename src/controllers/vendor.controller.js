@@ -103,6 +103,51 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
 
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 15));
+  const offset = (page - 1) * limit;
+  const search = (req.query.search || '').trim();
+  const statusFilter = (req.query.status || '').trim();
+  const headIdFilter = parseInt(req.query.head_id) || null;
+
+  // Build WHERE conditions
+  const conditions = ['vc.site_id = $1'];
+  const values = [siteId];
+  let paramIdx = 2;
+
+  if (search) {
+    conditions.push(
+      `(LOWER(vc.vendor_name) LIKE $${paramIdx} OR LOWER(vc.head_name) LIKE $${paramIdx} OR LOWER(vc.work_title) LIKE $${paramIdx})`
+    );
+    values.push(`%${search.toLowerCase()}%`);
+    paramIdx++;
+  }
+
+  if (statusFilter && statusFilter !== 'all') {
+    conditions.push(`vc.status = $${paramIdx}`);
+    values.push(statusFilter);
+    paramIdx++;
+  }
+
+  if (headIdFilter) {
+    conditions.push(`vc.head_id = $${paramIdx}`);
+    values.push(headIdFilter);
+    paramIdx++;
+  }
+
+  const whereClause = conditions.join(' AND ');
+
+  // Count total for pagination
+  const countResult = await pool.query(
+    `SELECT COUNT(DISTINCT vc.id)::int AS total
+     FROM vendor_commitments vc
+     WHERE ${whereClause}`,
+    values
+  );
+  const total = countResult.rows[0]?.total || 0;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+
+  // Fetch paginated commitments
   const commitmentsResult = await pool.query(
     `SELECT
       vc.id,
@@ -117,39 +162,23 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       vc.due_date,
       vc.note,
       vc.status,
+      vc.assigned_admin_id,
       vc.created_at,
       COALESCE(SUM(vp.amount), 0)::numeric(14,2) AS paid_amount,
       (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
-      m.full_name AS vendor_member_name
+      m.full_name AS vendor_member_name,
+      COUNT(vp.id)::int AS payment_count
      FROM vendor_commitments vc
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
      LEFT JOIN members m ON m.id = vc.vendor_member_id
-     WHERE vc.site_id = $1
+     WHERE ${whereClause}
      GROUP BY vc.id, m.full_name
-     ORDER BY vc.created_at DESC, vc.id DESC`,
-    [siteId]
+     ORDER BY vc.created_at DESC, vc.id DESC
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+    [...values, limit, offset]
   );
 
-  const paymentsResult = await pool.query(
-    `SELECT
-      vp.id,
-      vp.commitment_id,
-      vp.payment_date,
-      vp.amount,
-      vp.payment_mode,
-      vp.reference_no,
-      vp.note,
-      vp.voucher_url,
-      vp.status,
-      vp.approved_by,
-      vp.approved_at,
-      vp.created_at
-     FROM vendor_payments vp
-     WHERE vp.site_id = $1
-     ORDER BY vp.payment_date DESC, vp.id DESC`,
-    [siteId]
-  );
-
+  // Summary is always for the full site (not filtered)
   const summaryResult = await pool.query(
     `SELECT
       COUNT(*)::int AS total_contracts,
@@ -169,7 +198,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
 
   res.json({
     commitments: commitmentsResult.rows,
-    payments: paymentsResult.rows,
+    pagination: { page, limit, total, totalPages },
     summary: summaryResult.rows[0],
   });
 });
@@ -195,6 +224,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       vc.due_date,
       vc.note,
       vc.status,
+      vc.assigned_admin_id,
       vc.created_at,
       COALESCE(SUM(vp.amount), 0)::numeric(14,2) AS paid_amount,
       (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
@@ -211,7 +241,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   if (!commitment) return res.status(404).json({ message: 'Commitment not found' });
 
   const paymentsResult = await pool.query(
-    `SELECT id, commitment_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, approved_by, approved_at, created_at
+    `SELECT id, commitment_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, approved_by, approved_at, created_at, assigned_admin_id
      FROM vendor_payments
      WHERE commitment_id = $1 AND site_id = $2
      ORDER BY payment_date DESC, id DESC`,
@@ -219,6 +249,56 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   );
 
   res.json({ commitment, payments: paymentsResult.rows });
+});
+
+export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
+  const siteId = getSiteId(req);
+  const paymentId = asInt(req.params.paymentId);
+
+  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  if (!Number.isInteger(paymentId)) return res.status(400).json({ message: 'Invalid payment id' });
+
+  const result = await pool.query(
+    `SELECT
+      vp.id,
+      vp.site_id,
+      vp.commitment_id,
+      vp.payment_date,
+      vp.amount,
+      vp.payment_mode,
+      vp.reference_no,
+      vp.note,
+      vp.voucher_url,
+      vp.status,
+      vp.assigned_admin_id,
+      vp.approved_by,
+      vp.approved_at,
+      vp.created_at,
+      vc.vendor_name,
+      vc.head_name,
+      vc.work_title,
+      s.name AS site_name,
+      s.address AS site_address,
+      s.city AS site_city,
+      s.state AS site_state,
+      cu.name AS created_by_name,
+      au.name AS approved_by_name,
+      asg.name AS assigned_admin_name
+     FROM vendor_payments vp
+     INNER JOIN vendor_commitments vc ON vc.id = vp.commitment_id
+     LEFT JOIN sites s ON s.id = vp.site_id
+     LEFT JOIN users cu ON cu.id = vp.created_by
+     LEFT JOIN users au ON au.id = vp.approved_by
+     LEFT JOIN users asg ON asg.id = vp.assigned_admin_id
+     WHERE vp.id = $1 AND vp.site_id = $2
+     LIMIT 1`,
+    [paymentId, siteId]
+  );
+
+  const receipt = result.rows[0];
+  if (!receipt) return res.status(404).json({ message: 'Payment not found' });
+
+  res.json({ receipt });
 });
 
 export const createVendorCommitment = asyncHandler(async (req, res) => {
@@ -235,6 +315,7 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
     start_date,
     due_date,
     note,
+    assigned_admin_id,
   } = req.body;
 
   const amount = parseFloat(contract_amount);
@@ -279,14 +360,9 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
   if (!finalHeadName) return res.status(400).json({ message: 'Head is required' });
 
   const result = await pool.query(
-    `INSERT INTO vendor_commitments (
-      site_id, vendor_member_id, vendor_name, head_id, head_name,
-      work_title, contract_amount, start_date, due_date, note, created_by
-    ) VALUES (
-      $1, $2, $3, $4, $5,
-      $6, $7, $8, $9, $10, $11
-    )
-    RETURNING *`,
+    `INSERT INTO vendor_commitments (site_id, vendor_member_id, vendor_name, head_id, head_name, work_title, contract_amount, start_date, due_date, note, created_by, assigned_admin_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     RETURNING *`,
     [
       siteId,
       vendorMemberId,
@@ -299,6 +375,7 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
       due_date || null,
       note?.trim() || null,
       req.user.id,
+      assigned_admin_id ? parseInt(assigned_admin_id) : null,
     ]
   );
 
@@ -318,6 +395,7 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
     reference_no,
     note,
     voucher_url,
+    assigned_admin_id,
   } = req.body;
 
   const paymentAmount = parseFloat(amount);
@@ -355,22 +433,10 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
     const contractAmount = parseFloat(commitment.contract_amount) || 0;
     const remaining = contractAmount - alreadyPaid;
 
-    if (paymentAmount > remaining) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        message: `Payment exceeds remaining amount. Remaining is ${remaining.toFixed(2)}`,
-      });
-    }
-
     const paymentResult = await client.query(
-      `INSERT INTO vendor_payments (
-        commitment_id, site_id, payment_date, amount,
-        payment_mode, reference_no, note, voucher_url, status, created_by
-      ) VALUES (
-        $1, $2, $3, $4,
-        $5, $6, $7, $8, $9, $10
-      )
-      RETURNING *`,
+      `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
       [
         commitmentId,
         siteId,
@@ -382,18 +448,15 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
         voucher_url || null,
         'pending',
         req.user.id,
+        assigned_admin_id ? parseInt(assigned_admin_id) : null,
       ]
     );
 
     await client.query(
       `UPDATE vendor_commitments
-       SET status = CASE
-         WHEN (($1::numeric) + ($2::numeric)) >= contract_amount THEN 'closed'
-         ELSE status
-       END,
-       updated_at = CURRENT_TIMESTAMP
-       WHERE id = $3`,
-      [alreadyPaid, paymentAmount, commitmentId]
+       SET updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [commitmentId]
     );
 
     await client.query('COMMIT');
@@ -420,6 +483,7 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
     reference_no,
     note,
     voucher_url,
+    assigned_admin_id,
   } = req.body;
 
   const nextAmount = parseFloat(amount);
@@ -469,23 +533,8 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
     const contractAmount = parseFloat(commitment.contract_amount) || 0;
     const remainingCapacity = contractAmount - paidExcludingCurrent;
 
-    if (nextAmount > remainingCapacity) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        message: `Payment exceeds remaining amount. Remaining is ${remainingCapacity.toFixed(2)}`,
-      });
-    }
-
     const updatedPaymentResult = await client.query(
-      `UPDATE vendor_payments
-       SET payment_date = $1,
-           amount = $2,
-           payment_mode = $3,
-           reference_no = $4,
-           note = $5,
-           voucher_url = $6
-       WHERE id = $7
-       RETURNING *`,
+      `UPDATE vendor_payments SET payment_date = $1, amount = $2, payment_mode = $3, reference_no = $4, note = $5, voucher_url = $6, assigned_admin_id = $7 WHERE id = $8 RETURNING *`,
       [
         payment_date,
         nextAmount,
@@ -493,21 +542,14 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
         reference_no?.trim() || null,
         note?.trim() || null,
         voucher_url || null,
+        assigned_admin_id !== undefined ? (assigned_admin_id ? parseInt(assigned_admin_id) : null) : existing.assigned_admin_id,
         paymentId,
       ]
     );
 
     await client.query(
       `UPDATE vendor_commitments
-       SET status = CASE
-         WHEN COALESCE((
-           SELECT SUM(vp.amount)
-           FROM vendor_payments vp
-           WHERE vp.commitment_id = vendor_commitments.id
-         ), 0) >= contract_amount THEN 'closed'
-         ELSE 'open'
-       END,
-       updated_at = CURRENT_TIMESTAMP
+       SET updated_at = CURRENT_TIMESTAMP
        WHERE id = $1`,
       [existing.commitment_id]
     );
@@ -549,15 +591,7 @@ export const deleteVendorPayment = asyncHandler(async (req, res) => {
 
     await client.query(
       `UPDATE vendor_commitments
-       SET status = CASE
-         WHEN COALESCE((
-           SELECT SUM(vp.amount)
-           FROM vendor_payments vp
-           WHERE vp.commitment_id = vendor_commitments.id
-         ), 0) >= contract_amount THEN 'closed'
-         ELSE 'open'
-       END,
-       updated_at = CURRENT_TIMESTAMP
+       SET updated_at = CURRENT_TIMESTAMP
        WHERE id = $1`,
       [existing.commitment_id]
     );

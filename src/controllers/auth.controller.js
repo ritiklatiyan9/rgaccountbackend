@@ -64,11 +64,9 @@ export const login = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: 'Account is deactivated. Contact your admin.' });
   }
 
-  const newVersion = user.token_version + 1;
-  await userModel.update(user.id, { token_version: newVersion }, pool);
-
-  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version: newVersion });
-  const refreshToken = signRefreshToken({ id: user.id, version: newVersion });
+  const version = user.token_version;
+  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version });
+  const refreshToken = signRefreshToken({ id: user.id, version });
   const hashedRefresh = await hashRefreshToken(refreshToken);
   await userModel.update(user.id, { refresh_token: hashedRefresh }, pool);
 
@@ -88,12 +86,6 @@ export const login = asyncHandler(async (req, res) => {
 
   // Record login session
   const ipAddress = req.ip || req.connection.remoteAddress;
-
-  // First, close any prior active sessions for this user to avoid duplicate "Active" tags
-  await pool.query(
-    'UPDATE user_sessions SET logout_time = CURRENT_TIMESTAMP WHERE user_id = $1 AND logout_time IS NULL',
-    [user.id]
-  );
 
   const sessionResult = await pool.query(
     'INSERT INTO user_sessions (user_id, ip_address) VALUES ($1, $2) RETURNING id',
@@ -116,7 +108,17 @@ export const login = asyncHandler(async (req, res) => {
  */
 export const refresh = asyncHandler(async (req, res) => {
   const { refreshToken } = req.body;
-  const decoded = verifyToken(refreshToken, process.env.JWT_REFRESH_SECRET);
+  if (!refreshToken || typeof refreshToken !== 'string') {
+    return res.status(401).json({ message: 'Invalid refresh token' });
+  }
+
+  let decoded;
+  try {
+    decoded = verifyToken(refreshToken, process.env.JWT_REFRESH_SECRET);
+  } catch {
+    return res.status(401).json({ message: 'Invalid refresh token' });
+  }
+
   const user = await userModel.findById(decoded.id, pool);
 
   if (!user || user.token_version !== decoded.version) {
@@ -124,16 +126,14 @@ export const refresh = asyncHandler(async (req, res) => {
     return res.status(401).json({ message: 'Invalid refresh token' });
   }
 
-  if (!(await comparePassword(refreshToken, user.refresh_token))) {
+  if (!user.refresh_token || !(await comparePassword(refreshToken, user.refresh_token))) {
     await userModel.update(user.id, { token_version: user.token_version + 1, refresh_token: null }, pool);
     return res.status(401).json({ message: 'Invalid refresh token' });
   }
 
-  const newVersion = user.token_version + 1;
-  await userModel.update(user.id, { token_version: newVersion }, pool);
-
-  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version: newVersion });
-  const newRefreshToken = signRefreshToken({ id: user.id, version: newVersion });
+  const version = user.token_version;
+  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version });
+  const newRefreshToken = signRefreshToken({ id: user.id, version });
   const hashedRefresh = await hashRefreshToken(newRefreshToken);
   await userModel.update(user.id, { refresh_token: hashedRefresh }, pool);
 

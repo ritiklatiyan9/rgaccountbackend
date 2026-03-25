@@ -112,6 +112,7 @@ export const up = async () => {
         v_month_id INTEGER;
         v_source_module VARCHAR(50);
         v_source_id INTEGER;
+        v_assigned_admin_id INTEGER;
       BEGIN
         IF TG_TABLE_NAME = 'farmer_payments' THEN
           SELECT f.site_id, f.name INTO v_site_id, v_particular
@@ -130,6 +131,7 @@ export const up = async () => {
           v_created_by := NULL;
           v_source_module := 'farmer_payments';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
 
         ELSIF TG_TABLE_NAME = 'plot_commissions' THEN
           v_site_id := NEW.site_id;
@@ -145,6 +147,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'plot_commissions';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
 
         ELSIF TG_TABLE_NAME = 'day_book' THEN
           IF UPPER(COALESCE(NEW.entry_type, 'GENERAL')) IN ('CASH FLOW', 'FARMER PAYMENT', 'PLOT COMMISSION', 'FIRM TRANSACTION', 'PLOT PAYMENT') THEN
@@ -163,6 +166,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'day_book';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
 
         ELSIF TG_TABLE_NAME = 'firm_transactions' THEN
           v_site_id := NEW.site_id;
@@ -178,6 +182,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'firm_transactions';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
 
         ELSIF TG_TABLE_NAME = 'plot_payments' THEN
           v_site_id := NEW.site_id;
@@ -193,6 +198,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'plot_payments';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
 
         ELSIF TG_TABLE_NAME = 'expenses' THEN
           v_site_id := NEW.site_id;
@@ -208,6 +214,7 @@ export const up = async () => {
           v_created_by := NEW.created_by;
           v_source_module := 'expenses';
           v_source_id := NEW.id;
+          v_assigned_admin_id := NEW.assigned_admin_id;
         ELSE
           RETURN NEW;
         END IF;
@@ -232,6 +239,7 @@ export const up = async () => {
           cash_type,
           remarks,
           created_by,
+          assigned_admin_id,
           source_module,
           source_id
         ) VALUES (
@@ -244,6 +252,7 @@ export const up = async () => {
           v_cash_type,
           v_remarks,
           v_created_by,
+          v_assigned_admin_id,
           v_source_module,
           v_source_id
         )

@@ -87,9 +87,10 @@ class FarmerPaymentModel extends MasterModel {
   /** All farmer payments for a site on a specific date (for DayBook merge) */
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
-      SELECT fp.*, f.name AS farmer_name, f.site_id
+      SELECT fp.*, f.name AS farmer_name, f.site_id, u.name as assigned_admin_name
       FROM farmer_payments fp
       JOIN farmers f ON fp.farmer_id = f.id
+      LEFT JOIN users u ON fp.assigned_admin_id = u.id
       WHERE f.site_id = $1 AND fp.date = $2
       ORDER BY fp.id ASC
     `;

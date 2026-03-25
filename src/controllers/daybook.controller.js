@@ -26,6 +26,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     payment_mode, category, from_entity, to_entity, account_no, branch,
     // Farmer payment fields
     farmer_id, interest_rate, interest_amount, by_note,
+    assigned_admin_id,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -57,6 +58,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       interest_rate: parseFloat(interest_rate) || 0,
       interest_amount: parseFloat(interest_amount) || 0,
       remarks: remarks ? remarks.trim() : null,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
     const farmerPayment = await farmerPaymentModel.create(fpData, pool);
@@ -78,6 +80,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       branch: branch ? branch.trim().toUpperCase() : null,
       created_by: req.user.id,
       farmer_payment_id: farmerPayment.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
     const dayBookEntry = await dayBookModel.create(dbData, pool);
@@ -109,6 +112,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       by_note: by_note ? by_note.trim() : null,
       remarks: remarks ? remarks.trim() : null,
       created_by: req.user.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
     const commission = await plotCommissionModel.create(pcData, pool);
@@ -130,6 +134,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       branch: branch ? branch.trim().toUpperCase() : null,
       created_by: req.user.id,
       commission_id: commission.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
     const dayBookEntry = await dayBookModel.create(dbData, pool);
@@ -204,6 +209,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       credit: cfCredit,
       remarks: remarks ? remarks.trim() : null,
       created_by: req.user.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
     const cfEntry = await cashFlowEntryModel.create(cfData, pool);
 
@@ -224,6 +230,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       branch: branch ? branch.trim().toUpperCase() : null,
       created_by: req.user.id,
       cash_flow_entry_id: cfEntry.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
     const dayBookEntry = await dayBookModel.create(dbData, pool);
 
@@ -263,6 +270,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       remark: req.body.firm_remark ? req.body.firm_remark.trim().toUpperCase() : null,
       cheque_no: req.body.firm_cheque_no ? req.body.firm_cheque_no.trim().toUpperCase() : null,
       created_by: req.user.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
     const firmTxn = await firmTransactionModel.create(ftData, pool);
@@ -284,6 +292,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       branch: branch ? branch.trim().toUpperCase() : null,
       created_by: req.user.id,
       firm_transaction_id: firmTxn.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
     const dayBookEntry = await dayBookModel.create(dbData, pool);
@@ -325,6 +334,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       received_by: ppReceivedBy,
       amount: ppAmount,
       created_by: req.user.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
     const plotPayment = await plotPaymentModel.create(ppData, pool);
@@ -346,6 +356,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       branch: branch ? branch.trim().toUpperCase() : null,
       created_by: req.user.id,
       plot_payment_id: plotPayment.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
     const dayBookEntry = await dayBookModel.create(dbData, pool);
@@ -372,6 +383,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     account_no: account_no ? account_no.trim().toUpperCase() : null,
     branch: branch ? branch.trim().toUpperCase() : null,
     created_by: req.user.id,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
   };
 
   const dayBookEntry = await dayBookModel.create(data, pool);
@@ -423,6 +435,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     created_by: exp.created_by,
     created_at: exp.created_at,
     updated_at: exp.updated_at,
+    assigned_admin_id: exp.assigned_admin_id,
+    assigned_admin_name: exp.assigned_admin_name,
     source: 'expense',
   }));
 
@@ -459,6 +473,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       interest_amount: fp.interest_amount,
       created_at: fp.created_at,
       updated_at: fp.updated_at,
+      assigned_admin_id: fp.assigned_admin_id,
+      assigned_admin_name: fp.assigned_admin_name,
       source: 'farmer_payment',
     }));
 
@@ -581,6 +597,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       created_by: c.created_by,
       created_at: c.created_at,
       updated_at: c.updated_at,
+      assigned_admin_id: c.assigned_admin_id,
+      assigned_admin_name: c.assigned_admin_name,
       source: 'commission',
     }));
 
@@ -618,6 +636,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       created_by: cf.created_by,
       created_at: cf.created_at,
       updated_at: cf.updated_at,
+      assigned_admin_id: cf.assigned_admin_id,
+      assigned_admin_name: cf.assigned_admin_name,
       source: 'cashflow',
     }));
 
@@ -657,6 +677,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       created_by: ft.created_by,
       created_at: ft.created_at,
       updated_at: ft.updated_at,
+      assigned_admin_id: ft.assigned_admin_id,
+      assigned_admin_name: ft.assigned_admin_name,
       source: 'firm_transaction',
     }));
 
@@ -700,6 +722,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       created_by: pp.created_by,
       created_at: pp.created_at,
       updated_at: pp.updated_at,
+      assigned_admin_id: pp.assigned_admin_id,
+      assigned_admin_name: pp.assigned_admin_name,
       source: 'plot_payment',
     }));
 

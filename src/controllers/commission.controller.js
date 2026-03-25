@@ -8,7 +8,7 @@ import pool from '../config/db.js';
  * Create a new commission entry
  */
 export const createCommission = asyncHandler(async (req, res) => {
-  const { site_id, date, particular, father_name, plot_no, plot_size, plot_rate, amount, by_note, remarks, voucher_url } = req.body;
+  const { site_id, date, particular, father_name, plot_no, plot_size, plot_rate, amount, by_note, remarks, voucher_url, assigned_admin_id } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   if (!particular) return res.status(400).json({ message: 'Particular (person name) is required' });
@@ -26,6 +26,7 @@ export const createCommission = asyncHandler(async (req, res) => {
     remarks: remarks ? remarks.trim() : null,
     created_by: req.user.id,
     voucher_url: voucher_url || null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
   };
 
@@ -48,6 +49,7 @@ export const createCommission = asyncHandler(async (req, res) => {
       from_entity: null,
       to_entity: data.particular,
       created_by: req.user.id,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       commission_id: commission.id,
     }, pool);
   }

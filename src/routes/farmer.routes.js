@@ -16,24 +16,28 @@ import {
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
+import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
+
+const farmerReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'farmers' });
+const bustFarmerCache = invalidateCacheOnSuccess(['/farmers']);
 
 // All farmer routes require auth
 router.use(authMiddleware);
 
 // Farmer members (for registration dropdown) — must come before /:id
-router.get('/members', listFarmerMembers);
+router.get('/members', farmerReadCache, listFarmerMembers);
 
 // Farmer CRUD
-router.get('/', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), listFarmers);                                     // ?site_id=X
-router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), getFarmer);
-router.post('/', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), createFarmer);
-router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), updateFarmer);
-router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), deleteFarmer);
+router.get('/', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), farmerReadCache, listFarmers);                                     // ?site_id=X
+router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), farmerReadCache, getFarmer);
+router.post('/', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), bustFarmerCache, createFarmer);
+router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), bustFarmerCache, updateFarmer);
+router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, deleteFarmer);
 
 // Farmer Payments (installments)
-router.get('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), listPayments);
-router.post('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), createPayment);
-router.put('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), updatePayment);
-router.delete('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), deletePayment);
+router.get('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), farmerReadCache, listPayments);
+router.post('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), bustFarmerCache, createPayment);
+router.put('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), bustFarmerCache, updatePayment);
+router.delete('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, deletePayment);
 
 export default router;

@@ -98,9 +98,10 @@ class PlotPaymentModel extends MasterModel {
   /** All plot payments for a site+date (for Day Book enrichment) */
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
-      SELECT pp.*, p.plot_no, p.block, p.buyer_name, p.sale_price
+      SELECT pp.*, p.plot_no, p.block, p.buyer_name, p.sale_price, u.name as assigned_admin_name
       FROM plot_payments pp
       JOIN plots p ON p.id = pp.plot_id
+      LEFT JOIN users u ON pp.assigned_admin_id = u.id
       WHERE pp.site_id = $1 AND pp.date = $2
       ORDER BY pp.id ASC
     `;

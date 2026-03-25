@@ -4,7 +4,7 @@ import pool from '../config/db.js';
 const ALL_MODULES = [
     'dashboard', 'clients', 'vendors', 'farmers', 'commissions', 'daybook',
     'cashflow', 'firm_transactions', 'plot_payments', 'plot_registry',
-    'expenses', 'imprest', 'reports', 'settings',
+    'expenses', 'imprest', 'reports', 'settings', 'chat', 'excel',
 ];
 
 class PermissionModel {
@@ -19,7 +19,19 @@ class PermissionModel {
     async getPermission(userId, module) {
         const query = `SELECT * FROM user_permissions WHERE user_id = $1 AND module = $2`;
         const result = await pool.query(query, [userId, module]);
-        return result.rows[0] || null;
+        if (result.rows[0]) return result.rows[0];
+
+        // Auto-seed newly added modules for existing sub-admins.
+        if (ALL_MODULES.includes(module)) {
+            return this.upsert(userId, module, {
+                can_read: true,
+                can_write: true,
+                can_update: true,
+                can_delete: false,
+            });
+        }
+
+        return null;
     }
 
     /** Upsert a single module permission */

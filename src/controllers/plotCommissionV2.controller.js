@@ -28,7 +28,7 @@ export const getPlotsForCommission = asyncHandler(async (req, res) => {
  * Create new commission linked to a plot.
  */
 export const createPlotCommission = asyncHandler(async (req, res) => {
-  const { site_id, plot_id, agent_id, total_commission, remarks } = req.body;
+  const { site_id, plot_id, agent_id, total_commission, remarks, assigned_admin_id } = req.body;
 
   if (!site_id || !plot_id || !agent_id || !total_commission) {
     return res.status(400).json({ message: 'site_id, plot_id, agent_id, total_commission are required' });
@@ -47,6 +47,7 @@ export const createPlotCommission = asyncHandler(async (req, res) => {
     total_commission: parseFloat(total_commission),
     remarks: remarks ? remarks.trim() : null,
     status: 'Pending',
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     created_by: req.user.id
   };
 
@@ -88,7 +89,7 @@ export const getPlotCommissionDetail = asyncHandler(async (req, res) => {
  * Record an installment payment.
  */
 export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
-  const { master_id, date, amount, payment_mode, bank_name, transaction_id, remarks, voucher_number, voucher_url } = req.body;
+  const { master_id, date, amount, payment_mode, bank_name, transaction_id, remarks, voucher_number, voucher_url, assigned_admin_id } = req.body;
 
   if (!master_id || !amount) {
     return res.status(400).json({ message: 'master_id and amount are required' });
@@ -117,6 +118,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
     status: 'pending', // Requires approval
     voucher_number: voucher_number ? voucher_number.trim() : null,
     voucher_url: voucher_url || null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     created_by: req.user.id
   };
 

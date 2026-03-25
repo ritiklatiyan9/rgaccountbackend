@@ -17,7 +17,7 @@ import pool from '../config/db.js';
  * Admin allocates imprest to a sub-admin
  */
 export const createAllocation = asyncHandler(async (req, res) => {
-  const { sub_admin_id, amount, remark, date, site_id } = req.body;
+  const { sub_admin_id, amount, remark, date, site_id, assigned_admin_id } = req.body;
 
   if (!sub_admin_id) return res.status(400).json({ message: 'Sub-admin is required' });
   if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ message: 'Amount must be positive' });
@@ -34,6 +34,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
       sub_admin_id: parseInt(sub_admin_id),
       amount: parseFloat(amount),
       remark: remark ? remark.trim() : null,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       status: 'PENDING_RECEIPT',
     }, client);
 
@@ -249,7 +250,7 @@ export const getAllBalances = asyncHandler(async (req, res) => {
 export const createExpenseFromImprest = asyncHandler(async (req, res) => {
   const {
     site_id, date, from_entity, to_entity, payment_mode,
-    debit, credit, remark, account_no, branch, category,
+    debit, credit, remark, account_no, branch, category, assigned_admin_id,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -297,6 +298,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
       account_no: account_no ? account_no.trim().toUpperCase() : null,
       branch: branch ? branch.trim().toUpperCase() : null,
       category: category ? category.trim().toUpperCase() : null,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       status: 'pending',
       created_by: req.user.id,
     };
@@ -324,6 +326,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
       remarks: remark ? remark.trim().toUpperCase() : null,
       payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : null,
       category: category ? category.trim().toUpperCase() : null,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
       to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
       account_no: account_no ? account_no.trim().toUpperCase() : null,
@@ -363,7 +366,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
   const {
     site_id, amount, reason,
     date, from_entity, to_entity, payment_mode,
-    debit, credit, remark, account_no, branch, category,
+    debit, credit, remark, account_no, branch, category, assigned_admin_id,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -382,6 +385,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
     account_no: account_no ? account_no.trim().toUpperCase() : null,
     branch: branch ? branch.trim().toUpperCase() : null,
     category: category ? category.trim().toUpperCase() : null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
   };
 
   const request = await imprestExpenseRequestModel.create({
@@ -390,6 +394,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
     amount: requestAmount,
     expense_data: JSON.stringify(expenseData),
     reason: reason ? reason.trim() : null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'PENDING',
   }, pool);
 

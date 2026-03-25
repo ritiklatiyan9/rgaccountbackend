@@ -80,13 +80,14 @@ class PlotCommissionModel extends MasterModel {
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
       SELECT pc.*,
-             COALESCE(pc.father_name, m.father_name) AS father_name_resolved
+             COALESCE(pc.father_name, m.father_name) AS father_name_resolved, u.name as assigned_admin_name
       FROM plot_commissions pc
       LEFT JOIN LATERAL (
         SELECT father_name FROM members
         WHERE site_id = pc.site_id AND UPPER(full_name) = UPPER(pc.particular)
         LIMIT 1
       ) m ON true
+      LEFT JOIN users u ON pc.assigned_admin_id = u.id
       WHERE pc.site_id = $1 AND pc.date = $2
       ORDER BY pc.id ASC
     `;

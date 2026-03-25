@@ -25,12 +25,84 @@ function getTableName(source) {
   return table;
 }
 
+async function ensureInboundFirmTransferForApproval(entry, approverId) {
+  if (!entry?.is_firm_to_firm_transfer) return;
+  if ((entry.transfer_direction || '').toUpperCase() !== 'OUT') return;
+  if (!entry.transfer_group_id || !entry.transfer_to_site_id || !entry.transfer_to_firm_id) return;
+
+  const alreadyCreated = await pool.query(
+    `SELECT id FROM firm_transactions WHERE transfer_group_id = $1 AND transfer_direction = 'IN' LIMIT 1`,
+    [entry.transfer_group_id]
+  );
+  if (alreadyCreated.rows[0]) return;
+
+  const sourceFirmRes = await pool.query(`SELECT id, name FROM firms WHERE id = $1`, [entry.firm_id]);
+  const targetFirmRes = await pool.query(`SELECT id, name, site_id FROM firms WHERE id = $1`, [entry.transfer_to_firm_id]);
+
+  const sourceFirm = sourceFirmRes.rows[0];
+  const targetFirm = targetFirmRes.rows[0];
+  if (!sourceFirm || !targetFirm) return;
+  if (parseInt(targetFirm.site_id) !== parseInt(entry.transfer_to_site_id)) return;
+
+  const transferAmount = Math.max(parseFloat(entry.debit) || 0, parseFloat(entry.credit) || 0);
+  if (transferAmount <= 0) return;
+
+  await pool.query(
+    `INSERT INTO firm_transactions (
+      firm_id,
+      site_id,
+      date,
+      description,
+      payment_mode,
+      debit,
+      credit,
+      name,
+      purpose,
+      remark,
+      cheque_no,
+      created_by,
+      voucher_url,
+      assigned_admin_id,
+      status,
+      approved_by,
+      approved_at,
+      is_firm_to_firm_transfer,
+      transfer_to_site_id,
+      transfer_to_firm_id,
+      transfer_group_id,
+      transfer_direction
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'approved',$15,NOW(),true,$16,$17,$18,'IN'
+    )`,
+    [
+      targetFirm.id,
+      targetFirm.site_id,
+      entry.date,
+      `TRANSFER FROM ${sourceFirm.name}${entry.description ? ` - ${entry.description}` : ''}`,
+      (entry.payment_mode || 'bank').toLowerCase() === 'cash' ? 'cash' : 'bank',
+      0,
+      transferAmount,
+      sourceFirm.name,
+      entry.purpose || 'FIRM TO FIRM TRANSFER',
+      entry.remark || 'FIRM TO FIRM TRANSFER',
+      entry.cheque_no || null,
+      entry.created_by || null,
+      entry.voucher_url || null,
+      entry.assigned_admin_id || null,
+      approverId,
+      entry.site_id,
+      entry.firm_id,
+      entry.transfer_group_id,
+    ]
+  );
+}
+
 /**
  * GET /approvals/pending
  * List all pending entries across all modules (admin only)
  */
 export const listAllPending = asyncHandler(async (req, res) => {
-  const { site_id, date_from, date_to, module } = req.query;
+  const { site_id, date_from, date_to, module, assigned_admin_id } = req.query;
 
   const results = [];
 
@@ -52,6 +124,14 @@ export const listAllPending = asyncHandler(async (req, res) => {
       conditions.push(`${tableAlias}.date <= $${idx++}`);
       params.push(date_to);
     }
+    if (assigned_admin_id) {
+      if (assigned_admin_id === 'unassigned') {
+        conditions.push(`${tableAlias}.assigned_admin_id IS NULL`);
+      } else {
+        conditions.push(`${tableAlias}.assigned_admin_id = $${idx++}`);
+        params.push(parseInt(assigned_admin_id));
+      }
+    }
     return { where: conditions.join(' AND '), params };
   };
 
@@ -59,13 +139,15 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if (!module || module === 'farmer_payment') {
     const { where, params } = buildWhere('fp', 'f');
     const q = `
-      SELECT fp.*, f.name AS farmer_name, f.site_id,
-             s.name AS site_name, u.name AS created_by_name,
+                  SELECT fp.*, f.name AS farmer_name, f.site_id,
+                    s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                    COALESCE(aa.name, aa.email) AS assigned_admin_name,
              'farmer_payment' AS source
       FROM farmer_payments fp
       JOIN farmers f ON fp.farmer_id = f.id
       JOIN sites s ON f.site_id = s.id
-      LEFT JOIN users u ON fp.approved_by = u.id
+      LEFT JOIN users u ON f.created_by = u.id
+            LEFT JOIN users aa ON fp.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY fp.date DESC, fp.id DESC
     `;
@@ -81,11 +163,13 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if (!module || module === 'plot_commission') {
     const { where, params } = buildWhere('pc', 'pc');
     const q = `
-      SELECT pc.*, s.name AS site_name, u.name AS created_by_name,
+                  SELECT pc.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                    COALESCE(aa.name, aa.email) AS assigned_admin_name,
              'plot_commission' AS source
       FROM plot_commissions pc
       JOIN sites s ON pc.site_id = s.id
       LEFT JOIN users u ON pc.created_by = u.id
+            LEFT JOIN users aa ON pc.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY pc.date DESC, pc.id DESC
     `;
@@ -101,7 +185,8 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if (!module || module === 'plot_commission_payment') {
     const { where, params } = buildWhere('pcp', 'pcp');
     const q = `
-      SELECT pcp.*, s.name AS site_name, u.name AS created_by_name,
+                  SELECT pcp.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                    COALESCE(aa.name, aa.email) AS assigned_admin_name,
              p.plot_no, p.buyer_name, ag.full_name AS agent_name,
              'plot_commission_payment' AS source
       FROM plot_commission_payments pcp
@@ -110,6 +195,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
       JOIN plots p ON pcm.plot_id = p.id
       JOIN members ag ON pcm.agent_id = ag.id
       LEFT JOIN users u ON pcp.created_by = u.id
+            LEFT JOIN users aa ON pcp.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY pcp.date DESC, pcp.id DESC
     `;
@@ -125,13 +211,15 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if (!module || module === 'cash_flow_entry') {
     const { where, params } = buildWhere('cfe', 'cfe');
     const q = `
-      SELECT cfe.*, cfe.site_id, s.name AS site_name, u.name AS created_by_name,
+                  SELECT cfe.*, cfe.site_id, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                    COALESCE(aa.name, aa.email) AS assigned_admin_name,
              cfm.ledger_name, cfm.month, cfm.year,
              'cash_flow_entry' AS source
       FROM cash_flow_entries cfe
       JOIN sites s ON cfe.site_id = s.id
       JOIN cash_flow_months cfm ON cfe.cash_flow_month_id = cfm.id
       LEFT JOIN users u ON cfe.created_by = u.id
+            LEFT JOIN users aa ON cfe.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY cfe.date DESC, cfe.id DESC
     `;
@@ -147,20 +235,28 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if (!module || module === 'firm_transaction') {
     const { where, params } = buildWhere('ft', 'ft');
     const q = `
-      SELECT ft.*, s.name AS site_name, u.name AS created_by_name,
+                  SELECT ft.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                    COALESCE(aa.name, aa.email) AS assigned_admin_name,
              fi.name AS firm_name,
+             ts.name AS transfer_to_site_name,
+             tf.name AS transfer_to_firm_name,
              'firm_transaction' AS source
       FROM firm_transactions ft
       JOIN sites s ON ft.site_id = s.id
       JOIN firms fi ON ft.firm_id = fi.id
+      LEFT JOIN sites ts ON ts.id = ft.transfer_to_site_id
+      LEFT JOIN firms tf ON tf.id = ft.transfer_to_firm_id
       LEFT JOIN users u ON ft.created_by = u.id
+            LEFT JOIN users aa ON ft.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY ft.date DESC, ft.id DESC
     `;
     const r = await pool.query(q, params);
     results.push(...r.rows.map(row => ({
       ...row,
-      entry_label: `${row.firm_name}: ${row.description} - Dr:₹${row.debit} Cr:₹${row.credit}`,
+      entry_label: row.is_firm_to_firm_transfer
+        ? `${row.firm_name} -> ${row.transfer_to_firm_name || row.name || 'Target'} (${row.transfer_to_site_name || 'Site'}) - ₹${parseFloat(row.debit) || parseFloat(row.credit) || 0}`
+        : `${row.firm_name}: ${row.description} - Dr:₹${row.debit} Cr:₹${row.credit}`,
       module_label: 'Firm Transaction',
     })));
   }
@@ -169,13 +265,15 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if (!module || module === 'plot_payment') {
     const { where, params } = buildWhere('pp', 'pp');
     const q = `
-      SELECT pp.*, s.name AS site_name, u.name AS created_by_name,
+                  SELECT pp.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                    COALESCE(aa.name, aa.email) AS assigned_admin_name,
              p.plot_no, p.buyer_name,
              'plot_payment' AS source
       FROM plot_payments pp
       JOIN sites s ON pp.site_id = s.id
       JOIN plots p ON pp.plot_id = p.id
       LEFT JOIN users u ON pp.created_by = u.id
+            LEFT JOIN users aa ON pp.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY pp.date DESC, pp.id DESC
     `;
@@ -191,11 +289,13 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if (!module || module === 'expense') {
     const { where, params } = buildWhere('e', 'e');
     const q = `
-      SELECT e.*, s.name AS site_name, u.name AS created_by_name,
+                  SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                    COALESCE(aa.name, aa.email) AS assigned_admin_name,
              'expense' AS source
       FROM expenses e
       JOIN sites s ON e.site_id = s.id
       LEFT JOIN users u ON e.created_by = u.id
+            LEFT JOIN users aa ON e.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY e.date DESC, e.id DESC
     `;
@@ -230,11 +330,13 @@ export const listAllPending = asyncHandler(async (req, res) => {
     if (entryTypeFilter) {
       const { where, params } = buildWhere('d', 'd');
       const q = `
-        SELECT d.*, s.name AS site_name, u.name AS created_by_name,
+            SELECT d.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+              COALESCE(aa.name, aa.email) AS assigned_admin_name,
                'daybook' AS source
         FROM day_book d
         JOIN sites s ON d.site_id = s.id
         LEFT JOIN users u ON d.created_by = u.id
+         LEFT JOIN users aa ON d.assigned_admin_id = aa.id
         WHERE ${where} AND ${entryTypeFilter}
         ORDER BY d.date DESC, d.id DESC
       `;
@@ -322,9 +424,12 @@ export const approveEntry = asyncHandler(async (req, res) => {
   const entryId = parseInt(id);
 
   // Check current status
-  const check = await pool.query(`SELECT status FROM ${table} WHERE id = $1`, [entryId]);
+  const check = await pool.query(`SELECT status, assigned_admin_id FROM ${table} WHERE id = $1`, [entryId]);
   if (!check.rows[0]) return res.status(404).json({ message: 'Entry not found' });
   if (check.rows[0].status === 'approved') return res.status(400).json({ message: 'Entry is already approved' });
+  if (check.rows[0].assigned_admin_id && parseInt(check.rows[0].assigned_admin_id) !== parseInt(req.user.id)) {
+    return res.status(403).json({ message: 'This entry is assigned to another admin for approval' });
+  }
 
   const result = await pool.query(
     `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`,
@@ -332,6 +437,10 @@ export const approveEntry = asyncHandler(async (req, res) => {
   );
   
   const entry = result.rows[0];
+
+  if (source === 'firm_transaction') {
+    await ensureInboundFirmTransferForApproval(entry, req.user.id);
+  }
 
   // Auto-generate DayBook entry for new V2 commission payments
   if (source === 'plot_commission_payment' && parseFloat(entry.amount) > 0) {
@@ -417,9 +526,12 @@ export const rejectEntry = asyncHandler(async (req, res) => {
   const table = getTableName(source);
   const entryId = parseInt(id);
 
-  const check = await pool.query(`SELECT status FROM ${table} WHERE id = $1`, [entryId]);
+  const check = await pool.query(`SELECT status, assigned_admin_id FROM ${table} WHERE id = $1`, [entryId]);
   if (!check.rows[0]) return res.status(404).json({ message: 'Entry not found' });
   if (check.rows[0].status === 'rejected') return res.status(400).json({ message: 'Entry is already rejected' });
+  if (check.rows[0].assigned_admin_id && parseInt(check.rows[0].assigned_admin_id) !== parseInt(req.user.id)) {
+    return res.status(403).json({ message: 'This entry is assigned to another admin for approval' });
+  }
 
   const result = await pool.query(
     `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`,
@@ -451,19 +563,32 @@ export const bulkApprove = asyncHandler(async (req, res) => {
   }
 
   let totalApproved = 0;
+  let skippedAssignedToOthers = 0;
 
   for (const [table, ids] of Object.entries(grouped)) {
     if (ids.length === 0) continue;
     const result = await pool.query(
       `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW()
        WHERE id = ANY($1::int[]) AND status = 'pending'
+         AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)
        RETURNING *`,
-      [ids, req.user.id]
+      [ids, req.user.id, req.user.id]
     );
+
+    if (table === 'firm_transactions') {
+      for (const row of result.rows) {
+        await ensureInboundFirmTransferForApproval(row, req.user.id);
+      }
+    }
+
     totalApproved += result.rowCount;
+    skippedAssignedToOthers += (ids.length - result.rowCount);
   }
 
-  res.json({ message: `${totalApproved} entries approved successfully`, count: totalApproved });
+  const msg = skippedAssignedToOthers > 0
+    ? `${totalApproved} entries approved, ${skippedAssignedToOthers} skipped (assigned to other admins)`
+    : `${totalApproved} entries approved successfully`;
+  res.json({ message: msg, count: totalApproved, skippedAssignedToOthers });
 });
 
 /**
@@ -487,17 +612,23 @@ export const bulkReject = asyncHandler(async (req, res) => {
   }
 
   let totalRejected = 0;
+  let skippedAssignedToOthers = 0;
 
   for (const [table, ids] of Object.entries(grouped)) {
     if (ids.length === 0) continue;
     const result = await pool.query(
       `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
        WHERE id = ANY($1::int[]) AND status = 'pending'
+         AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)
        RETURNING *`,
-      [ids, req.user.id]
+      [ids, req.user.id, req.user.id]
     );
     totalRejected += result.rowCount;
+    skippedAssignedToOthers += (ids.length - result.rowCount);
   }
 
-  res.json({ message: `${totalRejected} entries rejected`, count: totalRejected });
+  const msg = skippedAssignedToOthers > 0
+    ? `${totalRejected} entries rejected, ${skippedAssignedToOthers} skipped (assigned to other admins)`
+    : `${totalRejected} entries rejected`;
+  res.json({ message: msg, count: totalRejected, skippedAssignedToOthers });
 });

@@ -174,9 +174,10 @@ class FirmTransactionModel extends MasterModel {
   /** Transactions for a site + date (for Day Book enrichment) */
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
-      SELECT ft.*, f.name AS firm_name
+      SELECT ft.*, f.name AS firm_name, u.name as assigned_admin_name
       FROM firm_transactions ft
       JOIN firms f ON f.id = ft.firm_id
+      LEFT JOIN users u ON ft.assigned_admin_id = u.id
       WHERE ft.site_id = $1 AND ft.date = $2
       ORDER BY ft.id ASC
     `;

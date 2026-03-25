@@ -60,15 +60,117 @@ class PlotRegistryPaymentModel extends MasterModel {
 
   /** Unique autocomplete values for UI */
   async getAutocomplete(siteId, pool) {
-    const [customerNames, farmerNames, paymentModes] = await Promise.all([
+    const hasSourcePlotPaymentColResult = await pool.query(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'plot_registry_payments'
+          AND column_name = 'source_plot_payment_id'
+      ) AS exists
+    `);
+    const hasSourcePlotPaymentCol = !!hasSourcePlotPaymentColResult.rows?.[0]?.exists;
+
+    const recentBankPlotPaymentsQuery = hasSourcePlotPaymentCol
+      ? `
+        SELECT
+          pp.id,
+          pp.plot_id,
+          p.plot_no,
+          p.buyer_name AS customer_name,
+          m.phone AS customer_phone,
+          pp.date,
+          pp.amount,
+          pp.payment_type,
+          pp.payment_from,
+          pp.narration,
+          pp.bank_details,
+          prp.id AS mapped_registry_payment_id
+        FROM plot_payments pp
+        LEFT JOIN plots p ON p.id = pp.plot_id
+        LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
+        LEFT JOIN plot_registry_payments prp ON prp.source_plot_payment_id = pp.id
+        WHERE pp.site_id = $1
+          AND UPPER(COALESCE(pp.payment_type, '')) = 'BANK'
+          AND (pp.amount IS NOT NULL AND pp.amount > 0)
+        ORDER BY pp.date DESC, pp.created_at DESC
+        LIMIT 200
+      `
+      : `
+        SELECT
+          pp.id,
+          pp.plot_id,
+          p.plot_no,
+          p.buyer_name AS customer_name,
+          m.phone AS customer_phone,
+          pp.date,
+          pp.amount,
+          pp.payment_type,
+          pp.payment_from,
+          pp.narration,
+          pp.bank_details,
+          NULL::INTEGER AS mapped_registry_payment_id
+        FROM plot_payments pp
+        LEFT JOIN plots p ON p.id = pp.plot_id
+        LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
+        WHERE pp.site_id = $1
+          AND UPPER(COALESCE(pp.payment_type, '')) = 'BANK'
+          AND (pp.amount IS NOT NULL AND pp.amount > 0)
+        ORDER BY pp.date DESC, pp.created_at DESC
+        LIMIT 200
+      `;
+
+    const [customerNames, farmerNames, paymentModes, plotOptions, clientNames, clientUsers, firmNames, recentBankPlotPayments] = await Promise.all([
       pool.query(`SELECT DISTINCT customer_name AS val FROM plot_registries WHERE site_id = $1 AND customer_name IS NOT NULL AND customer_name != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT farmer_name AS val FROM plot_registries WHERE site_id = $1 AND farmer_name IS NOT NULL AND farmer_name != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT payment_mode AS val FROM plot_registry_payments WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val ASC`, [siteId]),
+      pool.query(`
+        SELECT
+          p.id,
+          p.plot_no,
+          p.buyer_name,
+          p.plot_size,
+          p.circle_rate,
+          p.to_receive_bank,
+          p.registry_area
+        FROM plots p
+        WHERE p.site_id = $1
+        ORDER BY p.plot_no ASC
+      `, [siteId]),
+      pool.query(`
+        SELECT DISTINCT m.full_name AS val
+        FROM members m
+        WHERE m.site_id = $1
+          AND m.full_name IS NOT NULL
+          AND m.full_name != ''
+        ORDER BY val ASC
+      `, [siteId]),
+      pool.query(`
+        SELECT DISTINCT m.full_name AS name, COALESCE(m.phone, '') AS phone
+        FROM members m
+        WHERE m.site_id = $1
+          AND m.full_name IS NOT NULL
+          AND m.full_name != ''
+        ORDER BY name ASC
+      `, [siteId]),
+      pool.query(`
+        SELECT DISTINCT f.name AS val
+        FROM firms f
+        WHERE f.site_id = $1
+          AND f.name IS NOT NULL
+          AND f.name != ''
+        ORDER BY val ASC
+      `, [siteId]),
+      pool.query(recentBankPlotPaymentsQuery, [siteId]),
     ]);
     return {
       customerNames: customerNames.rows.map(r => r.val),
       farmerNames: farmerNames.rows.map(r => r.val),
       paymentModes: paymentModes.rows.map(r => r.val),
+      plotOptions: plotOptions.rows,
+      clientNames: clientNames.rows.map(r => r.val),
+      clientUsers: clientUsers.rows,
+      firmNames: firmNames.rows.map(r => r.val),
+      recentBankPlotPayments: recentBankPlotPayments.rows,
     };
   }
 }

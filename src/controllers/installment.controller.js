@@ -3,6 +3,20 @@ import { installmentModel, installmentPaymentModel } from '../models/Installment
 import { plotModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 
+let hasGracePeriodColumnCache = null;
+const hasGracePeriodColumn = async () => {
+  if (hasGracePeriodColumnCache !== null) return hasGracePeriodColumnCache;
+  const { rows } = await pool.query(
+    `SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_name = 'plots' AND column_name = 'grace_period_days'
+    ) AS exists_col`
+  );
+  hasGracePeriodColumnCache = !!rows[0]?.exists_col;
+  return hasGracePeriodColumnCache;
+};
+
 // ══════════════════════════════════════════════════
 //  INTEREST CALCULATION HELPERS
 // ══════════════════════════════════════════════════
@@ -46,7 +60,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
   const plotRes = await pool.query(
     `SELECT p.id, p.plot_no, p.block, p.buyer_name, p.sale_price,
             p.booking_date, p.booking_by, p.interest_enabled,
-            p.interest_rate, p.interest_type
+            p.interest_rate, p.interest_type, p.assigned_admin_id
      FROM plots p
      WHERE p.site_id = $1
      ORDER BY p.plot_no ASC`,
@@ -144,6 +158,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
           plot_no: plot.plot_no,
           block: plot.block,
           buyer_name: plot.buyer_name,
+          assigned_admin_id: plot.assigned_admin_id,
           installment_name: inst.installment_name,
           due_date: inst.due_date,
           days_overdue: daysOverdue,
@@ -168,6 +183,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
           plot_no: plot.plot_no,
           block: plot.block,
           buyer_name: plot.buyer_name,
+          assigned_admin_id: plot.assigned_admin_id,
           installment_name: inst.installment_name,
           due_date: inst.due_date,
           days_until: daysUntil,
@@ -191,6 +207,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
           plot_no: plot.plot_no,
           block: plot.block,
           buyer_name: plot.buyer_name,
+          assigned_admin_id: plot.assigned_admin_id,
           days_since_payment: daysSincePay,
           total_remaining: totalRemaining,
           last_payment_date: lastPayDate,
@@ -209,6 +226,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
           plot_no: plot.plot_no,
           block: plot.block,
           buyer_name: plot.buyer_name,
+          assigned_admin_id: plot.assigned_admin_id,
           days_since_payment: daysSinceBooking,
           total_remaining: totalRemaining,
           last_payment_date: null,
@@ -229,6 +247,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
           plot_no: plot.plot_no,
           block: plot.block,
           buyer_name: plot.buyer_name,
+          assigned_admin_id: plot.assigned_admin_id,
           pct_paid: Math.round(pctPaid),
           total_remaining: totalRemaining,
           last_payment_date: lastPayDate,
@@ -267,6 +286,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
           plot_no: plot.plot_no,
           block: plot.block,
           buyer_name: plot.buyer_name,
+          assigned_admin_id: plot.assigned_admin_id,
           late_count: lateCount,
           total_remaining: totalRemaining,
           last_payment_date: lastPayDate,
@@ -291,6 +311,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
           plot_no: plot.plot_no,
           block: plot.block,
           buyer_name: plot.buyer_name,
+          assigned_admin_id: plot.assigned_admin_id,
           max_gap_days: maxGap,
           total_remaining: totalRemaining,
           last_payment_date: lastPayDate,
@@ -309,6 +330,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
         plot_no: plot.plot_no,
         block: plot.block,
         buyer_name: plot.buyer_name,
+        assigned_admin_id: plot.assigned_admin_id,
         total_remaining: totalRemaining,
         last_payment_date: lastPayDate,
         message: `No installment plan setup — ₹${fmt(totalRemaining)} remaining from ${plot.buyer_name || 'Unknown'}`,
@@ -362,7 +384,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
 /** PUT /plots/:id/installment-settings — Update installment & interest config on plot */
 export const updateInstallmentSettings = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { installments_enabled, interest_enabled, interest_rate, interest_type } = req.body;
+  const { installments_enabled, interest_enabled, interest_rate, interest_type, grace_period_days } = req.body;
 
   const plot = await plotModel.findById(parseInt(id), pool);
   if (!plot) return res.status(404).json({ message: 'Plot not found' });
@@ -374,6 +396,9 @@ export const updateInstallmentSettings = asyncHandler(async (req, res) => {
   if (interest_type !== undefined) {
     const validTypes = ['per_day', 'per_month', 'per_quarter', 'per_year'];
     updateData.interest_type = validTypes.includes(interest_type) ? interest_type : 'per_month';
+  }
+  if (grace_period_days !== undefined && await hasGracePeriodColumn()) {
+    updateData.grace_period_days = Math.max(0, parseInt(grace_period_days) || 0);
   }
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
@@ -403,6 +428,8 @@ export const listInstallments = asyncHandler(async (req, res) => {
   let remaining_pool = parseFloat(totalRes.rows[0].total_received) || 0;
 
   // Distribute total received across installments in sort order
+  const graceDays = parseInt(plot.grace_period_days) || 15;
+
   const enriched = installments.map(inst => {
     const instAmount = parseFloat(inst.amount) || 0;
     const canApply = Math.min(remaining_pool, instAmount);
@@ -426,8 +453,37 @@ export const listInstallments = asyncHandler(async (req, res) => {
       interest = calculateInterest(remaining, parseFloat(plot.interest_rate), plot.interest_type, inst.due_date, today);
     }
 
-    return { ...inst, paid_amount, status, remaining_amount: remaining, interest_due: interest };
+    const dueDt = new Date(inst.due_date);
+    const daysOverdue = dueDt < today ? Math.floor((today - dueDt) / (1000 * 60 * 60 * 24)) : 0;
+    const underCancellation = remaining > 0 && daysOverdue > graceDays;
+
+    return {
+      ...inst,
+      paid_amount,
+      status,
+      remaining_amount: remaining,
+      interest_due: interest,
+      days_overdue: daysOverdue,
+      grace_period_days: graceDays,
+      under_cancellation: underCancellation,
+    };
   });
+
+  // Auto move plot into UNDER CANCELLATION after grace window if not manually cancelled.
+  const shouldUnderCancellation = enriched.some((i) => i.under_cancellation);
+  const currentStatus = String(plot.status || '').toUpperCase();
+  const protectedStatuses = ['CANCELLED', 'RESALE', 'TRANSFERRED'];
+
+  if (!protectedStatuses.includes(currentStatus)) {
+    if (shouldUnderCancellation && currentStatus !== 'UNDER CANCELLATION') {
+      await plotModel.update(parseInt(id), { status: 'UNDER CANCELLATION' }, pool);
+      plot.status = 'UNDER CANCELLATION';
+    }
+    if (!shouldUnderCancellation && currentStatus === 'UNDER CANCELLATION') {
+      await plotModel.update(parseInt(id), { status: 'BOOKED' }, pool);
+      plot.status = 'BOOKED';
+    }
+  }
 
   res.json({ installments: enriched, plot });
 });
@@ -605,7 +661,7 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
   let plotQuery = `
     SELECT p.id, p.plot_no, p.block, p.buyer_name, p.sale_price, p.status AS plot_status,
            p.installments_enabled, p.interest_enabled, p.interest_rate, p.interest_type,
-           p.booking_date, p.booking_by
+           p.booking_date, p.booking_by, p.assigned_admin_id
     FROM plots p
     WHERE p.site_id = $1
   `;

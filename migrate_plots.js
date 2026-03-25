@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS plot_payments (
   site_id         INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   date            DATE NOT NULL DEFAULT CURRENT_DATE,
   payment_from    VARCHAR(100),
+  bank_name       VARCHAR(150),
+  branch          VARCHAR(150),
   bank_details    VARCHAR(255),
   narration       TEXT,
   received_by     VARCHAR(255),

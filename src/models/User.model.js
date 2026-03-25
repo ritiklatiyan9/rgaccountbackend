@@ -11,16 +11,22 @@ class UserModel extends MasterModel {
     return result.rows[0];
   }
 
-  /** Get all sub-admins created by a specific admin */
-  async findSubAdminsByCreator(adminId, pool) {
+  /** Get all managed users (admins + sub-admins) created by a specific admin */
+  async findManagedUsersByCreator(adminId, pool) {
     const query = `
       SELECT id, name, email, phone, photo, role, is_active, created_at, updated_at
       FROM ${this.tableName}
       WHERE created_by = $1
+        AND role IN ('admin', 'sub_admin')
       ORDER BY created_at DESC
     `;
     const result = await pool.query(query, [adminId]);
     return result.rows;
+  }
+
+  /** Backward compatibility alias */
+  async findSubAdminsByCreator(adminId, pool) {
+    return this.findManagedUsersByCreator(adminId, pool);
   }
 
   /** Check if any admin exists in the system */
@@ -28,6 +34,18 @@ class UserModel extends MasterModel {
     const query = `SELECT id FROM ${this.tableName} WHERE role = 'admin' LIMIT 1`;
     const result = await pool.query(query);
     return result.rows.length > 0;
+  }
+
+  /** List active approvers (all active admins) */
+  async findActiveAdmins(pool) {
+    const query = `
+      SELECT id, name, email, phone, role
+      FROM ${this.tableName}
+      WHERE role = 'admin' AND is_active = true
+      ORDER BY name ASC
+    `;
+    const result = await pool.query(query);
+    return result.rows;
   }
 
   /** Safe user object (no password / tokens) */
