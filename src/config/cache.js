@@ -17,9 +17,11 @@ export const getCacheStats = () => responseCache.getStats();
 
 export const clearCacheByPrefixes = (prefixes = []) => {
   if (!prefixes?.length) return 0;
+  // Normalize: strip leading slashes so '/plots' matches namespace 'plots' in cache keys
+  const normalized = prefixes.map((p) => p.replace(/^\/+/, ''));
   let deleted = 0;
   for (const key of responseCache.keys()) {
-    if (prefixes.some((prefix) => key.includes(prefix))) {
+    if (normalized.some((prefix) => key.includes(prefix))) {
       if (responseCache.del(key) > 0) deleted += 1;
     }
   }

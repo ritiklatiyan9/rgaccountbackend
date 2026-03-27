@@ -73,10 +73,12 @@ export const listPlotCommissions = asyncHandler(async (req, res) => {
  */
 export const getPlotCommissionDetail = asyncHandler(async (req, res) => {
   const { id } = req.params;
+  const numId = parseInt(id);
+  if (isNaN(numId)) return res.status(400).json({ message: 'Invalid commission ID' });
   
   const [master, payments] = await Promise.all([
-    plotCommissionV2Model.findByIdWithDetails(parseInt(id), pool),
-    plotCommissionPaymentModel.findByCommissionId(parseInt(id), pool)
+    plotCommissionV2Model.findByIdWithDetails(numId, pool),
+    plotCommissionPaymentModel.findByCommissionId(numId, pool)
   ]);
 
   if (!master) return res.status(404).json({ message: 'Commission not found' });
@@ -132,11 +134,13 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
  */
 export const getPlotCommissionAnalytics = asyncHandler(async (req, res) => {
   const { id } = req.params;
+  const numId = parseInt(id);
+  if (isNaN(numId)) return res.status(400).json({ message: 'Invalid commission ID' });
   
-  const master = await plotCommissionV2Model.findByIdWithDetails(parseInt(id), pool);
+  const master = await plotCommissionV2Model.findByIdWithDetails(numId, pool);
   if (!master) return res.status(404).json({ message: 'Commission not found' });
 
-  const payments = await plotCommissionPaymentModel.findByCommissionId(parseInt(id), pool);
+  const payments = await plotCommissionPaymentModel.findByCommissionId(numId, pool);
 
   // Analytics calculations
   let cashPaid = 0;

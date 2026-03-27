@@ -384,7 +384,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
 /** PUT /plots/:id/installment-settings — Update installment & interest config on plot */
 export const updateInstallmentSettings = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { installments_enabled, interest_enabled, interest_rate, interest_type, grace_period_days } = req.body;
+  const { installments_enabled, interest_enabled, interest_rate, interest_type, grace_period_days, penalty_enabled, penalty_rate, penalty_type, free_to_sale_days } = req.body;
 
   const plot = await plotModel.findById(parseInt(id), pool);
   if (!plot) return res.status(404).json({ message: 'Plot not found' });
@@ -400,6 +400,13 @@ export const updateInstallmentSettings = asyncHandler(async (req, res) => {
   if (grace_period_days !== undefined && await hasGracePeriodColumn()) {
     updateData.grace_period_days = Math.max(0, parseInt(grace_period_days) || 0);
   }
+  if (penalty_enabled !== undefined) updateData.penalty_enabled = !!penalty_enabled;
+  if (penalty_rate !== undefined) updateData.penalty_rate = parseFloat(penalty_rate) || 0;
+  if (penalty_type !== undefined) {
+    const validPenaltyTypes = ['per_day', 'per_week', 'per_month', 'percentage'];
+    updateData.penalty_type = validPenaltyTypes.includes(penalty_type) ? penalty_type : 'per_day';
+  }
+  if (free_to_sale_days !== undefined) updateData.free_to_sale_days = Math.max(0, parseInt(free_to_sale_days) || 0);
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
@@ -429,6 +436,7 @@ export const listInstallments = asyncHandler(async (req, res) => {
 
   // Distribute total received across installments in sort order
   const graceDays = parseInt(plot.grace_period_days) || 15;
+  const freeSaleDays = parseInt(plot.free_to_sale_days) || 0;
 
   const enriched = installments.map(inst => {
     const instAmount = parseFloat(inst.amount) || 0;
@@ -457,6 +465,10 @@ export const listInstallments = asyncHandler(async (req, res) => {
     const daysOverdue = dueDt < today ? Math.floor((today - dueDt) / (1000 * 60 * 60 * 24)) : 0;
     const underCancellation = remaining > 0 && daysOverdue > graceDays;
 
+    // Free-to-sale: after grace_period + free_to_sale_days, plot eligible for cancellation
+    const ftsThreshold = graceDays + freeSaleDays;
+    const freeToSaleEligible = freeSaleDays > 0 && remaining > 0 && daysOverdue > ftsThreshold;
+
     return {
       ...inst,
       paid_amount,
@@ -466,11 +478,15 @@ export const listInstallments = asyncHandler(async (req, res) => {
       days_overdue: daysOverdue,
       grace_period_days: graceDays,
       under_cancellation: underCancellation,
+      free_to_sale_eligible: freeToSaleEligible,
     };
   });
 
   // Auto move plot into UNDER CANCELLATION after grace window if not manually cancelled.
-  const shouldUnderCancellation = enriched.some((i) => i.under_cancellation);
+  // If free_to_sale_days is set, use grace + free_to_sale threshold; otherwise just grace period.
+  const shouldUnderCancellation = freeSaleDays > 0
+    ? enriched.some((i) => i.free_to_sale_eligible)
+    : enriched.some((i) => i.under_cancellation);
   const currentStatus = String(plot.status || '').toUpperCase();
   const protectedStatuses = ['CANCELLED', 'RESALE', 'TRANSFERRED'];
 
@@ -860,6 +876,308 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
       pending_count: sumPending,
       partial_count: sumPartial,
       overdue_count: sumOverdue,
+    },
+  });
+});
+
+// ══════════════════════════════════════════════════
+//  PAYMENT ANALYTICS
+// ══════════════════════════════════════════════════
+
+/** GET /plots/payment-analytics?site_id=X&mode=...&installment_no=...&month=...&year=...&date_from=...&date_to=... */
+export const paymentAnalytics = asyncHandler(async (req, res) => {
+  const { site_id, mode, installment_no, month, year, date_from, date_to } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const today = new Date();
+  const todayStr = today.toISOString().split('T')[0];
+  const todayMs = today.getTime();
+  const DAY = 86400000;
+
+  // ── 1. Fetch all BOOKED / active plots ──
+  const plotRes = await pool.query(
+    `SELECT p.id, p.plot_no, p.block, p.buyer_name, p.sale_price,
+            p.installments_enabled, p.interest_enabled, p.interest_rate, p.interest_type,
+            p.booking_date, p.booking_by, p.status AS plot_status
+     FROM plots p
+     WHERE p.site_id = $1
+       AND p.status NOT IN ('CANCELLED','AVAILABLE')
+     ORDER BY p.plot_no ASC`,
+    [parseInt(site_id)]
+  );
+  if (plotRes.rows.length === 0) return res.json({ results: [], summary: {} });
+
+  const plotIds = plotRes.rows.map(r => r.id);
+
+  // ── 2. Fetch installments ──
+  const instRes = await pool.query(
+    `SELECT id, plot_id, installment_name, amount, due_date, sort_order
+     FROM plot_installments WHERE plot_id = ANY($1)
+     ORDER BY plot_id, sort_order ASC, due_date ASC`,
+    [plotIds]
+  );
+  const instByPlot = {};
+  for (const i of instRes.rows) {
+    if (!instByPlot[i.plot_id]) instByPlot[i.plot_id] = [];
+    instByPlot[i.plot_id].push(i);
+  }
+
+  // ── 3. Total received per plot ──
+  const payRes = await pool.query(
+    `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
+     FROM plot_payments WHERE plot_id = ANY($1) GROUP BY plot_id`,
+    [plotIds]
+  );
+  const receivedMap = {};
+  for (const r of payRes.rows) receivedMap[r.plot_id] = parseFloat(r.total_received) || 0;
+
+  // ── 4. Last payment date per plot ──
+  const lastPayRes = await pool.query(
+    `SELECT plot_id, MAX(date) AS last_payment_date
+     FROM plot_payments WHERE plot_id = ANY($1) GROUP BY plot_id`,
+    [plotIds]
+  );
+  const lastPayMap = {};
+  for (const r of lastPayRes.rows) lastPayMap[r.plot_id] = r.last_payment_date;
+
+  // ── 5. Payments per plot with dates ──
+  const allPayRes = await pool.query(
+    `SELECT plot_id, date, amount, payment_from, payment_type
+     FROM plot_payments WHERE plot_id = ANY($1) ORDER BY plot_id, date ASC`,
+    [plotIds]
+  );
+  const paymentsByPlot = {};
+  for (const r of allPayRes.rows) {
+    if (!paymentsByPlot[r.plot_id]) paymentsByPlot[r.plot_id] = [];
+    paymentsByPlot[r.plot_id].push(r);
+  }
+
+  // Helper: enrich installments with paid amounts
+  const enrichInstallments = (plotId) => {
+    const installments = instByPlot[plotId] || [];
+    let pool_ = receivedMap[plotId] || 0;
+    return installments.map(inst => {
+      const amt = parseFloat(inst.amount) || 0;
+      const paid = Math.min(pool_, amt);
+      pool_ -= paid;
+      const remaining = Math.max(amt - paid, 0);
+      let status = 'pending';
+      if (paid >= amt && amt > 0) status = 'paid';
+      else if (paid > 0) status = 'partially_paid';
+      else if (new Date(inst.due_date) < today) status = 'overdue';
+      return { ...inst, paid, remaining, status };
+    });
+  };
+
+  const results = [];
+
+  for (const plot of plotRes.rows) {
+    const salePrice = parseFloat(plot.sale_price) || 0;
+    const totalReceived = receivedMap[plot.id] || 0;
+    const installments = instByPlot[plot.id] || [];
+    const enriched = enrichInstallments(plot.id);
+    const lastPayDate = lastPayMap[plot.id] || null;
+    const plotPayments = paymentsByPlot[plot.id] || [];
+
+    const totalRemaining = installments.length > 0
+      ? enriched.reduce((s, i) => s + i.remaining, 0)
+      : Math.max(salePrice - totalReceived, 0);
+
+    // Compute interest for overdue installments
+    let interestDue = 0;
+    if (plot.interest_enabled) {
+      for (const inst of enriched) {
+        if (inst.remaining > 0 && new Date(inst.due_date) < today) {
+          interestDue += calculateInterest(inst.remaining, parseFloat(plot.interest_rate), plot.interest_type, inst.due_date, todayStr);
+        }
+      }
+    }
+
+    const base = {
+      plot_id: plot.id,
+      plot_no: plot.plot_no,
+      block: plot.block,
+      buyer_name: plot.buyer_name,
+      sale_price: salePrice,
+      total_received: totalReceived,
+      total_remaining: totalRemaining,
+      interest_due: interestDue,
+      plot_status: plot.plot_status,
+      booking_date: plot.booking_date,
+      last_payment_date: lastPayDate,
+      installment_count: installments.length,
+    };
+
+    // ── MODE: installment_pending — filter by specific installment number ──
+    if (mode === 'installment_pending') {
+      const instNo = parseInt(installment_no) || 1;
+      const inst = enriched[instNo - 1];
+      if (!inst) continue; // plot doesn't have that installment
+      if (inst.remaining <= 0) continue; // already paid
+      results.push({
+        ...base,
+        installment_name: inst.installment_name || `Installment ${instNo}`,
+        installment_amount: parseFloat(inst.amount),
+        installment_paid: inst.paid,
+        installment_remaining: inst.remaining,
+        installment_due_date: inst.due_date,
+        installment_status: inst.status,
+        days_overdue: inst.status === 'overdue' ? Math.floor((todayMs - new Date(inst.due_date).getTime()) / DAY) : 0,
+      });
+      continue;
+    }
+
+    // ── MODE: overall_pending — anyone with balance remaining ──
+    if (mode === 'overall_pending') {
+      if (totalRemaining <= 0) continue;
+      const overdueInsts = enriched.filter(i => i.status === 'overdue');
+      results.push({
+        ...base,
+        overdue_count: overdueInsts.length,
+        next_due_date: enriched.find(i => i.remaining > 0 && new Date(i.due_date) >= today)?.due_date || null,
+      });
+      continue;
+    }
+
+    // ── MODE: month_pending — installments due in a specific month/year that remain unpaid ──
+    if (mode === 'month_pending') {
+      const targetMonth = parseInt(month) || (today.getMonth() + 1);
+      const targetYear = parseInt(year) || today.getFullYear();
+
+      const matchingInsts = enriched.filter(i => {
+        const d = new Date(i.due_date);
+        return (d.getMonth() + 1) === targetMonth && d.getFullYear() === targetYear && i.remaining > 0;
+      });
+      if (matchingInsts.length === 0) continue;
+
+      results.push({
+        ...base,
+        matching_installments: matchingInsts.map(i => ({
+          name: i.installment_name,
+          amount: parseFloat(i.amount),
+          paid: i.paid,
+          remaining: i.remaining,
+          due_date: i.due_date,
+          status: i.status,
+        })),
+        month_total_due: matchingInsts.reduce((s, i) => s + parseFloat(i.amount), 0),
+        month_total_remaining: matchingInsts.reduce((s, i) => s + i.remaining, 0),
+      });
+      continue;
+    }
+
+    // ── MODE: overdue_till_date — anyone who has NOT paid till today (any overdue installment) ──
+    if (mode === 'overdue_till_date') {
+      const overdueInsts = enriched.filter(i => i.remaining > 0 && new Date(i.due_date) < today);
+      if (overdueInsts.length === 0) continue;
+      const totalOverdueAmount = overdueInsts.reduce((s, i) => s + i.remaining, 0);
+      const maxOverdueDays = Math.max(...overdueInsts.map(i => Math.floor((todayMs - new Date(i.due_date).getTime()) / DAY)));
+
+      results.push({
+        ...base,
+        overdue_installments: overdueInsts.map(i => ({
+          name: i.installment_name,
+          amount: parseFloat(i.amount),
+          paid: i.paid,
+          remaining: i.remaining,
+          due_date: i.due_date,
+          days_overdue: Math.floor((todayMs - new Date(i.due_date).getTime()) / DAY),
+        })),
+        overdue_count: overdueInsts.length,
+        total_overdue_amount: totalOverdueAmount,
+        max_overdue_days: maxOverdueDays,
+      });
+      continue;
+    }
+
+    // ── MODE: custom_range — installments due in a custom date range with pending amounts ──
+    if (mode === 'custom_range') {
+      const from = date_from ? new Date(date_from) : new Date('1970-01-01');
+      const to = date_to ? new Date(date_to) : new Date('2099-12-31');
+
+      const matchingInsts = enriched.filter(i => {
+        const d = new Date(i.due_date);
+        return d >= from && d <= to && i.remaining > 0;
+      });
+      if (matchingInsts.length === 0) continue;
+
+      results.push({
+        ...base,
+        matching_installments: matchingInsts.map(i => ({
+          name: i.installment_name,
+          amount: parseFloat(i.amount),
+          paid: i.paid,
+          remaining: i.remaining,
+          due_date: i.due_date,
+          status: i.status,
+        })),
+        range_total_due: matchingInsts.reduce((s, i) => s + parseFloat(i.amount), 0),
+        range_total_remaining: matchingInsts.reduce((s, i) => s + i.remaining, 0),
+      });
+      continue;
+    }
+
+    // ── MODE: no_payment_since — plots with no payment in specific months ──
+    if (mode === 'no_payment_since') {
+      const targetMonth = parseInt(month) || (today.getMonth() + 1);
+      const targetYear = parseInt(year) || today.getFullYear();
+      const monthStart = new Date(targetYear, targetMonth - 1, 1);
+      const monthEnd = new Date(targetYear, targetMonth, 0);
+
+      const hasPayInMonth = plotPayments.some(p => {
+        const d = new Date(p.date);
+        return d >= monthStart && d <= monthEnd;
+      });
+      if (hasPayInMonth) continue;
+      if (totalRemaining <= 0) continue;
+
+      results.push({
+        ...base,
+        overdue_count: enriched.filter(i => i.status === 'overdue').length,
+      });
+      continue;
+    }
+
+    // Default: return all with pending
+    if (!mode || mode === 'all') {
+      if (totalRemaining <= 0) continue;
+      const overdueInsts = enriched.filter(i => i.status === 'overdue');
+      results.push({
+        ...base,
+        overdue_count: overdueInsts.length,
+        installments_detail: enriched.filter(i => i.remaining > 0).map(i => ({
+          name: i.installment_name,
+          amount: parseFloat(i.amount),
+          paid: i.paid,
+          remaining: i.remaining,
+          due_date: i.due_date,
+          status: i.status,
+        })),
+      });
+    }
+  }
+
+  // Sort: overdue first, then by remaining desc
+  results.sort((a, b) => {
+    const aOverdue = a.overdue_count || a.days_overdue || 0;
+    const bOverdue = b.overdue_count || b.days_overdue || 0;
+    if (aOverdue > 0 && bOverdue === 0) return -1;
+    if (aOverdue === 0 && bOverdue > 0) return 1;
+    return (b.total_remaining || 0) - (a.total_remaining || 0);
+  });
+
+  // Summary
+  const totalPendingAmount = results.reduce((s, r) => s + (r.total_remaining || 0), 0);
+  const totalInterest = results.reduce((s, r) => s + (r.interest_due || 0), 0);
+  const overduePersons = results.filter(r => (r.overdue_count || r.days_overdue || 0) > 0).length;
+
+  res.json({
+    results,
+    summary: {
+      total_persons: results.length,
+      total_pending_amount: totalPendingAmount,
+      total_interest_due: totalInterest,
+      overdue_persons: overduePersons,
     },
   });
 });

@@ -43,7 +43,7 @@ export const createExpense = asyncHandler(async (req, res) => {
   const {
     site_id, date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
-    assigned_user_id, assigned_admin_id, voucher_url
+    assigned_user_id, assigned_admin_id, voucher_url, bill_url
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -63,6 +63,7 @@ export const createExpense = asyncHandler(async (req, res) => {
     assigned_user_id: assigned_user_id ? parseInt(assigned_user_id) : null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     voucher_url: voucher_url || null,
+    bill_url: bill_url || null,
     status: 'pending', // New expenses are pending by default
     created_by: req.user.id,
   };
@@ -80,12 +81,12 @@ export const listExpenses = asyncHandler(async (req, res) => {
   const {
     site_id, page = 1, limit = 20,
     search, mode, category, to_entity,
-    dateFrom, dateTo, export: isExport
+    dateFrom, dateTo, export: isExport, missing_bill, order
   } = req.query;
 
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const filters = { search, mode, category, to_entity, dateFrom, dateTo };
+  const filters = { search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order };
 
   // If exporting, fetch all filtered records by bypassing the limit
   const fetchLimit = isExport === 'true' ? 0 : parseInt(limit);
@@ -140,7 +141,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
   const {
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
-    assigned_user_id, assigned_admin_id, voucher_url
+    assigned_user_id, assigned_admin_id, voucher_url, bill_url
   } = req.body;
 
   const data = {
@@ -157,6 +158,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
     assigned_user_id: assigned_user_id !== undefined ? (assigned_user_id ? parseInt(assigned_user_id) : null) : existing.assigned_user_id,
     assigned_admin_id: assigned_admin_id !== undefined ? (assigned_admin_id ? parseInt(assigned_admin_id) : null) : existing.assigned_admin_id,
     voucher_url: voucher_url !== undefined ? (voucher_url || null) : existing.voucher_url,
+    bill_url: bill_url !== undefined ? (bill_url || null) : existing.bill_url,
   };
 
   const updated = await expenseModel.update(parseInt(id), data, pool);

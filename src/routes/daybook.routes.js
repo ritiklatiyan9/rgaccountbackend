@@ -23,6 +23,7 @@ import {
   listPlotsForDayBook,
   updatePlotPaymentFromDayBook,
   deletePlotPaymentFromDayBook,
+  listRecentTransactions,
 } from '../controllers/daybook.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -36,6 +37,9 @@ router.use(authMiddleware);
 
 const daybookReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'daybook' });
 const bustDaybookCache = invalidateCacheOnSuccess(['/daybook']);
+
+// Recent transactions (Dashboard) — must be before /:id route
+router.get('/recent', requireRole('admin', 'sub_admin'), daybookReadCache, listRecentTransactions);
 
 // Day Book CRUD
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'write'), bustDaybookCache, createDayBookEntry);

@@ -10,7 +10,7 @@ import {
   updateInstallmentSettings, listInstallments, createInstallments,
   updateInstallment, deleteInstallment,
   recordInstallmentPayment, listInstallmentPayments,
-  paymentManagementList, paymentReminders,
+  paymentManagementList, paymentReminders, paymentAnalytics,
 } from '../controllers/installment.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -28,6 +28,7 @@ router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payme
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, getAutocomplete);                      // ?site_id=X
 router.get('/payment-management', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, paymentManagementList);           // ?site_id=X
 router.get('/payment-reminders', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, paymentReminders);                  // ?site_id=X&page=1&limit=10
+router.get('/payment-analytics', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, paymentAnalytics);                   // ?site_id=X&mode=...
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, getPlot);
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), bustPlotCache, createPlot);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), bustPlotCache, updatePlot);

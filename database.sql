@@ -397,8 +397,13 @@ CREATE TABLE IF NOT EXISTS plots (
   block           VARCHAR(10),
   buyer_name      VARCHAR(255),
   plot_size       NUMERIC(10,2),
+  plot_size_mtr   NUMERIC(10,2),
   plot_rate       NUMERIC(15,2),
   sale_price      NUMERIC(15,2) NOT NULL DEFAULT 0,
+  commission_rate NUMERIC(15,2) DEFAULT 0,
+  plot_commission NUMERIC(15,2) DEFAULT 0,
+  original_plot_rate NUMERIC(15,2) DEFAULT 0,
+  discount_rate   NUMERIC(15,2) DEFAULT 0,
   registry_area   NUMERIC(10,2) DEFAULT 0,
   circle_rate     NUMERIC(15,2) DEFAULT 0,
   to_receive_bank NUMERIC(15,2) DEFAULT 0,
@@ -472,6 +477,8 @@ CREATE TABLE IF NOT EXISTS expenses (
   approved_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
   approved_at     TIMESTAMPTZ,
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  voucher_url     TEXT,
+  bill_url        TEXT,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
   updated_at      TIMESTAMPTZ DEFAULT NOW()
 );

@@ -1395,3 +1395,49 @@ export const deletePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
   await plotPaymentModel.delete(ppId, pool);
   res.json({ message: 'Plot payment deleted from Day Book and Plot Payments' });
 });
+
+// ══════════════════════════════════════════════════
+//  RECENT TRANSACTIONS (Dashboard)
+// ══════════════════════════════════════════════════
+
+/**
+ * GET /daybook/recent?site_id=X&page=1&limit=10
+ * Returns recent transactions across ALL modules via cash_flow_entries.
+ */
+export const listRecentTransactions = asyncHandler(async (req, res) => {
+  const { site_id, limit = 10, page = 1 } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const lim = Math.min(parseInt(limit) || 10, 50);
+  const pg = Math.max(parseInt(page) || 1, 1);
+  const offset = (pg - 1) * lim;
+  const siteId = parseInt(site_id);
+
+  const countResult = await pool.query(
+    `SELECT COUNT(*)::int AS total FROM cash_flow_entries WHERE site_id = $1`,
+    [siteId]
+  );
+  const total = countResult.rows[0].total;
+
+  const result = await pool.query(
+    `SELECT cfe.id, cfe.date, cfe.particular, cfe.debit, cfe.credit, cfe.cash_type,
+            cfe.remarks, cfe.status, cfe.source_module, cfe.source_id,
+            cfe.voucher_url, cfe.created_at,
+            COALESCE(u.name, u.email) AS created_by_name
+     FROM cash_flow_entries cfe
+     LEFT JOIN users u ON cfe.created_by = u.id
+     WHERE cfe.site_id = $1
+     ORDER BY cfe.date DESC, cfe.created_at DESC
+     LIMIT $2 OFFSET $3`,
+    [siteId, lim, offset]
+  );
+
+  res.json({
+    transactions: result.rows,
+    pagination: {
+      totalItems: total,
+      totalPages: Math.ceil(total / lim),
+      currentPage: pg,
+    },
+  });
+});

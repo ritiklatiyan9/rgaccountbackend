@@ -12,7 +12,7 @@ class PlotCommissionV2Model extends MasterModel {
   async findBySiteIdWithDetails(siteId, pool) {
     const query = `
       SELECT
-        pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission, pc.remarks, pc.status, pc.created_at,
+        pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission, p.commission_rate, pc.remarks, pc.status, pc.created_at,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name,
         m.full_name AS agent_name, m.phone AS agent_phone,
         COALESCE(SUM(pcp.amount), 0) AS total_paid,

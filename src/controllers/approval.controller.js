@@ -207,7 +207,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
     })));
   }
 
-  // 3. Cash Flow Entries
+  // 3. Cash Flow Entries (exclude trigger-synced duplicates from other modules)
   if (!module || module === 'cash_flow_entry') {
     const { where, params } = buildWhere('cfe', 'cfe');
     const q = `
@@ -221,6 +221,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
       LEFT JOIN users u ON cfe.created_by = u.id
             LEFT JOIN users aa ON cfe.assigned_admin_id = aa.id
       WHERE ${where}
+        AND cfe.source_module IS NULL
       ORDER BY cfe.date DESC, cfe.id DESC
     `;
     const r = await pool.query(q, params);
@@ -313,15 +314,17 @@ export const listAllPending = asyncHandler(async (req, res) => {
       'FARMER PAYMENT': 'daybook_farmer',
       'PLOT COMMISSION': 'daybook_commission',
       'EXPENSE': 'daybook_expense',
+      'GENERAL': 'daybook_general',
     };
     const DAYBOOK_LABEL_MAP = {
       'FARMER PAYMENT': 'Farmer Payment (DayBook)',
       'PLOT COMMISSION': 'Plot Commission (DayBook)',
       'EXPENSE': 'Expense (DayBook)',
+      'GENERAL': 'General Entry (DayBook)',
     };
 
     // Map module filter to entry_type
-    let entryTypeFilter = `d.entry_type IN ('FARMER PAYMENT', 'PLOT COMMISSION', 'EXPENSE')`;
+    let entryTypeFilter = `d.entry_type NOT IN ('CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT', 'VENDOR PAYMENT')`;
     if (module === 'farmer_payment') entryTypeFilter = `d.entry_type = 'FARMER PAYMENT'`;
     else if (module === 'plot_commission') entryTypeFilter = `d.entry_type = 'PLOT COMMISSION'`;
     else if (module === 'expense') entryTypeFilter = `d.entry_type = 'EXPENSE'`;
@@ -377,11 +380,11 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     pool.query(`SELECT COUNT(*)::int AS count FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE fp.status = 'pending' ${fSiteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM plot_commissions WHERE status = 'pending' ${siteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM plot_commission_payments WHERE status = 'pending' ${siteFilter}`, params),
-    pool.query(`SELECT COUNT(*)::int AS count FROM cash_flow_entries WHERE status = 'pending' ${siteFilter}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM cash_flow_entries WHERE status = 'pending' AND source_module IS NULL ${siteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM firm_transactions WHERE status = 'pending' ${siteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM plot_payments WHERE status = 'pending' ${siteFilter}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM expenses WHERE status = 'pending' ${siteFilter}`, params),
-    pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book WHERE status = 'pending' AND entry_type IN ('FARMER PAYMENT', 'PLOT COMMISSION', 'EXPENSE') ${siteFilter} GROUP BY entry_type`, params),
+    pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book WHERE status = 'pending' AND entry_type NOT IN ('CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT', 'VENDOR PAYMENT') ${siteFilter} GROUP BY entry_type`, params),
   ];
 
   const [fp, pc, pcp, cf, ft, pp, ex, db] = await Promise.all(queries);
@@ -394,14 +397,20 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   const pcCount = pc.rows[0].count + pcp.rows[0].count + (dbMap['PLOT COMMISSION'] || 0);
   const exCount = ex.rows[0].count + (dbMap['EXPENSE'] || 0);
 
+  // Count GENERAL and other non-mapped day_book entry types into cash_flow_entry
+  const otherDbCount = Object.entries(dbMap)
+    .filter(([et]) => !['FARMER PAYMENT', 'PLOT COMMISSION', 'EXPENSE'].includes(et))
+    .reduce((sum, [, count]) => sum + count, 0);
+  const cfCount = cf.rows[0].count + otherDbCount;
+
   const counts = {
     farmer_payment: fpCount,
     plot_commission: pcCount,
-    cash_flow_entry: cf.rows[0].count,
+    cash_flow_entry: cfCount,
     firm_transaction: ft.rows[0].count,
     plot_payment: pp.rows[0].count,
     expense: exCount,
-    total: fpCount + pcCount + cf.rows[0].count +
+    total: fpCount + pcCount + cfCount +
            ft.rows[0].count + pp.rows[0].count + exCount,
   };
 

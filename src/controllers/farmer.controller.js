@@ -148,9 +148,9 @@ export const deleteFarmer = asyncHandler(async (req, res) => {
 export const createPayment = asyncHandler(async (req, res) => {
   const { farmerId } = req.params;
   const {
-    date, particular, amount, by_note, interest_rate, interest_amount, remarks,
+    date, particular, amount, by_note, remarks,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
-    voucher_url,
+    voucher_url, assigned_admin_id,
   } = req.body;
 
   const farmer = await farmerModel.findById(parseInt(farmerId), pool);
@@ -175,8 +175,6 @@ export const createPayment = asyncHandler(async (req, res) => {
     particular,
     amount: totalAmount,
     by_note: by_note || null,
-    interest_rate: parseFloat(interest_rate) || 0,
-    interest_amount: parseFloat(interest_amount) || 0,
     remarks: remarks || null,
     payment_mode: mode,
     cash_amount: cashAmt,
@@ -288,7 +286,7 @@ export const listPayments = asyncHandler(async (req, res) => {
 export const updatePayment = asyncHandler(async (req, res) => {
   const { farmerId, paymentId } = req.params;
   const {
-    date, particular, amount, by_note, interest_rate, interest_amount, remarks,
+    date, particular, amount, by_note, remarks,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
     voucher_url,
   } = req.body;
@@ -303,8 +301,6 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (particular !== undefined) updateData.particular = particular;
   if (amount !== undefined) updateData.amount = amount;
   if (by_note !== undefined) updateData.by_note = by_note;
-  if (interest_rate !== undefined) updateData.interest_rate = interest_rate;
-  if (interest_amount !== undefined) updateData.interest_amount = interest_amount;
   if (remarks !== undefined) updateData.remarks = remarks;
   if (payment_mode !== undefined) updateData.payment_mode = payment_mode;
   if (cash_amount !== undefined) updateData.cash_amount = cash_amount;

@@ -90,14 +90,18 @@ export const getTodayActivity = asyncHandler(async (req, res) => {
       [sessionId]
     );
 
-    // Invalidate refresh token so the terminated client cannot silently re-authenticate.
-    await pool.query(
-      `UPDATE users
-       SET refresh_token = NULL,
-         token_version = token_version + 1
-       WHERE id = $1`,
-      [targetSession.user_id]
-    );
+    // Only invalidate tokens if force-logging out a DIFFERENT user's session.
+    // If admin is logging out one of their own other sessions, don't bump token_version
+    // because that would invalidate ALL of admin's sessions including the current one.
+    if (targetSession.user_id !== req.user.id) {
+      await pool.query(
+        `UPDATE users
+         SET refresh_token = NULL,
+           token_version = token_version + 1
+         WHERE id = $1`,
+        [targetSession.user_id]
+      );
+    }
 
     res.json({ message: 'Session logged out successfully', sessionId });
   });

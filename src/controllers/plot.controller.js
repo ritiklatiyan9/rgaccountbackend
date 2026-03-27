@@ -2,6 +2,79 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 
+/**
+ * Auto-check BOOKED plots with free_to_sale_days set.
+ * If any installment is overdue beyond grace_period + free_to_sale_days,
+ * move the plot to UNDER CANCELLATION.
+ */
+const checkFreeToSaleStatus = async (siteId) => {
+  try {
+    // Dynamically check if grace_period_days column exists
+    const { rows: colCheck } = await pool.query(
+      `SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'plots' AND column_name = 'grace_period_days'
+      ) AS has_col`
+    );
+    const hasGracePeriod = !!colCheck[0]?.has_col;
+
+    const selectCols = hasGracePeriod
+      ? `p.id, p.status, p.grace_period_days, p.free_to_sale_days`
+      : `p.id, p.status, p.free_to_sale_days`;
+
+    const { rows: candidates } = await pool.query(`
+      SELECT ${selectCols}
+      FROM plots p
+      WHERE p.site_id = $1
+        AND p.installments_enabled = true
+        AND p.free_to_sale_days > 0
+        AND p.status NOT IN ('UNDER CANCELLATION', 'CANCELLED', 'RESALE', 'TRANSFERRED', 'COMPANY')
+    `, [siteId]);
+
+    if (candidates.length === 0) return;
+
+    const today = new Date();
+
+    for (const plot of candidates) {
+      const graceDays = parseInt(plot.grace_period_days) || 15;
+      const ftsThreshold = graceDays + (parseInt(plot.free_to_sale_days) || 0);
+
+      // Get installments + distributed payments
+      const { rows: installments } = await pool.query(
+        `SELECT amount, due_date FROM plot_installments WHERE plot_id = $1 ORDER BY sort_order ASC, due_date ASC`,
+        [plot.id]
+      );
+      if (installments.length === 0) continue;
+
+      const totalRes = await pool.query(
+        `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments WHERE plot_id = $1`,
+        [plot.id]
+      );
+      let remainingPool = parseFloat(totalRes.rows[0].total_received) || 0;
+
+      let shouldCancel = false;
+      for (const inst of installments) {
+        const instAmt = parseFloat(inst.amount) || 0;
+        const canApply = Math.min(remainingPool, instAmt);
+        remainingPool -= canApply;
+        const remaining = instAmt - canApply;
+        if (remaining <= 0) continue;
+
+        const dueDt = new Date(inst.due_date);
+        const daysOverdue = dueDt < today ? Math.floor((today - dueDt) / (1000 * 60 * 60 * 24)) : 0;
+        if (daysOverdue > ftsThreshold) { shouldCancel = true; break; }
+      }
+
+      if (shouldCancel) {
+        await plotModel.update(plot.id, { status: 'UNDER CANCELLATION' }, pool);
+      }
+    }
+  } catch (err) {
+    // Non-critical — log and continue
+    console.error('checkFreeToSaleStatus error:', err.message);
+  }
+};
+
 let plotCommissionColumnsCache = null;
 const getPlotCommissionColumns = async () => {
   if (plotCommissionColumnsCache) return plotCommissionColumnsCache;
@@ -29,9 +102,25 @@ const getPlotCommissionMasterColumns = async () => {
 
 const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssignedAdminId = null }) => {
   if (!plot) return null;
-  const commissionEnabled = !!plot.commission_enabled;
   const bookingBy = String(plot.booking_by || '').trim();
-  if (!commissionEnabled || !bookingBy) return null;
+  if (!bookingBy) return null;
+
+  // Use plot_commission (Size × Commission Rate) if available, else fall back to old commission_enabled logic
+  let totalCommission = parseFloat(plot.plot_commission) || 0;
+
+  if (totalCommission <= 0) {
+    // Fallback to old commission_enabled / commission_type / commission_value
+    const commissionEnabled = !!plot.commission_enabled;
+    if (!commissionEnabled) return null;
+    const salePrice = parseFloat(plot.sale_price) || 0;
+    const commissionType = String(plot.commission_type || 'PERCENTAGE').toUpperCase();
+    const commissionValue = parseFloat(plot.commission_value) || 0;
+    totalCommission = commissionType === 'FIXED'
+      ? commissionValue
+      : Math.round((salePrice * commissionValue / 100) * 100) / 100;
+  }
+
+  if (totalCommission <= 0) return null;
 
   // Resolve selected booking member as commission receiver (agent).
   const memberResult = await pool.query(
@@ -52,15 +141,6 @@ const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssigned
     [parseInt(plot.id), parseInt(member.id)]
   );
   if (existingResult.rows[0]) return existingResult.rows[0];
-
-  const salePrice = parseFloat(plot.sale_price) || 0;
-  const commissionType = String(plot.commission_type || 'PERCENTAGE').toUpperCase();
-  const commissionValue = parseFloat(plot.commission_value) || 0;
-  const totalCommission = commissionType === 'FIXED'
-    ? commissionValue
-    : Math.round((salePrice * commissionValue / 100) * 100) / 100;
-
-  if (totalCommission <= 0) return null;
 
   const assignedAdmin = plot.assigned_admin_id || fallbackAssignedAdminId || null;
   const masterCols = await getPlotCommissionMasterColumns();
@@ -105,7 +185,7 @@ const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssigned
 
 /** POST /plots — Create a new plot */
 export const createPlot = asyncHandler(async (req, res) => {
-  const { site_id, plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value } = req.body;
+  const { site_id, plot_no, block, buyer_name, plot_size, plot_size_mtr, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value, commission_rate, plot_commission } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   if (!plot_no || !plot_no.trim()) return res.status(400).json({ message: 'Plot number is required' });
@@ -123,6 +203,7 @@ export const createPlot = asyncHandler(async (req, res) => {
     block: block ? block.trim().toUpperCase() : null,
     buyer_name: buyer_name ? buyer_name.trim().toUpperCase() : null,
     plot_size: parseFloat(plot_size) || null,
+    plot_size_mtr: parseFloat(plot_size_mtr) || null,
     plot_rate: parseFloat(plot_rate) || null,
     sale_price: parseFloat(sale_price) || 0,
     registry_area: parseFloat(registry_area) || 0,
@@ -134,6 +215,8 @@ export const createPlot = asyncHandler(async (req, res) => {
     status: status || 'BOOKED',
     notes: notes ? notes.trim() : null,
     plc_charges: parseFloat(plc_charges) || 0,
+    commission_rate: parseFloat(commission_rate) || 0,
+    plot_commission: parseFloat(plot_commission) || 0,
     team: team ? team.trim().toUpperCase() : null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     created_by: req.user.id,
@@ -170,6 +253,9 @@ export const listPlots = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
+  // Auto-update status for plots past free-to-sale threshold
+  await checkFreeToSaleStatus(parseInt(site_id));
+
   const plots = await plotModel.findBySiteId(parseInt(site_id), pool);
   res.json({ plots });
 });
@@ -185,7 +271,7 @@ export const getPlot = asyncHandler(async (req, res) => {
 /** PUT /plots/:id — Update plot details */
 export const updatePlot = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value } = req.body;
+  const { plot_no, block, buyer_name, plot_size, plot_size_mtr, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value, commission_rate, plot_commission, original_plot_rate, discount_rate } = req.body;
 
   const existing = await plotModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
@@ -202,6 +288,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (block !== undefined) updateData.block = block ? block.trim().toUpperCase() : null;
   if (buyer_name !== undefined) updateData.buyer_name = buyer_name ? buyer_name.trim().toUpperCase() : null;
   if (plot_size !== undefined) updateData.plot_size = parseFloat(plot_size) || null;
+  if (plot_size_mtr !== undefined) updateData.plot_size_mtr = parseFloat(plot_size_mtr) || null;
   if (plot_rate !== undefined) updateData.plot_rate = parseFloat(plot_rate) || null;
   if (sale_price !== undefined) updateData.sale_price = parseFloat(sale_price) || 0;
   if (registry_area !== undefined) updateData.registry_area = parseFloat(registry_area) || 0;
@@ -213,6 +300,10 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (status !== undefined) updateData.status = status;
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
   if (plc_charges !== undefined) updateData.plc_charges = parseFloat(plc_charges) || 0;
+  if (commission_rate !== undefined) updateData.commission_rate = parseFloat(commission_rate) || 0;
+  if (plot_commission !== undefined) updateData.plot_commission = parseFloat(plot_commission) || 0;
+  if (original_plot_rate !== undefined) updateData.original_plot_rate = parseFloat(original_plot_rate) || 0;
+  if (discount_rate !== undefined) updateData.discount_rate = parseFloat(discount_rate) || 0;
   if (team !== undefined) updateData.team = team ? team.trim().toUpperCase() : null;
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
 

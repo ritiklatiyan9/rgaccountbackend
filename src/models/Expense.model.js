@@ -302,8 +302,9 @@ class ExpenseModel extends MasterModel {
    * Calculates running balance dynamically across both tables.
    */
   async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
-    const { search, mode, category, to_entity, dateFrom, dateTo } = filters;
+    const { search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order = 'desc' } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
+    const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     // ── Build WHERE clause once, reuse across queries ──
     const params = [siteId];
@@ -320,6 +321,9 @@ class ExpenseModel extends MasterModel {
       params.push(`%${search}%`);
       pIdx++;
     }
+    if (missing_bill === 'true') {
+      whereClause += ` AND u.payment_mode IS NOT NULL AND u.payment_mode != '' AND u.payment_mode != 'CASH' AND (u.bill_url IS NULL OR u.bill_url = '')`;
+    }
 
     const filterParams = [...params]; // snapshot before LIMIT/OFFSET
 
@@ -330,7 +334,7 @@ class ExpenseModel extends MasterModel {
           id::text as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
           payment_mode, debit, credit, remark, account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
-          assigned_user_id, assigned_admin_id, voucher_url,
+          assigned_user_id, assigned_admin_id, voucher_url, bill_url,
           'expenses' as source
         FROM expenses
         WHERE site_id = $1
@@ -342,7 +346,7 @@ class ExpenseModel extends MasterModel {
           payment_mode, debit, credit, particular || CASE WHEN remarks IS NOT NULL AND remarks != '' THEN ' - ' || remarks ELSE '' END as remark,
           account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
-          assigned_user_id, assigned_admin_id, voucher_url,
+          assigned_user_id, assigned_admin_id, voucher_url, NULL as bill_url,
           CASE 
             WHEN entry_type = 'FARMER PAYMENT' THEN 'farmer_payment'
             WHEN entry_type = 'PLOT COMMISSION' THEN 'commission'
@@ -362,9 +366,9 @@ class ExpenseModel extends MasterModel {
       LEFT JOIN members m ON u.assigned_user_id = m.id
       LEFT JOIN users admin_u ON u.assigned_admin_id = admin_u.id
       WHERE 1=1 ${whereClause}
-      ORDER BY u.date DESC, u.created_at DESC,
-               CASE WHEN u.source = 'daybook' THEN 1 ELSE 0 END DESC, 
-               u.original_id DESC
+      ORDER BY u.date ${sortDir}, u.created_at ${sortDir},
+               CASE WHEN u.source = 'daybook' THEN 1 ELSE 0 END ${sortDir}, 
+               u.original_id ${sortDir}
     `;
     const dataParams = [...params];
     if (limit > 0) {

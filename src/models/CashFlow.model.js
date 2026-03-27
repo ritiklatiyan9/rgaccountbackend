@@ -154,6 +154,7 @@ class CashFlowEntryModel extends MasterModel {
       JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
       LEFT JOIN users u ON cfe.assigned_admin_id = u.id
       WHERE cfe.site_id = $1 AND cfe.date = $2
+        AND cfe.source_module IS NULL
       ORDER BY cfe.created_at ASC
     `;
     const result = await pool.query(query, [siteId, date]);
