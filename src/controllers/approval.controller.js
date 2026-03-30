@@ -499,7 +499,7 @@ export const approveEntry = asyncHandler(async (req, res) => {
                 pcm.id, pcm.total_commission, 
                 COALESCE(SUM(pcp.amount), 0) as total_paid
              FROM plot_commissions_v2 pcm
-             LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved'
+             LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
              WHERE pcm.id = $1
              GROUP BY pcm.id
           `;
@@ -640,4 +640,226 @@ export const bulkReject = asyncHandler(async (req, res) => {
     ? `${totalRejected} entries rejected, ${skippedAssignedToOthers} skipped (assigned to other admins)`
     : `${totalRejected} entries rejected`;
   res.json({ message: msg, count: totalRejected, skippedAssignedToOthers });
+});
+
+// ══════════════════════════════════════════════════
+//  CHEQUE STATUS UPDATE (Admin)
+// ══════════════════════════════════════════════════
+
+const CHEQUE_TABLES = {
+  farmer_payment: 'farmer_payments',
+  plot_commission_payment: 'plot_commission_payments',
+  cash_flow_entry: 'cash_flow_entries',
+  firm_transaction: 'firm_transactions',
+  plot_payment: 'plot_payments',
+  expense: 'expenses',
+  vendor_payment: 'vendor_payments',
+  plot_registry_payment: 'plot_registry_payments',
+  daybook: 'day_book',
+};
+
+/**
+ * GET /approvals/cheques
+ * List all cheque entries across modules (for admin cheque management tab).
+ * Query: ?site_id=X&status=PENDING|CLEARED|BOUNCED|RETURNED|all
+ */
+export const listChequeEntries = asyncHandler(async (req, res) => {
+  const { site_id, status } = req.query;
+
+  const statusFilter = status && status !== 'all' ? status.toUpperCase() : null;
+
+  // Build UNION ALL query across all relevant tables
+  const queries = [];
+  const params = [];
+  let paramIdx = 0;
+
+  const addQuery = (table, source, labelExpr, siteCol = 'site_id') => {
+    paramIdx++;
+    const siteParam = site_id ? `AND t.${siteCol} = $${paramIdx}` : '';
+    const statusParam = statusFilter ? `AND t.cheque_status = $${paramIdx + (site_id ? 0 : 0)}` : '';
+
+    // Build WHERE parts dynamically
+    const whereParts = ['t.cheque_status IS NOT NULL'];
+    if (site_id) { params.push(parseInt(site_id)); whereParts.push(`t.${siteCol} = $${params.length}`); }
+    if (statusFilter) { params.push(statusFilter); whereParts.push(`t.cheque_status = $${params.length}`); }
+
+    const debitCol = table === 'firm_transactions' ? 'debit' : table === 'plot_commission_payments' ? 'amount' : table === 'plot_payments' ? 'amount' : table === 'plot_registry_payments' ? 'amount' : 'debit';
+    const creditCol = table === 'firm_transactions' ? 'credit' : table === 'plot_commission_payments' ? '0' : table === 'plot_payments' ? '0' : table === 'plot_registry_payments' ? '0' : 'credit';
+
+    queries.push(`
+      SELECT t.id, '${source}' AS source, ${labelExpr} AS entry_label,
+        COALESCE(t.${debitCol}, 0)::numeric AS debit, COALESCE(t.${creditCol}, 0)::numeric AS credit,
+        t.cheque_no, t.cheque_status, t.date,
+        t.${siteCol} AS site_id, s.name AS site_name,
+        t.created_at, t.updated_at
+      FROM ${table} t
+      LEFT JOIN sites s ON s.id = t.${siteCol}
+      WHERE ${whereParts.join(' AND ')}
+    `);
+  };
+
+  // Reset params for each call — we'll use a simpler approach
+  params.length = 0;
+
+  // Build all sub-queries with shared param indices
+  const whereParts = (siteCol = 'site_id') => {
+    const parts = ['t.cheque_status IS NOT NULL'];
+    if (site_id) parts.push(`t.${siteCol} = $1`);
+    if (statusFilter) parts.push(`t.cheque_status = $${site_id ? 2 : 1}`);
+    return parts.join(' AND ');
+  };
+
+  const allParams = [];
+  if (site_id) allParams.push(parseInt(site_id));
+  if (statusFilter) allParams.push(statusFilter);
+
+  const unionParts = [
+    `SELECT t.id, 'farmer_payment' AS source, COALESCE(t.particular, '') || ' - ' || COALESCE(f.name, '') AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      f.site_id, s.name AS site_name, t.created_at
+    FROM farmer_payments t
+    LEFT JOIN farmers f ON f.id = t.farmer_id
+    LEFT JOIN sites s ON s.id = f.site_id
+    WHERE t.cheque_status IS NOT NULL${site_id ? ` AND f.site_id = $1` : ''}${statusFilter ? ` AND t.cheque_status = $${site_id ? 2 : 1}` : ''}`,
+
+    `SELECT t.id, 'plot_commission_payment' AS source, 'Commission Payment #' || t.id AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      pc.site_id, s.name AS site_name, t.created_at
+    FROM plot_commission_payments t
+    LEFT JOIN plot_commissions_v2 pc ON pc.id = t.plot_commission_id
+    LEFT JOIN sites s ON s.id = pc.site_id
+    WHERE t.cheque_status IS NOT NULL${site_id ? ` AND pc.site_id = $1` : ''}${statusFilter ? ` AND t.cheque_status = $${site_id ? 2 : 1}` : ''}`,
+
+    `SELECT t.id, 'firm_transaction' AS source, COALESCE(t.description, '') || CASE WHEN t.name IS NOT NULL THEN ' - ' || t.name ELSE '' END AS entry_label,
+      COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      t.site_id, s.name AS site_name, t.created_at
+    FROM firm_transactions t
+    LEFT JOIN sites s ON s.id = t.site_id
+    WHERE ${whereParts()}`,
+
+    `SELECT t.id, 'plot_payment' AS source, 'Plot Payment - ' || COALESCE(p.plot_no, '') || ' ' || COALESCE(p.buyer_name, '') AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      t.site_id, s.name AS site_name, t.created_at
+    FROM plot_payments t
+    LEFT JOIN sites s ON s.id = t.site_id
+    LEFT JOIN plots p ON p.id = t.plot_id
+    WHERE ${whereParts()}`,
+
+    `SELECT t.id, 'expense' AS source, COALESCE(t.remark, t.category, '') AS entry_label,
+      COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      t.site_id, s.name AS site_name, t.created_at
+    FROM expenses t
+    LEFT JOIN sites s ON s.id = t.site_id
+    WHERE ${whereParts()}`,
+
+    `SELECT t.id, 'vendor_payment' AS source, 'Vendor - ' || COALESCE(vc.vendor_name, '') AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.payment_date AS date,
+      t.site_id, s.name AS site_name, t.created_at
+    FROM vendor_payments t
+    LEFT JOIN sites s ON s.id = t.site_id
+    LEFT JOIN vendor_commitments vc ON vc.id = t.commitment_id
+    WHERE ${whereParts()}`,
+
+    `SELECT t.id, 'cash_flow_entry' AS source, COALESCE(t.particular, '') AS entry_label,
+      COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      t.site_id, s.name AS site_name, t.created_at
+    FROM cash_flow_entries t
+    LEFT JOIN sites s ON s.id = t.site_id
+    WHERE ${whereParts()} AND t.source_module IS NULL`,
+
+    `SELECT t.id, 'plot_registry_payment' AS source, 'Registry Payment #' || t.id AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.payment_date AS date,
+      r.site_id, s.name AS site_name, t.created_at
+    FROM plot_registry_payments t
+    LEFT JOIN plot_registries r ON r.id = t.registry_id
+    LEFT JOIN sites s ON s.id = r.site_id
+    WHERE t.cheque_status IS NOT NULL${site_id ? ` AND r.site_id = $1` : ''}${statusFilter ? ` AND t.cheque_status = $${site_id ? 2 : 1}` : ''}`,
+
+    `SELECT t.id, 'daybook' AS source, COALESCE(t.particular, '') AS entry_label,
+      COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      t.site_id, s.name AS site_name, t.created_at
+    FROM day_book t
+    LEFT JOIN sites s ON s.id = t.site_id
+    WHERE ${whereParts()} AND t.farmer_payment_id IS NULL AND t.commission_id IS NULL AND t.cash_flow_entry_id IS NULL AND t.firm_transaction_id IS NULL AND t.plot_payment_id IS NULL AND t.vendor_payment_id IS NULL`,
+  ];
+
+  const fullQuery = unionParts.join('\nUNION ALL\n') + '\nORDER BY created_at DESC';
+
+  const result = await pool.query(fullQuery, allParams);
+
+  // Count by status
+  const statusCounts = { PENDING: 0, CLEARED: 0, BOUNCED: 0, RETURNED: 0 };
+  result.rows.forEach(r => {
+    if (statusCounts[r.cheque_status] !== undefined) statusCounts[r.cheque_status]++;
+  });
+
+  res.json({ entries: result.rows, counts: statusCounts, total: result.rows.length });
+});
+
+/**
+ * PATCH /approvals/cheque-status
+ * Update cheque_status for a payment entry (admin only).
+ * Body: { id, source, cheque_status }
+ * Valid cheque_status values: PENDING, CLEARED, BOUNCED, RETURNED
+ */
+export const updateChequeStatus = asyncHandler(async (req, res) => {
+  const { id, source, cheque_status } = req.body;
+
+  if (!id || !source || !cheque_status) {
+    return res.status(400).json({ message: 'id, source, and cheque_status are required' });
+  }
+
+  const VALID_STATUSES = ['PENDING', 'CLEARED', 'BOUNCED', 'RETURNED'];
+  const normalizedStatus = String(cheque_status).toUpperCase();
+  if (!VALID_STATUSES.includes(normalizedStatus)) {
+    return res.status(400).json({ message: `cheque_status must be one of: ${VALID_STATUSES.join(', ')}` });
+  }
+
+  const table = CHEQUE_TABLES[source];
+  if (!table) {
+    return res.status(400).json({ message: `Invalid source: ${source}` });
+  }
+
+  const result = await pool.query(
+    `UPDATE ${table}
+     SET cheque_status = $1, updated_at = NOW()
+     WHERE id = $2
+     RETURNING *`,
+    [normalizedStatus, parseInt(id)]
+  );
+
+  if (result.rowCount === 0) {
+    return res.status(404).json({ message: 'Entry not found' });
+  }
+
+  // Sync cheque_status to cash_flow_entries (trigger only fires on INSERT, not UPDATE)
+  // For BOUNCED/RETURNED: zero out the amounts so they don't count in totals
+  if (table !== 'cash_flow_entries') {
+    const isBounced = ['BOUNCED', 'RETURNED'].includes(normalizedStatus);
+    if (isBounced) {
+      await pool.query(
+        `UPDATE cash_flow_entries
+         SET cheque_status = $1, debit = 0, credit = 0, updated_at = NOW()
+         WHERE source_module = $2 AND source_id = $3`,
+        [normalizedStatus, table, parseInt(id)]
+      );
+    } else {
+      await pool.query(
+        `UPDATE cash_flow_entries
+         SET cheque_status = $1, updated_at = NOW()
+         WHERE source_module = $2 AND source_id = $3`,
+        [normalizedStatus, table, parseInt(id)]
+      );
+    }
+  } else {
+    // Source IS cash_flow_entries — just zero amounts if bounced
+    if (['BOUNCED', 'RETURNED'].includes(normalizedStatus)) {
+      await pool.query(
+        `UPDATE cash_flow_entries SET debit = 0, credit = 0 WHERE id = $1`,
+        [parseInt(id)]
+      );
+    }
+  }
+
+  res.json({ entry: result.rows[0], message: `Cheque status updated to ${normalizedStatus}` });
 });

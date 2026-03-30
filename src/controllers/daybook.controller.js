@@ -258,6 +258,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     const ftCredit = parseFloat(credit) || 0;
 
     // Create the firm_transactions record
+    const normMode = payment_mode ? payment_mode.trim().toLowerCase() : 'cash';
     const ftData = {
       firm_id,
       site_id: parseInt(site_id),
@@ -269,6 +270,8 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       purpose: req.body.firm_purpose ? req.body.firm_purpose.trim().toUpperCase() : null,
       remark: req.body.firm_remark ? req.body.firm_remark.trim().toUpperCase() : null,
       cheque_no: req.body.firm_cheque_no ? req.body.firm_cheque_no.trim().toUpperCase() : null,
+      payment_mode: ['cash', 'bank', 'cheque'].includes(normMode) ? normMode : 'cash',
+      cheque_status: normMode === 'cheque' ? 'PENDING' : null,
       created_by: req.user.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
@@ -276,6 +279,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     const firmTxn = await firmTransactionModel.create(ftData, pool);
 
     // Also create the day book entry (linked via firm_transaction_id)
+    const upperMode = payment_mode ? payment_mode.trim().toUpperCase() : null;
     const dbData = {
       site_id: parseInt(site_id),
       date: ftDate,
@@ -284,12 +288,14 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       debit: ftDebit,
       credit: ftCredit,
       remarks: remarks ? remarks.trim() : null,
-      payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : null,
+      payment_mode: upperMode,
       category: category ? category.trim().toUpperCase() : 'FIRM',
       from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
       to_entity: to_entity ? to_entity.trim().toUpperCase() : firm.name,
       account_no: account_no ? account_no.trim().toUpperCase() : null,
       branch: branch ? branch.trim().toUpperCase() : null,
+      cheque_no: req.body.firm_cheque_no ? req.body.firm_cheque_no.trim().toUpperCase() : null,
+      cheque_status: null,
       created_by: req.user.id,
       firm_transaction_id: firmTxn.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
@@ -317,7 +323,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     const ppDate = date || new Date().toISOString().split('T')[0];
     const ppAmount = parseFloat(credit) || parseFloat(debit) || 0;
     const ppPaymentFrom = req.body.pp_payment_from ? req.body.pp_payment_from.trim().toUpperCase() : null;
-    const ppPaymentType = req.body.pp_payment_type === 'BANK' ? 'BANK' : 'CASH';
+    const ppPaymentType = req.body.pp_payment_type === 'BANK' ? 'BANK' : req.body.pp_payment_type === 'CHEQUE' ? 'CHEQUE' : 'CASH';
     const ppBankDetails = req.body.pp_bank_details ? req.body.pp_bank_details.trim().toUpperCase() : null;
     const ppNarration = req.body.pp_narration ? req.body.pp_narration.trim().toUpperCase() : null;
     const ppReceivedBy = req.body.pp_received_by ? req.body.pp_received_by.trim().toUpperCase() : null;
@@ -333,6 +339,8 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       narration: ppNarration,
       received_by: ppReceivedBy,
       amount: ppAmount,
+      cheque_no: req.body.pp_cheque_no ? req.body.pp_cheque_no.trim().toUpperCase() : null,
+      cheque_status: ppPaymentFrom === 'CHEQUE' || ppPaymentType === 'CHEQUE' ? 'PENDING' : null,
       created_by: req.user.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
@@ -340,6 +348,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     const plotPayment = await plotPaymentModel.create(ppData, pool);
 
     // Also create the day book entry (linked via plot_payment_id)
+    const ppMode = ppPaymentFrom || (ppPaymentType === 'BANK' ? 'BANK' : ppPaymentType === 'CHEQUE' ? 'CHEQUE' : 'CASH');
     const dbData = {
       site_id: parseInt(site_id),
       date: ppDate,
@@ -348,12 +357,14 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       debit: parseFloat(debit) || 0,
       credit: parseFloat(credit) || 0,
       remarks: remarks ? remarks.trim() : null,
-      payment_mode: ppPaymentFrom || (ppPaymentType === 'BANK' ? 'BANK' : 'CASH'),
+      payment_mode: ppMode,
       category: category ? category.trim().toUpperCase() : 'PLOT PAYMENT',
       from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
       to_entity: to_entity ? to_entity.trim().toUpperCase() : `${plot.plot_no} - ${plot.buyer_name || ''}`.trim(),
       account_no: account_no ? account_no.trim().toUpperCase() : null,
       branch: branch ? branch.trim().toUpperCase() : null,
+      cheque_no: req.body.pp_cheque_no ? req.body.pp_cheque_no.trim().toUpperCase() : null,
+      cheque_status: null,
       created_by: req.user.id,
       plot_payment_id: plotPayment.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
@@ -368,6 +379,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
   }
 
   // ── Standard day book entry (non-special type) ──
+  const stdMode = payment_mode ? payment_mode.trim().toUpperCase() : null;
   const data = {
     site_id: site_id,
     date: date || new Date().toISOString().split('T')[0],
@@ -376,12 +388,14 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     debit: parseFloat(debit) || 0,
     credit: parseFloat(credit) || 0,
     remarks: remarks ? remarks.trim() : null,
-    payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : null,
+    payment_mode: stdMode,
     category: category ? category.trim().toUpperCase() : null,
     from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
     to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
     account_no: account_no ? account_no.trim().toUpperCase() : null,
     branch: branch ? branch.trim().toUpperCase() : null,
+    cheque_no: req.body.cheque_no ? req.body.cheque_no.trim().toUpperCase() : null,
+    cheque_status: stdMode === 'CHEQUE' ? 'PENDING' : null,
     created_by: req.user.id,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
   };
@@ -432,6 +446,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     to_entity: exp.to_entity,
     account_no: exp.account_no,
     branch: exp.branch,
+    cheque_status: exp.cheque_status,
+    cheque_no: exp.cheque_no,
     created_by: exp.created_by,
     created_at: exp.created_at,
     updated_at: exp.updated_at,
@@ -471,6 +487,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       by_note: fp.by_note,
       interest_rate: fp.interest_rate,
       interest_amount: fp.interest_amount,
+      cheque_status: fp.cheque_status,
+      cheque_no: fp.cheque_no,
       created_at: fp.created_at,
       updated_at: fp.updated_at,
       assigned_admin_id: fp.assigned_admin_id,
@@ -623,7 +641,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       debit: cf.debit,
       credit: cf.credit,
       remarks: cf.remarks,
-      payment_mode: null,
+      payment_mode: cf.cash_type,
       category: 'CASH FLOW',
       from_entity: null,
       to_entity: null,
@@ -633,6 +651,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       ledger_type: cf.ledger_type,
       cf_month: cf.cf_month,
       cf_year: cf.cf_year,
+      cheque_status: cf.cheque_status,
+      cheque_no: cf.cheque_no,
       created_by: cf.created_by,
       created_at: cf.created_at,
       updated_at: cf.updated_at,
@@ -663,7 +683,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       debit: ft.debit,
       credit: ft.credit,
       remarks: ft.remark,
-      payment_mode: null,
+      payment_mode: ft.payment_mode ? ft.payment_mode.toUpperCase() : null,
       category: 'FIRM',
       from_entity: null,
       to_entity: ft.firm_name,
@@ -674,6 +694,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       firm_purpose: ft.purpose,
       firm_remark: ft.remark,
       firm_cheque_no: ft.cheque_no,
+      cheque_status: ft.cheque_status,
+      cheque_no: ft.cheque_no,
       created_by: ft.created_by,
       created_at: ft.created_at,
       updated_at: ft.updated_at,
@@ -706,6 +728,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       pp_bank_details: pp.bank_details,
       pp_narration: pp.narration,
       pp_received_by: pp.received_by,
+      pp_cheque_no: pp.cheque_no,
       site_id: pp.site_id,
       date: pp.date,
       particular: `PLOT PAYMENT - ${pp.plot_no}${pp.buyer_name ? ' (' + pp.buyer_name + ')' : ''}`,
@@ -719,6 +742,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       to_entity: pp.plot_no,
       account_no: null,
       branch: null,
+      cheque_status: pp.cheque_status,
+      cheque_no: pp.cheque_no,
       created_by: pp.created_by,
       created_at: pp.created_at,
       updated_at: pp.updated_at,
@@ -751,6 +776,10 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   const typeMap = {}, modeMap = {}, catMap = {};
 
   for (const e of allEntries) {
+    // Skip bounced/returned cheques from summary totals
+    const cs = e.cheque_status ? String(e.cheque_status).toUpperCase() : null;
+    if (cs === 'BOUNCED' || cs === 'RETURNED') continue;
+
     const dr = parseFloat(e.debit) || 0;
     const cr = parseFloat(e.credit) || 0;
     total_debit += dr;
@@ -1241,6 +1270,7 @@ export const updateFirmTransactionFromDayBook = asyncHandler(async (req, res) =>
   } = req.body;
 
   // Update firm_transactions record
+  const updNormMode = payment_mode !== undefined ? (payment_mode ? payment_mode.trim().toLowerCase() : null) : undefined;
   const ftUpdate = {
     date: date || existing.date,
     description: particular !== undefined ? particular.trim().toUpperCase() : existing.description,
@@ -1250,6 +1280,7 @@ export const updateFirmTransactionFromDayBook = asyncHandler(async (req, res) =>
     purpose: req.body.firm_purpose !== undefined ? (req.body.firm_purpose ? req.body.firm_purpose.trim().toUpperCase() : null) : existing.purpose,
     remark: req.body.firm_remark !== undefined ? (req.body.firm_remark ? req.body.firm_remark.trim().toUpperCase() : null) : existing.remark,
     cheque_no: req.body.firm_cheque_no !== undefined ? (req.body.firm_cheque_no ? req.body.firm_cheque_no.trim().toUpperCase() : null) : existing.cheque_no,
+    ...(updNormMode !== undefined && { payment_mode: ['cash', 'bank', 'cheque'].includes(updNormMode) ? updNormMode : 'cash' }),
   };
 
   const updatedFt = await firmTransactionModel.update(parseInt(id), ftUpdate, pool);
@@ -1274,6 +1305,7 @@ export const updateFirmTransactionFromDayBook = asyncHandler(async (req, res) =>
       account_no: account_no !== undefined ? (account_no ? account_no.trim().toUpperCase() : null) : undefined,
       branch: branch !== undefined ? (branch ? branch.trim().toUpperCase() : null) : undefined,
       category: category !== undefined ? (category ? category.trim().toUpperCase() : null) : undefined,
+      cheque_no: req.body.firm_cheque_no !== undefined ? (req.body.firm_cheque_no ? req.body.firm_cheque_no.trim().toUpperCase() : null) : undefined,
     };
     Object.keys(dbUpdate).forEach(k => dbUpdate[k] === undefined && delete dbUpdate[k]);
     await dayBookModel.update(dbId, dbUpdate, pool);
@@ -1422,7 +1454,7 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `SELECT cfe.id, cfe.date, cfe.particular, cfe.debit, cfe.credit, cfe.cash_type,
             cfe.remarks, cfe.status, cfe.source_module, cfe.source_id,
-            cfe.voucher_url, cfe.created_at,
+            cfe.voucher_url, cfe.created_at, cfe.cheque_status, cfe.cheque_no,
             COALESCE(u.name, u.email) AS created_by_name
      FROM cash_flow_entries cfe
      LEFT JOIN users u ON cfe.created_by = u.id
@@ -1439,5 +1471,71 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
       totalPages: Math.ceil(total / lim),
       currentPage: pg,
     },
+  });
+});
+
+// ══════════════════════════════════════════════════
+//  PROFIT SUMMARY
+// ══════════════════════════════════════════════════
+
+/**
+ * GET /daybook/profit-summary?site_id=X
+ * Returns profit breakdown:
+ *   Earn   = plot_payments credit
+ *   Expenses = farmer_payments debit + expenses debit + plot_payments debit
+ *              + plot_commissions debit + plot_commission_payments debit + vendor_payments debit
+ * Excludes: firm_transactions, day_book (personal ledger / cashflow), imprest
+ */
+export const getProfitSummary = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const siteId = parseInt(site_id);
+
+  const profitModules = [
+    'plot_payments',
+    'farmer_payments',
+    'expenses',
+    'plot_commissions',
+    'plot_commission_payments',
+    'vendor_payments',
+  ];
+
+  const result = await pool.query(
+    `SELECT source_module,
+            COALESCE(SUM(credit), 0)::numeric AS total_credit,
+            COALESCE(SUM(debit),  0)::numeric AS total_debit
+     FROM cash_flow_entries
+     WHERE site_id = $1
+       AND source_module = ANY($2)
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     GROUP BY source_module`,
+    [siteId, profitModules]
+  );
+
+  const byModule = {};
+  let totalEarn = 0;
+  let totalExpense = 0;
+
+  for (const row of result.rows) {
+    const credit = parseFloat(row.total_credit) || 0;
+    const debit  = parseFloat(row.total_debit)  || 0;
+
+    byModule[row.source_module] = { credit, debit };
+
+    // Earn = only plot_payments credit (money received from buyers)
+    if (row.source_module === 'plot_payments') {
+      totalEarn += credit;
+    }
+
+    // Expense = debit side of all profit modules
+    totalExpense += debit;
+  }
+
+  res.json({
+    earn: totalEarn,
+    expense: totalExpense,
+    profit: totalEarn - totalExpense,
+    breakdown: byModule,
   });
 });

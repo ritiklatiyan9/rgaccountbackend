@@ -10,11 +10,11 @@ class FirmModel extends MasterModel {
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT f.*,
-        COALESCE((SELECT SUM(ft.debit)  FROM firm_transactions ft WHERE ft.firm_id = f.id), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true), 0)
+        COALESCE((SELECT SUM(ft.debit)  FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
+          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
           AS total_debit,
-        COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft WHERE ft.firm_id = f.id), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true), 0)
+        COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
+          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
           AS total_credit,
         (SELECT COUNT(*)::int FROM firm_transactions ft WHERE ft.firm_id = f.id)
           + (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id) AND cfe.is_firm_transaction = true)
@@ -38,11 +38,11 @@ class FirmModel extends MasterModel {
   async findByIdWithTotals(id, pool) {
     const query = `
       SELECT f.*,
-        COALESCE((SELECT SUM(ft.debit)  FROM firm_transactions ft WHERE ft.firm_id = f.id), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true), 0)
+        COALESCE((SELECT SUM(ft.debit)  FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
+          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
           AS total_debit,
-        COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft WHERE ft.firm_id = f.id), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true), 0)
+        COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
+          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
           AS total_credit,
         (SELECT COUNT(*)::int FROM firm_transactions ft WHERE ft.firm_id = f.id)
           + (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id) AND cfe.is_firm_transaction = true)
@@ -80,7 +80,7 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(debit), 0)  AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM firm_transactions
-      WHERE firm_id = $1
+      WHERE firm_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     `;
     const result = await pool.query(query, [firmId]);
     const base = result.rows[0];
@@ -91,7 +91,7 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(CASE WHEN from_firm_id = $1 THEN COALESCE(debit,0) + COALESCE(credit,0) ELSE 0 END), 0) AS cf_debit,
         COALESCE(SUM(CASE WHEN to_firm_id   = $1 THEN COALESCE(debit,0) + COALESCE(credit,0) ELSE 0 END), 0) AS cf_credit
       FROM cash_flow_entries
-      WHERE (from_firm_id = $1 OR to_firm_id = $1) AND is_firm_transaction = true
+      WHERE (from_firm_id = $1 OR to_firm_id = $1) AND is_firm_transaction = true AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     `;
     const cfResult = await pool.query(cfQuery, [firmId]);
     const cf = cfResult.rows[0];
@@ -114,7 +114,7 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(debit), 0) AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM firm_transactions
-      WHERE firm_id = $1
+      WHERE firm_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(remark, ''), 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;
@@ -131,7 +131,7 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(debit), 0) AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM firm_transactions
-      WHERE firm_id = $1
+      WHERE firm_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(name, ''), 'UNKNOWN')
       ORDER BY total_debit DESC
     `;
@@ -163,7 +163,7 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(debit), 0) AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM firm_transactions
-      WHERE firm_id = $1
+      WHERE firm_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY EXTRACT(YEAR FROM date), EXTRACT(MONTH FROM date)
       ORDER BY year DESC, month DESC
     `;

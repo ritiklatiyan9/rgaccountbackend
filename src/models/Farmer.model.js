@@ -12,7 +12,7 @@ class FarmerModel extends MasterModel {
         COALESCE(SUM(fp.amount), 0) AS total_paid,
         COUNT(fp.id) AS payment_count
       FROM farmers f
-      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
+      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       WHERE f.site_id = $1
       GROUP BY f.id
       ORDER BY f.created_at DESC
@@ -29,7 +29,7 @@ class FarmerModel extends MasterModel {
         COALESCE(SUM(fp.interest_amount), 0) AS total_interest,
         COUNT(fp.id) AS payment_count
       FROM farmers f
-      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
+      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       WHERE f.id = $1
       GROUP BY f.id
     `;
@@ -44,7 +44,7 @@ class FarmerModel extends MasterModel {
         COALESCE(SUM(fp.amount), 0) AS total_paid,
         COUNT(fp.id) AS payment_count
       FROM farmers f
-      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
+      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       WHERE f.created_by = $1
       GROUP BY f.id
       ORDER BY f.created_at DESC
@@ -72,14 +72,14 @@ class FarmerPaymentModel extends MasterModel {
 
   /** Sum of all payments for a farmer */
   async getTotalPaid(farmerId, pool) {
-    const query = `SELECT COALESCE(SUM(amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1`;
+    const query = `SELECT COALESCE(SUM(amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`;
     const result = await pool.query(query, [farmerId]);
     return parseFloat(result.rows[0].total);
   }
 
   /** Sum of all interest for a farmer */
   async getTotalInterest(farmerId, pool) {
-    const query = `SELECT COALESCE(SUM(interest_amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1`;
+    const query = `SELECT COALESCE(SUM(interest_amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`;
     const result = await pool.query(query, [farmerId]);
     return parseFloat(result.rows[0].total);
   }

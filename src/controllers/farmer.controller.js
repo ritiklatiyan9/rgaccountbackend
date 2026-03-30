@@ -164,8 +164,8 @@ export const createPayment = asyncHandler(async (req, res) => {
 
   const totalAmount = parseFloat(amount) || 0;
   const mode = (payment_mode || 'CASH').toUpperCase();
-  const cashAmt = mode === 'BANK' ? 0 : (mode === 'SPLIT' ? (parseFloat(cash_amount) || 0) : totalAmount);
-  const bankAmt = mode === 'CASH' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmount);
+  const cashAmt = mode === 'BANK' || mode === 'CHEQUE' ? 0 : (mode === 'SPLIT' ? (parseFloat(cash_amount) || 0) : totalAmount);
+  const bankAmt = mode === 'CASH' || mode === 'CHEQUE' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmount);
 
   const paymentDate = date || new Date().toISOString().split('T')[0];
 
@@ -186,6 +186,8 @@ export const createPayment = asyncHandler(async (req, res) => {
     voucher_url: voucher_url || null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
+    cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+    cheque_status: mode === 'CHEQUE' ? 'PENDING' : null,
   };
 
   const payment = await farmerPaymentModel.create(paymentData, pool);

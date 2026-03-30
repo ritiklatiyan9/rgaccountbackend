@@ -168,7 +168,8 @@ export const createTransaction = asyncHandler(async (req, res) => {
   const txnDate = date || new Date().toISOString().split('T')[0];
   const txnDebit = parseFloat(debit) || 0;
   const txnCredit = parseFloat(credit) || 0;
-  const txnPaymentMode = (payment_mode || 'cash').toLowerCase() === 'bank' ? 'bank' : 'cash';
+  const rawMode = (payment_mode || 'cash').toLowerCase();
+  const txnPaymentMode = ['cash', 'bank', 'cheque'].includes(rawMode) ? rawMode : 'cash';
 
   let cfEntryId = null;
 
@@ -248,6 +249,7 @@ export const createTransaction = asyncHandler(async (req, res) => {
     voucher_url: voucher_url || null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
+    cheque_status: txnPaymentMode === 'cheque' ? 'PENDING' : null,
     ...(cfEntryId && { cash_flow_entry_id: cfEntryId }),
   };
 
@@ -735,7 +737,7 @@ export const getFirmHistoryAnalytics = asyncHandler(async (req, res) => {
         COALESCE(SUM(debit), 0) AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM firm_transactions
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       `,
       [siteId]
     ),
@@ -748,7 +750,7 @@ export const getFirmHistoryAnalytics = asyncHandler(async (req, res) => {
         COALESCE(SUM(ft.debit), 0) AS total_debit,
         COALESCE(SUM(ft.credit), 0) AS total_credit
       FROM firms f
-      LEFT JOIN firm_transactions ft ON ft.firm_id = f.id
+      LEFT JOIN firm_transactions ft ON ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       WHERE f.site_id = $1
       GROUP BY f.id, f.name
       ORDER BY f.name ASC
@@ -766,7 +768,7 @@ export const getFirmHistoryAnalytics = asyncHandler(async (req, res) => {
       FROM firm_transactions ft
       JOIN firms f ON f.id = ft.firm_id
       JOIN firms f2 ON f2.site_id = ft.site_id AND UPPER(f2.name) = UPPER(COALESCE(ft.name, ''))
-      WHERE ft.site_id = $1
+      WHERE ft.site_id = $1 AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY f.name, f2.name
       ORDER BY entries DESC, f.name ASC
       `,

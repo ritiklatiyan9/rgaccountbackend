@@ -91,7 +91,7 @@ export const getPlotCommissionDetail = asyncHandler(async (req, res) => {
  * Record an installment payment.
  */
 export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
-  const { master_id, date, amount, payment_mode, bank_name, transaction_id, remarks, voucher_number, voucher_url, assigned_admin_id } = req.body;
+  const { master_id, date, amount, payment_mode, bank_name, transaction_id, remarks, voucher_number, voucher_url, assigned_admin_id, cheque_no } = req.body;
 
   if (!master_id || !amount) {
     return res.status(400).json({ message: 'master_id and amount are required' });
@@ -121,7 +121,9 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
     voucher_number: voucher_number ? voucher_number.trim() : null,
     voucher_url: voucher_url || null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    created_by: req.user.id
+    created_by: req.user.id,
+    cheque_no: cheque_no ? cheque_no.trim() : null,
+    cheque_status: (payment_mode || 'CASH').toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
   };
 
   const payment = await plotCommissionPaymentModel.create(data, pool);

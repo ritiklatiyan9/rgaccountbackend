@@ -10,9 +10,9 @@ class PlotModel extends MasterModel {
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT p.*,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id), 0) AS total_received,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'BANK'), 0) AS received_bank,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH'), 0) AS received_cash,
+        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_received,
+        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'BANK' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
+        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_cash,
         (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count
       FROM plots p
       WHERE p.site_id = $1
@@ -33,9 +33,9 @@ class PlotModel extends MasterModel {
   async findByIdWithTotals(id, pool) {
     const query = `
       SELECT p.*,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id), 0) AS total_received,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'BANK'), 0) AS received_bank,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH'), 0) AS received_cash,
+        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_received,
+        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'BANK' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
+        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_cash,
         (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count
       FROM plots p
       WHERE p.id = $1
@@ -71,7 +71,7 @@ class PlotPaymentModel extends MasterModel {
         COUNT(*)::int AS entries,
         COALESCE(SUM(amount), 0) AS total_amount
       FROM plot_payments
-      WHERE plot_id = $1
+      WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(payment_from, ''), 'OTHER')
       ORDER BY total_amount DESC
     `;
@@ -87,7 +87,7 @@ class PlotPaymentModel extends MasterModel {
         COUNT(*)::int AS entries,
         COALESCE(SUM(amount), 0) AS total_amount
       FROM plot_payments
-      WHERE plot_id = $1
+      WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(received_by, ''), 'UNKNOWN')
       ORDER BY total_amount DESC
     `;

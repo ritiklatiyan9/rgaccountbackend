@@ -88,7 +88,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
   // 3. Total received per plot
   const payRes = await pool.query(
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
-     FROM plot_payments WHERE plot_id = ANY($1) GROUP BY plot_id`,
+     FROM plot_payments WHERE plot_id = ANY($1) AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
     [plotIds]
   );
   const receivedMap = {};
@@ -429,7 +429,7 @@ export const listInstallments = asyncHandler(async (req, res) => {
 
   // Get total received from plot_payments (the single source of truth)
   const totalRes = await pool.query(
-    `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments WHERE plot_id = $1`,
+    `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
     [parseInt(id)]
   );
   let remaining_pool = parseFloat(totalRes.rows[0].total_received) || 0;
@@ -712,7 +712,7 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
   const payResult = await pool.query(
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
      FROM plot_payments
-     WHERE plot_id = ANY($1)
+     WHERE plot_id = ANY($1) AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      GROUP BY plot_id`,
     [plotIds]
   );
@@ -925,7 +925,7 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   // ── 3. Total received per plot ──
   const payRes = await pool.query(
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
-     FROM plot_payments WHERE plot_id = ANY($1) GROUP BY plot_id`,
+     FROM plot_payments WHERE plot_id = ANY($1) AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
     [plotIds]
   );
   const receivedMap = {};

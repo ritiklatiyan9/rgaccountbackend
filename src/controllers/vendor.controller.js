@@ -169,7 +169,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       m.full_name AS vendor_member_name,
       COUNT(vp.id)::int AS payment_count
      FROM vendor_commitments vc
-     LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
+     LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      WHERE ${whereClause}
      GROUP BY vc.id, m.full_name
@@ -189,7 +189,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
      LEFT JOIN (
       SELECT commitment_id, SUM(amount)::numeric(14,2) AS paid_amount
       FROM vendor_payments
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY commitment_id
      ) p ON p.commitment_id = vc.id
      WHERE vc.site_id = $1`,
@@ -230,7 +230,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
       m.full_name AS vendor_member_name
      FROM vendor_commitments vc
-     LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
+     LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      WHERE vc.id = $1 AND vc.site_id = $2
      GROUP BY vc.id, m.full_name`,
@@ -425,7 +425,7 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
     const paidResult = await client.query(
       `SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS paid
        FROM vendor_payments
-       WHERE commitment_id = $1`,
+       WHERE commitment_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
       [commitmentId]
     );
 
@@ -433,22 +433,25 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
     const contractAmount = parseFloat(commitment.contract_amount) || 0;
     const remaining = contractAmount - alreadyPaid;
 
+    const vendorPayMode = (payment_mode || 'cash').toLowerCase();
     const paymentResult = await client.query(
-      `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [
         commitmentId,
         siteId,
         payment_date,
         paymentAmount,
-        (payment_mode || 'cash').toLowerCase(),
+        vendorPayMode,
         reference_no?.trim() || null,
         note?.trim() || null,
         voucher_url || null,
         'pending',
         req.user.id,
         assigned_admin_id ? parseInt(assigned_admin_id) : null,
+        req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+        vendorPayMode === 'cheque' ? 'PENDING' : null,
       ]
     );
 
@@ -525,7 +528,7 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
     const sumResult = await client.query(
       `SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS paid
        FROM vendor_payments
-       WHERE commitment_id = $1 AND id <> $2`,
+       WHERE commitment_id = $1 AND id <> $2 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
       [existing.commitment_id, paymentId]
     );
 

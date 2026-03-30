@@ -227,7 +227,7 @@ class ExpenseModel extends MasterModel {
         COALESCE(SUM(credit), 0)::numeric AS total_credit,
         COUNT(*)::int AS total_count
       FROM expenses
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     `;
     const result = await pool.query(query, [siteId]);
     return result.rows[0];
@@ -244,7 +244,7 @@ class ExpenseModel extends MasterModel {
         COALESCE(SUM(credit), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM expenses
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(payment_mode, 'UNSPECIFIED')
       ORDER BY total_debit DESC
     `;
@@ -263,7 +263,7 @@ class ExpenseModel extends MasterModel {
         COALESCE(SUM(credit), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM expenses
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(category, 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;
@@ -337,7 +337,7 @@ class ExpenseModel extends MasterModel {
           assigned_user_id, assigned_admin_id, voucher_url, bill_url,
           'expenses' as source
         FROM expenses
-        WHERE site_id = $1
+        WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         
         UNION ALL
         
@@ -353,7 +353,7 @@ class ExpenseModel extends MasterModel {
             ELSE 'daybook'
           END as source
         FROM day_book
-        WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT')
+        WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT') AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       )
     `;
 
@@ -435,10 +435,10 @@ class ExpenseModel extends MasterModel {
     const modeQuery = `
       WITH unified AS (
         SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
-        FROM expenses WHERE site_id = $1
+        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         UNION ALL
         SELECT date, payment_mode, category, to_entity, from_entity, particular as remark, account_no, branch, debit, credit
-        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT')
+        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT') AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       )
       SELECT 
         COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode, 
@@ -454,10 +454,10 @@ class ExpenseModel extends MasterModel {
     const catQuery = `
       WITH unified AS (
         SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
-        FROM expenses WHERE site_id = $1
+        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         UNION ALL
         SELECT date, payment_mode, category, to_entity, from_entity, particular as remark, account_no, branch, debit, credit
-        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT')
+        FROM day_book WHERE site_id = $1 AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT') AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       )
       SELECT 
         COALESCE(category, 'UNCATEGORIZED') as category, 

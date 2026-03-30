@@ -1,10 +1,60 @@
 import pool from '../config/db.js';
 
+/**
+ * Migration: Add cheque_status to all payment tables
+ * - cheque_status: 'pending' | 'cleared' | 'bounced' | 'returned'
+ * - When cheque_status is 'bounced' or 'returned', amounts are nullified (set to 0 in cashflow)
+ * - Also updates CHECK constraints to allow 'cheque' payment_mode where missing
+ */
 export const up = async () => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // ── 1. Add cheque_status + cheque_no to all payment tables ──
+
+    // farmer_payments
+    await client.query(`ALTER TABLE farmer_payments ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    await client.query(`ALTER TABLE farmer_payments ADD COLUMN IF NOT EXISTS cheque_no VARCHAR(50) DEFAULT NULL`);
+
+    // plot_commission_payments
+    await client.query(`ALTER TABLE plot_commission_payments ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    await client.query(`ALTER TABLE plot_commission_payments ADD COLUMN IF NOT EXISTS cheque_no VARCHAR(50) DEFAULT NULL`);
+
+    // firm_transactions (already has cheque_no)
+    await client.query(`ALTER TABLE firm_transactions ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    // Update CHECK constraint to allow 'cheque'
+    await client.query(`ALTER TABLE firm_transactions DROP CONSTRAINT IF EXISTS firm_transactions_payment_mode_check`);
+    await client.query(`ALTER TABLE firm_transactions ADD CONSTRAINT firm_transactions_payment_mode_check CHECK (payment_mode IN ('cash', 'bank', 'cheque'))`);
+
+    // vendor_payments (already has 'cheque' in CHECK)
+    await client.query(`ALTER TABLE vendor_payments ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    await client.query(`ALTER TABLE vendor_payments ADD COLUMN IF NOT EXISTS cheque_no VARCHAR(50) DEFAULT NULL`);
+
+    // plot_payments
+    await client.query(`ALTER TABLE plot_payments ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    await client.query(`ALTER TABLE plot_payments ADD COLUMN IF NOT EXISTS cheque_no VARCHAR(50) DEFAULT NULL`);
+
+    // expenses
+    await client.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    await client.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS cheque_no VARCHAR(50) DEFAULT NULL`);
+
+    // plot_registry_payments
+    await client.query(`ALTER TABLE plot_registry_payments ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    await client.query(`ALTER TABLE plot_registry_payments ADD COLUMN IF NOT EXISTS cheque_no VARCHAR(50) DEFAULT NULL`);
+
+    // cash_flow_entries
+    await client.query(`ALTER TABLE cash_flow_entries ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    await client.query(`ALTER TABLE cash_flow_entries ADD COLUMN IF NOT EXISTS cheque_no VARCHAR(50) DEFAULT NULL`);
+    // Update cash_type CHECK to allow 'cheque'
+    await client.query(`ALTER TABLE cash_flow_entries DROP CONSTRAINT IF EXISTS cash_flow_entries_cash_type_check`);
+    await client.query(`ALTER TABLE cash_flow_entries ADD CONSTRAINT cash_flow_entries_cash_type_check CHECK (cash_type IN ('cash', 'bank', 'cheque'))`);
+
+    // day_book
+    await client.query(`ALTER TABLE day_book ADD COLUMN IF NOT EXISTS cheque_status VARCHAR(20) DEFAULT NULL`);
+    await client.query(`ALTER TABLE day_book ADD COLUMN IF NOT EXISTS cheque_no VARCHAR(50) DEFAULT NULL`);
+
+    // ── 2. Update the sync trigger to handle cheque ──
     await client.query(`
       CREATE OR REPLACE FUNCTION sync_cashflow_from_modules()
       RETURNS TRIGGER
@@ -27,6 +77,8 @@ export const up = async () => {
         v_status VARCHAR(20) := 'pending';
         v_approved_by INTEGER;
         v_approved_at TIMESTAMPTZ;
+        v_cheque_status VARCHAR(20);
+        v_cheque_no VARCHAR(50);
       BEGIN
         v_source_module := TG_TABLE_NAME;
 
@@ -38,6 +90,8 @@ export const up = async () => {
         END IF;
 
         v_source_id := NEW.id;
+        v_cheque_status := NEW.cheque_status;
+        v_cheque_no := NEW.cheque_no;
 
         IF TG_TABLE_NAME = 'farmer_payments' THEN
           SELECT f.site_id, f.name INTO v_site_id, v_particular
@@ -49,17 +103,16 @@ export const up = async () => {
           v_debit := COALESCE(NEW.amount, 0);
           v_credit := 0;
           v_cash_type := CASE
-            WHEN UPPER(COALESCE(NEW.payment_mode, 'CASH')) = 'BANK' THEN 'bank'
+            WHEN UPPER(COALESCE(NEW.payment_mode, 'CASH')) IN ('BANK', 'CHEQUE') THEN 'bank'
             ELSE 'cash'
           END;
           v_remarks := NEW.remarks;
           v_created_by := NEW.created_by;
-          v_assigned_admin_id := NEW.assigned_admin_id;5
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
           v_approved_at := NEW.approved_at;
-          v_approved_disable;
 
         ELSIF TG_TABLE_NAME = 'plot_commissions' THEN
           v_site_id := NEW.site_id;
@@ -91,7 +144,7 @@ export const up = async () => {
           v_debit := COALESCE(NEW.amount, 0);
           v_credit := 0;
           v_cash_type := CASE
-            WHEN UPPER(COALESCE(NEW.payment_mode, 'CASH')) = 'BANK' THEN 'bank'
+            WHEN UPPER(COALESCE(NEW.payment_mode, 'CASH')) IN ('BANK', 'CHEQUE') THEN 'bank'
             ELSE 'cash'
           END;
           v_remarks := NEW.remarks;
@@ -116,6 +169,7 @@ export const up = async () => {
           v_debit := COALESCE(NEW.debit, 0);
           v_credit := COALESCE(NEW.credit, 0);
           v_cash_type := CASE
+            WHEN UPPER(COALESCE(NEW.payment_mode, 'CASH')) IN ('BANK', 'CHEQUE') THEN 'bank'
             WHEN UPPER(COALESCE(NEW.payment_mode, 'CASH')) LIKE '%BANK%' THEN 'bank'
             ELSE 'cash'
           END;
@@ -133,7 +187,7 @@ export const up = async () => {
           v_debit := COALESCE(NEW.debit, 0);
           v_credit := COALESCE(NEW.credit, 0);
           v_cash_type := CASE
-            WHEN LOWER(COALESCE(NEW.payment_mode, 'cash')) = 'bank' THEN 'bank'
+            WHEN LOWER(COALESCE(NEW.payment_mode, 'cash')) IN ('bank', 'cheque') THEN 'bank'
             ELSE 'cash'
           END;
           v_remarks := NEW.remark;
@@ -169,6 +223,7 @@ export const up = async () => {
           v_debit := COALESCE(NEW.debit, 0);
           v_credit := COALESCE(NEW.credit, 0);
           v_cash_type := CASE
+            WHEN UPPER(COALESCE(NEW.payment_mode, 'CASH')) IN ('BANK', 'CHEQUE') THEN 'bank'
             WHEN UPPER(COALESCE(NEW.payment_mode, 'CASH')) LIKE '%BANK%' THEN 'bank'
             ELSE 'cash'
           END;
@@ -191,7 +246,7 @@ export const up = async () => {
           v_debit := COALESCE(NEW.amount, 0);
           v_credit := 0;
           v_cash_type := CASE
-            WHEN LOWER(COALESCE(NEW.payment_mode, 'cash')) = 'bank' THEN 'bank'
+            WHEN LOWER(COALESCE(NEW.payment_mode, 'cash')) IN ('bank', 'cheque') THEN 'bank'
             ELSE 'cash'
           END;
           v_remarks := NEW.note;
@@ -205,13 +260,20 @@ export const up = async () => {
           RETURN NEW;
         END IF;
 
-        IF v_site_id IS NULL OR (COALESCE(v_debit, 0) = 0 AND COALESCE(v_credit, 0) = 0) THEN
+        -- If cheque is bounced/returned, nullify the amounts
+        IF v_cheque_status IS NOT NULL AND UPPER(v_cheque_status) IN ('BOUNCED', 'RETURNED') THEN
+          v_debit := 0;
+          v_credit := 0;
+        END IF;
+
+        IF v_site_id IS NULL THEN
           DELETE FROM cash_flow_entries cfe
           WHERE cfe.source_module = v_source_module
             AND cfe.source_id = v_source_id;
           RETURN NEW;
         END IF;
 
+        -- If both debit and credit are 0 (e.g. bounced cheque), still keep entry but with 0 amounts
         v_month_id := ensure_site_cashflow_month(v_site_id, v_entry_date, v_created_by);
 
         INSERT INTO cash_flow_entries (
@@ -230,7 +292,9 @@ export const up = async () => {
           voucher_url,
           status,
           approved_by,
-          approved_at
+          approved_at,
+          cheque_status,
+          cheque_no
         ) VALUES (
           v_month_id,
           v_site_id,
@@ -247,7 +311,9 @@ export const up = async () => {
           v_voucher_url,
           v_status,
           v_approved_by,
-          v_approved_at
+          v_approved_at,
+          v_cheque_status,
+          v_cheque_no
         )
         ON CONFLICT (source_module, source_id)
         DO UPDATE SET
@@ -265,6 +331,8 @@ export const up = async () => {
           status = EXCLUDED.status,
           approved_by = EXCLUDED.approved_by,
           approved_at = EXCLUDED.approved_at,
+          cheque_status = EXCLUDED.cheque_status,
+          cheque_no = EXCLUDED.cheque_no,
           updated_at = NOW();
 
         RETURN NEW;
@@ -272,182 +340,12 @@ export const up = async () => {
       $$
     `);
 
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_farmer_payments ON farmer_payments`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_plot_commissions ON plot_commissions`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_plot_commission_payments ON plot_commission_payments`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_day_book ON day_book`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_firm_transactions ON firm_transactions`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_plot_payments ON plot_payments`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_expenses ON expenses`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_vendor_payments ON vendor_payments`);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_farmer_payments
-      AFTER INSERT OR UPDATE OR DELETE ON farmer_payments
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_plot_commissions
-      AFTER INSERT OR UPDATE OR DELETE ON plot_commissions
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_plot_commission_payments
-      AFTER INSERT OR UPDATE OR DELETE ON plot_commission_payments
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_day_book
-      AFTER INSERT OR UPDATE OR DELETE ON day_book
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_firm_transactions
-      AFTER INSERT OR UPDATE OR DELETE ON firm_transactions
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_plot_payments
-      AFTER INSERT OR UPDATE OR DELETE ON plot_payments
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_expenses
-      AFTER INSERT OR UPDATE OR DELETE ON expenses
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_vendor_payments
-      AFTER INSERT OR UPDATE OR DELETE ON vendor_payments
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    // Remove orphaned source-linked entries once.
-    await client.query(`
-      DELETE FROM cash_flow_entries cfe
-      WHERE cfe.source_module = 'farmer_payments'
-        AND NOT EXISTS (SELECT 1 FROM farmer_payments fp WHERE fp.id = cfe.source_id)
-    `);
-    await client.query(`
-      DELETE FROM cash_flow_entries cfe
-      WHERE cfe.source_module = 'plot_commissions'
-        AND NOT EXISTS (SELECT 1 FROM plot_commissions pc WHERE pc.id = cfe.source_id)
-    `);
-    await client.query(`
-      DELETE FROM cash_flow_entries cfe
-      WHERE cfe.source_module = 'plot_commission_payments'
-        AND NOT EXISTS (SELECT 1 FROM plot_commission_payments pcp WHERE pcp.id = cfe.source_id)
-    `);
-    await client.query(`
-      DELETE FROM cash_flow_entries cfe
-      WHERE cfe.source_module = 'day_book'
-        AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.id = cfe.source_id)
-    `);
-    await client.query(`
-      DELETE FROM cash_flow_entries cfe
-      WHERE cfe.source_module = 'firm_transactions'
-        AND NOT EXISTS (SELECT 1 FROM firm_transactions ft WHERE ft.id = cfe.source_id)
-    `);
-    await client.query(`
-      DELETE FROM cash_flow_entries cfe
-      WHERE cfe.source_module = 'plot_payments'
-        AND NOT EXISTS (SELECT 1 FROM plot_payments pp WHERE pp.id = cfe.source_id)
-    `);
-    await client.query(`
-      DELETE FROM cash_flow_entries cfe
-      WHERE cfe.source_module = 'expenses'
-        AND NOT EXISTS (SELECT 1 FROM expenses e WHERE e.id = cfe.source_id)
-    `);
-    await client.query(`
-      DELETE FROM cash_flow_entries cfe
-      WHERE cfe.source_module = 'vendor_payments'
-        AND NOT EXISTS (SELECT 1 FROM vendor_payments vp WHERE vp.id = cfe.source_id)
-    `);
-
-    // One-time full re-sync (fires update triggers and upserts current values).
-    await client.query(`UPDATE farmer_payments SET id = id`);
-    await client.query(`UPDATE plot_commissions SET id = id`);
-    await client.query(`UPDATE plot_commission_payments SET id = id`);
-    await client.query(`UPDATE day_book SET id = id`);
-    await client.query(`UPDATE firm_transactions SET id = id`);
-    await client.query(`UPDATE plot_payments SET id = id`);
-    await client.query(`UPDATE expenses SET id = id`);
-    await client.query(`UPDATE vendor_payments SET id = id`);
-
     await client.query('COMMIT');
-    console.log('✅ Migration 030 complete: cash flow sync now covers insert/update/delete across money modules.');
-  } catch (error) {
+    console.log('Migration 031: cheque_status columns and updated trigger applied successfully');
+  } catch (err) {
     await client.query('ROLLBACK');
-    console.error('❌ Migration 030 failed:', error);
-    throw error;
-  } finally {
-    client.release();
-  }
-};
-
-export const down = async () => {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_farmer_payments ON farmer_payments`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_plot_commissions ON plot_commissions`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_plot_commission_payments ON plot_commission_payments`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_day_book ON day_book`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_firm_transactions ON firm_transactions`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_plot_payments ON plot_payments`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_expenses ON expenses`);
-    await client.query(`DROP TRIGGER IF EXISTS trg_sync_cfe_vendor_payments ON vendor_payments`);
-
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_farmer_payments
-      AFTER INSERT ON farmer_payments
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_plot_commissions
-      AFTER INSERT ON plot_commissions
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_day_book
-      AFTER INSERT ON day_book
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_firm_transactions
-      AFTER INSERT ON firm_transactions
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_plot_payments
-      AFTER INSERT ON plot_payments
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_expenses
-      AFTER INSERT ON expenses
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-    await client.query(`
-      CREATE TRIGGER trg_sync_cfe_vendor_payments
-      AFTER INSERT ON vendor_payments
-      FOR EACH ROW EXECUTE FUNCTION sync_cashflow_from_modules()
-    `);
-
-    await client.query('COMMIT');
-    console.log('✅ Migration 030 rollback complete.');
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('❌ Migration 030 rollback failed:', error);
-    throw error;
+    console.error('Migration 031 failed:', err);
+    throw err;
   } finally {
     client.release();
   }

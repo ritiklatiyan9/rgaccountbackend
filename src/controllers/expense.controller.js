@@ -66,6 +66,8 @@ export const createExpense = asyncHandler(async (req, res) => {
     bill_url: bill_url || null,
     status: 'pending', // New expenses are pending by default
     created_by: req.user.id,
+    cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+    cheque_status: (payment_mode || '').trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
   };
 
   const expense = await expenseModel.create(data, pool);

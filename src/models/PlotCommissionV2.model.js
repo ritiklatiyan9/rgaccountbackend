@@ -20,7 +20,7 @@ class PlotCommissionV2Model extends MasterModel {
       FROM plot_commissions_v2 pc
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id
-      LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id AND pcp.status = 'approved'
+      LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       WHERE pc.site_id = $1
       GROUP BY pc.id, p.id, m.id
       ORDER BY pc.created_at DESC
@@ -36,14 +36,15 @@ class PlotCommissionV2Model extends MasterModel {
     const query = `
       SELECT
         pc.*,
-        p.plot_no, p.plot_size, p.plot_rate, p.buyer_name,
+        p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.commission_rate,
         m.full_name AS agent_name, m.phone AS agent_phone,
-        COALESCE(SUM(pcp.amount), 0) AS total_paid,
-        (pc.total_commission - COALESCE(SUM(pcp.amount), 0)) AS balance
+        COALESCE(SUM(pcp.amount) FILTER (WHERE pcp.status = 'approved'), 0) AS total_paid,
+        COALESCE(SUM(pcp.amount) FILTER (WHERE pcp.status IN ('approved', 'pending')), 0) AS total_paid_all,
+        (pc.total_commission - COALESCE(SUM(pcp.amount) FILTER (WHERE pcp.status IN ('approved', 'pending')), 0)) AS balance
       FROM plot_commissions_v2 pc
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id
-      LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id AND pcp.status = 'approved'
+      LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       WHERE pc.id = $1
       GROUP BY pc.id, p.id, m.id
     `;

@@ -76,7 +76,7 @@ class DayBookModel extends MasterModel {
         COALESCE(SUM(credit), 0)::numeric AS total_credit,
         COUNT(*)::int AS total_count
       FROM day_book
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     `;
     const result = await pool.query(query, [siteId]);
     return result.rows[0];
@@ -93,7 +93,7 @@ class DayBookModel extends MasterModel {
         COALESCE(SUM(credit), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM day_book
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY entry_type
       ORDER BY total_debit DESC
     `;
@@ -112,7 +112,7 @@ class DayBookModel extends MasterModel {
         COALESCE(SUM(credit), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM day_book
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(payment_mode, 'UNSPECIFIED')
       ORDER BY total_debit DESC
     `;
@@ -131,7 +131,7 @@ class DayBookModel extends MasterModel {
         COALESCE(SUM(credit), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM day_book
-      WHERE site_id = $1
+      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(category, 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;

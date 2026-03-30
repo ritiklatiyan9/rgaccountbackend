@@ -47,7 +47,7 @@ const checkFreeToSaleStatus = async (siteId) => {
       if (installments.length === 0) continue;
 
       const totalRes = await pool.query(
-        `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments WHERE plot_id = $1`,
+        `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
         [plot.id]
       );
       let remainingPool = parseFloat(totalRes.rows[0].total_received) || 0;
@@ -376,7 +376,7 @@ export const createPayment = asyncHandler(async (req, res) => {
   const plot = await plotModel.findById(parseInt(plot_id), pool);
   if (!plot) return res.status(404).json({ message: 'Plot not found' });
 
-  const normalizedPaymentType = payment_type === 'BANK' ? 'BANK' : 'CASH';
+  const normalizedPaymentType = ['BANK', 'CHEQUE'].includes(payment_type) ? payment_type : 'CASH';
 
   const data = {
     plot_id: parseInt(plot_id),
@@ -385,8 +385,8 @@ export const createPayment = asyncHandler(async (req, res) => {
     payment_from: payment_from ? payment_from.trim().toUpperCase() : null,
     payment_type: normalizedPaymentType,
     bank_details: bank_details ? bank_details.trim().toUpperCase() : null,
-    bank_name: normalizedPaymentType === 'BANK' ? (bank_name ? bank_name.trim().toUpperCase() : null) : null,
-    branch: normalizedPaymentType === 'BANK' ? (branch ? branch.trim().toUpperCase() : null) : null,
+    bank_name: ['BANK', 'CHEQUE'].includes(normalizedPaymentType) ? (bank_name ? bank_name.trim().toUpperCase() : null) : null,
+    branch: ['BANK', 'CHEQUE'].includes(normalizedPaymentType) ? (branch ? branch.trim().toUpperCase() : null) : null,
     narration: narration ? narration.trim().toUpperCase() : null,
     received_by: received_by ? received_by.trim().toUpperCase() : null,
     amount: parseFloat(amount) || 0,
@@ -394,6 +394,8 @@ export const createPayment = asyncHandler(async (req, res) => {
     voucher_url: voucher_url || null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
+    cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+    cheque_status: normalizedPaymentType === 'CHEQUE' ? 'PENDING' : null,
   };
 
   const payment = await plotPaymentModel.create(data, pool);

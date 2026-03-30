@@ -10,8 +10,12 @@ class CashFlowMonthModel extends MasterModel {
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT cfm.*,
-        COALESCE((SELECT SUM(cfe.debit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id), 0) AS total_debit,
-        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id), 0) AS total_credit,
+        COALESCE((SELECT SUM(cfe.debit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_debit,
+        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_credit,
+        COALESCE((SELECT SUM(cfe.debit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND cfe.cash_type = 'cash' AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS cash_given,
+        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND cfe.cash_type = 'cash' AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS cash_received,
+        COALESCE((SELECT SUM(cfe.debit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND cfe.cash_type = 'bank' AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS bank_given,
+        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND cfe.cash_type = 'bank' AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS bank_received,
         (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id) AS entry_count
       FROM cash_flow_months cfm
       WHERE cfm.site_id = $1
@@ -32,8 +36,8 @@ class CashFlowMonthModel extends MasterModel {
   async findByIdWithTotals(id, pool) {
     const query = `
       SELECT cfm.*,
-        COALESCE((SELECT SUM(cfe.debit)  FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id), 0) AS total_debit,
-        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id), 0) AS total_credit,
+        COALESCE((SELECT SUM(cfe.debit)  FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_debit,
+        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_credit,
         (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id) AS entry_count
       FROM cash_flow_months cfm
       WHERE cfm.id = $1
@@ -51,7 +55,7 @@ class CashFlowMonthModel extends MasterModel {
         COALESCE(SUM(cfe.debit), 0) AS total_debit,
         cfm.opening_balance + COALESCE(SUM(cfe.credit), 0) - COALESCE(SUM(cfe.debit), 0) AS closing_balance
       FROM cash_flow_months cfm
-      LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
+      LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       WHERE cfm.id = $1
       GROUP BY cfm.id
     `;
@@ -107,7 +111,7 @@ class CashFlowEntryModel extends MasterModel {
         COALESCE(SUM(debit), 0)  AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM cash_flow_entries
-      WHERE cash_flow_month_id = $1
+      WHERE cash_flow_month_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     `;
     const result = await pool.query(query, [monthId]);
     return result.rows[0];
@@ -133,7 +137,7 @@ class CashFlowEntryModel extends MasterModel {
         COALESCE(SUM(debit), 0) AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM cash_flow_entries
-      WHERE cash_flow_month_id = $1
+      WHERE cash_flow_month_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY particular
       ORDER BY total_debit DESC
     `;

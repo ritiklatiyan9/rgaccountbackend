@@ -196,6 +196,8 @@ export const createRegistryPayment = asyncHandler(async (req, res) => {
     notes: notes ? notes.trim().toUpperCase() : null,
     assigned_admin_id: req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null,
     created_by: req.user.id,
+    cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+    cheque_status: (payment_mode || '').trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
   };
 
   if (hasSourcePlotPaymentCol) {

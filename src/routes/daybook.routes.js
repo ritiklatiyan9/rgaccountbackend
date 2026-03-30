@@ -24,6 +24,7 @@ import {
   updatePlotPaymentFromDayBook,
   deletePlotPaymentFromDayBook,
   listRecentTransactions,
+  getProfitSummary,
 } from '../controllers/daybook.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -40,6 +41,9 @@ const bustDaybookCache = invalidateCacheOnSuccess(['/daybook']);
 
 // Recent transactions (Dashboard) — must be before /:id route
 router.get('/recent', requireRole('admin', 'sub_admin'), daybookReadCache, listRecentTransactions);
+
+// Profit summary (Dashboard)
+router.get('/profit-summary', requireRole('admin', 'sub_admin'), daybookReadCache, getProfitSummary);
 
 // Day Book CRUD
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'write'), bustDaybookCache, createDayBookEntry);
