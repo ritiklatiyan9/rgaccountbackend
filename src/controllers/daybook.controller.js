@@ -1485,6 +1485,9 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
  *   Expenses = farmer_payments debit + expenses debit + plot_payments debit
  *              + plot_commissions debit + plot_commission_payments debit + vendor_payments debit
  * Excludes: firm_transactions, day_book (personal ledger / cashflow), imprest
+ *
+ * Also returns ledger flow (non-profit entries: day_book, firm_transactions, direct cashflow)
+ * and currentBalance = profit + ledgerCredit - ledgerDebit
  */
 export const getProfitSummary = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
@@ -1501,6 +1504,7 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
     'vendor_payments',
   ];
 
+  // Profit modules breakdown
   const result = await pool.query(
     `SELECT source_module,
             COALESCE(SUM(credit), 0)::numeric AS total_credit,
@@ -1532,10 +1536,43 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
     totalExpense += debit;
   }
 
+  const profit = totalEarn - totalExpense;
+
+  // Ledger flow: entries NOT in profit modules (day_book, firm_transactions, direct cashflow with NULL source_module)
+  const ledgerResult = await pool.query(
+    `SELECT
+       COALESCE(source_module, 'direct') AS ledger_source,
+       COALESCE(SUM(credit), 0)::numeric AS total_credit,
+       COALESCE(SUM(debit),  0)::numeric AS total_debit
+     FROM cash_flow_entries
+     WHERE site_id = $1
+       AND (source_module IS NULL OR source_module NOT IN (${profitModules.map((_, i) => `$${i + 2}`).join(', ')}))
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     GROUP BY COALESCE(source_module, 'direct')`,
+    [siteId, ...profitModules]
+  );
+
+  let ledgerCredit = 0;
+  let ledgerDebit = 0;
+  const ledgerBreakdown = {};
+
+  for (const row of ledgerResult.rows) {
+    const credit = parseFloat(row.total_credit) || 0;
+    const debit  = parseFloat(row.total_debit)  || 0;
+    ledgerCredit += credit;
+    ledgerDebit  += debit;
+    ledgerBreakdown[row.ledger_source] = { credit, debit };
+  }
+
   res.json({
     earn: totalEarn,
     expense: totalExpense,
-    profit: totalEarn - totalExpense,
+    profit,
     breakdown: byModule,
+    ledgerCredit,
+    ledgerDebit,
+    ledgerNet: ledgerCredit - ledgerDebit,
+    ledgerBreakdown,
+    currentBalance: profit + ledgerCredit - ledgerDebit,
   });
 });
