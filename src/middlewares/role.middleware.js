@@ -8,6 +8,11 @@ const requireRole = (...roles) => {
       return res.status(401).json({ message: 'Authentication required' });
     }
 
+    // super_admin always passes any role check
+    if (req.user.role === 'super_admin') {
+      return next();
+    }
+
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({ message: 'Insufficient permissions' });
     }

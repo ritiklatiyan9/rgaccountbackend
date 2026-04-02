@@ -72,7 +72,7 @@ export const login = asyncHandler(async (req, res) => {
 
   // Fetch accessible sites
   let sites;
-  if (user.role === 'admin') {
+  if (user.role === 'admin' || user.role === 'super_admin') {
     sites = await siteModel.findAll(pool);
   } else {
     sites = await siteModel.findByUserId(user.id, pool);
@@ -84,14 +84,17 @@ export const login = asyncHandler(async (req, res) => {
     permissions = await permissionModel.getByUserId(user.id);
   }
 
-  // Record login session
+  // Record login session (skip for super_admin to hide from activity)
   const ipAddress = req.ip || req.connection.remoteAddress;
+  let sessionId = null;
 
-  const sessionResult = await pool.query(
-    'INSERT INTO user_sessions (user_id, ip_address) VALUES ($1, $2) RETURNING id',
-    [user.id, ipAddress]
-  );
-  const sessionId = sessionResult.rows[0].id;
+  if (user.role !== 'super_admin') {
+    const sessionResult = await pool.query(
+      'INSERT INTO user_sessions (user_id, ip_address) VALUES ($1, $2) RETURNING id',
+      [user.id, ipAddress]
+    );
+    sessionId = sessionResult.rows[0].id;
+  }
 
   res.json({
     user: userModel.sanitize(user),
@@ -168,7 +171,7 @@ export const getMe = asyncHandler(async (req, res) => {
   if (!user) return res.status(404).json({ message: 'User not found' });
 
   let sites;
-  if (user.role === 'admin') {
+  if (user.role === 'admin' || user.role === 'super_admin') {
     sites = await siteModel.findAll(pool);
   } else {
     sites = await siteModel.findByUserId(user.id, pool);

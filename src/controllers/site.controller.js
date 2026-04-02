@@ -41,7 +41,7 @@ export const createSite = asyncHandler(async (req, res) => {
 export const listSites = asyncHandler(async (req, res) => {
   let sites;
 
-  if (req.user.role === 'admin') {
+  if (req.user.role === 'admin' || req.user.role === 'super_admin') {
     sites = await siteModel.findAll(pool);
   } else {
     sites = await siteModel.findByUserId(req.user.id, pool);

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
   phone           VARCHAR(20),
   photo           VARCHAR(500),
   role            VARCHAR(20) NOT NULL DEFAULT 'sub_admin'
-                    CHECK (role IN ('admin', 'sub_admin')),
+                    CHECK (role IN ('super_admin', 'admin', 'sub_admin')),
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
   is_active       BOOLEAN DEFAULT TRUE,
   refresh_token   VARCHAR(500),

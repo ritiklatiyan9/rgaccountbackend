@@ -10,8 +10,8 @@ import permissionModel from '../models/Permission.model.js';
 const requirePermission = (module, action) => {
     return async (req, res, next) => {
         try {
-            // Admin always has full access
-            if (req.user.role === 'admin') {
+            // Admin and super_admin always have full access
+            if (req.user.role === 'admin' || req.user.role === 'super_admin') {
                 return next();
             }
 

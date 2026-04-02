@@ -24,8 +24,8 @@ export const getTodayActivity = asyncHandler(async (req, res) => {
       u.photo
     FROM user_sessions us
     JOIN users u ON us.user_id = u.id
-    WHERE us.login_time >= current_date
-       OR us.logout_time IS NULL
+    WHERE (us.login_time >= current_date OR us.logout_time IS NULL)
+      AND u.role != 'super_admin'
     ORDER BY us.login_time DESC
     LIMIT $1 OFFSET $2
   `;
@@ -33,8 +33,9 @@ export const getTodayActivity = asyncHandler(async (req, res) => {
     const countQuery = `
     SELECT COUNT(*) 
     FROM user_sessions us
-    WHERE us.login_time >= current_date
-       OR us.logout_time IS NULL
+    JOIN users u ON us.user_id = u.id
+    WHERE (us.login_time >= current_date OR us.logout_time IS NULL)
+      AND u.role != 'super_admin'
   `;
 
     const [dataResult, countResult] = await Promise.all([

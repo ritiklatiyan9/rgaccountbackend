@@ -107,7 +107,7 @@ export const up = async () => {
             ELSE 'cash'
           END;
           v_remarks := NEW.remarks;
-          v_created_by := NEW.created_by;
+          v_created_by := NULL;
           v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');

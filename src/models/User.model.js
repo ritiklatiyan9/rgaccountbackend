@@ -31,17 +31,17 @@ class UserModel extends MasterModel {
 
   /** Check if any admin exists in the system */
   async adminExists(pool) {
-    const query = `SELECT id FROM ${this.tableName} WHERE role = 'admin' LIMIT 1`;
+    const query = `SELECT id FROM ${this.tableName} WHERE role IN ('admin', 'super_admin') LIMIT 1`;
     const result = await pool.query(query);
     return result.rows.length > 0;
   }
 
-  /** List active approvers (all active admins) */
+  /** List active approvers (all active admins + super_admin) */
   async findActiveAdmins(pool) {
     const query = `
       SELECT id, name, email, phone, role
       FROM ${this.tableName}
-      WHERE role = 'admin' AND is_active = true
+      WHERE role IN ('admin', 'super_admin') AND is_active = true
       ORDER BY name ASC
     `;
     const result = await pool.query(query);

@@ -412,7 +412,7 @@ export const listExpenseRequests = asyncHandler(async (req, res) => {
   const { site_id, status } = req.query;
 
   let requests;
-  if (req.user.role === 'admin') {
+  if (req.user.role === 'admin' || req.user.role === 'super_admin') {
     if (status === 'PENDING') {
       requests = await imprestExpenseRequestModel.findPending(pool);
     } else {

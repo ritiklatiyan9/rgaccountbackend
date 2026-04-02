@@ -53,13 +53,12 @@ export const up = async () => {
             ELSE 'cash'
           END;
           v_remarks := NEW.remarks;
-          v_created_by := NEW.created_by;
-          v_assigned_admin_id := NEW.assigned_admin_id;5
+          v_created_by := NULL;
+          v_assigned_admin_id := NEW.assigned_admin_id;
           v_voucher_url := NEW.voucher_url;
           v_status := COALESCE(NEW.status, 'pending');
           v_approved_by := NEW.approved_by;
           v_approved_at := NEW.approved_at;
-          v_approved_disable;
 
         ELSIF TG_TABLE_NAME = 'plot_commissions' THEN
           v_site_id := NEW.site_id;
