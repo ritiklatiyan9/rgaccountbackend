@@ -23,7 +23,7 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ message: 'Session expired. Please login again.' });
     }
 
-    if (sessionIdHeader) {
+    if (sessionIdHeader && decoded.role !== 'super_admin') {
       const sessionId = parseInt(sessionIdHeader, 10);
       if (!Number.isInteger(sessionId) || sessionId <= 0) {
         return res.status(401).json({ message: 'Invalid session context' });
