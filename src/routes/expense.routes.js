@@ -24,7 +24,7 @@ router.get('/autocomplete', requireRole('admin', 'sub_admin'), expenseReadCache,
 router.get('/pending', requireRole('admin'), expenseReadCache, listPendingExpenses);     // Admin: get pending expenses
 router.get('/status-counts', requireRole('admin'), expenseReadCache, getStatusCounts);   // Admin: get status counts
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, getExpense);
-router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'create'), bustExpenseCache, createExpense);
+router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'write'), bustExpenseCache, createExpense);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), bustExpenseCache, updateExpense);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), bustExpenseCache, deleteExpense);
 

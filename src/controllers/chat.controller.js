@@ -105,7 +105,7 @@ export const deleteMessage = async (req, res) => {
 
         // Only super-admins usually allowed, but let's check basic permissions or roles if needed
         // Assuming role middleware checks it or we can check req.user.role here
-        if (req.user.role !== 'admin') {
+        if (req.user.role !== 'admin' && req.user.role !== 'super_admin') {
             return res.status(403).json({ message: 'Only admins can delete messages' });
         }
 

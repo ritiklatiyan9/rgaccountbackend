@@ -181,7 +181,7 @@ export const getBalance = asyncHandler(async (req, res) => {
   const userId = req.query.user_id ? parseInt(req.query.user_id) : req.user.id;
 
   // Admin can check any user's balance; sub-admin only their own
-  if (req.user.role !== 'admin' && userId !== req.user.id) {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && userId !== req.user.id) {
     return res.status(403).json({ message: 'Insufficient permissions' });
   }
 
@@ -197,7 +197,7 @@ export const getLedger = asyncHandler(async (req, res) => {
   const userId = req.query.user_id ? parseInt(req.query.user_id) : req.user.id;
   const { date_from, date_to, page = 1, limit = 20 } = req.query;
 
-  if (req.user.role !== 'admin' && userId !== req.user.id) {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && userId !== req.user.id) {
     return res.status(403).json({ message: 'Insufficient permissions' });
   }
 
