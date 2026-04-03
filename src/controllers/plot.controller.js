@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
+import { plotRegistryModel } from '../models/PlotRegistry.model.js';
 import pool from '../config/db.js';
 
 /**
@@ -179,6 +180,64 @@ const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssigned
   return insertResult.rows[0] || null;
 };
 
+/**
+ * Auto-create a plot_registries entry when a plot status changes to REGISTRY.
+ * Skips if registry already exists for this plot.
+ */
+const maybeAutoCreatePlotRegistry = async ({ plot, createdBy, registryFields = {} }) => {
+  if (!plot) return null;
+  const plotStatus = String(plot.status || '').toUpperCase();
+  if (plotStatus !== 'REGISTRY') return null;
+
+  try {
+    // Check if registry already exists for this plot by plot_id or plot_no
+    const existingById = plot.id
+      ? (await pool.query(`SELECT id FROM plot_registries WHERE plot_id = $1 LIMIT 1`, [parseInt(plot.id)])).rows[0]
+      : null;
+    if (existingById) return { id: existingById.id, already_existed: true };
+
+    const plotNo = String(plot.plot_no || '').trim().toUpperCase();
+    if (!plotNo) return null;
+
+    const existingByNo = await plotRegistryModel.findByPlotNo(parseInt(plot.site_id), plotNo, pool);
+    if (existingByNo) return { id: existingByNo.id, already_existed: true };
+
+    // Build registry data from plot fields + optional registry form fields
+    const sizeMeter = parseFloat(plot.registry_area) || parseFloat(plot.plot_size_mtr) || null;
+    const sizeSqyard = sizeMeter ? parseFloat((sizeMeter * 1.19599).toFixed(2)) : null;
+    const circleRate = parseFloat(plot.circle_rate) || null;
+    const bankAmount = parseFloat(plot.to_receive_bank) || (sizeMeter && circleRate ? parseFloat((sizeMeter * circleRate).toFixed(2)) : null);
+
+    const data = {
+      site_id: parseInt(plot.site_id),
+      plot_id: parseInt(plot.id),
+      plot_no: plotNo,
+      customer_name: plot.buyer_name ? String(plot.buyer_name).trim().toUpperCase() : null,
+      size_meter: sizeMeter,
+      size_sqyard: sizeSqyard,
+      circle_rate: circleRate,
+      registry_date: registryFields.registry_date || null,
+      created_entry_date: new Date().toISOString().split('T')[0],
+      farmer_name: registryFields.farmer_name ? String(registryFields.farmer_name).trim().toUpperCase() : null,
+      seller_name: registryFields.seller_name ? String(registryFields.seller_name).trim().toUpperCase() : null,
+      firm_name: registryFields.firm_name ? String(registryFields.firm_name).trim().toUpperCase() : null,
+      bank_amount: bankAmount,
+      registry_payment: parseFloat(registryFields.registry_payment) || 0,
+      notes: registryFields.notes ? String(registryFields.notes).trim() : 'Auto-created from Plot Payments (status → REGISTRY)',
+      assigned_admin_id: plot.assigned_admin_id ? parseInt(plot.assigned_admin_id) : null,
+      created_by: createdBy ? parseInt(createdBy) : null,
+    };
+
+    const registry = await plotRegistryModel.create(data, pool);
+    return { id: registry.id, already_existed: false };
+  } catch (err) {
+    // Non-critical — if plot_registries table doesn't exist yet, skip
+    if (err?.code === '42P01') return null;
+    console.error('maybeAutoCreatePlotRegistry error:', err.message);
+    return null;
+  }
+};
+
 // ══════════════════════════════════════════════════
 //  PLOT ENDPOINTS
 // ══════════════════════════════════════════════════
@@ -284,7 +343,17 @@ export const createPlot = asyncHandler(async (req, res) => {
     if (err?.code !== '42P01') throw err;
   }
 
-  res.status(201).json({ plot, auto_commission: autoCommission });
+  // Auto-create registry if plot created with status REGISTRY
+  let autoRegistry = null;
+  if (String(data.status).toUpperCase() === 'REGISTRY') {
+    autoRegistry = await maybeAutoCreatePlotRegistry({
+      plot,
+      createdBy: req.user?.id,
+      registryFields: req.body.registry_fields || {},
+    });
+  }
+
+  res.status(201).json({ plot, auto_commission: autoCommission, auto_registry: autoRegistry });
 });
 
 /** GET /plots?site_id=X — List all plots for a site */
@@ -389,7 +458,17 @@ export const updatePlot = asyncHandler(async (req, res) => {
     if (err?.code !== '42P01') throw err;
   }
 
-  res.json({ plot: updated, auto_commission: autoCommission });
+  // Auto-create registry when status changes to REGISTRY
+  let autoRegistry = null;
+  if (status !== undefined && String(status).toUpperCase() === 'REGISTRY' && String(existing.status).toUpperCase() !== 'REGISTRY') {
+    autoRegistry = await maybeAutoCreatePlotRegistry({
+      plot: updated,
+      createdBy: req.user?.id,
+      registryFields: req.body.registry_fields || {},
+    });
+  }
+
+  res.json({ plot: updated, auto_commission: autoCommission, auto_registry: autoRegistry });
 });
 
 /** DELETE /plots/:id — Delete a plot and all its payments */
@@ -494,7 +573,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (!existing) return res.status(404).json({ message: 'Payment not found' });
 
   const updateData = {};
-  const normalizedPaymentType = payment_type !== undefined ? (payment_type === 'BANK' ? 'BANK' : 'CASH') : undefined;
+  const normalizedPaymentType = payment_type !== undefined ? (['BANK', 'CHEQUE'].includes(payment_type) ? payment_type : 'CASH') : undefined;
   if (date !== undefined) updateData.date = date;
   if (payment_from !== undefined) updateData.payment_from = payment_from ? payment_from.trim().toUpperCase() : null;
   if (normalizedPaymentType !== undefined) updateData.payment_type = normalizedPaymentType;

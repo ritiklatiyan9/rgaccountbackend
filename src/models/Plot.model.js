@@ -11,7 +11,7 @@ class PlotModel extends MasterModel {
     const query = `
       SELECT p.*,
         COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_received,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'BANK' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
+        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type IN ('BANK', 'CHEQUE') AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
         COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_cash,
         (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count,
         COALESCE((SELECT string_agg(DISTINCT pp.buyer_name, ', ') FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.buyer_name IS NOT NULL AND pp.buyer_name != ''), '') AS payment_buyer_names,
@@ -36,7 +36,7 @@ class PlotModel extends MasterModel {
     const query = `
       SELECT p.*,
         COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_received,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'BANK' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
+        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type IN ('BANK', 'CHEQUE') AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
         COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_cash,
         (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count
       FROM plots p

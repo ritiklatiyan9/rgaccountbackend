@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
+import { plotModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 
 // ══════════════════════════════════════════════════
@@ -42,7 +43,22 @@ export const createRegistry = asyncHandler(async (req, res) => {
   };
 
   const registry = await plotRegistryModel.create(data, pool);
-  res.status(201).json({ registry });
+
+  // Auto-update linked plot status to REGISTRY if currently BOOKED
+  let plotStatusUpdated = false;
+  if (data.plot_id) {
+    try {
+      const plot = await plotModel.findById(data.plot_id, pool);
+      if (plot && ['BOOKED'].includes(String(plot.status || '').toUpperCase())) {
+        await plotModel.update(data.plot_id, { status: 'REGISTRY' }, pool);
+        plotStatusUpdated = true;
+      }
+    } catch (err) {
+      console.error('Auto-update plot status on registry create error:', err.message);
+    }
+  }
+
+  res.status(201).json({ registry, plot_status_updated: plotStatusUpdated });
 });
 
 /** GET /registries?site_id=X — List all registries for a site */
@@ -100,7 +116,23 @@ export const updateRegistry = asyncHandler(async (req, res) => {
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
   const updated = await plotRegistryModel.update(parseInt(id), updateData, pool);
-  res.json({ registry: updated });
+
+  // Auto-update linked plot status to REGISTRY if not already
+  let plotStatusUpdated = false;
+  const resolvedPlotId = updateData.plot_id !== undefined ? updateData.plot_id : existing.plot_id;
+  if (resolvedPlotId) {
+    try {
+      const plot = await plotModel.findById(resolvedPlotId, pool);
+      if (plot && String(plot.status || '').toUpperCase() !== 'REGISTRY') {
+        await plotModel.update(resolvedPlotId, { status: 'REGISTRY' }, pool);
+        plotStatusUpdated = true;
+      }
+    } catch (err) {
+      console.error('Auto-update plot status on registry update error:', err.message);
+    }
+  }
+
+  res.json({ registry: updated, plot_status_updated: plotStatusUpdated });
 });
 
 /** DELETE /registries/:id */

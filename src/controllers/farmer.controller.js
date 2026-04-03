@@ -165,7 +165,7 @@ export const createPayment = asyncHandler(async (req, res) => {
   const totalAmount = parseFloat(amount) || 0;
   const mode = (payment_mode || 'CASH').toUpperCase();
   const cashAmt = mode === 'BANK' || mode === 'CHEQUE' ? 0 : (mode === 'SPLIT' ? (parseFloat(cash_amount) || 0) : totalAmount);
-  const bankAmt = mode === 'CASH' || mode === 'CHEQUE' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmount);
+  const bankAmt = mode === 'CASH' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmount);
 
   const paymentDate = date || new Date().toISOString().split('T')[0];
 
