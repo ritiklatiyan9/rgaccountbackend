@@ -537,10 +537,10 @@ export const getAutocomplete = asyncHandler(async (req, res) => {
   const [data, membersResult] = await Promise.all([
     plotPaymentModel.getAutocomplete(parseInt(site_id), pool),
     pool.query(
-      `SELECT full_name, phone FROM members WHERE site_id = $1 AND full_name IS NOT NULL AND full_name != '' ORDER BY full_name ASC`,
+      `SELECT full_name, phone, team, member_type FROM members WHERE site_id = $1 AND full_name IS NOT NULL AND full_name != '' ORDER BY full_name ASC`,
       [parseInt(site_id)]
     ),
   ]);
-  data.members = membersResult.rows.map(r => ({ name: r.full_name, phone: r.phone || '' }));
+  data.members = membersResult.rows.map(r => ({ name: r.full_name, phone: r.phone || '', team: r.team || '', member_type: r.member_type || '' }));
   res.json(data);
 });

@@ -644,6 +644,7 @@ CREATE TABLE IF NOT EXISTS members (
   company_name    VARCHAR(255),
   reference       VARCHAR(255),
   notes           TEXT,
+  team            VARCHAR(50),
   status          VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'
                     CHECK (status IN ('ACTIVE','INACTIVE','BLOCKED')),
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,

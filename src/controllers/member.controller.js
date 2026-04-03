@@ -28,6 +28,8 @@ const MEMBER_FIELDS = [
   'license_number', 'commission_rate', 'operating_areas',
   // Vendor-specific
   'business_name', 'service_type', 'payment_terms',
+  // Team (for broker/member/employee/partner)
+  'team',
 ];
 
 const sanitize = (body) => {
@@ -44,7 +46,7 @@ const sanitize = (body) => {
         'marital_status', 'qualification', 'passport_no', 'driving_license_no',
         'gst_no', 'tin_no', 'emergency_contact_name', 'emergency_contact_relation',
         'nominee_name', 'nominee_relation', 'designation', 'department',
-        'employment_type'].includes(f) && val) {
+        'employment_type', 'team'].includes(f) && val) {
         val = val.toUpperCase();
       }
       data[f] = val || null;
@@ -89,6 +91,17 @@ export const createMember = asyncHandler(async (req, res) => {
 
   data.site_id = parseInt(site_id);
   data.created_by = req.user.id;
+
+  // Check phone uniqueness within site
+  if (data.phone) {
+    const { rows } = await pool.query(
+      `SELECT id, full_name FROM members WHERE site_id = $1 AND phone = $2`,
+      [data.site_id, data.phone]
+    );
+    if (rows.length > 0) {
+      return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${rows[0].full_name}` });
+    }
+  }
 
   // Handle document uploads (photo + KYC + employee docs)
   const docUrls = await uploadDocuments(req.files);
@@ -140,6 +153,17 @@ export const updateMember = asyncHandler(async (req, res) => {
   if (!existing) return res.status(404).json({ message: 'Member not found' });
 
   const data = sanitize(req.body);
+
+  // Check phone uniqueness within site (exclude current member)
+  if (data.phone) {
+    const { rows } = await pool.query(
+      `SELECT id, full_name FROM members WHERE site_id = $1 AND phone = $2 AND id != $3`,
+      [existing.site_id, data.phone, parseInt(id)]
+    );
+    if (rows.length > 0) {
+      return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${rows[0].full_name}` });
+    }
+  }
 
   // Handle document uploads (photo + KYC + employee docs)
   const docUrls = await uploadDocuments(req.files);
