@@ -13,7 +13,9 @@ class PlotModel extends MasterModel {
         COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_received,
         COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'BANK' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
         COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_cash,
-        (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count
+        (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count,
+        COALESCE((SELECT string_agg(DISTINCT pp.buyer_name, ', ') FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.buyer_name IS NOT NULL AND pp.buyer_name != ''), '') AS payment_buyer_names,
+        COALESCE((SELECT string_agg(DISTINCT pp.booked_by, ', ') FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.booked_by IS NOT NULL AND pp.booked_by != ''), '') AS payment_booked_bys
       FROM plots p
       WHERE p.site_id = $1
       ORDER BY p.plot_no ASC
@@ -22,11 +24,11 @@ class PlotModel extends MasterModel {
     return result.rows;
   }
 
-  /** Check for duplicate plot_no within a site */
-  async findByPlotNo(siteId, plotNo, pool) {
-    const query = `SELECT * FROM plots WHERE site_id = $1 AND UPPER(plot_no) = UPPER($2)`;
+  /** Check for duplicate plot_no within a site — returns ALL matches */
+  async findAllByPlotNo(siteId, plotNo, pool) {
+    const query = `SELECT * FROM plots WHERE site_id = $1 AND UPPER(plot_no) = UPPER($2) ORDER BY id`;
     const result = await pool.query(query, [siteId, plotNo]);
-    return result.rows[0];
+    return result.rows;
   }
 
   /** Get single plot with aggregates */
@@ -111,12 +113,13 @@ class PlotPaymentModel extends MasterModel {
 
   /** Unique autocomplete values from the site's plot payments */
   async getAutocomplete(siteId, pool) {
-    const [names, paymentFroms, bankDetails, narrations, receivedBys] = await Promise.all([
+    const [names, paymentFroms, bankDetails, narrations, receivedBys, bookedBys] = await Promise.all([
       pool.query(`SELECT DISTINCT p.buyer_name AS val FROM plots p WHERE p.site_id = $1 AND p.buyer_name IS NOT NULL AND p.buyer_name != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT payment_from AS val FROM plot_payments WHERE site_id = $1 AND payment_from IS NOT NULL AND payment_from != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT bank_details AS val FROM plot_payments WHERE site_id = $1 AND bank_details IS NOT NULL AND bank_details != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT narration AS val FROM plot_payments WHERE site_id = $1 AND narration IS NOT NULL AND narration != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT received_by AS val FROM plot_payments WHERE site_id = $1 AND received_by IS NOT NULL AND received_by != '' ORDER BY val ASC`, [siteId]),
+      pool.query(`SELECT DISTINCT booked_by AS val FROM plot_payments WHERE site_id = $1 AND booked_by IS NOT NULL AND booked_by != '' ORDER BY val ASC`, [siteId]),
     ]);
     return {
       buyerNames: names.rows.map(r => r.val),
@@ -124,6 +127,7 @@ class PlotPaymentModel extends MasterModel {
       bankDetails: bankDetails.rows.map(r => r.val),
       narrations: narrations.rows.map(r => r.val),
       receivedBys: receivedBys.rows.map(r => r.val),
+      bookedBys: bookedBys.rows.map(r => r.val),
     };
   }
 }

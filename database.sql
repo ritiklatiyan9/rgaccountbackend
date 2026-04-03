@@ -411,11 +411,11 @@ CREATE TABLE IF NOT EXISTS plots (
   booking_by      VARCHAR(255),
   booking_date    DATE,
   status          VARCHAR(50) DEFAULT 'BOOKED',
+  plot_tag        VARCHAR(20),
   notes           TEXT,
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(site_id, plot_no)
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_plots_site ON plots(site_id);
@@ -442,6 +442,8 @@ CREATE TABLE IF NOT EXISTS plot_payments (
   bank_details    VARCHAR(255),
   narration       TEXT,
   received_by     VARCHAR(255),
+  buyer_name      VARCHAR(255),
+  booked_by       VARCHAR(255),
   amount          NUMERIC(15,2) NOT NULL DEFAULT 0,
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at      TIMESTAMPTZ DEFAULT NOW(),

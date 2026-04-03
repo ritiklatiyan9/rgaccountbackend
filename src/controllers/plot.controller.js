@@ -185,7 +185,7 @@ const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssigned
 
 /** POST /plots — Create a new plot */
 export const createPlot = asyncHandler(async (req, res) => {
-  const { site_id, plot_no, block, buyer_name, plot_size, plot_size_mtr, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value, commission_rate, plot_commission } = req.body;
+  const { site_id, plot_no, block, buyer_name, plot_size, plot_size_mtr, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value, commission_rate, plot_commission, force_duplicate } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   if (!plot_no || !plot_no.trim()) return res.status(400).json({ message: 'Plot number is required' });
@@ -193,9 +193,43 @@ export const createPlot = asyncHandler(async (req, res) => {
 
   const trimmedPlotNo = plot_no.trim().toUpperCase();
 
-  // Duplicate check
-  const existing = await plotModel.findByPlotNo(parseInt(site_id), trimmedPlotNo, pool);
-  if (existing) return res.status(409).json({ message: `Plot "${trimmedPlotNo}" already exists for this site` });
+  // Duplicate check — returns all existing plots with same plot_no
+  const existingPlots = await plotModel.findAllByPlotNo(parseInt(site_id), trimmedPlotNo, pool);
+
+  var newPlotTag = undefined;
+  if (existingPlots.length > 0) {
+    const nonResale = existingPlots.filter(p => p.status !== 'RESALE');
+    const allResale = nonResale.length === 0;
+    const dupInfo = existingPlots.map(p => ({ id: p.id, status: p.status, plot_tag: p.plot_tag, buyer_name: p.buyer_name }));
+
+    if (!allResale) {
+      // Active plot exists — hard block
+      return res.status(409).json({
+        message: `Plot "${trimmedPlotNo}" already exists for this site`,
+        duplicates: dupInfo,
+        canOverride: false,
+      });
+    }
+
+    if (!force_duplicate) {
+      // All are RESALE but user hasn't confirmed yet — soft block with override option
+      return res.status(409).json({
+        message: `Plot "${trimmedPlotNo}" exists but is marked RESALE. You can create a new one.`,
+        duplicates: dupInfo,
+        canOverride: true,
+      });
+    }
+
+    // force_duplicate is true and all existing are RESALE — proceed with tagging
+    const totalExisting = existingPlots.length;
+    for (let i = 0; i < existingPlots.length; i++) {
+      const tag = i === 0 ? 'OLD' : `NEW ${i}`;
+      if (existingPlots[i].plot_tag !== tag) {
+        await pool.query(`UPDATE plots SET plot_tag = $1 WHERE id = $2`, [tag, existingPlots[i].id]);
+      }
+    }
+    newPlotTag = totalExisting === 1 ? 'NEW' : `NEW ${totalExisting}`;
+  }
 
   const data = {
     site_id: parseInt(site_id),
@@ -221,6 +255,11 @@ export const createPlot = asyncHandler(async (req, res) => {
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     created_by: req.user.id,
   };
+
+  // Set plot_tag if this is a RESALE duplicate
+  if (typeof newPlotTag !== 'undefined') {
+    data.plot_tag = newPlotTag;
+  }
 
   const columns = await getPlotCommissionColumns();
   if (columns.has('commission_enabled')) data.commission_enabled = !!commission_enabled;
@@ -356,10 +395,30 @@ export const updatePlot = asyncHandler(async (req, res) => {
 /** DELETE /plots/:id — Delete a plot and all its payments */
 export const deletePlot = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const existing = await plotModel.findById(parseInt(id), pool);
+  const plotId = parseInt(id);
+  const existing = await plotModel.findById(plotId, pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
 
-  await plotModel.delete(parseInt(id), pool);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Delete commission payments linked to this plot's commissions
+    await client.query(
+      `DELETE FROM plot_commission_payments WHERE plot_commission_id IN (SELECT id FROM plot_commissions_v2 WHERE plot_id = $1)`,
+      [plotId]
+    );
+    // Delete commissions linked to this plot
+    await client.query(`DELETE FROM plot_commissions_v2 WHERE plot_id = $1`, [plotId]);
+    // Delete the plot itself
+    await client.query(`DELETE FROM plots WHERE id = $1`, [plotId]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
   res.json({ message: 'Plot deleted' });
 });
 
@@ -369,7 +428,7 @@ export const deletePlot = asyncHandler(async (req, res) => {
 
 /** POST /plots/payments — Create a payment */
 export const createPayment = asyncHandler(async (req, res) => {
-  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, received_by, amount, voucher_url, assigned_admin_id } = req.body;
+  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, received_by, amount, voucher_url, assigned_admin_id, buyer_name, booked_by } = req.body;
 
   if (!plot_id) return res.status(400).json({ message: 'Plot is required' });
 
@@ -396,6 +455,8 @@ export const createPayment = asyncHandler(async (req, res) => {
     status: 'pending',
     cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
     cheque_status: normalizedPaymentType === 'CHEQUE' ? 'PENDING' : null,
+    buyer_name: buyer_name ? buyer_name.trim().toUpperCase() : null,
+    booked_by: booked_by ? booked_by.trim().toUpperCase() : null,
   };
 
   const payment = await plotPaymentModel.create(data, pool);
@@ -428,7 +489,7 @@ export const getPayment = asyncHandler(async (req, res) => {
 /** PUT /plots/payments/:id — Update a payment */
 export const updatePayment = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, payment_from, payment_type, bank_details, bank_name, branch, narration, received_by, amount, voucher_url, assigned_admin_id } = req.body;
+  const { date, payment_from, payment_type, bank_details, bank_name, branch, narration, received_by, amount, voucher_url, assigned_admin_id, buyer_name, booked_by } = req.body;
 
   const existing = await plotPaymentModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Payment not found' });
@@ -446,6 +507,8 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (amount !== undefined) updateData.amount = parseFloat(amount) || 0;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+  if (buyer_name !== undefined) updateData.buyer_name = buyer_name ? buyer_name.trim().toUpperCase() : null;
+  if (booked_by !== undefined) updateData.booked_by = booked_by ? booked_by.trim().toUpperCase() : null;
 
   if (normalizedPaymentType === 'CASH') {
     updateData.bank_name = null;
