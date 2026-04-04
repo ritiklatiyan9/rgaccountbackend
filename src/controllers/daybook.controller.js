@@ -1455,9 +1455,18 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
     `SELECT cfe.id, cfe.date, cfe.particular, cfe.debit, cfe.credit, cfe.cash_type,
             cfe.remarks, cfe.status, cfe.source_module, cfe.source_id,
             cfe.voucher_url, cfe.created_at, cfe.cheque_status, cfe.cheque_no,
-            COALESCE(u.name, u.email) AS created_by_name
+            COALESCE(u.name, u.email) AS created_by_name,
+            CASE
+              WHEN cfe.source_module = 'plot_payments' THEN pl.plot_no
+              WHEN cfe.source_module = 'plot_installment_payments' THEN pli.plot_no
+              ELSE NULL
+            END AS plot_no
      FROM cash_flow_entries cfe
      LEFT JOIN users u ON cfe.created_by = u.id
+     LEFT JOIN plot_payments pp ON cfe.source_module = 'plot_payments' AND cfe.source_id = pp.id
+     LEFT JOIN plots pl ON pp.plot_id = pl.id
+     LEFT JOIN plot_installment_payments pip ON cfe.source_module = 'plot_installment_payments' AND cfe.source_id = pip.id
+     LEFT JOIN plots pli ON pip.plot_id = pli.id
      WHERE cfe.site_id = $1
      ORDER BY cfe.date DESC, cfe.created_at DESC
      LIMIT $2 OFFSET $3`,
@@ -1475,19 +1484,20 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════
-//  PROFIT SUMMARY
+//  PROFIT SUMMARY — queries source tables directly
 // ══════════════════════════════════════════════════
 
 /**
  * GET /daybook/profit-summary?site_id=X
  * Returns profit breakdown:
- *   Earn   = plot_payments credit
- *   Expenses = farmer_payments debit + expenses debit + plot_payments debit
- *              + plot_commissions debit + plot_commission_payments debit + vendor_payments debit
+ *   Earn   = plot_payments credit (money received from buyers)
+ *   Expenses = farmer_payments + expenses + plot_commissions + plot_commission_payments + vendor_payments
  * Excludes: firm_transactions, day_book (personal ledger / cashflow), imprest
  *
  * Also returns ledger flow (non-profit entries: day_book, firm_transactions, direct cashflow)
  * and currentBalance = profit + ledgerCredit - ledgerDebit
+ *
+ * Queries source tables directly (not cash_flow_entries) so numbers always match module pages.
  */
 export const getProfitSummary = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
@@ -1495,60 +1505,80 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
 
   const siteId = parseInt(site_id);
 
-  const profitModules = [
-    'plot_payments',
-    'farmer_payments',
-    'expenses',
-    'plot_commissions',
-    'plot_commission_payments',
-    'vendor_payments',
-  ];
+  // ── Earn: Plot Payments (unchanged) ──
+  const earnResult = await pool.query(
+    `SELECT COALESCE(SUM(amount), 0)::numeric AS total_earn
+     FROM (
+       SELECT amount FROM plot_payments WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       UNION ALL
+       SELECT amount FROM plot_installment_payments WHERE plot_id IN (SELECT id FROM plots WHERE site_id = $1) AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     ) u`,
+    [siteId]
+  );
+  const totalEarn = parseFloat(earnResult.rows[0].total_earn) || 0;
 
-  // Profit modules breakdown
-  const result = await pool.query(
-    `SELECT source_module,
-            COALESCE(SUM(credit), 0)::numeric AS total_credit,
-            COALESCE(SUM(debit),  0)::numeric AS total_debit
-     FROM cash_flow_entries
-     WHERE site_id = $1
-       AND source_module = ANY($2)
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-     GROUP BY source_module`,
-    [siteId, profitModules]
+  // ── Expenses: unified query matching the Expenses page ──
+  // Combines expenses table + day_book expense-type entries
+  const expenseResult = await pool.query(
+    `SELECT source_type, COALESCE(SUM(debit), 0)::numeric AS total_debit
+     FROM (
+       SELECT debit, 'expenses' AS source_type
+       FROM expenses
+       WHERE site_id = $1
+         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       UNION ALL
+       SELECT amount AS debit, 'plot_registry_payments' AS source_type
+       FROM plot_registry_payments
+       WHERE site_id = $1
+         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       UNION ALL
+       SELECT debit,
+         CASE entry_type
+           WHEN 'EXPENSE' THEN 'expenses'
+           WHEN 'FARMER PAYMENT' THEN 'farmer_payments'
+           WHEN 'PLOT COMMISSION' THEN 'commissions'
+           WHEN 'VENDOR PAYMENT' THEN 'vendor_payments'
+         END AS source_type
+       FROM day_book
+       WHERE site_id = $1
+         AND entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION', 'VENDOR PAYMENT')
+         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     ) u
+     GROUP BY source_type`,
+    [siteId]
   );
 
-  const byModule = {};
-  let totalEarn = 0;
+  const byModule = { plot_payments: { credit: totalEarn, debit: 0 } };
   let totalExpense = 0;
 
-  for (const row of result.rows) {
-    const credit = parseFloat(row.total_credit) || 0;
-    const debit  = parseFloat(row.total_debit)  || 0;
-
-    byModule[row.source_module] = { credit, debit };
-
-    // Earn = only plot_payments credit (money received from buyers)
-    if (row.source_module === 'plot_payments') {
-      totalEarn += credit;
-    }
-
-    // Expense = debit side of all profit modules
+  for (const row of expenseResult.rows) {
+    const debit = parseFloat(row.total_debit) || 0;
     totalExpense += debit;
+    if (!byModule[row.source_type]) byModule[row.source_type] = { credit: 0, debit: 0 };
+    byModule[row.source_type].debit += debit;
   }
 
   const profit = totalEarn - totalExpense;
 
-  // Ledger flow: entries NOT in profit modules (day_book, firm_transactions, direct cashflow with NULL source_module)
+  // ── Ledger flow: non-profit entries, separated by site vs person ledger_type ──
+  const profitModules = [
+    'plot_payments', 'farmer_payments', 'expenses',
+    'plot_commissions', 'plot_commission_payments', 'vendor_payments',
+    'plot_installment_payments', 'plot_registry_payments',
+  ];
+
   const ledgerResult = await pool.query(
     `SELECT
-       COALESCE(source_module, 'direct') AS ledger_source,
-       COALESCE(SUM(credit), 0)::numeric AS total_credit,
-       COALESCE(SUM(debit),  0)::numeric AS total_debit
-     FROM cash_flow_entries
-     WHERE site_id = $1
-       AND (source_module IS NULL OR source_module NOT IN (${profitModules.map((_, i) => `$${i + 2}`).join(', ')}))
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-     GROUP BY COALESCE(source_module, 'direct')`,
+       COALESCE(cfe.source_module, 'direct') AS ledger_source,
+       cfm.ledger_type,
+       COALESCE(SUM(cfe.credit), 0)::numeric AS total_credit,
+       COALESCE(SUM(cfe.debit),  0)::numeric AS total_debit
+     FROM cash_flow_entries cfe
+     JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+     WHERE cfe.site_id = $1
+       AND (cfe.source_module IS NULL OR cfe.source_module NOT IN (${profitModules.map((_, i) => `$${i + 2}`).join(', ')}))
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     GROUP BY COALESCE(cfe.source_module, 'direct'), cfm.ledger_type`,
     [siteId, ...profitModules]
   );
 
@@ -1556,13 +1586,54 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
   let ledgerDebit = 0;
   const ledgerBreakdown = {};
 
+  // Person ledger totals (separate from site ledger flow)
+  let personGiven = 0;   // debit = money given to person
+  let personReturned = 0; // credit = money returned by person
+
   for (const row of ledgerResult.rows) {
     const credit = parseFloat(row.total_credit) || 0;
     const debit  = parseFloat(row.total_debit)  || 0;
-    ledgerCredit += credit;
-    ledgerDebit  += debit;
-    ledgerBreakdown[row.ledger_source] = { credit, debit };
+
+    if (row.ledger_type === 'person') {
+      personGiven += debit;
+      personReturned += credit;
+    } else if (row.ledger_source === 'firm_transactions') {
+      // Skip — firm totals handled by separate query below
+    } else {
+      // Site ledger entries — include in main ledger flow & balance
+      ledgerCredit += credit;
+      ledgerDebit  += debit;
+      const key = row.ledger_source;
+      if (!ledgerBreakdown[key]) ledgerBreakdown[key] = { credit: 0, debit: 0 };
+      ledgerBreakdown[key].credit += credit;
+      ledgerBreakdown[key].debit  += debit;
+    }
   }
+
+  // ── Firm transactions: match the Firm Transactions module page logic ──
+  // Sums from firm_transactions table + cash_flow_entries with is_firm_transaction=true
+  const firmResult = await pool.query(
+    `SELECT
+       COALESCE((SELECT SUM(ft.debit) FROM firm_transactions ft JOIN firms f ON f.id = ft.firm_id
+                 WHERE f.site_id = $1 AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED','RETURNED'))), 0)
+       + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0))
+                   FROM cash_flow_entries cfe JOIN firms f ON f.id = cfe.from_firm_id
+                   WHERE f.site_id = $1 AND cfe.is_firm_transaction = true
+                   AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))), 0)
+       AS total_debit,
+       COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft JOIN firms f ON f.id = ft.firm_id
+                 WHERE f.site_id = $1 AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED','RETURNED'))), 0)
+       + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0))
+                   FROM cash_flow_entries cfe JOIN firms f ON f.id = cfe.to_firm_id
+                   WHERE f.site_id = $1 AND cfe.is_firm_transaction = true
+                   AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))), 0)
+       AS total_credit`,
+    [siteId]
+  );
+  const firmDebit  = parseFloat(firmResult.rows[0].total_debit)  || 0;
+  const firmCredit = parseFloat(firmResult.rows[0].total_credit) || 0;
+
+  const personPending = personGiven - personReturned;
 
   res.json({
     earn: totalEarn,
@@ -1573,6 +1644,12 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
     ledgerDebit,
     ledgerNet: ledgerCredit - ledgerDebit,
     ledgerBreakdown,
-    currentBalance: profit + ledgerCredit - ledgerDebit,
+    firmCredit,
+    firmDebit,
+    firmNet: firmCredit - firmDebit,
+    personGiven,
+    personReturned,
+    personPending,
+    currentBalance: profit - personPending,
   });
 });
