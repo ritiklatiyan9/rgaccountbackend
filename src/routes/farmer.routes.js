@@ -19,7 +19,8 @@ import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const farmerReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'farmers' });
-const bustFarmerCache = invalidateCacheOnSuccess(['/farmers']);
+// Farmer mutations affect daybook dashboard too
+const bustFarmerCache = invalidateCacheOnSuccess(['/farmers', '/daybook']);
 
 // All farmer routes require auth
 router.use(authMiddleware);

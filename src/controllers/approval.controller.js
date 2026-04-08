@@ -266,7 +266,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if (!module || module === 'plot_payment') {
     const { where, params } = buildWhere('pp', 'pp');
     const q = `
-                  SELECT pp.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                  SELECT pp.*, pp.payment_type AS payment_mode, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
              p.plot_no, p.buyer_name,
              'plot_payment' AS source
@@ -803,7 +803,7 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
  * Valid cheque_status values: PENDING, CLEARED, BOUNCED, RETURNED
  */
 export const updateChequeStatus = asyncHandler(async (req, res) => {
-  const { id, source, cheque_status } = req.body;
+  const { id, source, cheque_status, cheque_no } = req.body;
 
   if (!id || !source || !cheque_status) {
     return res.status(400).json({ message: 'id, source, and cheque_status are required' });
@@ -820,37 +820,54 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: `Invalid source: ${source}` });
   }
 
+  const trimmedChequeNo = cheque_no !== undefined ? (cheque_no ? String(cheque_no).trim() : null) : undefined;
+
+  const setClauses = ['cheque_status = $1', 'updated_at = NOW()'];
+  const queryParams = [normalizedStatus];
+  let paramIdx = 2;
+
+  if (trimmedChequeNo !== undefined) {
+    setClauses.push(`cheque_no = $${paramIdx}`);
+    queryParams.push(trimmedChequeNo);
+    paramIdx++;
+  }
+
+  queryParams.push(parseInt(id));
+
   const result = await pool.query(
     `UPDATE ${table}
-     SET cheque_status = $1, updated_at = NOW()
-     WHERE id = $2
+     SET ${setClauses.join(', ')}
+     WHERE id = $${paramIdx}
      RETURNING *`,
-    [normalizedStatus, parseInt(id)]
+    queryParams
   );
 
   if (result.rowCount === 0) {
     return res.status(404).json({ message: 'Entry not found' });
   }
 
-  // Sync cheque_status to cash_flow_entries (trigger only fires on INSERT, not UPDATE)
+  // Sync cheque_status (and cheque_no if provided) to cash_flow_entries
   // For BOUNCED/RETURNED: zero out the amounts so they don't count in totals
   if (table !== 'cash_flow_entries') {
     const isBounced = ['BOUNCED', 'RETURNED'].includes(normalizedStatus);
-    if (isBounced) {
-      await pool.query(
-        `UPDATE cash_flow_entries
-         SET cheque_status = $1, debit = 0, credit = 0, updated_at = NOW()
-         WHERE source_module = $2 AND source_id = $3`,
-        [normalizedStatus, table, parseInt(id)]
-      );
-    } else {
-      await pool.query(
-        `UPDATE cash_flow_entries
-         SET cheque_status = $1, updated_at = NOW()
-         WHERE source_module = $2 AND source_id = $3`,
-        [normalizedStatus, table, parseInt(id)]
-      );
+    const cfSetParts = ['cheque_status = $1', 'updated_at = NOW()'];
+    const cfParams = [normalizedStatus];
+    let cfIdx = 2;
+    if (trimmedChequeNo !== undefined) {
+      cfSetParts.push(`cheque_no = $${cfIdx}`);
+      cfParams.push(trimmedChequeNo);
+      cfIdx++;
     }
+    if (isBounced) {
+      cfSetParts.push('debit = 0', 'credit = 0');
+    }
+    cfParams.push(table, parseInt(id));
+    await pool.query(
+      `UPDATE cash_flow_entries
+       SET ${cfSetParts.join(', ')}
+       WHERE source_module = $${cfIdx} AND source_id = $${cfIdx + 1}`,
+      cfParams
+    );
   } else {
     // Source IS cash_flow_entries — just zero amounts if bounced
     if (['BOUNCED', 'RETURNED'].includes(normalizedStatus)) {

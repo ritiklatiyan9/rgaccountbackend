@@ -307,11 +307,13 @@ class DayBookModel extends MasterModel {
    */
   async findByStatus(status, siteId, dateFrom, dateTo, pool) {
     let query = `
-      SELECT d.*, s.name as site_name, u.name as created_by_name, admin_u.name as assigned_admin_name
+      SELECT d.*, s.name as site_name, u.name as created_by_name, admin_u.name as assigned_admin_name,
+             pp.booked_by
       FROM day_book d
       JOIN sites s ON d.site_id = s.id
       LEFT JOIN users u ON d.created_by = u.id
       LEFT JOIN users admin_u ON d.assigned_admin_id = admin_u.id
+      LEFT JOIN plot_payments pp ON pp.id = d.plot_payment_id
       WHERE d.entry_type IN ('EXPENSE', 'FARMER PAYMENT', 'PLOT COMMISSION')
     `;
     const params = [];

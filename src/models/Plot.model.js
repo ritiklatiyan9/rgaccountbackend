@@ -56,10 +56,11 @@ class PlotPaymentModel extends MasterModel {
   /** All payments for a plot, ordered by date ASC */
   async findByPlotId(plotId, pool) {
     const query = `
-      SELECT *, 'payment' AS source
-      FROM plot_payments
-      WHERE plot_id = $1
-      ORDER BY date ASC, created_at ASC
+      SELECT pp.*, 'payment' AS source, u.name AS created_by_name
+      FROM plot_payments pp
+      LEFT JOIN users u ON u.id = pp.created_by
+      WHERE pp.plot_id = $1
+      ORDER BY pp.date ASC, pp.created_at ASC
     `;
     const result = await pool.query(query, [plotId]);
     return result.rows;

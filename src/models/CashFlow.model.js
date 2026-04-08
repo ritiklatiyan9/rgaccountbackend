@@ -92,10 +92,11 @@ class CashFlowEntryModel extends MasterModel {
   /** All entries for a month, ordered by date ASC */
   async findByMonthId(monthId, pool) {
     const query = `
-      SELECT cfe.*, ff.name AS from_firm_name, tf.name AS to_firm_name
+      SELECT cfe.*, ff.name AS from_firm_name, tf.name AS to_firm_name, u.name AS created_by_name
       FROM cash_flow_entries cfe
       LEFT JOIN firms ff ON ff.id = cfe.from_firm_id
       LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
+      LEFT JOIN users u ON u.id = cfe.created_by
       WHERE cfe.cash_flow_month_id = $1
       ORDER BY date ASC, created_at ASC
     `;

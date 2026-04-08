@@ -14,7 +14,8 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 router.use(authMiddleware);
 
 const cashflowReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'cashflow' });
-const bustCashflowCache = invalidateCacheOnSuccess(['/cashflow']);
+// Cashflow mutations affect daybook dashboard too
+const bustCashflowCache = invalidateCacheOnSuccess(['/cashflow', '/daybook']);
 
 // ── Month endpoints ──
 router.get('/months', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), cashflowReadCache, listMonths);                                // ?site_id=X

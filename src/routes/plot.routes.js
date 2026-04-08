@@ -21,7 +21,8 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 router.use(authMiddleware);
 
 const plotReadCache = cacheResponse({ ttlSeconds: 45, namespace: 'plots' });
-const bustPlotCache = invalidateCacheOnSuccess(['/plots']);
+// Plot mutations affect daybook dashboard too
+const bustPlotCache = invalidateCacheOnSuccess(['/plots', '/daybook']);
 
 // ── Plot endpoints ──
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, listPlots);                                        // ?site_id=X

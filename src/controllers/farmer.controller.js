@@ -188,6 +188,7 @@ export const createPayment = asyncHandler(async (req, res) => {
     status: 'pending',
     cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
     cheque_status: mode === 'CHEQUE' ? 'PENDING' : null,
+    created_by: req.user.id,
   };
 
   const payment = await farmerPaymentModel.create(paymentData, pool);

@@ -1460,7 +1460,16 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
               WHEN cfe.source_module = 'plot_payments' THEN pl.plot_no
               WHEN cfe.source_module = 'plot_installment_payments' THEN pli.plot_no
               ELSE NULL
-            END AS plot_no
+            END AS plot_no,
+            CASE
+              WHEN cfe.source_module = 'plot_payments' THEN COALESCE(pp.buyer_name, pl.buyer_name)
+              WHEN cfe.source_module = 'plot_installment_payments' THEN pli.buyer_name
+              ELSE NULL
+            END AS buyer_name,
+            CASE
+              WHEN cfe.source_module = 'plot_payments' THEN pp.booked_by
+              ELSE NULL
+            END AS booked_by
      FROM cash_flow_entries cfe
      LEFT JOIN users u ON cfe.created_by = u.id
      LEFT JOIN plot_payments pp ON cfe.source_module = 'plot_payments' AND cfe.source_id = pp.id
@@ -1652,4 +1661,71 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
     personPending,
     currentBalance: profit - personPending,
   });
+});
+
+/**
+ * GET /daybook/profit-monthly?site_id=X
+ * Returns last 12 months of earning (plot payments) and expense totals.
+ */
+export const getProfitMonthly = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const siteId = parseInt(site_id);
+
+  const result = await pool.query(
+    `WITH first_date AS (
+       SELECT LEAST(
+         COALESCE((SELECT MIN(date) FROM plot_payments WHERE site_id = $1), now()),
+         COALESCE((SELECT MIN(e.date) FROM expenses e WHERE e.site_id = $1), now()),
+         COALESCE((SELECT MIN(db.date) FROM day_book db WHERE db.site_id = $1), now())
+       ) AS d
+     ),
+     months AS (
+       SELECT to_char(g, 'YYYY-MM') AS m, to_char(g, 'Mon YY') AS label
+       FROM first_date,
+            generate_series(
+              date_trunc('month', first_date.d),
+              date_trunc('month', now()),
+              '1 month'
+            ) g
+     ),
+     earn AS (
+       SELECT to_char(date, 'YYYY-MM') AS m, COALESCE(SUM(amount), 0)::numeric AS total
+       FROM (
+         SELECT date, amount FROM plot_payments
+         WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         UNION ALL
+         SELECT pip.payment_date AS date, pip.amount FROM plot_installment_payments pip
+         JOIN plots p ON p.id = pip.plot_id
+         WHERE p.site_id = $1 AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       ) u
+       GROUP BY 1
+     ),
+     exp AS (
+       SELECT to_char(date, 'YYYY-MM') AS m, COALESCE(SUM(debit), 0)::numeric AS total
+       FROM (
+         SELECT date, debit FROM expenses
+         WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         UNION ALL
+         SELECT payment_date AS date, amount AS debit FROM plot_registry_payments
+         WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         UNION ALL
+         SELECT date, debit FROM day_book
+         WHERE site_id = $1
+           AND entry_type IN ('EXPENSE','FARMER PAYMENT','PLOT COMMISSION','VENDOR PAYMENT')
+           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       ) u
+       GROUP BY 1
+     )
+     SELECT months.m, months.label,
+            COALESCE(earn.total, 0) AS earning,
+            COALESCE(exp.total, 0)  AS expense
+     FROM months
+     LEFT JOIN earn ON earn.m = months.m
+     LEFT JOIN exp  ON exp.m  = months.m
+     ORDER BY months.m`,
+    [siteId]
+  );
+
+  res.json({ months: result.rows });
 });

@@ -266,6 +266,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
     approved_at: entry.approved_at,
     created_by: entry.created_by,
     created_by_name: entry.created_by_name,
+    booked_by: entry.booked_by || null,
     created_at: entry.created_at,
     source: entry.entry_type === 'FARMER PAYMENT' ? 'farmer_payment' : entry.entry_type === 'PLOT COMMISSION' ? 'commission' : 'daybook',
     entry_type: entry.entry_type, // Preserve entry type for UI labeling

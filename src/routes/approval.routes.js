@@ -16,7 +16,8 @@ import requireRole from '../middlewares/role.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const approvalReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'approvals' });
-const bustApprovalCache = invalidateCacheOnSuccess(['/approvals']);
+// Approval mutations affect all modules (expenses, farmers, plots, cashflow, daybook, etc.)
+const bustApprovalCache = invalidateCacheOnSuccess(['/approvals', '/expenses', '/farmers', '/plots', '/cashflow', '/daybook', '/firms', '/registries']);
 
 // All approval routes require auth + admin role
 router.use(authMiddleware);

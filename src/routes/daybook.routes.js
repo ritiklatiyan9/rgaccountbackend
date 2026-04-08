@@ -25,6 +25,7 @@ import {
   deletePlotPaymentFromDayBook,
   listRecentTransactions,
   getProfitSummary,
+  getProfitMonthly,
 } from '../controllers/daybook.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -37,13 +38,15 @@ const router = express.Router();
 router.use(authMiddleware);
 
 const daybookReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'daybook' });
-const bustDaybookCache = invalidateCacheOnSuccess(['/daybook']);
+// Daybook mutations affect expenses, farmers, cashflow, plots, firms — bust all related caches
+const bustDaybookCache = invalidateCacheOnSuccess(['/daybook', '/expenses', '/farmers', '/cashflow', '/plots', '/firms']);
 
 // Recent transactions (Dashboard) — must be before /:id route
 router.get('/recent', requireRole('admin', 'sub_admin'), daybookReadCache, listRecentTransactions);
 
 // Profit summary (Dashboard)
 router.get('/profit-summary', requireRole('admin', 'sub_admin'), daybookReadCache, getProfitSummary);
+router.get('/profit-monthly', requireRole('admin', 'sub_admin'), daybookReadCache, getProfitMonthly);
 
 // Day Book CRUD
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'write'), bustDaybookCache, createDayBookEntry);

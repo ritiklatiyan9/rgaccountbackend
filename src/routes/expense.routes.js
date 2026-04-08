@@ -16,7 +16,8 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 router.use(authMiddleware);
 
 const expenseReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'expenses' });
-const bustExpenseCache = invalidateCacheOnSuccess(['/expenses']);
+// Expense mutations affect daybook dashboard too
+const bustExpenseCache = invalidateCacheOnSuccess(['/expenses', '/daybook']);
 
 // Standard expense CRUD
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, listExpenses);                            // ?site_id=X

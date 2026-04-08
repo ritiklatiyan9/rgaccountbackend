@@ -1,7 +1,8 @@
-import { cacheEnabled, clearCacheByPrefixes, responseCache } from '../config/cache.js';
+import { cacheEnabled, cacheGet, cacheSet, clearCacheByPrefixes, getDefaultTTL } from '../config/cache.js';
 
 const sortQueryEntries = (queryObj = {}) => (
   Object.entries(queryObj)
+    .filter(([k]) => k !== 'nocache')
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(',') : String(v)}`)
     .join('&')
@@ -13,8 +14,9 @@ const buildKey = (req, namespace = 'api') => {
   return `${namespace}|${userPart}|${req.path}|${queryPart}`;
 };
 
-export const cacheResponse = ({ ttlSeconds = 45, namespace = 'api' } = {}) => {
-  return (req, res, next) => {
+export const cacheResponse = ({ ttlSeconds, namespace = 'api' } = {}) => {
+  const ttl = ttlSeconds ?? getDefaultTTL();
+  return async (req, res, next) => {
     if (!cacheEnabled() || req.method !== 'GET') return next();
 
     const noCacheRequested =
@@ -24,20 +26,22 @@ export const cacheResponse = ({ ttlSeconds = 45, namespace = 'api' } = {}) => {
     if (noCacheRequested) return next();
 
     const key = buildKey(req, namespace);
-    const cached = responseCache.get(key);
-    if (cached) {
-      res.setHeader('X-Cache', 'HIT');
-      return res.status(cached.statusCode).json(cached.payload);
+
+    try {
+      const cached = await cacheGet(key);
+      if (cached) {
+        res.setHeader('X-Cache', 'HIT');
+        return res.status(cached.statusCode).json(cached.payload);
+      }
+    } catch {
+      // Redis read failure — proceed without cache
     }
 
     const originalJson = res.json.bind(res);
     res.json = (payload) => {
       if (res.statusCode >= 200 && res.statusCode < 300) {
-        responseCache.set(
-          key,
-          { statusCode: res.statusCode, payload },
-          ttlSeconds,
-        );
+        // Fire-and-forget: don't await cache write
+        cacheSet(key, { statusCode: res.statusCode, payload }, ttl).catch(() => {});
       }
       res.setHeader('X-Cache', 'MISS');
       return originalJson(payload);
@@ -51,7 +55,7 @@ export const invalidateCacheOnSuccess = (prefixes = []) => {
   return (_req, res, next) => {
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
-        clearCacheByPrefixes(prefixes);
+        clearCacheByPrefixes(prefixes).catch(() => {});
       }
     });
     next();

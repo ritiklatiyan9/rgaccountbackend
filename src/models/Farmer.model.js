@@ -62,9 +62,11 @@ class FarmerPaymentModel extends MasterModel {
   /** All payments for a farmer, ordered by date */
   async findByFarmerId(farmerId, pool) {
     const query = `
-      SELECT * FROM farmer_payments
-      WHERE farmer_id = $1
-      ORDER BY date ASC, created_at ASC
+      SELECT fp.*, u.name AS created_by_name
+      FROM farmer_payments fp
+      LEFT JOIN users u ON u.id = fp.created_by
+      WHERE fp.farmer_id = $1
+      ORDER BY fp.date ASC, fp.created_at ASC
     `;
     const result = await pool.query(query, [farmerId]);
     return result.rows;

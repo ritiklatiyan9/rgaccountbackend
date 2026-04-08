@@ -50,9 +50,11 @@ class PlotRegistryPaymentModel extends MasterModel {
   /** All payments for a registry, ordered by date ASC */
   async findByRegistryId(registryId, pool) {
     const query = `
-      SELECT * FROM plot_registry_payments
-      WHERE registry_id = $1
-      ORDER BY payment_date ASC, created_at ASC
+      SELECT prp.*, u.name AS created_by_name
+      FROM plot_registry_payments prp
+      LEFT JOIN users u ON u.id = prp.created_by
+      WHERE prp.registry_id = $1
+      ORDER BY prp.payment_date ASC, prp.created_at ASC
     `;
     const result = await pool.query(query, [registryId]);
     return result.rows;
