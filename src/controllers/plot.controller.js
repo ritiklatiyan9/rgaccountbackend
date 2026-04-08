@@ -567,7 +567,7 @@ export const getPayment = asyncHandler(async (req, res) => {
 /** PUT /plots/payments/:id — Update a payment */
 export const updatePayment = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, buyer_name, booked_by } = req.body;
+  const { date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, buyer_name, booked_by, cheque_no, cheque_status, received_by } = req.body;
 
   const existing = await plotPaymentModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Payment not found' });
@@ -586,6 +586,9 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
   if (buyer_name !== undefined) updateData.buyer_name = buyer_name ? buyer_name.trim().toUpperCase() : null;
   if (booked_by !== undefined) updateData.booked_by = booked_by ? booked_by.trim().toUpperCase() : null;
+  if (cheque_no !== undefined) updateData.cheque_no = cheque_no ? String(cheque_no).trim() : null;
+  if (cheque_status !== undefined) updateData.cheque_status = cheque_status || null;
+  if (received_by !== undefined) updateData.received_by = received_by ? received_by.trim().toUpperCase() : null;
 
   if (normalizedPaymentType === 'CASH') {
     updateData.bank_name = null;

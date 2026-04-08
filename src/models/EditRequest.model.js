@@ -12,17 +12,23 @@ class EditRequestModelClass extends MasterModel {
     let query = `
       SELECT er.*, 
              u.name AS requested_by_name, u.email AS requested_by_email,
-             s.name AS site_name,
-             ru.name AS reviewed_by_name
+             COALESCE(s.name, s2.name) AS site_name,
+             ru.name AS reviewed_by_name,
+             COALESCE(er.original_data->>'plot_no', p.plot_no) AS record_plot_no,
+             COALESCE(er.original_data->>'booking_by', er.original_data->>'booked_by', p.booking_by) AS record_booked_by,
+             COALESCE(er.original_data->>'payment_type', er.original_data->>'payment_mode', er.original_data->>'particular') AS record_payment_mode,
+             COALESCE(er.original_data->>'buyer_name', p.buyer_name) AS record_buyer_name
       FROM edit_requests er
       LEFT JOIN users u ON er.requested_by = u.id
       LEFT JOIN sites s ON er.site_id = s.id
       LEFT JOIN users ru ON er.reviewed_by = ru.id
+      LEFT JOIN plots p ON er.module IN ('plot_payment','daybook_plot_payment') AND p.id = (er.original_data->>'plot_id')::int
+      LEFT JOIN sites s2 ON er.site_id IS NULL AND s2.id = (er.original_data->>'site_id')::int
     `;
     const params = [];
     
     if (siteId) {
-      query += ` WHERE er.site_id = $1`;
+      query += ` WHERE COALESCE(er.site_id, (er.original_data->>'site_id')::int) = $1`;
       params.push(parseInt(siteId));
     }
     
@@ -39,18 +45,24 @@ class EditRequestModelClass extends MasterModel {
     let query = `
       SELECT er.*, 
              u.name AS requested_by_name, u.email AS requested_by_email,
-             s.name AS site_name,
-             ru.name AS reviewed_by_name
+             COALESCE(s.name, s2.name) AS site_name,
+             ru.name AS reviewed_by_name,
+             COALESCE(er.original_data->>'plot_no', p.plot_no) AS record_plot_no,
+             COALESCE(er.original_data->>'booking_by', er.original_data->>'booked_by', p.booking_by) AS record_booked_by,
+             COALESCE(er.original_data->>'payment_type', er.original_data->>'payment_mode', er.original_data->>'particular') AS record_payment_mode,
+             COALESCE(er.original_data->>'buyer_name', p.buyer_name) AS record_buyer_name
       FROM edit_requests er
       LEFT JOIN users u ON er.requested_by = u.id
       LEFT JOIN sites s ON er.site_id = s.id
       LEFT JOIN users ru ON er.reviewed_by = ru.id
+      LEFT JOIN plots p ON er.module IN ('plot_payment','daybook_plot_payment') AND p.id = (er.original_data->>'plot_id')::int
+      LEFT JOIN sites s2 ON er.site_id IS NULL AND s2.id = (er.original_data->>'site_id')::int
       WHERE er.status = $1
     `;
     const params = [status];
     
     if (siteId) {
-      query += ` AND er.site_id = $2`;
+      query += ` AND COALESCE(er.site_id, (er.original_data->>'site_id')::int) = $2`;
       params.push(parseInt(siteId));
     }
     

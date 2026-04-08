@@ -716,7 +716,8 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
   const unionParts = [
     `SELECT t.id, 'farmer_payment' AS source, COALESCE(t.particular, '') || ' - ' || COALESCE(f.name, '') AS entry_label,
       COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
-      f.site_id, s.name AS site_name, t.created_at
+      f.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
     FROM farmer_payments t
     LEFT JOIN farmers f ON f.id = t.farmer_id
     LEFT JOIN sites s ON s.id = f.site_id
@@ -724,7 +725,8 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
 
     `SELECT t.id, 'plot_commission_payment' AS source, 'Commission Payment #' || t.id AS entry_label,
       COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
-      pc.site_id, s.name AS site_name, t.created_at
+      pc.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
     FROM plot_commission_payments t
     LEFT JOIN plot_commissions_v2 pc ON pc.id = t.plot_commission_id
     LEFT JOIN sites s ON s.id = pc.site_id
@@ -732,14 +734,16 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
 
     `SELECT t.id, 'firm_transaction' AS source, COALESCE(t.description, '') || CASE WHEN t.name IS NOT NULL THEN ' - ' || t.name ELSE '' END AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
-      t.site_id, s.name AS site_name, t.created_at
+      t.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
     FROM firm_transactions t
     LEFT JOIN sites s ON s.id = t.site_id
     WHERE ${whereParts()}`,
 
     `SELECT t.id, 'plot_payment' AS source, 'Plot Payment - ' || COALESCE(p.plot_no, '') || ' ' || COALESCE(p.buyer_name, '') AS entry_label,
       COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
-      t.site_id, s.name AS site_name, t.created_at
+      t.site_id, s.name AS site_name, t.created_at,
+      p.plot_no, t.booked_by
     FROM plot_payments t
     LEFT JOIN sites s ON s.id = t.site_id
     LEFT JOIN plots p ON p.id = t.plot_id
@@ -747,14 +751,16 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
 
     `SELECT t.id, 'expense' AS source, COALESCE(t.remark, t.category, '') AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
-      t.site_id, s.name AS site_name, t.created_at
+      t.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
     FROM expenses t
     LEFT JOIN sites s ON s.id = t.site_id
     WHERE ${whereParts()}`,
 
     `SELECT t.id, 'vendor_payment' AS source, 'Vendor - ' || COALESCE(vc.vendor_name, '') AS entry_label,
       COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.payment_date AS date,
-      t.site_id, s.name AS site_name, t.created_at
+      t.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
     FROM vendor_payments t
     LEFT JOIN sites s ON s.id = t.site_id
     LEFT JOIN vendor_commitments vc ON vc.id = t.commitment_id
@@ -762,14 +768,16 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
 
     `SELECT t.id, 'cash_flow_entry' AS source, COALESCE(t.particular, '') AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
-      t.site_id, s.name AS site_name, t.created_at
+      t.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
     FROM cash_flow_entries t
     LEFT JOIN sites s ON s.id = t.site_id
     WHERE ${whereParts()} AND t.source_module IS NULL`,
 
     `SELECT t.id, 'plot_registry_payment' AS source, 'Registry Payment #' || t.id AS entry_label,
       COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.payment_date AS date,
-      r.site_id, s.name AS site_name, t.created_at
+      r.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
     FROM plot_registry_payments t
     LEFT JOIN plot_registries r ON r.id = t.registry_id
     LEFT JOIN sites s ON s.id = r.site_id
@@ -777,7 +785,8 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
 
     `SELECT t.id, 'daybook' AS source, COALESCE(t.particular, '') AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
-      t.site_id, s.name AS site_name, t.created_at
+      t.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
     FROM day_book t
     LEFT JOIN sites s ON s.id = t.site_id
     WHERE ${whereParts()} AND t.farmer_payment_id IS NULL AND t.commission_id IS NULL AND t.cash_flow_entry_id IS NULL AND t.firm_transaction_id IS NULL AND t.plot_payment_id IS NULL AND t.vendor_payment_id IS NULL`,
