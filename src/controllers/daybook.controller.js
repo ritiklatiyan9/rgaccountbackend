@@ -418,15 +418,17 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // Default to today if no date provided
   const queryDate = date || new Date().toISOString().split('T')[0];
 
+  console.log(`[daybook] listEntries site_id=${siteId} date=${queryDate}`);
+
   // Fetch ONLY the requested date from all tables — fast indexed queries
   const [dayBookEntries, expenseEntries, farmerPaymentEntries, commissionEntries, cashFlowEntries, firmTxnEntries, plotPaymentEntries] = await Promise.all([
     dayBookModel.findBySiteAndDate(siteId, queryDate, pool),
-    expenseModel.findBySiteAndDate(siteId, queryDate, pool).catch(() => []),
-    farmerPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(() => []),
-    plotCommissionModel.findBySiteAndDate(siteId, queryDate, pool).catch(() => []),
-    cashFlowEntryModel.findBySiteAndDate(siteId, queryDate, pool).catch(() => []),
-    firmTransactionModel.findBySiteAndDate(siteId, queryDate, pool).catch(() => []),
-    plotPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(() => []),
+    expenseModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] expense query error:', err.message); return []; }),
+    farmerPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] farmer_payment query error:', err.message); return []; }),
+    plotCommissionModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] commission query error:', err.message); return []; }),
+    cashFlowEntryModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] cashflow query error:', err.message); return []; }),
+    firmTransactionModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] firm_transaction query error:', err.message); return []; }),
+    plotPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] plot_payment query error:', err.message); return []; }),
   ]);
 
   // Transform expenses to day_book format
@@ -753,6 +755,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     }));
 
   // Merge and sort ASC by id
+  console.log(`[daybook] counts: daybook=${enrichedDayBookEntries.length} expenses=${transformedExpenses.length} fp=${transformedFarmerPayments.length} comm=${transformedCommissions.length} cf=${transformedCashFlow.length} ft=${transformedFirmTxns.length} pp=${transformedPlotPayments.length}`);
   const allEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments].sort((a, b) => {
     const idA = typeof a.id === 'string' && a.id.startsWith('expense_') ? parseInt(a.id.split('_')[1]) + 100000
               : typeof a.id === 'string' && a.id.startsWith('fp_') ? parseInt(a.id.split('_')[1]) + 200000
@@ -1728,4 +1731,33 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
   );
 
   res.json({ months: result.rows });
+});
+
+/* ── Latest date with data (for auto-jump on site change) ── */
+export const getLatestDate = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const siteId = parseInt(site_id);
+
+  const result = await pool.query(
+    `SELECT MAX(d) AS latest_date FROM (
+       SELECT MAX(date) AS d FROM day_book WHERE site_id = $1
+       UNION ALL
+       SELECT MAX(date) FROM expenses WHERE site_id = $1
+       UNION ALL
+       SELECT MAX(fp.date) FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE f.site_id = $1
+       UNION ALL
+       SELECT MAX(date) FROM plot_commissions WHERE site_id = $1
+       UNION ALL
+       SELECT MAX(date) FROM cash_flow_entries WHERE site_id = $1
+       UNION ALL
+       SELECT MAX(date) FROM firm_transactions WHERE site_id = $1
+       UNION ALL
+       SELECT MAX(date) FROM plot_payments WHERE site_id = $1
+     ) sub`,
+    [siteId]
+  );
+
+  const latestDate = result.rows[0]?.latest_date || null;
+  res.json({ latest_date: latestDate ? latestDate.toISOString().slice(0, 10) : null });
 });

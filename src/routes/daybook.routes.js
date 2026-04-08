@@ -26,6 +26,7 @@ import {
   listRecentTransactions,
   getProfitSummary,
   getProfitMonthly,
+  getLatestDate,
 } from '../controllers/daybook.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -47,6 +48,9 @@ router.get('/recent', requireRole('admin', 'sub_admin'), daybookReadCache, listR
 // Profit summary (Dashboard)
 router.get('/profit-summary', requireRole('admin', 'sub_admin'), daybookReadCache, getProfitSummary);
 router.get('/profit-monthly', requireRole('admin', 'sub_admin'), daybookReadCache, getProfitMonthly);
+
+// Latest date with data (auto-jump on site change)
+router.get('/latest-date', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, getLatestDate);
 
 // Day Book CRUD
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'write'), bustDaybookCache, createDayBookEntry);
