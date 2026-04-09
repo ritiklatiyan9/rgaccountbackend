@@ -5,6 +5,7 @@ const ALL_MODULES = [
     'dashboard', 'clients', 'vendors', 'farmers', 'commissions', 'daybook',
     'cashflow', 'firm_transactions', 'plot_payments', 'plot_registry',
     'expenses', 'imprest', 'reports', 'settings', 'chat', 'excel',
+    'expense_approval',
 ];
 
 class PermissionModel {
@@ -23,10 +24,13 @@ class PermissionModel {
 
         // Auto-seed newly added modules for existing sub-admins.
         if (ALL_MODULES.includes(module)) {
+            // Sensitive modules default to no access — admin must grant explicitly
+            const RESTRICTED_MODULES = ['expense_approval'];
+            const restricted = RESTRICTED_MODULES.includes(module);
             return this.upsert(userId, module, {
-                can_read: true,
-                can_write: true,
-                can_update: true,
+                can_read: !restricted,
+                can_write: !restricted,
+                can_update: !restricted,
                 can_delete: false,
             });
         }

@@ -22,16 +22,16 @@ const bustExpenseCache = invalidateCacheOnSuccess(['/expenses', '/daybook']);
 // Standard expense CRUD
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, listExpenses);                            // ?site_id=X
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), expenseReadCache, getAutocomplete);             // ?site_id=X
-router.get('/pending', requireRole('admin'), expenseReadCache, listPendingExpenses);     // Admin: get pending expenses
-router.get('/status-counts', requireRole('admin'), expenseReadCache, getStatusCounts);   // Admin: get status counts
+router.get('/pending', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'), expenseReadCache, listPendingExpenses);     // Expense approval: get pending expenses
+router.get('/status-counts', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'), expenseReadCache, getStatusCounts);   // Expense approval: get status counts
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, getExpense);
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'write'), bustExpenseCache, createExpense);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), bustExpenseCache, updateExpense);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), bustExpenseCache, deleteExpense);
 
-// Approval routes (admin only)
-router.put('/:id/approve', requireRole('admin'), bustExpenseCache, approveExpense);
-router.put('/:id/reject', requireRole('admin'), bustExpenseCache, rejectExpense);
-router.post('/bulk-approve', requireRole('admin'), bustExpenseCache, bulkApproveExpenses);
+// Approval routes (admin or sub-admin with expense_approval permission)
+router.put('/:id/approve', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'write'), bustExpenseCache, approveExpense);
+router.put('/:id/reject', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'write'), bustExpenseCache, rejectExpense);
+router.post('/bulk-approve', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'write'), bustExpenseCache, bulkApproveExpenses);
 
 export default router;

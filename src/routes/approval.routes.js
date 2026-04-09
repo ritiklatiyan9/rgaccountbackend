@@ -13,15 +13,16 @@ import {
 } from '../controllers/approval.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
+import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const approvalReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'approvals' });
 // Approval mutations affect all modules (expenses, farmers, plots, cashflow, daybook, etc.)
 const bustApprovalCache = invalidateCacheOnSuccess(['/approvals', '/expenses', '/farmers', '/plots', '/cashflow', '/daybook', '/firms', '/registries']);
 
-// All approval routes require auth + admin role
+// All approval routes require auth + admin role or sub-admin with expense_approval permission
 router.use(authMiddleware);
-router.use(requireRole('admin'));
+router.use(requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'));
 
 router.get('/pending', approvalReadCache, listAllPending);           // ?site_id=X&date_from=&date_to=&module=
 router.get('/counts', approvalReadCache, getPendingCounts);           // ?site_id=X

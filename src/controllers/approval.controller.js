@@ -98,11 +98,41 @@ async function ensureInboundFirmTransferForApproval(entry, approverId) {
 }
 
 /**
+ * For sub-admins, fetch allowed approval modules from user_approval_modules.
+ * Admins get null (meaning all modules allowed).
+ */
+async function getAllowedModules(user) {
+  if (user.role === 'admin' || user.role === 'super_admin') return null; // all allowed
+  try {
+    const result = await pool.query(
+      'SELECT module FROM user_approval_modules WHERE user_id = $1',
+      [user.id]
+    );
+    return new Set(result.rows.map(r => r.module));
+  } catch {
+    // Table may not exist yet — deny all
+    return new Set();
+  }
+}
+
+/** Check if a module key is allowed (handles daybook sub-types too) */
+function isModuleAllowed(allowed, moduleKey) {
+  if (!allowed) return true; // admin — all allowed
+  // daybook sub-types → check the 'daybook' module
+  if (moduleKey === 'daybook_farmer' || moduleKey === 'daybook_commission' || moduleKey === 'daybook_expense' || moduleKey === 'daybook_general') {
+    return allowed.has('daybook');
+  }
+  return allowed.has(moduleKey);
+}
+
+/**
  * GET /approvals/pending
- * List all pending entries across all modules (admin only)
+ * List all pending entries across all modules.
+ * Sub-admins only see modules they've been granted.
  */
 export const listAllPending = asyncHandler(async (req, res) => {
   const { site_id, date_from, date_to, module, assigned_admin_id } = req.query;
+  const allowedModules = await getAllowedModules(req.user);
 
   const results = [];
 
@@ -136,7 +166,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   };
 
   // 1. Farmer Payments (from farmer_payments table)
-  if (!module || module === 'farmer_payment') {
+  if ((!module || module === 'farmer_payment') && isModuleAllowed(allowedModules, 'farmer_payment')) {
     const { where, params } = buildWhere('fp', 'f');
     const q = `
                   SELECT fp.*, f.name AS farmer_name, f.site_id,
@@ -160,7 +190,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 2. Plot Commissions (Legacy)
-  if (!module || module === 'plot_commission') {
+  if ((!module || module === 'plot_commission') && isModuleAllowed(allowedModules, 'plot_commission')) {
     const { where, params } = buildWhere('pc', 'pc');
     const q = `
                   SELECT pc.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -182,7 +212,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 2.5 Plot Commission Payments (V2)
-  if (!module || module === 'plot_commission_payment') {
+  if ((!module || module === 'plot_commission_payment') && isModuleAllowed(allowedModules, 'plot_commission_payment')) {
     const { where, params } = buildWhere('pcp', 'pcp');
     const q = `
                   SELECT pcp.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -208,7 +238,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 3. Cash Flow Entries (exclude trigger-synced duplicates from other modules)
-  if (!module || module === 'cash_flow_entry') {
+  if ((!module || module === 'cash_flow_entry') && isModuleAllowed(allowedModules, 'cash_flow_entry')) {
     const { where, params } = buildWhere('cfe', 'cfe');
     const q = `
                   SELECT cfe.*, cfe.site_id, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -233,7 +263,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 4. Firm Transactions
-  if (!module || module === 'firm_transaction') {
+  if ((!module || module === 'firm_transaction') && isModuleAllowed(allowedModules, 'firm_transaction')) {
     const { where, params } = buildWhere('ft', 'ft');
     const q = `
                   SELECT ft.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -263,7 +293,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 5. Plot Payments
-  if (!module || module === 'plot_payment') {
+  if ((!module || module === 'plot_payment') && isModuleAllowed(allowedModules, 'plot_payment')) {
     const { where, params } = buildWhere('pp', 'pp');
     const q = `
                   SELECT pp.*, pp.payment_type AS payment_mode, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -287,7 +317,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 6. Expenses
-  if (!module || module === 'expense') {
+  if ((!module || module === 'expense') && isModuleAllowed(allowedModules, 'expense')) {
     const { where, params } = buildWhere('e', 'e');
     const q = `
                   SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -309,7 +339,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 7. Day Book entries (farmer payments, commissions, expenses auto-created in day_book)
-  {
+  if (isModuleAllowed(allowedModules, 'daybook')) {
     const DAYBOOK_TYPE_MAP = {
       'FARMER PAYMENT': 'daybook_farmer',
       'PLOT COMMISSION': 'daybook_commission',
@@ -367,10 +397,12 @@ export const listAllPending = asyncHandler(async (req, res) => {
 
 /**
  * GET /approvals/counts
- * Get pending counts per module (admin only)
+ * Get pending counts per module.
+ * Sub-admins only see counts for their allowed modules.
  */
 export const getPendingCounts = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
+  const allowedModules = await getAllowedModules(req.user);
 
   const siteFilter = site_id ? 'AND site_id = $1' : '';
   const fSiteFilter = site_id ? 'AND f.site_id = $1' : '';
@@ -393,28 +425,30 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   const dbMap = {};
   for (const row of db.rows) dbMap[row.entry_type] = row.count;
 
-  const fpCount = fp.rows[0].count + (dbMap['FARMER PAYMENT'] || 0);
-  const pcCount = pc.rows[0].count + pcp.rows[0].count + (dbMap['PLOT COMMISSION'] || 0);
-  const exCount = ex.rows[0].count + (dbMap['EXPENSE'] || 0);
+  const a = (mod) => isModuleAllowed(allowedModules, mod);
 
-  // Count GENERAL and other non-mapped day_book entry types into cash_flow_entry
-  const otherDbCount = Object.entries(dbMap)
+  const fpCount = a('farmer_payment') ? fp.rows[0].count + (a('daybook') ? (dbMap['FARMER PAYMENT'] || 0) : 0) : 0;
+  const pcCount = a('plot_commission') || a('plot_commission_payment')
+    ? (a('plot_commission') ? pc.rows[0].count : 0) + (a('plot_commission_payment') ? pcp.rows[0].count : 0) + (a('daybook') ? (dbMap['PLOT COMMISSION'] || 0) : 0)
+    : 0;
+  const exCount = a('expense') ? ex.rows[0].count + (a('daybook') ? (dbMap['EXPENSE'] || 0) : 0) : 0;
+  const cfCount = a('cash_flow_entry') ? cf.rows[0].count + (a('daybook') ? Object.entries(dbMap)
     .filter(([et]) => !['FARMER PAYMENT', 'PLOT COMMISSION', 'EXPENSE'].includes(et))
-    .reduce((sum, [, count]) => sum + count, 0);
-  const cfCount = cf.rows[0].count + otherDbCount;
+    .reduce((sum, [, count]) => sum + count, 0) : 0) : 0;
+  const ftCount = a('firm_transaction') ? ft.rows[0].count : 0;
+  const ppCount = a('plot_payment') ? pp.rows[0].count : 0;
 
   const counts = {
     farmer_payment: fpCount,
     plot_commission: pcCount,
     cash_flow_entry: cfCount,
-    firm_transaction: ft.rows[0].count,
-    plot_payment: pp.rows[0].count,
+    firm_transaction: ftCount,
+    plot_payment: ppCount,
     expense: exCount,
-    total: fpCount + pcCount + cfCount +
-           ft.rows[0].count + pp.rows[0].count + exCount,
+    total: fpCount + pcCount + cfCount + ftCount + ppCount + exCount,
   };
 
-  res.json(counts);
+  res.json({ ...counts, allowed_modules: allowedModules ? Array.from(allowedModules) : null });
 });
 
 /**
@@ -427,6 +461,12 @@ export const approveEntry = asyncHandler(async (req, res) => {
 
   if (!source || !ALLOWED_TABLES[source]) {
     return res.status(400).json({ message: 'source query param is required (farmer_payment, plot_commission, cash_flow_entry, firm_transaction, plot_payment, expense, daybook)' });
+  }
+
+  // Check module-level permission for sub-admins
+  const allowedModules = await getAllowedModules(req.user);
+  if (!isModuleAllowed(allowedModules, source)) {
+    return res.status(403).json({ message: 'You do not have permission to approve this module' });
   }
 
   const table = getTableName(source);
@@ -530,6 +570,12 @@ export const rejectEntry = asyncHandler(async (req, res) => {
 
   if (!source || !ALLOWED_TABLES[source]) {
     return res.status(400).json({ message: 'source query param is required' });
+  }
+
+  // Check module-level permission for sub-admins
+  const allowedModules = await getAllowedModules(req.user);
+  if (!isModuleAllowed(allowedModules, source)) {
+    return res.status(403).json({ message: 'You do not have permission to reject this module' });
   }
 
   const table = getTableName(source);

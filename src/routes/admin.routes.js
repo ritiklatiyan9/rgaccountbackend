@@ -9,6 +9,8 @@ import {
 	listApprovers,
 	updateManagedUserAccess,
 	resetManagedUserPassword,
+	listApprovalManagers,
+	updateApprovalManager,
 } from '../controllers/admin.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -29,5 +31,9 @@ router.put('/sub-admins/:id', bustAdminCache, updateSubAdmin);
 router.delete('/sub-admins/:id', bustAdminCache, deleteSubAdmin);
 router.patch('/sub-admins/:id/access', bustAdminCache, updateManagedUserAccess);
 router.post('/sub-admins/:id/reset-password', bustAdminCache, resetManagedUserPassword);
+
+// Approval Manager routes (admin only)
+router.get('/approval-managers', adminReadCache, listApprovalManagers);
+router.put('/approval-managers/:userId', bustAdminCache, updateApprovalManager);
 
 export default router;

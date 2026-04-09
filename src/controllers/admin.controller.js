@@ -247,3 +247,132 @@ export const resetManagedUserPassword = asyncHandler(async (req, res) => {
 
   res.json({ user: userModel.sanitize(updated), message: 'Password reset successfully. User must login again.' });
 });
+
+// ══════════════════════════════════════════════════
+//  APPROVAL MANAGER ENDPOINTS
+// ══════════════════════════════════════════════════
+
+/**
+ * All approval module keys (must match ALLOWED_TABLES keys in approval.controller)
+ */
+const APPROVAL_MODULES = [
+  'farmer_payment',
+  'plot_commission',
+  'plot_commission_payment',
+  'cash_flow_entry',
+  'firm_transaction',
+  'plot_payment',
+  'expense',
+  'daybook',
+];
+
+// Ensure the table exists (safe to call multiple times)
+let _tableReady = false;
+const ensureApprovalModulesTable = async () => {
+  if (_tableReady) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_approval_modules (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      module VARCHAR(50) NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(user_id, module)
+    );
+  `);
+  _tableReady = true;
+};
+
+/**
+ * GET /admin/approval-managers
+ * List all admins + sub-admins with their per-module approval permissions.
+ */
+export const listApprovalManagers = asyncHandler(async (_req, res) => {
+  await ensureApprovalModulesTable();
+
+  const usersResult = await pool.query(
+    `SELECT u.id, u.name, u.email, u.phone, u.photo, u.role, u.is_active
+     FROM users u
+     WHERE u.role IN ('admin', 'sub_admin') AND u.is_active = true
+     ORDER BY u.role ASC, u.name ASC`
+  );
+
+  const modulesResult = await pool.query(
+    `SELECT user_id, module FROM user_approval_modules ORDER BY user_id`
+  );
+
+  // Build lookup: userId → Set of modules
+  const moduleMap = {};
+  for (const row of modulesResult.rows) {
+    if (!moduleMap[row.user_id]) moduleMap[row.user_id] = [];
+    moduleMap[row.user_id].push(row.module);
+  }
+
+  const managers = usersResult.rows.map(u => ({
+    ...u,
+    allowed_modules: moduleMap[u.id] || [],
+  }));
+
+  res.json({ managers, all_modules: APPROVAL_MODULES });
+});
+
+/**
+ * PUT /admin/approval-managers/:userId
+ * Update a sub-admin's allowed approval modules.
+ * Body: { modules: ['farmer_payment', 'expense', ...] }
+ */
+export const updateApprovalManager = asyncHandler(async (req, res) => {
+  await ensureApprovalModulesTable();
+
+  const targetUserId = parseInt(req.params.userId, 10);
+  const { modules } = req.body;
+
+  if (!Number.isInteger(targetUserId)) {
+    return res.status(400).json({ message: 'Invalid user id' });
+  }
+  if (!Array.isArray(modules)) {
+    return res.status(400).json({ message: 'modules must be an array' });
+  }
+
+  const user = await userModel.findById(targetUserId, pool);
+  if (!user || !['admin', 'sub_admin'].includes(user.role)) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  // Validate modules
+  const validModules = modules.filter(m => APPROVAL_MODULES.includes(m));
+
+  // Replace all modules for this user in one transaction
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM user_approval_modules WHERE user_id = $1', [targetUserId]);
+    for (const mod of validModules) {
+      await client.query(
+        'INSERT INTO user_approval_modules (user_id, module) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [targetUserId, mod]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // Also update the expense_approval permission so sidebar/route gating works
+  const hasAny = validModules.length > 0;
+  await permissionModel.upsert(targetUserId, 'expense_approval', {
+    can_read: hasAny,
+    can_write: hasAny,
+    can_update: hasAny,
+    can_delete: false,
+  });
+
+  res.json({
+    message: validModules.length > 0
+      ? `${validModules.length} approval module(s) granted`
+      : 'All approval modules revoked',
+    modules: validModules,
+  });
+});
