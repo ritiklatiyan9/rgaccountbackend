@@ -229,3 +229,59 @@ export async function getPlotPaymentDetail(plotId, siteId) {
     installments: instRes.rows,
   };
 }
+
+/**
+ * Fetch recent BANK + CHEQUE plot payments for a site — used by PlotRegistry "Link Payments" dropdown.
+ * Checks if source_plot_payment_id column exists for mapped_registry_payment_id tracking.
+ */
+export async function getRegistryBankChequePayments(siteId) {
+  const hasColResult = await pool.query(`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'plot_registry_payments'
+        AND column_name = 'source_plot_payment_id'
+    ) AS exists
+  `);
+  const hasCol = !!hasColResult.rows?.[0]?.exists;
+
+  const query = hasCol
+    ? `
+      SELECT
+        pp.id, pp.plot_id, p.plot_no,
+        p.buyer_name AS customer_name,
+        m.phone AS customer_phone,
+        pp.date, pp.amount, pp.payment_type, pp.payment_from,
+        pp.narration, pp.bank_details,
+        prp.id AS mapped_registry_payment_id
+      FROM plot_payments pp
+      LEFT JOIN plots p ON p.id = pp.plot_id
+      LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
+      LEFT JOIN plot_registry_payments prp ON prp.source_plot_payment_id = pp.id
+      WHERE pp.site_id = $1
+        AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
+        AND (pp.amount IS NOT NULL AND pp.amount > 0)
+      ORDER BY pp.date DESC, pp.created_at DESC
+    `
+    : `
+      SELECT
+        pp.id, pp.plot_id, p.plot_no,
+        p.buyer_name AS customer_name,
+        m.phone AS customer_phone,
+        pp.date, pp.amount, pp.payment_type, pp.payment_from,
+        pp.narration, pp.bank_details,
+        NULL::INTEGER AS mapped_registry_payment_id
+      FROM plot_payments pp
+      LEFT JOIN plots p ON p.id = pp.plot_id
+      LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
+      WHERE pp.site_id = $1
+        AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
+        AND (pp.amount IS NOT NULL AND pp.amount > 0)
+      ORDER BY pp.date DESC, pp.created_at DESC
+    `;
+
+  const { rows } = await pool.query(query, [siteId]);
+  return rows.map(r => ({
+    ...r,
+    date: r.date instanceof Date ? r.date.toISOString() : r.date,
+  }));
+}

@@ -15,18 +15,22 @@ const dateFilter = (col, paramStart) =>
   `AND ${col} >= $${paramStart} AND ${col} < $${paramStart + 1}`;
 
 // ── Revenue: plot_payments + plot_installment_payments ──
-export async function getRevenue(siteId, start, end) {
+export async function getRevenue(siteId, start, end, excludeOldPlots = false) {
+  const oldFilter = excludeOldPlots ? `AND (plt.plot_tag IS NULL OR plt.plot_tag != 'OLD')` : '';
   const { rows } = await pool.query(
     `SELECT COALESCE(SUM(amount), 0)::numeric AS total
      FROM (
-       SELECT amount FROM plot_payments
-       WHERE site_id = $1 ${dateFilter('date', 2)}
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       SELECT pp.amount FROM plot_payments pp
+       JOIN plots plt ON plt.id = pp.plot_id
+       WHERE pp.site_id = $1 ${dateFilter('pp.date', 2)}
+         AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         ${oldFilter}
        UNION ALL
        SELECT pip.amount FROM plot_installment_payments pip
        JOIN plots p ON p.id = pip.plot_id
        WHERE p.site_id = $1 ${dateFilter('pip.payment_date', 2)}
          AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         ${oldFilter.replace(/plt\./g, 'p.')}
      ) u`,
     [siteId, start, end]
   );
@@ -129,9 +133,9 @@ export async function getOutstanding(siteId) {
 }
 
 // ── Combined KPI fetch (single round-trip where possible) ──
-export async function getAllKpis(siteId, start, end) {
+export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
   const [revenue, expData, cashflow, outstanding] = await Promise.all([
-    getRevenue(siteId, start, end),
+    getRevenue(siteId, start, end, excludeOldPlots),
     getExpenseBreakdown(siteId, start, end),
     getSiteCashflow(siteId, start, end),
     getOutstanding(siteId),

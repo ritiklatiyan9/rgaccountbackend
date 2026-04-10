@@ -204,3 +204,51 @@ export const deletePlotCommission = asyncHandler(async (req, res) => {
 
   res.json({ message: 'Commission and all associated payments deleted' });
 });
+
+/**
+ * PUT /plot-commission/payment/:id
+ * Update an individual commission payment.
+ */
+export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const numId = parseInt(id);
+  if (isNaN(numId)) return res.status(400).json({ message: 'Invalid payment ID' });
+
+  const existing = await plotCommissionPaymentModel.findById(numId, pool);
+  if (!existing) return res.status(404).json({ message: 'Payment not found' });
+
+  const { date, amount, payment_mode, bank_name, transaction_id, cheque_no, remarks, voucher_url, assigned_admin_id } = req.body;
+
+  const data = {};
+  if (date !== undefined) data.date = date;
+  if (amount !== undefined) data.amount = parseFloat(amount);
+  if (payment_mode !== undefined) data.payment_mode = payment_mode;
+  if (bank_name !== undefined) data.bank_name = bank_name ? bank_name.trim() : null;
+  if (transaction_id !== undefined) data.transaction_id = transaction_id ? transaction_id.trim() : null;
+  if (cheque_no !== undefined) data.cheque_no = cheque_no ? cheque_no.trim() : null;
+  if (remarks !== undefined) data.remarks = remarks ? remarks.trim() : null;
+  if (voucher_url !== undefined) data.voucher_url = voucher_url || null;
+  if (assigned_admin_id !== undefined) data.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+  if (payment_mode !== undefined) {
+    data.cheque_status = payment_mode.toUpperCase() === 'CHEQUE' ? (existing.cheque_status || 'PENDING') : null;
+  }
+  data.updated_at = new Date();
+
+  const updated = await plotCommissionPaymentModel.update(numId, data, pool);
+  res.json({ payment: updated, message: 'Payment updated successfully' });
+});
+
+/**
+ * DELETE /plot-commission/payment/:id
+ * Delete an individual commission payment.
+ */
+export const deletePlotCommissionPayment = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const numId = parseInt(id);
+  if (isNaN(numId)) return res.status(400).json({ message: 'Invalid payment ID' });
+
+  const deleted = await plotCommissionPaymentModel.delete(numId, pool);
+  if (!deleted) return res.status(404).json({ message: 'Payment not found' });
+
+  res.json({ message: 'Payment deleted successfully' });
+});

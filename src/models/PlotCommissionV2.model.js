@@ -13,7 +13,7 @@ class PlotCommissionV2Model extends MasterModel {
     const query = `
       SELECT
         pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission, p.commission_rate, pc.remarks, pc.status, pc.created_at,
-        p.plot_no, p.plot_size, p.plot_rate, p.buyer_name,
+        p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.plot_tag,
         m.full_name AS agent_name, m.phone AS agent_phone,
         COALESCE(SUM(pcp.amount), 0) AS total_paid,
         (pc.total_commission - COALESCE(SUM(pcp.amount), 0)) AS balance

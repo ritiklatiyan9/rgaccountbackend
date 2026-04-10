@@ -10,7 +10,7 @@ import {
 import { getAllKpis } from './services/kpi.service.js';
 import { verifyFinancialIntegrity, getQueryDescriptions } from './services/consistency.service.js';
 import { getRevenueVsExpense, getProfitTrend, getExpenseByCategory } from './services/charts.service.js';
-import { getPlotPageData, getPlotPaymentDetail } from './services/plotPayments.service.js';
+import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
 import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes } from '../config/cache.js';
 
 // ── Input types ──
@@ -291,6 +291,24 @@ const PlotPaymentDetailType = new GraphQLObjectType({
   },
 });
 
+const RegistryLinkablePaymentType = new GraphQLObjectType({
+  name: 'RegistryLinkablePayment',
+  fields: {
+    id:                        { type: new GraphQLNonNull(GraphQLID) },
+    plot_id:                   { type: GraphQLInt },
+    plot_no:                   { type: GraphQLString },
+    customer_name:             { type: GraphQLString },
+    customer_phone:            { type: GraphQLString },
+    date:                      { type: GraphQLString },
+    amount:                    { type: GraphQLFloat },
+    payment_type:              { type: GraphQLString },
+    payment_from:              { type: GraphQLString },
+    narration:                 { type: GraphQLString },
+    bank_details:              { type: GraphQLString },
+    mapped_registry_payment_id: { type: GraphQLInt },
+  },
+});
+
 // ── Cache helpers ──
 const CACHE_TTL = 120; // 2 minutes for dashboard data
 
@@ -308,18 +326,19 @@ const QueryType = new GraphQLObjectType({
       args: {
         siteId: { type: new GraphQLNonNull(GraphQLID) },
         range:  { type: new GraphQLNonNull(DateRangeInput) },
+        excludeOldPlots: { type: GraphQLBoolean },
       },
-      async resolve(_, { siteId, range }, ctx) {
+      async resolve(_, { siteId, range, excludeOldPlots = false }, ctx) {
         if (!ctx.user) throw new Error('Authentication required');
         const id = parseInt(siteId);
-        const key = cacheKey('kpi', id, range.start, range.end);
+        const key = cacheKey(`kpi${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);
           if (cached) return cached;
         }
 
-        const result = await getAllKpis(id, range.start, range.end);
+        const result = await getAllKpis(id, range.start, range.end, excludeOldPlots);
 
         // Transform breakdown object → array for GraphQL
         const breakdownArr = Object.entries(result.breakdown).map(([mod, v]) => ({
@@ -360,18 +379,19 @@ const QueryType = new GraphQLObjectType({
         siteId:     { type: new GraphQLNonNull(GraphQLID) },
         range:      { type: new GraphQLNonNull(DateRangeInput) },
         resolution: { type: ResolutionEnum },
+        excludeOldPlots: { type: GraphQLBoolean },
       },
-      async resolve(_, { siteId, range, resolution = 'MONTH' }, ctx) {
+      async resolve(_, { siteId, range, resolution = 'MONTH', excludeOldPlots = false }, ctx) {
         if (!ctx.user) throw new Error('Authentication required');
         const id = parseInt(siteId);
-        const key = cacheKey(`chart-rve-${resolution}`, id, range.start, range.end);
+        const key = cacheKey(`chart-rve-${resolution}${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);
           if (cached) return cached;
         }
 
-        const data = await getRevenueVsExpense(id, range.start, range.end, resolution);
+        const data = await getRevenueVsExpense(id, range.start, range.end, resolution, excludeOldPlots);
         if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
         return data;
       },
@@ -383,18 +403,19 @@ const QueryType = new GraphQLObjectType({
         siteId:     { type: new GraphQLNonNull(GraphQLID) },
         range:      { type: new GraphQLNonNull(DateRangeInput) },
         resolution: { type: ResolutionEnum },
+        excludeOldPlots: { type: GraphQLBoolean },
       },
-      async resolve(_, { siteId, range, resolution = 'MONTH' }, ctx) {
+      async resolve(_, { siteId, range, resolution = 'MONTH', excludeOldPlots = false }, ctx) {
         if (!ctx.user) throw new Error('Authentication required');
         const id = parseInt(siteId);
-        const key = cacheKey(`chart-profit-${resolution}`, id, range.start, range.end);
+        const key = cacheKey(`chart-profit-${resolution}${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);
           if (cached) return cached;
         }
 
-        const data = await getProfitTrend(id, range.start, range.end, resolution);
+        const data = await getProfitTrend(id, range.start, range.end, resolution, excludeOldPlots);
         if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
         return data;
       },
@@ -448,6 +469,17 @@ const QueryType = new GraphQLObjectType({
         if (!ctx.user) throw new Error('Authentication required');
         const data = await getPlotPaymentDetail(parseInt(plotId), parseInt(siteId));
         return data;
+      },
+    },
+
+    registryBankChequePayments: {
+      type: new GraphQLList(RegistryLinkablePaymentType),
+      args: {
+        siteId: { type: new GraphQLNonNull(GraphQLID) },
+      },
+      async resolve(_, { siteId }, ctx) {
+        if (!ctx.user) throw new Error('Authentication required');
+        return getRegistryBankChequePayments(parseInt(siteId));
       },
     },
   },

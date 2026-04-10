@@ -21,9 +21,10 @@ async function runFromSourceTables(siteId, start, end) {
   const revResult = await pool.query(
     `SELECT COALESCE(SUM(amount), 0)::numeric AS total
      FROM (
-       SELECT amount FROM plot_payments
-       WHERE site_id = $1 AND date >= $2 AND date < $3
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       SELECT pp.amount FROM plot_payments pp
+       JOIN plots plt ON plt.id = pp.plot_id
+       WHERE pp.site_id = $1 AND pp.date >= $2 AND pp.date < $3
+         AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
        UNION ALL
        SELECT pip.amount FROM plot_installment_payments pip
        JOIN plots p ON p.id = pip.plot_id

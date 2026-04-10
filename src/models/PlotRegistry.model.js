@@ -92,10 +92,9 @@ class PlotRegistryPaymentModel extends MasterModel {
         LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
         LEFT JOIN plot_registry_payments prp ON prp.source_plot_payment_id = pp.id
         WHERE pp.site_id = $1
-          AND UPPER(COALESCE(pp.payment_type, '')) = 'BANK'
+          AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
           AND (pp.amount IS NOT NULL AND pp.amount > 0)
         ORDER BY pp.date DESC, pp.created_at DESC
-        LIMIT 200
       `
       : `
         SELECT
@@ -115,10 +114,9 @@ class PlotRegistryPaymentModel extends MasterModel {
         LEFT JOIN plots p ON p.id = pp.plot_id
         LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
         WHERE pp.site_id = $1
-          AND UPPER(COALESCE(pp.payment_type, '')) = 'BANK'
+          AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
           AND (pp.amount IS NOT NULL AND pp.amount > 0)
         ORDER BY pp.date DESC, pp.created_at DESC
-        LIMIT 200
       `;
 
     const [customerNames, farmerNames, paymentModes, plotOptions, clientNames, clientUsers, firmNames, recentBankPlotPayments] = await Promise.all([
