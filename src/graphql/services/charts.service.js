@@ -76,6 +76,7 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          SELECT payment_date AS date, amount AS debit FROM plot_registry_payments
          WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND source_plot_payment_id IS NULL
          UNION ALL
          SELECT date, amount AS debit FROM plot_commissions
          WHERE site_id = $1 AND date >= $2 AND date < $3

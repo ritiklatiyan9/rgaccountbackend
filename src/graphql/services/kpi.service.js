@@ -59,6 +59,7 @@ export async function getExpenseBreakdown(siteId, start, end) {
        FROM plot_registry_payments
        WHERE site_id = $1 ${dateFilter('payment_date', 2)}
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND source_plot_payment_id IS NULL
        UNION ALL
        SELECT amount AS debit, 'commissions' AS source_type
        FROM plot_commissions

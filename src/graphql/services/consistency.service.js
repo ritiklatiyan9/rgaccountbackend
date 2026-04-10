@@ -51,6 +51,7 @@ async function runFromSourceTables(siteId, start, end) {
        SELECT amount AS debit FROM plot_registry_payments
        WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND source_plot_payment_id IS NULL
        UNION ALL
        SELECT amount AS debit FROM plot_commissions
        WHERE site_id = $1 AND date >= $2 AND date < $3
@@ -117,10 +118,14 @@ async function runFromCashFlowEntries(siteId, start, end) {
     `SELECT
        COALESCE(SUM(credit), 0)::numeric AS total_credit,
        COALESCE(SUM(debit),  0)::numeric AS total_debit
-     FROM cash_flow_entries
-     WHERE site_id = $1 AND date >= $2 AND date < $3
-       AND source_module IN (${placeholders})
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+     FROM cash_flow_entries cfe
+     WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+       AND cfe.source_module IN (${placeholders})
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND NOT (cfe.source_module = 'plot_registry_payments' AND EXISTS (
+         SELECT 1 FROM plot_registry_payments prp
+         WHERE prp.id = cfe.source_id AND prp.source_plot_payment_id IS NOT NULL
+       ))`,
     [siteId, start, end, ...profitModules]
   );
 

@@ -1618,6 +1618,7 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
        FROM plot_registry_payments
        WHERE site_id = $1
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+         AND source_plot_payment_id IS NULL
        UNION ALL
        SELECT amount AS debit, 'commissions' AS source_type
        FROM plot_commissions
@@ -1801,6 +1802,7 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
          UNION ALL
          SELECT payment_date AS date, amount AS debit FROM plot_registry_payments
          WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND source_plot_payment_id IS NULL
          UNION ALL
          SELECT date, amount AS debit FROM plot_commissions
          WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))

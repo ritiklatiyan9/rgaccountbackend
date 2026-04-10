@@ -57,13 +57,13 @@ export const createPlotCommission = asyncHandler(async (req, res) => {
 
 /**
  * GET /plot-commission/list
- * List all commissions with aggregated payment data.
+ * List commissions grouped by plot (one row per plot).
  */
 export const listPlotCommissions = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const commissions = await plotCommissionV2Model.findBySiteIdWithDetails(parseInt(site_id), pool);
+  const commissions = await plotCommissionV2Model.findBySiteIdGroupedByPlot(parseInt(site_id), pool);
   res.json({ commissions });
 });
 
@@ -84,6 +84,87 @@ export const getPlotCommissionDetail = asyncHandler(async (req, res) => {
   if (!master) return res.status(404).json({ message: 'Commission not found' });
 
   res.json({ master, payments });
+});
+
+/**
+ * GET /plot-commission/plot/:plotId
+ * Get all commissions for a plot (agent history) with all their payments.
+ * Used by the new detail page that groups by plot.
+ */
+export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
+  const { plotId } = req.params;
+  const { site_id } = req.query;
+  const numPlotId = parseInt(plotId);
+  if (isNaN(numPlotId)) return res.status(400).json({ message: 'Invalid plot ID' });
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const commissions = await plotCommissionV2Model.findAllCommissionsByPlotId(numPlotId, parseInt(site_id), pool);
+  if (!commissions || commissions.length === 0) {
+    return res.status(404).json({ message: 'No commissions found for this plot' });
+  }
+
+  // Get all payments for each commission
+  const commissionIds = commissions.map(c => c.id);
+  const allPaymentsQuery = `
+    SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name
+    FROM plot_commission_payments pcp
+    LEFT JOIN users u ON pcp.created_by = u.id
+    LEFT JOIN users a ON pcp.approved_by = a.id
+    WHERE pcp.plot_commission_id = ANY($1)
+    ORDER BY pcp.date DESC, pcp.created_at DESC
+  `;
+  const paymentsResult = await pool.query(allPaymentsQuery, [commissionIds]);
+  const allPayments = paymentsResult.rows;
+
+  // Group payments by commission_id
+  const paymentsByCommission = {};
+  for (const p of allPayments) {
+    if (!paymentsByCommission[p.plot_commission_id]) {
+      paymentsByCommission[p.plot_commission_id] = [];
+    }
+    paymentsByCommission[p.plot_commission_id].push(p);
+  }
+
+  // Plot-level info from first commission (all share the same plot)
+  const plotInfo = {
+    plot_id: commissions[0].plot_id,
+    plot_no: commissions[0].plot_no,
+    plot_size: commissions[0].plot_size,
+    plot_rate: commissions[0].plot_rate,
+    buyer_name: commissions[0].buyer_name,
+    commission_rate: commissions[0].commission_rate,
+    plot_tag: commissions[0].plot_tag,
+    site_name: commissions[0].site_name,
+    site_id: commissions[0].site_id,
+  };
+
+  // Build agent sections
+  const agents = commissions.map(c => ({
+    commission_id: c.id,
+    agent_id: c.agent_id,
+    agent_name: c.agent_name,
+    agent_phone: c.agent_phone,
+    total_commission: c.total_commission,
+    total_paid: parseFloat(c.total_paid) || 0,
+    total_paid_all: parseFloat(c.total_paid_all) || 0,
+    balance: parseFloat(c.balance) || 0,
+    status: c.status,
+    remarks: c.remarks,
+    created_at: c.created_at,
+    payments: paymentsByCommission[c.id] || []
+  }));
+
+  // Plot-level totals
+  const totalCommission = agents.reduce((s, a) => s + parseFloat(a.total_commission), 0);
+  const totalPaid = agents.reduce((s, a) => s + a.total_paid, 0);
+  const totalPaidAll = agents.reduce((s, a) => s + a.total_paid_all, 0);
+
+  res.json({
+    plot: plotInfo,
+    agents,
+    totals: { total_commission: totalCommission, total_paid: totalPaid, total_paid_all: totalPaidAll, balance: totalCommission - totalPaidAll },
+    is_resale: commissions.length > 1,
+  });
 });
 
 /**

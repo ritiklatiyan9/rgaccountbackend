@@ -6,6 +6,7 @@ import {
   createPlotCommission,
   listPlotCommissions,
   getPlotCommissionDetail,
+  getPlotCommissionByPlot,
   createPlotCommissionPayment,
   updatePlotCommissionPayment,
   deletePlotCommissionPayment,
@@ -36,6 +37,9 @@ router.delete('/payment/:id', requireRole('admin', 'sub_admin'), requirePermissi
 
 // Analytics route (more specific, must come before /:id routes)
 router.get('/analytics/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getPlotCommissionAnalytics);
+
+// Plot-level detail route (all commissions for a plot)
+router.get('/plot/:plotId', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getPlotCommissionByPlot);
 
 // Master commission routes (less specific, come last)
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getPlotCommissionDetail);
