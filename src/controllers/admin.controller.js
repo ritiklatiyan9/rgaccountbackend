@@ -107,10 +107,6 @@ export const updateSubAdmin = asyncHandler(async (req, res) => {
   if (!managedUser || managedUser.role === 'super_admin') {
     return res.status(404).json({ message: 'Managed user not found' });
   }
-  // Non-super admins can only manage users they created
-  if (req.user.role !== 'super_admin' && managedUser.created_by !== req.user.id) {
-    return res.status(404).json({ message: 'Managed user not found' });
-  }
 
   if (role !== undefined) {
     const normalizedRole = normalizeRole(role);
@@ -154,9 +150,6 @@ export const deleteSubAdmin = asyncHandler(async (req, res) => {
   if (!managedUser || managedUser.role === 'super_admin') {
     return res.status(404).json({ message: 'Managed user not found' });
   }
-  if (req.user.role !== 'super_admin' && managedUser.created_by !== req.user.id) {
-    return res.status(404).json({ message: 'Managed user not found' });
-  }
 
   await userModel.update(parseInt(id, 10), { is_active: false }, pool);
   res.json({ message: 'Managed user deactivated' });
@@ -184,9 +177,6 @@ export const updateManagedUserAccess = asyncHandler(async (req, res) => {
 
   const managedUser = await userModel.findById(targetUserId, pool);
   if (!managedUser || managedUser.role === 'super_admin') {
-    return res.status(404).json({ message: 'Managed user not found' });
-  }
-  if (req.user.role !== 'super_admin' && managedUser.created_by !== req.user.id) {
     return res.status(404).json({ message: 'Managed user not found' });
   }
 
@@ -225,9 +215,6 @@ export const resetManagedUserPassword = asyncHandler(async (req, res) => {
 
   const managedUser = await userModel.findById(targetUserId, pool);
   if (!managedUser || managedUser.role === 'super_admin') {
-    return res.status(404).json({ message: 'Managed user not found' });
-  }
-  if (req.user.role !== 'super_admin' && managedUser.created_by !== req.user.id) {
     return res.status(404).json({ message: 'Managed user not found' });
   }
 
