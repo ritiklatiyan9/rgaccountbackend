@@ -159,11 +159,44 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const totalPaid = agents.reduce((s, a) => s + a.total_paid, 0);
   const totalPaidAll = agents.reduce((s, a) => s + a.total_paid_all, 0);
 
+  // Find related plots with same plot_no (history timeline)
+  const timelineQuery = `
+    SELECT
+      p.id AS plot_id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate,
+      STRING_AGG(DISTINCT m.full_name, ', ' ORDER BY m.full_name) AS agent_names,
+      SUM(pc.total_commission) AS total_commission,
+      COALESCE(SUM(paid_agg.total_paid), 0) AS total_paid,
+      MIN(pc.created_at) AS first_created,
+      MAX(pc.created_at) AS last_created,
+      MAX(pc.status) AS latest_status
+    FROM plots p
+    JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = $2
+    JOIN members m ON pc.agent_id = m.id
+    LEFT JOIN (
+      SELECT plot_commission_id, SUM(amount) AS total_paid
+      FROM plot_commission_payments
+      WHERE status = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      GROUP BY plot_commission_id
+    ) paid_agg ON paid_agg.plot_commission_id = pc.id
+    WHERE p.plot_no = $1 AND pc.site_id = $2
+    GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate
+    ORDER BY MAX(pc.created_at) DESC
+  `;
+  const timelineResult = await pool.query(timelineQuery, [plotInfo.plot_no, parseInt(site_id)]);
+  const timeline = timelineResult.rows.map(r => ({
+    ...r,
+    total_commission: parseFloat(r.total_commission) || 0,
+    total_paid: parseFloat(r.total_paid) || 0,
+    balance: (parseFloat(r.total_commission) || 0) - (parseFloat(r.total_paid) || 0),
+    is_current: r.plot_id === numPlotId,
+  }));
+
   res.json({
     plot: plotInfo,
     agents,
     totals: { total_commission: totalCommission, total_paid: totalPaid, total_paid_all: totalPaidAll, balance: totalCommission - totalPaidAll },
     is_resale: commissions.length > 1,
+    timeline,
   });
 });
 

@@ -310,7 +310,7 @@ const RegistryLinkablePaymentType = new GraphQLObjectType({
 });
 
 // ── Cache helpers ──
-const CACHE_TTL = 120; // 2 minutes for dashboard data
+const CACHE_TTL = 15; // 15 seconds — short enough to stay fresh while reducing DB load
 
 function cacheKey(prefix, siteId, start, end) {
   return `dashboard:${prefix}:${siteId}:${start}:${end}`;
@@ -331,12 +331,6 @@ const QueryType = new GraphQLObjectType({
       async resolve(_, { siteId, range, excludeOldPlots = false }, ctx) {
         if (!ctx.user) throw new Error('Authentication required');
         const id = parseInt(siteId);
-        const key = cacheKey(`kpi${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
-
-        if (cacheEnabled()) {
-          const cached = await cacheGet(key);
-          if (cached) return cached;
-        }
 
         const result = await getAllKpis(id, range.start, range.end, excludeOldPlots);
 
@@ -348,9 +342,7 @@ const QueryType = new GraphQLObjectType({
           count: v.count || 0,
         }));
 
-        const response = { ...result, breakdown: breakdownArr };
-        if (cacheEnabled()) await cacheSet(key, response, CACHE_TTL);
-        return response;
+        return { ...result, breakdown: breakdownArr };
       },
     },
 

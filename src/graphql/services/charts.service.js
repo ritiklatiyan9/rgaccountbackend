@@ -30,8 +30,6 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          UNION ALL
          SELECT MIN(date)    AS d FROM expenses                 WHERE site_id = $1 AND date >= $2 AND date < $3
          UNION ALL
-         SELECT MIN(payment_date) FROM plot_registry_payments   WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
-         UNION ALL
          SELECT MIN(date)    AS d FROM plot_commission_payments WHERE site_id = $1 AND date >= $2 AND date < $3
          UNION ALL
          SELECT MIN(payment_date) FROM vendor_payments          WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
@@ -73,15 +71,6 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          WHERE site_id = $1 AND date >= $2 AND date < $3
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
          UNION ALL
-         SELECT payment_date AS date, amount AS debit FROM plot_registry_payments
-         WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
-           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-           AND source_plot_payment_id IS NULL
-         UNION ALL
-         SELECT date, amount AS debit FROM plot_commissions
-         WHERE site_id = $1 AND date >= $2 AND date < $3
-           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         UNION ALL
          SELECT date, amount AS debit FROM plot_commission_payments
          WHERE site_id = $1 AND date >= $2 AND date < $3
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
@@ -89,6 +78,12 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          SELECT payment_date AS date, amount AS debit FROM vendor_payments
          WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         UNION ALL
+         SELECT cfe.date, cfe.debit FROM cash_flow_entries cfe
+         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+         WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+           AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
+           AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
        ) u
        GROUP BY 1
      )

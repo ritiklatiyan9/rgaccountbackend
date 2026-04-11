@@ -2,11 +2,12 @@
  * KPI Service — Direct SQL aggregation against source tables.
  * All computations happen in PostgreSQL, never in JS.
  *
- * Revenue  = plot_payments + plot_installment_payments
- * Expense  = farmer_payments + expenses + plot_commissions + plot_commission_payments
- *            + vendor_payments + plot_registry_payments + day_book EXPENSE entries (orphan)
- * Cashflow = site-type cash_flow_entries (credit − debit)
- * Outstanding = person-ledger pending (given − returned)
+ * Total Incoming = plot_payments + plot_installment_payments
+ * Total Expenses = farmer_payments + expenses + plot_commission_payments
+ *                  + vendor_payments + personal_ledger_debit + orphan day_book EXPENSE
+ * Plot Registry  = mapping of plot_payments only, NOT counted as new incoming/outgoing
+ * Cashflow       = site-type cash_flow_entries (credit − debit)
+ * Outstanding    = person-ledger pending (given − returned)
  */
 import pool from '../../config/db.js';
 
@@ -38,6 +39,9 @@ export async function getRevenue(siteId, start, end, excludeOldPlots = false) {
 }
 
 // ── Expense breakdown by module ──
+// Total Expenses = farmer_payments + expenses + commissions + commission_payments
+//                  + vendor_payments + personal_ledger_debit + orphan daybook EXPENSE
+// NOTE: plot_registry_payments are EXCLUDED — they are just mapped plot payments
 export async function getExpenseBreakdown(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT source_type,
@@ -55,17 +59,6 @@ export async function getExpenseBreakdown(siteId, start, end) {
        WHERE site_id = $1 ${dateFilter('date', 2)}
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
        UNION ALL
-       SELECT amount AS debit, 'plot_registry_payments' AS source_type
-       FROM plot_registry_payments
-       WHERE site_id = $1 ${dateFilter('payment_date', 2)}
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         AND source_plot_payment_id IS NULL
-       UNION ALL
-       SELECT amount AS debit, 'commissions' AS source_type
-       FROM plot_commissions
-       WHERE site_id = $1 ${dateFilter('date', 2)}
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-       UNION ALL
        SELECT amount AS debit, 'commission_payments' AS source_type
        FROM plot_commission_payments
        WHERE site_id = $1 ${dateFilter('date', 2)}
@@ -75,6 +68,14 @@ export async function getExpenseBreakdown(siteId, start, end) {
        FROM vendor_payments
        WHERE site_id = $1 ${dateFilter('payment_date', 2)}
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       UNION ALL
+       SELECT cfe.debit, 'personal_ledger_debit' AS source_type
+       FROM cash_flow_entries cfe
+       JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+       WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
+         AND LOWER(cfm.ledger_type) = 'person'
+         AND cfe.debit > 0
+         AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
        UNION ALL
        SELECT debit, 'daybook_expense' AS source_type
        FROM day_book
@@ -116,7 +117,7 @@ export async function getSiteCashflow(siteId, start, end) {
 }
 
 // ── Person Ledger Outstanding ──
-export async function getOutstanding(siteId) {
+export async function getOutstanding(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT
        COALESCE(SUM(cfe.debit),  0)::numeric AS given,
@@ -139,9 +140,12 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     getRevenue(siteId, start, end, excludeOldPlots),
     getExpenseBreakdown(siteId, start, end),
     getSiteCashflow(siteId, start, end),
-    getOutstanding(siteId),
+    getOutstanding(siteId, start, end),
   ]);
 
+  // Total Incoming = Plot Payments only
+  // Total Expenses = farmer + expenses + commissions + vendors + personal_ledger_debit + orphan daybook
+  // Profit = Total Incoming - Total Expenses
   const netProfit = revenue - expData.total;
   const profitMargin = revenue > 0 ? (netProfit / revenue) * 100 : 0;
 

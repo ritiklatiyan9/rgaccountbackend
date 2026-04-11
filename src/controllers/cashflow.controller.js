@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model.js';
 import { firmModel } from '../models/Firm.model.js';
 import pool from '../config/db.js';
+import { clearCacheByPrefixes } from '../config/cache.js';
 
 // ══════════════════════════════════════════════════
 //  CASH FLOW MONTH ENDPOINTS
@@ -198,6 +199,7 @@ export const createEntry = asyncHandler(async (req, res) => {
   };
 
   const entry = await cashFlowEntryModel.create(data, pool);
+  clearCacheByPrefixes(['dashboard:']).catch(() => {});
   res.status(201).json({ entry });
 });
 
@@ -327,6 +329,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
   }
 
   const updated = await cashFlowEntryModel.update(parseInt(id), updateData, pool);
+  clearCacheByPrefixes(['dashboard:']).catch(() => {});
   res.json({ entry: updated });
 });
 
@@ -354,5 +357,6 @@ export const deleteEntry = asyncHandler(async (req, res) => {
   if (cfMonth && cfMonth.is_locked) return res.status(403).json({ message: 'This month is locked.' });
 
   await cashFlowEntryModel.delete(parseInt(id), pool);
+  clearCacheByPrefixes(['dashboard:']).catch(() => {});
   res.json({ message: 'Entry deleted' });
 });

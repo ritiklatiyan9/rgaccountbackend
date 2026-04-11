@@ -48,15 +48,6 @@ async function runFromSourceTables(siteId, start, end) {
        WHERE site_id = $1 AND date >= $2 AND date < $3
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
        UNION ALL
-       SELECT amount AS debit FROM plot_registry_payments
-       WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         AND source_plot_payment_id IS NULL
-       UNION ALL
-       SELECT amount AS debit FROM plot_commissions
-       WHERE site_id = $1 AND date >= $2 AND date < $3
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-       UNION ALL
        SELECT amount AS debit FROM plot_commission_payments
        WHERE site_id = $1 AND date >= $2 AND date < $3
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
@@ -64,6 +55,12 @@ async function runFromSourceTables(siteId, start, end) {
        SELECT amount AS debit FROM vendor_payments
        WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       UNION ALL
+       SELECT cfe.debit FROM cash_flow_entries cfe
+       JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+       WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+         AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
+         AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
        UNION ALL
        SELECT debit FROM day_book
        WHERE site_id = $1 AND date >= $2 AND date < $3
@@ -108,8 +105,8 @@ async function runFromCashFlowEntries(siteId, start, end) {
   const profitModules = [
     'plot_payments', 'plot_installment_payments',
     'farmer_payments', 'expenses',
-    'plot_commissions', 'plot_commission_payments',
-    'vendor_payments', 'plot_registry_payments',
+    'plot_commission_payments',
+    'vendor_payments',
   ];
 
   const placeholders = profitModules.map((_, i) => `$${i + 4}`).join(', ');
@@ -121,11 +118,7 @@ async function runFromCashFlowEntries(siteId, start, end) {
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND cfe.source_module IN (${placeholders})
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
-       AND NOT (cfe.source_module = 'plot_registry_payments' AND EXISTS (
-         SELECT 1 FROM plot_registry_payments prp
-         WHERE prp.id = cfe.source_id AND prp.source_plot_payment_id IS NOT NULL
-       ))`,
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
     [siteId, start, end, ...profitModules]
   );
 
@@ -148,7 +141,19 @@ async function runFromCashFlowEntries(siteId, start, end) {
   );
   const orphanExpense = parseFloat(orphanResult.rows[0].total) || 0;
 
-  const adjExpense = totalExpense + orphanExpense;
+  // Personal ledger debit (person-type entries are native to cash_flow_entries, not synced)
+  const plResult = await pool.query(
+    `SELECT COALESCE(SUM(cfe.debit), 0)::numeric AS total
+     FROM cash_flow_entries cfe
+     JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+     WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+       AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+    [siteId, start, end]
+  );
+  const personalLedgerDebit = parseFloat(plResult.rows[0].total) || 0;
+
+  const adjExpense = totalExpense + orphanExpense + personalLedgerDebit;
   const netProfit = totalRevenue - adjExpense;
 
   // Outstanding from person ledger (same source for both runs)
