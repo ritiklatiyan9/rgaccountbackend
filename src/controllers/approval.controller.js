@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
+import { imprestLedgerModel } from '../models/Imprest.model.js';
 
 /**
  * Unified approval controller for all financial modules.
@@ -581,17 +582,49 @@ export const rejectEntry = asyncHandler(async (req, res) => {
   const table = getTableName(source);
   const entryId = parseInt(id);
 
-  const check = await pool.query(`SELECT status, assigned_admin_id FROM ${table} WHERE id = $1`, [entryId]);
+  const check = await pool.query(`SELECT status, assigned_admin_id, created_by FROM ${table} WHERE id = $1`, [entryId]);
   if (!check.rows[0]) return res.status(404).json({ message: 'Entry not found' });
   if (check.rows[0].status === 'rejected') return res.status(400).json({ message: 'Entry is already rejected' });
   if (check.rows[0].assigned_admin_id && parseInt(check.rows[0].assigned_admin_id) !== parseInt(req.user.id)) {
     return res.status(403).json({ message: 'This entry is assigned to another admin for approval' });
   }
 
+  const wasApproved = check.rows[0].status === 'approved';
+
   const result = await pool.query(
     `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`,
     [entryId, req.user.id]
   );
+
+  // Reverse imprest deduction if entry was previously approved
+  const IMPREST_SOURCES = ['expense', 'farmer_payment', 'plot_commission_payment', 'vendor_payment', 'daybook'];
+  if (wasApproved && IMPREST_SOURCES.includes(source)) {
+    const entry = result.rows[0];
+    const debitAmount = parseFloat(entry.debit || entry.amount) || 0;
+    if (debitAmount > 0 && entry.created_by) {
+      try {
+        const userResult = await pool.query('SELECT role FROM users WHERE id = $1', [entry.created_by]);
+        if (userResult.rows[0]?.role === 'sub_admin') {
+          const existingDeduction = await pool.query(
+            `SELECT id FROM imprest_ledger WHERE user_id = $1 AND reference_id = $2 AND type = 'EXPENSE' AND amount < 0 LIMIT 1`,
+            [entry.created_by, entryId]
+          );
+          if (existingDeduction.rows.length > 0) {
+            await imprestLedgerModel.createEntry({
+              user_id: entry.created_by,
+              type: 'ADJUSTMENT',
+              reference_id: entryId,
+              amount: debitAmount,
+              remarks: `REVERSED (REJECTED): ${source.toUpperCase()} #${entryId}`,
+              created_by: req.user.id,
+            }, pool);
+          }
+        }
+      } catch (err) {
+        console.error('[Imprest] Failed to reverse on rejection for', source, entryId, err.message);
+      }
+    }
+  }
 
   res.json({ entry: result.rows[0], message: `${source} rejected` });
 });

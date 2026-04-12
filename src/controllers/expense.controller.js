@@ -36,6 +36,39 @@ async function deductImprestOnApproval(createdByUserId, debitAmount, referenceId
 }
 
 /**
+ * Helper: Reverse the imprest deduction when a previously-approved expense
+ * is REJECTED/DECLINED. Adds back the deducted amount to restore balance.
+ */
+async function reverseImprestOnRejection(createdByUserId, debitAmount, referenceId, remarks, rejectedByUserId) {
+  if (!debitAmount || debitAmount <= 0) return;
+
+  try {
+    // Only reverse for sub_admin users
+    const userResult = await pool.query('SELECT role FROM users WHERE id = $1', [createdByUserId]);
+    const user = userResult.rows[0];
+    if (!user || user.role !== 'sub_admin') return;
+
+    // Check that an EXPENSE deduction actually exists for this reference
+    const existing = await pool.query(
+      `SELECT id FROM imprest_ledger WHERE user_id = $1 AND reference_id = $2 AND type = 'EXPENSE' AND amount < 0 LIMIT 1`,
+      [createdByUserId, referenceId]
+    );
+    if (existing.rows.length === 0) return; // No deduction was made, nothing to reverse
+
+    await imprestLedgerModel.createEntry({
+      user_id: createdByUserId,
+      type: 'ADJUSTMENT',
+      reference_id: referenceId,
+      amount: debitAmount, // positive = restore balance
+      remarks: `REVERSED (REJECTED): ${remarks}`.toUpperCase(),
+      created_by: rejectedByUserId,
+    }, pool);
+  } catch (err) {
+    console.error('[Imprest] Failed to reverse on rejection for ref', referenceId, err.message);
+  }
+}
+
+/**
  * POST /expenses
  * Create a new expense entry (status defaults to 'pending')
  */
@@ -429,6 +462,17 @@ export const rejectExpense = asyncHandler(async (req, res) => {
       [parseInt(id), req.user.id]
     );
 
+    // Reverse imprest deduction if this was previously approved
+    if (payment.status === 'approved') {
+      await reverseImprestOnRejection(
+        payment.created_by,
+        parseFloat(payment.amount) || 0,
+        payment.id,
+        `VENDOR PAYMENT #${payment.id}`,
+        req.user.id
+      );
+    }
+
     return res.json({ expense: rejectedResult.rows[0], message: 'Vendor payment rejected' });
   }
 
@@ -441,6 +485,18 @@ export const rejectExpense = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'Entry is already rejected' });
     }
     const entry = await dayBookModel.rejectEntry(parseInt(id), req.user.id, pool);
+
+    // Reverse imprest deduction if this was previously approved
+    if (existing.status === 'approved') {
+      await reverseImprestOnRejection(
+        existing.created_by,
+        parseFloat(existing.debit) || 0,
+        existing.id,
+        `DAYBOOK #${existing.id}: ${existing.entry_type || 'EXPENSE'}`,
+        req.user.id
+      );
+    }
+
     return res.json({ expense: entry, message: 'Day Book expense rejected' });
   }
 
@@ -454,6 +510,18 @@ export const rejectExpense = asyncHandler(async (req, res) => {
   }
 
   const expense = await expenseModel.rejectExpense(parseInt(id), req.user.id, pool);
+
+  // Reverse imprest deduction if this was previously approved
+  if (existing.status === 'approved') {
+    await reverseImprestOnRejection(
+      existing.created_by,
+      parseFloat(existing.debit) || 0,
+      existing.id,
+      `EXPENSE #${existing.id}: ${existing.remark || 'EXPENSE'}`,
+      req.user.id
+    );
+  }
+
   res.json({ expense, message: 'Expense rejected' });
 });
 

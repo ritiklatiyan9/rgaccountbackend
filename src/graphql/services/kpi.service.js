@@ -53,21 +53,25 @@ export async function getExpenseBreakdown(siteId, start, end) {
        JOIN farmers f ON f.id = fp.farmer_id
        WHERE f.site_id = $1 ${dateFilter('fp.date', 2)}
          AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND fp.status != 'rejected'
        UNION ALL
        SELECT debit, 'expenses' AS source_type
        FROM expenses
        WHERE site_id = $1 ${dateFilter('date', 2)}
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND status != 'rejected'
        UNION ALL
        SELECT amount AS debit, 'commission_payments' AS source_type
        FROM plot_commission_payments
        WHERE site_id = $1 ${dateFilter('date', 2)}
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND status != 'rejected'
        UNION ALL
        SELECT amount AS debit, 'vendor_payments' AS source_type
        FROM vendor_payments
        WHERE site_id = $1 ${dateFilter('payment_date', 2)}
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND status != 'rejected'
        UNION ALL
        SELECT cfe.debit, 'personal_ledger_debit' AS source_type
        FROM cash_flow_entries cfe
@@ -83,6 +87,7 @@ export async function getExpenseBreakdown(siteId, start, end) {
          AND entry_type = 'EXPENSE'
          AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND status != 'rejected'
      ) u
      GROUP BY source_type`,
     [siteId, start, end]

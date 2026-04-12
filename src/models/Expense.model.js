@@ -450,7 +450,7 @@ class ExpenseModel extends MasterModel {
       WHERE 1=1 ${whereClause}
     `;
 
-    // ── Q3: Summary aggregates ──
+    // ── Q3: Summary aggregates (exclude rejected) ──
     const summaryQuery = `
       ${unifiedCTE}
       SELECT 
@@ -458,7 +458,7 @@ class ExpenseModel extends MasterModel {
         COALESCE(SUM(credit), 0)::numeric as total_credit,
         COUNT(*)::int as total_count
       FROM unified u
-      WHERE 1=1 ${whereClause}
+      WHERE 1=1 ${whereClause} AND u.status != 'rejected'
     `;
 
     // ── Run all 3 in parallel ──
@@ -501,24 +501,24 @@ class ExpenseModel extends MasterModel {
     const modeQuery = `
       WITH unified AS (
         SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
-        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
         UNION ALL
         SELECT fp.date, fp.payment_mode, 'FARMER PAYMENT' as category, UPPER(f.name) as to_entity, NULL as from_entity,
           UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit
         FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
-        WHERE f.site_id = $1 AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        WHERE f.site_id = $1 AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND fp.status != 'rejected'
         UNION ALL
         SELECT pcp.date, pcp.payment_mode, 'COMMISSION' as category, UPPER(ag.full_name) as to_entity, NULL as from_entity,
           UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch, pcp.amount as debit, 0::numeric as credit
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
         JOIN members ag ON pcm.agent_id = ag.id
-        WHERE pcp.site_id = $1 AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        WHERE pcp.site_id = $1 AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND pcp.status != 'rejected'
         UNION ALL
         SELECT vp.payment_date as date, UPPER(vp.payment_mode) as payment_mode, 'VENDOR PAYMENT' as category, UPPER(vc.vendor_name) as to_entity, NULL as from_entity,
           UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' as remark, NULL as account_no, NULL as branch, vp.amount as debit, 0::numeric as credit
         FROM vendor_payments vp JOIN vendor_commitments vc ON vp.commitment_id = vc.id
-        WHERE vp.site_id = $1 AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        WHERE vp.site_id = $1 AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND vp.status != 'rejected'
         UNION ALL
         SELECT cfe.date, UPPER(cfe.cash_type) as payment_mode, 'PERSONAL LEDGER' as category, cfe.to_name as to_entity, NULL as from_entity,
           COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit
@@ -530,7 +530,7 @@ class ExpenseModel extends MasterModel {
         SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
-          AND (d.cheque_status IS NULL OR d.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND (d.cheque_status IS NULL OR d.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND d.status != 'rejected'
       )
       SELECT 
         COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode, 
@@ -546,24 +546,24 @@ class ExpenseModel extends MasterModel {
     const catQuery = `
       WITH unified AS (
         SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
-        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
         UNION ALL
         SELECT fp.date, fp.payment_mode, 'FARMER PAYMENT' as category, UPPER(f.name) as to_entity, NULL as from_entity,
           UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit
         FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
-        WHERE f.site_id = $1 AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        WHERE f.site_id = $1 AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND fp.status != 'rejected'
         UNION ALL
         SELECT pcp.date, pcp.payment_mode, 'COMMISSION' as category, UPPER(ag.full_name) as to_entity, NULL as from_entity,
           UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch, pcp.amount as debit, 0::numeric as credit
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
         JOIN members ag ON pcm.agent_id = ag.id
-        WHERE pcp.site_id = $1 AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        WHERE pcp.site_id = $1 AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND pcp.status != 'rejected'
         UNION ALL
         SELECT vp.payment_date as date, UPPER(vp.payment_mode) as payment_mode, 'VENDOR PAYMENT' as category, UPPER(vc.vendor_name) as to_entity, NULL as from_entity,
           UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' as remark, NULL as account_no, NULL as branch, vp.amount as debit, 0::numeric as credit
         FROM vendor_payments vp JOIN vendor_commitments vc ON vp.commitment_id = vc.id
-        WHERE vp.site_id = $1 AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        WHERE vp.site_id = $1 AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND vp.status != 'rejected'
         UNION ALL
         SELECT cfe.date, UPPER(cfe.cash_type) as payment_mode, 'PERSONAL LEDGER' as category, cfe.to_name as to_entity, NULL as from_entity,
           COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit
@@ -575,7 +575,7 @@ class ExpenseModel extends MasterModel {
         SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
-          AND (d.cheque_status IS NULL OR d.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND (d.cheque_status IS NULL OR d.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND d.status != 'rejected'
       )
       SELECT 
         COALESCE(category, 'UNCATEGORIZED') as category, 
