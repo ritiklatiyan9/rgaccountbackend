@@ -16,6 +16,11 @@ import {
   approveExpenseRequest,
   rejectExpenseRequest,
   adjustBalance,
+  createReturn,
+  listReturns,
+  getPendingReturns,
+  acceptReturn,
+  rejectReturn,
 } from '../controllers/imprest.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -52,5 +57,12 @@ router.post('/adjust', requireRole('admin'), bustImprestCache, adjustBalance);
 // ── Admin approve/reject expense requests ──
 router.put('/expense-requests/:id/approve', requireRole('admin'), bustImprestCache, approveExpenseRequest);
 router.put('/expense-requests/:id/reject', requireRole('admin'), bustImprestCache, rejectExpenseRequest);
+
+// ── Imprest returns (sub-admin → admin money return) ──
+router.post('/returns', bustImprestCache, createReturn);
+router.get('/returns', imprestReadCache, listReturns);
+router.get('/pending-returns', requireRole('admin'), imprestReadCache, getPendingReturns);
+router.put('/returns/:id/accept', requireRole('admin'), bustImprestCache, acceptReturn);
+router.put('/returns/:id/reject', requireRole('admin'), bustImprestCache, rejectReturn);
 
 export default router;

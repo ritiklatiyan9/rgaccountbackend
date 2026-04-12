@@ -3,6 +3,7 @@ import {
   imprestAllocationModel,
   imprestLedgerModel,
   imprestExpenseRequestModel,
+  imprestReturnModel,
 } from '../models/Imprest.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import { expenseModel } from '../models/Expense.model.js';
@@ -589,4 +590,175 @@ export const adjustBalance = asyncHandler(async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// ══════════════════════════════════════════════════
+//  IMPREST RETURN (Sub-Admin → Admin)
+// ══════════════════════════════════════════════════
+
+/**
+ * POST /imprest/returns
+ * Sub-admin initiates returning money back to admin
+ */
+export const createReturn = asyncHandler(async (req, res) => {
+  const { amount, reason, payment_mode, site_id, assigned_admin_id } = req.body;
+
+  const returnAmount = parseFloat(amount);
+  if (!returnAmount || returnAmount <= 0) {
+    return res.status(400).json({ message: 'Amount must be positive' });
+  }
+
+  // Validate balance — can't return more than available
+  const currentBalance = await imprestLedgerModel.getBalance(req.user.id, pool);
+  if (currentBalance < returnAmount) {
+    return res.status(400).json({
+      message: `Insufficient balance. You have ${currentBalance} but tried to return ${returnAmount}`,
+      balance: currentBalance,
+    });
+  }
+
+  const returnRecord = await imprestReturnModel.create({
+    sub_admin_id: req.user.id,
+    amount: returnAmount,
+    reason: reason ? reason.trim() : null,
+    payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : 'CASH',
+    site_id: site_id ? parseInt(site_id) : null,
+    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+    status: 'PENDING',
+  }, pool);
+
+  res.status(201).json({
+    return: returnRecord,
+    message: 'Return request submitted. Waiting for admin acceptance.',
+  });
+});
+
+/**
+ * GET /imprest/returns
+ * Admin: all returns; Sub-admin: own returns
+ */
+export const listReturns = asyncHandler(async (req, res) => {
+  let returns;
+  if (req.user.role === 'admin' || req.user.role === 'super_admin') {
+    returns = await imprestReturnModel.findAllWithDetails(pool);
+  } else {
+    returns = await imprestReturnModel.findBySubAdminId(req.user.id, pool);
+  }
+  res.json({ returns });
+});
+
+/**
+ * GET /imprest/pending-returns
+ * Admin: pending returns needing review
+ */
+export const getPendingReturns = asyncHandler(async (req, res) => {
+  const returns = await imprestReturnModel.findPending(pool);
+  res.json({ returns });
+});
+
+/**
+ * PUT /imprest/returns/:id/accept
+ * Admin accepts a return — deducts from sub-admin's imprest ledger + day book
+ */
+export const acceptReturn = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { review_remark } = req.body;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Accept the return record
+    const returnRecord = await imprestReturnModel.acceptReturn(
+      parseInt(id),
+      req.user.id,
+      review_remark ? review_remark.trim() : null,
+      client
+    );
+
+    if (!returnRecord) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Return not found or already processed' });
+    }
+
+    const returnAmount = parseFloat(returnRecord.amount);
+
+    // 2. Verify sub-admin still has sufficient balance
+    const currentBalance = await imprestLedgerModel.getBalance(returnRecord.sub_admin_id, client);
+    if (currentBalance < returnAmount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        message: `Sub-admin balance (${currentBalance}) is now less than return amount (${returnAmount}). Cannot accept.`,
+      });
+    }
+
+    // 3. Deduct from sub-admin's imprest ledger (negative = deduction)
+    await imprestLedgerModel.createEntry({
+      user_id: returnRecord.sub_admin_id,
+      type: 'REFUND',
+      reference_id: returnRecord.id,
+      amount: -returnAmount,
+      remarks: `IMPREST RETURN #${returnRecord.id} ACCEPTED BY ADMIN. ${returnRecord.reason || ''}`.trim(),
+      created_by: req.user.id,
+    }, client);
+
+    // 4. Create Day Book entry (DEBIT from sub-admin back to admin)
+    const subAdminResult = await client.query('SELECT name FROM users WHERE id = $1', [returnRecord.sub_admin_id]);
+    const subAdminName = subAdminResult.rows[0]?.name || 'Sub-Admin';
+
+    const dayBookData = {
+      site_id: returnRecord.site_id || 1,
+      date: new Date().toISOString().split('T')[0],
+      particular: `IMPREST RETURN FROM ${subAdminName.toUpperCase()}`,
+      entry_type: 'IMPREST',
+      debit: returnAmount,
+      credit: 0,
+      remarks: `IMPREST RETURN: ${returnRecord.reason || 'UNUSED FUNDS RETURNED'}`.toUpperCase(),
+      payment_mode: returnRecord.payment_mode || 'CASH',
+      category: 'IMPREST',
+      from_entity: subAdminName.toUpperCase(),
+      to_entity: 'ADMIN',
+      status: 'approved',
+      created_by: req.user.id,
+    };
+
+    await dayBookModel.create(dayBookData, client);
+
+    await client.query('COMMIT');
+
+    const newBalance = await imprestLedgerModel.getBalance(returnRecord.sub_admin_id, pool);
+
+    res.json({
+      return: returnRecord,
+      balance: newBalance,
+      message: 'Return accepted. Imprest balance updated.',
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * PUT /imprest/returns/:id/reject
+ * Admin rejects a return — no balance change
+ */
+export const rejectReturn = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { review_remark } = req.body;
+
+  const returnRecord = await imprestReturnModel.rejectReturn(
+    parseInt(id),
+    req.user.id,
+    review_remark ? review_remark.trim() : null,
+    pool
+  );
+
+  if (!returnRecord) {
+    return res.status(404).json({ message: 'Return not found or already processed' });
+  }
+
+  res.json({ return: returnRecord, message: 'Return request rejected' });
 });

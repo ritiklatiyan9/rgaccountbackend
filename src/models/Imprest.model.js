@@ -366,6 +366,99 @@ class ImprestExpenseRequestModel extends MasterModel {
   }
 }
 
+// ── Imprest Return Model ──
+class ImprestReturnModel extends MasterModel {
+  constructor() {
+    super('imprest_returns');
+  }
+
+  /**
+   * Find all pending returns (admin view)
+   */
+  async findPending(pool) {
+    const query = `
+      SELECT ir.*, u.name as sub_admin_name, u.email as sub_admin_email,
+             s.name as site_name, asa.name as assigned_admin_name
+      FROM imprest_returns ir
+      LEFT JOIN users u ON ir.sub_admin_id = u.id
+      LEFT JOIN sites s ON ir.site_id = s.id
+      LEFT JOIN users asa ON ir.assigned_admin_id = asa.id
+      WHERE ir.status = 'PENDING'
+      ORDER BY ir.created_at DESC
+    `;
+    const result = await pool.query(query);
+    return result.rows;
+  }
+
+  /**
+   * Find all returns with details (admin view)
+   */
+  async findAllWithDetails(pool) {
+    const query = `
+      SELECT ir.*, u.name as sub_admin_name, u.email as sub_admin_email,
+             s.name as site_name, r.name as reviewer_name,
+             asa.name as assigned_admin_name
+      FROM imprest_returns ir
+      LEFT JOIN users u ON ir.sub_admin_id = u.id
+      LEFT JOIN sites s ON ir.site_id = s.id
+      LEFT JOIN users r ON ir.reviewed_by = r.id
+      LEFT JOIN users asa ON ir.assigned_admin_id = asa.id
+      ORDER BY ir.created_at DESC
+    `;
+    const result = await pool.query(query);
+    return result.rows;
+  }
+
+  /**
+   * Find returns by sub-admin
+   */
+  async findBySubAdminId(subAdminId, pool) {
+    const query = `
+      SELECT ir.*, s.name as site_name, r.name as reviewer_name,
+             asa.name as assigned_admin_name
+      FROM imprest_returns ir
+      LEFT JOIN sites s ON ir.site_id = s.id
+      LEFT JOIN users r ON ir.reviewed_by = r.id
+      LEFT JOIN users asa ON ir.assigned_admin_id = asa.id
+      WHERE ir.sub_admin_id = $1
+      ORDER BY ir.created_at DESC
+    `;
+    const result = await pool.query(query, [subAdminId]);
+    return result.rows;
+  }
+
+  /**
+   * Accept a return
+   */
+  async acceptReturn(id, reviewedBy, reviewRemark, pool) {
+    const query = `
+      UPDATE imprest_returns
+      SET status = 'ACCEPTED', reviewed_by = $2, reviewed_at = NOW(),
+          review_remark = $3, updated_at = NOW()
+      WHERE id = $1 AND status = 'PENDING'
+      RETURNING *
+    `;
+    const result = await pool.query(query, [id, reviewedBy, reviewRemark]);
+    return result.rows[0];
+  }
+
+  /**
+   * Reject a return
+   */
+  async rejectReturn(id, reviewedBy, reviewRemark, pool) {
+    const query = `
+      UPDATE imprest_returns
+      SET status = 'REJECTED', reviewed_by = $2, reviewed_at = NOW(),
+          review_remark = $3, updated_at = NOW()
+      WHERE id = $1 AND status = 'PENDING'
+      RETURNING *
+    `;
+    const result = await pool.query(query, [id, reviewedBy, reviewRemark]);
+    return result.rows[0];
+  }
+}
+
 export const imprestAllocationModel = new ImprestAllocationModel();
 export const imprestLedgerModel = new ImprestLedgerModel();
 export const imprestExpenseRequestModel = new ImprestExpenseRequestModel();
+export const imprestReturnModel = new ImprestReturnModel();
