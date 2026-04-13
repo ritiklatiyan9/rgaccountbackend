@@ -388,7 +388,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (plot_no !== undefined) {
     const trimmed = plot_no.trim().toUpperCase();
     if (trimmed !== existing.plot_no) {
-      const dup = await plotModel.findByPlotNo(existing.site_id, trimmed, pool);
+      const dup = await plotRegistryModel.findByPlotNo(existing.site_id, trimmed, pool);
       if (dup) return res.status(409).json({ message: `Plot "${trimmed}" already exists` });
     }
     updateData.plot_no = trimmed;
@@ -404,7 +404,20 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (to_receive_bank !== undefined) updateData.to_receive_bank = parseFloat(to_receive_bank) || 0;
   if (first_installment !== undefined) updateData.first_installment = parseFloat(first_installment) || 0;
   if (booking_by !== undefined) updateData.booking_by = booking_by ? booking_by.trim().toUpperCase() : null;
-  if (booking_date !== undefined) updateData.booking_date = booking_date || null;
+  if (booking_date !== undefined) {
+    if (!booking_date) {
+      updateData.booking_date = null;
+    } else {
+      // Handle Unix timestamp in milliseconds sent from frontend
+      const ts = Number(booking_date);
+      if (!isNaN(ts) && String(booking_date).length >= 10 && !/^\d{4}-\d{2}-\d{2}/.test(String(booking_date))) {
+        const d = new Date(ts > 9999999999 ? ts : ts * 1000);
+        updateData.booking_date = d.toISOString().slice(0, 10);
+      } else {
+        updateData.booking_date = booking_date;
+      }
+    }
+  }
   if (status !== undefined) updateData.status = status;
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
   if (plc_charges !== undefined) updateData.plc_charges = parseFloat(plc_charges) || 0;
