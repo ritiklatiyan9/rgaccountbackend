@@ -83,6 +83,8 @@ class PlotCommissionV2Model extends MasterModel {
           p.buyer_name,
           p.commission_rate,
           p.plot_tag,
+          p.status AS plot_status,
+          COALESCE(p.plot_commission, 0) AS plot_commission,
           m.full_name AS agent_name,
           m.phone AS agent_phone,
           COALESCE(SUM(pcp.amount), 0) AS total_paid,
@@ -107,6 +109,7 @@ class PlotCommissionV2Model extends MasterModel {
           ca.buyer_name,
           ca.commission_rate,
           ca.plot_tag,
+          ca.plot_status,
           ca.site_id,
           -- latest agent info (rn=1)
           MAX(CASE WHEN ca.rn = 1 THEN ca.id END) AS latest_commission_id,
@@ -117,11 +120,12 @@ class PlotCommissionV2Model extends MasterModel {
           -- aggregate all agents for search
           STRING_AGG(DISTINCT ca.agent_name, ', ' ORDER BY ca.agent_name) AS all_agent_names,
           COUNT(DISTINCT ca.id) AS commission_count,
-          SUM(ca.total_commission) AS total_commission,
+          -- Use fixed plot commission instead of summing per-agent commissions
+          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) AS total_commission,
           SUM(ca.total_paid) AS total_paid,
-          SUM(ca.balance) AS balance
+          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) - SUM(ca.total_paid) AS balance
         FROM commission_agg ca
-        GROUP BY ca.plot_id, ca.plot_no, ca.plot_size, ca.plot_rate, ca.buyer_name, ca.commission_rate, ca.plot_tag, ca.site_id
+        GROUP BY ca.plot_id, ca.plot_no, ca.plot_size, ca.plot_rate, ca.buyer_name, ca.commission_rate, ca.plot_tag, ca.plot_status, ca.site_id
       )
       SELECT * FROM plot_summary
       ORDER BY plot_no ASC
@@ -139,6 +143,7 @@ class PlotCommissionV2Model extends MasterModel {
       SELECT
         pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission, pc.remarks, pc.status, pc.created_at,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.commission_rate, p.plot_tag,
+        COALESCE(p.plot_commission, 0) AS plot_commission,
         s.name AS site_name,
         m.full_name AS agent_name, m.phone AS agent_phone,
         COALESCE(SUM(pcp.amount) FILTER (WHERE pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_paid,

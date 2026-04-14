@@ -626,6 +626,35 @@ export const rejectEntry = asyncHandler(async (req, res) => {
     }
   }
 
+  // Update overall commission status if plot_commission_payment was rejected
+  if (source === 'plot_commission_payment') {
+    const entry = result.rows[0];
+    if (entry.plot_commission_id) {
+      try {
+        const sumQuery = `
+          SELECT 
+            pcm.id, pcm.total_commission, 
+            COALESCE(SUM(pcp.amount), 0) as total_paid
+          FROM plot_commissions_v2 pcm
+          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          WHERE pcm.id = $1
+          GROUP BY pcm.id
+        `;
+        const sumRes = await pool.query(sumQuery, [entry.plot_commission_id]);
+        if (sumRes.rows.length > 0) {
+          const { id, total_commission, total_paid } = sumRes.rows[0];
+          let newStatus = 'Pending';
+          if (Number(total_paid) > 0) {
+            newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : 'Partial';
+          }
+          await pool.query(`UPDATE plot_commissions_v2 SET status = $1 WHERE id = $2`, [newStatus, id]);
+        }
+      } catch (err) {
+        console.error('[Approval] Failed to update commission status after rejection:', err.message);
+      }
+    }
+  }
+
   res.json({ entry: result.rows[0], message: `${source} rejected` });
 });
 
@@ -652,6 +681,7 @@ export const bulkApprove = asyncHandler(async (req, res) => {
 
   let totalApproved = 0;
   let skippedAssignedToOthers = 0;
+  const affectedCommissions = new Set();
 
   for (const [table, ids] of Object.entries(grouped)) {
     if (ids.length === 0) continue;
@@ -669,8 +699,45 @@ export const bulkApprove = asyncHandler(async (req, res) => {
       }
     }
 
+    // Track plot commission payments for status update
+    if (table === 'plot_commission_payments') {
+      for (const row of result.rows) {
+        if (row.plot_commission_id) {
+          affectedCommissions.add(row.plot_commission_id);
+        }
+      }
+    }
+
     totalApproved += result.rowCount;
     skippedAssignedToOthers += (ids.length - result.rowCount);
+  }
+
+  // Update commission statuses for all affected commissions
+  if (affectedCommissions.size > 0) {
+    try {
+      for (const commissionId of affectedCommissions) {
+        const sumQuery = `
+          SELECT 
+            pcm.id, pcm.total_commission, 
+            COALESCE(SUM(pcp.amount), 0) as total_paid
+          FROM plot_commissions_v2 pcm
+          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          WHERE pcm.id = $1
+          GROUP BY pcm.id
+        `;
+        const sumRes = await pool.query(sumQuery, [commissionId]);
+        if (sumRes.rows.length > 0) {
+          const { id, total_commission, total_paid } = sumRes.rows[0];
+          let newStatus = 'Pending';
+          if (Number(total_paid) > 0) {
+            newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : 'Partial';
+          }
+          await pool.query(`UPDATE plot_commissions_v2 SET status = $1 WHERE id = $2`, [newStatus, id]);
+        }
+      }
+    } catch (err) {
+      console.error('[Approval] Failed to update commission statuses in bulk approve:', err.message);
+    }
   }
 
   const msg = skippedAssignedToOthers > 0
@@ -701,6 +768,7 @@ export const bulkReject = asyncHandler(async (req, res) => {
 
   let totalRejected = 0;
   let skippedAssignedToOthers = 0;
+  const affectedCommissions = new Set();
 
   for (const [table, ids] of Object.entries(grouped)) {
     if (ids.length === 0) continue;
@@ -711,8 +779,46 @@ export const bulkReject = asyncHandler(async (req, res) => {
        RETURNING *`,
       [ids, req.user.id, req.user.id]
     );
+
+    // Track plot commission payments for status update
+    if (table === 'plot_commission_payments') {
+      for (const row of result.rows) {
+        if (row.plot_commission_id) {
+          affectedCommissions.add(row.plot_commission_id);
+        }
+      }
+    }
+
     totalRejected += result.rowCount;
     skippedAssignedToOthers += (ids.length - result.rowCount);
+  }
+
+  // Update commission statuses for all affected commissions
+  if (affectedCommissions.size > 0) {
+    try {
+      for (const commissionId of affectedCommissions) {
+        const sumQuery = `
+          SELECT 
+            pcm.id, pcm.total_commission, 
+            COALESCE(SUM(pcp.amount), 0) as total_paid
+          FROM plot_commissions_v2 pcm
+          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          WHERE pcm.id = $1
+          GROUP BY pcm.id
+        `;
+        const sumRes = await pool.query(sumQuery, [commissionId]);
+        if (sumRes.rows.length > 0) {
+          const { id, total_commission, total_paid } = sumRes.rows[0];
+          let newStatus = 'Pending';
+          if (Number(total_paid) > 0) {
+            newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : 'Partial';
+          }
+          await pool.query(`UPDATE plot_commissions_v2 SET status = $1 WHERE id = $2`, [newStatus, id]);
+        }
+      }
+    } catch (err) {
+      console.error('[Approval] Failed to update commission statuses in bulk reject:', err.message);
+    }
   }
 
   const msg = skippedAssignedToOthers > 0
@@ -963,6 +1069,46 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
         `UPDATE cash_flow_entries SET debit = 0, credit = 0 WHERE id = $1`,
         [parseInt(id)]
       );
+    }
+  }
+
+  // If this is a plot commission payment, auto-update the commission status
+  if (source === 'plot_commission_payment') {
+    try {
+      const paymentRes = await pool.query(
+        `SELECT plot_commission_id FROM plot_commission_payments WHERE id = $1`,
+        [parseInt(id)]
+      );
+      if (paymentRes.rows.length > 0) {
+        const plotCommissionId = paymentRes.rows[0].plot_commission_id;
+        const commRes = await pool.query(
+          `SELECT pc.total_commission, 
+                  COALESCE(SUM(pcp.amount) FILTER (WHERE pcp.status = 'approved' 
+                  AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_paid
+           FROM plot_commissions_v2 pc
+           LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id
+           WHERE pc.id = $1
+           GROUP BY pc.id`,
+          [plotCommissionId]
+        );
+        
+        if (commRes.rows.length > 0) {
+          const { total_commission, total_paid } = commRes.rows[0];
+          const numCommission = parseFloat(total_commission) || 0;
+          const numPaid = parseFloat(total_paid) || 0;
+          
+          let newStatus = 'Pending';
+          if (numPaid >= numCommission) newStatus = 'Completed';
+          else if (numPaid > 0) newStatus = 'Partial';
+          
+          await pool.query(
+            `UPDATE plot_commissions_v2 SET status = $1, updated_at = NOW() WHERE id = $2`,
+            [newStatus, plotCommissionId]
+          );
+        }
+      }
+    } catch (err) {
+      console.error('Error auto-updating commission status after cheque status change:', err);
     }
   }
 

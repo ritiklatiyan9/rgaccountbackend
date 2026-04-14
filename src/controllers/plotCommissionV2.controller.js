@@ -4,6 +4,48 @@ import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
 
 /**
+ * Helper: Auto-update commission status based on payment completion
+ * Called when a payment is approved or cheque status changes
+ */
+const autoUpdateCommissionStatus = async (commissionId, poolConn) => {
+  try {
+    // Get commission details including total and paid amounts
+    const commRes = await poolConn.query(
+      `SELECT pc.total_commission, 
+              COALESCE(SUM(pcp.amount) FILTER (WHERE pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_paid
+       FROM plot_commissions_v2 pc
+       LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id
+       WHERE pc.id = $1
+       GROUP BY pc.id`,
+      [commissionId]
+    );
+    
+    if (commRes.rows.length === 0) return;
+    
+    const { total_commission, total_paid } = commRes.rows[0];
+    const numCommission = parseFloat(total_commission) || 0;
+    const numPaid = parseFloat(total_paid) || 0;
+    
+    // Determine new status
+    let newStatus = 'Pending';
+    if (numPaid >= numCommission) {
+      newStatus = 'Completed';
+    } else if (numPaid > 0) {
+      newStatus = 'Partial';
+    }
+    
+    // Update commission status
+    await poolConn.query(
+      `UPDATE plot_commissions_v2 SET status = $1, updated_at = NOW() WHERE id = $2`,
+      [newStatus, commissionId]
+    );
+  } catch (err) {
+    console.error('Error auto-updating commission status:', err);
+    // Non-critical, don't fail the request
+  }
+};
+
+/**
  * GET /plot-commission/plots
  * Load plots from plot payments module that belong to the site.
  */
@@ -134,6 +176,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     buyer_name: commissions[0].buyer_name,
     commission_rate: commissions[0].commission_rate,
     plot_tag: commissions[0].plot_tag,
+    plot_commission: parseFloat(commissions[0].plot_commission) || 0,
     site_name: commissions[0].site_name,
     site_id: commissions[0].site_id,
   };
@@ -151,11 +194,13 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     status: c.status,
     remarks: c.remarks,
     created_at: c.created_at,
-    payments: paymentsByCommission[c.id] || []
+    payments: paymentsByCommission[c.id] || [],
+    payment_count: (paymentsByCommission[c.id] || []).length,
   }));
 
-  // Plot-level totals
-  const totalCommission = agents.reduce((s, a) => s + parseFloat(a.total_commission), 0);
+  // Plot-level totals — use fixed plot commission instead of summing per-agent amounts
+  const fixedCommission = parseFloat(commissions[0].plot_commission) || 0;
+  const totalCommission = fixedCommission > 0 ? fixedCommission : agents.reduce((s, a) => s + parseFloat(a.total_commission), 0);
   const totalPaid = agents.reduce((s, a) => s + a.total_paid, 0);
   const totalPaidAll = agents.reduce((s, a) => s + a.total_paid_all, 0);
 
@@ -163,9 +208,11 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const timelineQuery = `
     SELECT
       p.id AS plot_id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate,
+      COALESCE(p.plot_commission, 0) AS plot_commission,
       STRING_AGG(DISTINCT m.full_name, ', ' ORDER BY m.full_name) AS agent_names,
-      SUM(pc.total_commission) AS total_commission,
+      COALESCE(NULLIF(COALESCE(p.plot_commission, 0), 0), MAX(pc.total_commission)) AS total_commission,
       COALESCE(SUM(paid_agg.total_paid), 0) AS total_paid,
+      COALESCE(SUM(paid_agg.payment_count), 0) AS payment_count,
       MIN(pc.created_at) AS first_created,
       MAX(pc.created_at) AS last_created,
       MAX(pc.status) AS latest_status
@@ -173,13 +220,13 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = $2
     JOIN members m ON pc.agent_id = m.id
     LEFT JOIN (
-      SELECT plot_commission_id, SUM(amount) AS total_paid
+      SELECT plot_commission_id, SUM(amount) AS total_paid, COUNT(*) AS payment_count
       FROM plot_commission_payments
       WHERE status = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY plot_commission_id
     ) paid_agg ON paid_agg.plot_commission_id = pc.id
     WHERE p.plot_no = $1 AND pc.site_id = $2
-    GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate
+    GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.plot_commission
     ORDER BY MAX(pc.created_at) DESC
   `;
   const timelineResult = await pool.query(timelineQuery, [plotInfo.plot_no, parseInt(site_id)]);
@@ -187,6 +234,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     ...r,
     total_commission: parseFloat(r.total_commission) || 0,
     total_paid: parseFloat(r.total_paid) || 0,
+    payment_count: parseInt(r.payment_count) || 0,
     balance: (parseFloat(r.total_commission) || 0) - (parseFloat(r.total_paid) || 0),
     is_current: r.plot_id === numPlotId,
   }));
@@ -241,6 +289,10 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   };
 
   const payment = await plotCommissionPaymentModel.create(data, pool);
+  
+  // Auto-update commission status based on payment aggregates
+  await autoUpdateCommissionStatus(parseInt(master_id), pool);
+  
   res.status(201).json({ payment, message: 'Payment recorded and is pending approval' });
 });
 
@@ -349,6 +401,10 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   data.updated_at = new Date();
 
   const updated = await plotCommissionPaymentModel.update(numId, data, pool);
+  
+  // Auto-update commission status based on payment aggregates
+  await autoUpdateCommissionStatus(existing.plot_commission_id, pool);
+  
   res.json({ payment: updated, message: 'Payment updated successfully' });
 });
 
