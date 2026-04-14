@@ -22,6 +22,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
 
   if (!sub_admin_id) return res.status(400).json({ message: 'Sub-admin is required' });
   if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ message: 'Amount must be positive' });
+  if (!site_id) return res.status(400).json({ message: 'Site is required' });
 
   const client = await pool.connect();
   try {
@@ -36,6 +37,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
       amount: parseFloat(amount),
       remark: remark ? remark.trim() : null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+      site_id: parseInt(site_id),
       status: 'PENDING_RECEIPT',
     }, client);
 
@@ -81,7 +83,8 @@ export const createAllocation = asyncHandler(async (req, res) => {
  * Admin: list all allocations
  */
 export const listAllocations = asyncHandler(async (req, res) => {
-  const allocations = await imprestAllocationModel.findAllWithDetails(pool);
+  const { site_id } = req.query;
+  const allocations = await imprestAllocationModel.findAllWithDetails(site_id ? parseInt(site_id) : null, pool);
   res.json({ allocations });
 });
 
@@ -105,7 +108,8 @@ export const cancelAllocation = asyncHandler(async (req, res) => {
  * Sub-admin: get pending allocations to confirm
  */
 export const getPendingReceipts = asyncHandler(async (req, res) => {
-  const allocations = await imprestAllocationModel.findPendingBySubAdminId(req.user.id, pool);
+  const { site_id } = req.query;
+  const allocations = await imprestAllocationModel.findPendingBySubAdminId(req.user.id, site_id ? parseInt(site_id) : null, pool);
   res.json({ allocations });
 });
 
@@ -150,12 +154,13 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
       amount: parseFloat(allocation.amount),
       remarks: `Imprest received from admin. ${confirmation_remark.trim()}`,
       created_by: req.user.id,
+      site_id: existing.site_id,
     }, client);
 
     await client.query('COMMIT');
 
     // Get updated balance
-    const balance = await imprestLedgerModel.getBalance(req.user.id, pool);
+    const balance = await imprestLedgerModel.getBalance(req.user.id, existing.site_id, pool);
 
     res.json({
       allocation,
@@ -186,7 +191,7 @@ export const getBalance = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: 'Insufficient permissions' });
   }
 
-  const balance = await imprestLedgerModel.getBalance(userId, pool);
+  const balance = await imprestLedgerModel.getBalance(userId, req.query.site_id ? parseInt(req.query.site_id) : null, pool);
   res.json({ balance, user_id: userId });
 });
 
@@ -196,7 +201,8 @@ export const getBalance = asyncHandler(async (req, res) => {
  */
 export const getLedger = asyncHandler(async (req, res) => {
   const userId = req.query.user_id ? parseInt(req.query.user_id) : req.user.id;
-  const { date_from, date_to, page = 1, limit = 20 } = req.query;
+  const { date_from, date_to, page = 1, limit = 20, site_id } = req.query;
+  const parsedSiteId = site_id ? parseInt(site_id) : null;
 
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && userId !== req.user.id) {
     return res.status(403).json({ message: 'Insufficient permissions' });
@@ -207,16 +213,16 @@ export const getLedger = asyncHandler(async (req, res) => {
 
   let entries;
   if (date_from || date_to) {
-    entries = await imprestLedgerModel.findByUserIdAndDateRange(userId, date_from, date_to, parsedLimit, offset, pool);
+    entries = await imprestLedgerModel.findByUserIdAndDateRange(userId, parsedSiteId, date_from, date_to, parsedLimit, offset, pool);
   } else {
-    entries = await imprestLedgerModel.findByUserId(userId, parsedLimit, offset, pool);
+    entries = await imprestLedgerModel.findByUserId(userId, parsedSiteId, parsedLimit, offset, pool);
   }
 
-  const totalItems = await imprestLedgerModel.countByUserIdAndDateRange(userId, date_from, date_to, pool);
+  const totalItems = await imprestLedgerModel.countByUserIdAndDateRange(userId, parsedSiteId, date_from, date_to, pool);
   const totalPages = Math.ceil(totalItems / parsedLimit);
 
-  const balance = await imprestLedgerModel.getBalance(userId, pool);
-  const monthly = await imprestLedgerModel.getMonthlySummary(userId, pool);
+  const balance = await imprestLedgerModel.getBalance(userId, parsedSiteId, pool);
+  const monthly = await imprestLedgerModel.getMonthlySummary(userId, parsedSiteId, pool);
 
   res.json({
     entries,
@@ -236,7 +242,8 @@ export const getLedger = asyncHandler(async (req, res) => {
  * Admin: get all sub-admin balances
  */
 export const getAllBalances = asyncHandler(async (req, res) => {
-  const balances = await imprestLedgerModel.getAllBalances(pool);
+  const { site_id } = req.query;
+  const balances = await imprestLedgerModel.getAllBalances(site_id ? parseInt(site_id) : null, pool);
   res.json({ balances });
 });
 
@@ -264,7 +271,8 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
     await client.query('BEGIN');
 
     // 1. Check imprest balance
-    const currentBalance = await imprestLedgerModel.getBalance(req.user.id, client);
+    const parsedSiteId = parseInt(site_id);
+    const currentBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, client);
 
     if (currentBalance <= 0) {
       await client.query('ROLLBACK');
@@ -314,6 +322,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
       amount: -expenseAmount, // negative = deduction
       remarks: `Expense #${expense.id}: ${remark || 'Expense from imprest'}`.toUpperCase(),
       created_by: req.user.id,
+      site_id: parsedSiteId,
     }, client);
 
     // 4. Create Day Book entry (DEBIT from imprest)
@@ -340,7 +349,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
-    const newBalance = await imprestLedgerModel.getBalance(req.user.id, pool);
+    const newBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, pool);
 
     res.status(201).json({
       expense,
@@ -412,15 +421,17 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
 export const listExpenseRequests = asyncHandler(async (req, res) => {
   const { site_id, status } = req.query;
 
+  const parsedSiteId = site_id ? parseInt(site_id) : null;
+
   let requests;
   if (req.user.role === 'admin' || req.user.role === 'super_admin') {
     if (status === 'PENDING') {
-      requests = await imprestExpenseRequestModel.findPending(pool);
+      requests = await imprestExpenseRequestModel.findPending(parsedSiteId, pool);
     } else {
-      requests = await imprestExpenseRequestModel.findAllWithDetails(site_id ? parseInt(site_id) : null, pool);
+      requests = await imprestExpenseRequestModel.findAllWithDetails(parsedSiteId, pool);
     }
   } else {
-    requests = await imprestExpenseRequestModel.findBySubAdminId(req.user.id, pool);
+    requests = await imprestExpenseRequestModel.findBySubAdminId(req.user.id, parsedSiteId, pool);
   }
 
   res.json({ requests });
@@ -472,6 +483,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       amount: -expenseAmount,
       remarks: `OVERDRAFT EXPENSE #${expense.id} (Admin approved): ${expenseData.remark || ''}`.trim(),
       created_by: req.user.id,
+      site_id: request.site_id ? parseInt(request.site_id) : null,
     }, client);
 
     // 4. Create Day Book entry
@@ -558,6 +570,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
       amount: parseFloat(amount),
       remarks: remarks ? remarks.trim().toUpperCase() : 'ADMIN ADJUSTMENT',
       created_by: req.user.id,
+      site_id: site_id ? parseInt(site_id) : null,
     }, client);
 
     // Day Book entry for audit trail
@@ -581,7 +594,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
-    const balance = await imprestLedgerModel.getBalance(parseInt(user_id), pool);
+    const balance = await imprestLedgerModel.getBalance(parseInt(user_id), site_id ? parseInt(site_id) : null, pool);
 
     res.json({ entry, balance, message: 'Balance adjusted successfully' });
   } catch (err) {
@@ -609,7 +622,8 @@ export const createReturn = asyncHandler(async (req, res) => {
   }
 
   // Validate balance — can't return more than available
-  const currentBalance = await imprestLedgerModel.getBalance(req.user.id, pool);
+  const parsedSiteId = site_id ? parseInt(site_id) : null;
+  const currentBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, pool);
   if (currentBalance < returnAmount) {
     return res.status(400).json({
       message: `Insufficient balance. You have ${currentBalance} but tried to return ${returnAmount}`,
@@ -638,11 +652,14 @@ export const createReturn = asyncHandler(async (req, res) => {
  * Admin: all returns; Sub-admin: own returns
  */
 export const listReturns = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  const parsedSiteId = site_id ? parseInt(site_id) : null;
+
   let returns;
   if (req.user.role === 'admin' || req.user.role === 'super_admin') {
-    returns = await imprestReturnModel.findAllWithDetails(pool);
+    returns = await imprestReturnModel.findAllWithDetails(parsedSiteId, pool);
   } else {
-    returns = await imprestReturnModel.findBySubAdminId(req.user.id, pool);
+    returns = await imprestReturnModel.findBySubAdminId(req.user.id, parsedSiteId, pool);
   }
   res.json({ returns });
 });
@@ -652,7 +669,8 @@ export const listReturns = asyncHandler(async (req, res) => {
  * Admin: pending returns needing review
  */
 export const getPendingReturns = asyncHandler(async (req, res) => {
-  const returns = await imprestReturnModel.findPending(pool);
+  const { site_id } = req.query;
+  const returns = await imprestReturnModel.findPending(site_id ? parseInt(site_id) : null, pool);
   res.json({ returns });
 });
 
@@ -684,7 +702,8 @@ export const acceptReturn = asyncHandler(async (req, res) => {
     const returnAmount = parseFloat(returnRecord.amount);
 
     // 2. Verify sub-admin still has sufficient balance
-    const currentBalance = await imprestLedgerModel.getBalance(returnRecord.sub_admin_id, client);
+    const returnSiteId = returnRecord.site_id ? parseInt(returnRecord.site_id) : null;
+    const currentBalance = await imprestLedgerModel.getBalance(returnRecord.sub_admin_id, returnSiteId, client);
     if (currentBalance < returnAmount) {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -700,6 +719,7 @@ export const acceptReturn = asyncHandler(async (req, res) => {
       amount: -returnAmount,
       remarks: `IMPREST RETURN #${returnRecord.id} ACCEPTED BY ADMIN. ${returnRecord.reason || ''}`.trim(),
       created_by: req.user.id,
+      site_id: returnSiteId,
     }, client);
 
     // 4. Create Day Book entry (DEBIT from sub-admin back to admin)
@@ -726,7 +746,7 @@ export const acceptReturn = asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
-    const newBalance = await imprestLedgerModel.getBalance(returnRecord.sub_admin_id, pool);
+    const newBalance = await imprestLedgerModel.getBalance(returnRecord.sub_admin_id, returnSiteId, pool);
 
     res.json({
       return: returnRecord,

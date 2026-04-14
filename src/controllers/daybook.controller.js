@@ -421,7 +421,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   console.log(`[daybook] listEntries site_id=${siteId} date=${queryDate}`);
 
   // Fetch ONLY the requested date from all tables — fast indexed queries
-  const [dayBookEntries, expenseEntries, farmerPaymentEntries, commissionEntries, cashFlowEntries, firmTxnEntries, plotPaymentEntries] = await Promise.all([
+  const [dayBookEntriesRaw, expenseEntries, farmerPaymentEntries, commissionEntries, cashFlowEntries, firmTxnEntries, plotPaymentEntries] = await Promise.all([
     dayBookModel.findBySiteAndDate(siteId, queryDate, pool),
     expenseModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] expense query error:', err.message); return []; }),
     farmerPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] farmer_payment query error:', err.message); return []; }),
@@ -430,6 +430,9 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     firmTransactionModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] firm_transaction query error:', err.message); return []; }),
     plotPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] plot_payment query error:', err.message); return []; }),
   ]);
+
+  // Exclude IMPREST entries from daybook — they are managed in the Imprest module
+  const dayBookEntries = dayBookEntriesRaw.filter(e => e.entry_type !== 'IMPREST');
 
   // Transform expenses to day_book format
   const transformedExpenses = expenseEntries.map(exp => ({
@@ -498,7 +501,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       source: 'farmer_payment',
     }));
 
-  // Enrich daybook entries that ARE linked to farmer payments or commissions
+  // Enrich daybook entries that ARE linked to farmer payments, commissions, etc.
   const enrichedDayBookEntries = dayBookEntries.map(e => {
     if (e.farmer_payment_id) {
       const fp = farmerPaymentEntries.find(fp => fp.id === e.farmer_payment_id);

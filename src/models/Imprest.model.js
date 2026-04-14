@@ -9,30 +9,42 @@ class ImprestAllocationModel extends MasterModel {
   /**
    * All allocations for a specific sub-admin
    */
-  async findBySubAdminId(subAdminId, pool) {
-    const query = `
-      SELECT ia.*, u.name as admin_name
+  async findBySubAdminId(subAdminId, siteId, pool) {
+    let query = `
+      SELECT ia.*, u.name as admin_name, s.name as site_name
       FROM imprest_allocations ia
       LEFT JOIN users u ON ia.admin_id = u.id
+      LEFT JOIN sites s ON ia.site_id = s.id
       WHERE ia.sub_admin_id = $1
-      ORDER BY ia.created_at DESC
     `;
-    const result = await pool.query(query, [subAdminId]);
+    const params = [subAdminId];
+    if (siteId) {
+      query += ` AND ia.site_id = $2`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ia.created_at DESC`;
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
   /**
    * Pending allocations for a sub-admin (for receipt confirmation)
    */
-  async findPendingBySubAdminId(subAdminId, pool) {
-    const query = `
-      SELECT ia.*, u.name as admin_name
+  async findPendingBySubAdminId(subAdminId, siteId, pool) {
+    let query = `
+      SELECT ia.*, u.name as admin_name, s.name as site_name
       FROM imprest_allocations ia
       LEFT JOIN users u ON ia.admin_id = u.id
+      LEFT JOIN sites s ON ia.site_id = s.id
       WHERE ia.sub_admin_id = $1 AND ia.status = 'PENDING_RECEIPT'
-      ORDER BY ia.created_at DESC
     `;
-    const result = await pool.query(query, [subAdminId]);
+    const params = [subAdminId];
+    if (siteId) {
+      query += ` AND ia.site_id = $2`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ia.created_at DESC`;
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
@@ -54,19 +66,26 @@ class ImprestAllocationModel extends MasterModel {
   /**
    * All allocations (admin view - all sub-admins)
    */
-  async findAllWithDetails(pool) {
-    const query = `
+  async findAllWithDetails(siteId, pool) {
+    let query = `
       SELECT ia.*,
              sa.name as sub_admin_name, sa.email as sub_admin_email,
              ad.name as admin_name,
-             asa.name as assigned_admin_name
+             asa.name as assigned_admin_name,
+             s.name as site_name
       FROM imprest_allocations ia
       LEFT JOIN users sa ON ia.sub_admin_id = sa.id
       LEFT JOIN users ad ON ia.admin_id = ad.id
       LEFT JOIN users asa ON ia.assigned_admin_id = asa.id
-      ORDER BY ia.created_at DESC
+      LEFT JOIN sites s ON ia.site_id = s.id
     `;
-    const result = await pool.query(query);
+    const params = [];
+    if (siteId) {
+      query += ` WHERE ia.site_id = $1`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ia.created_at DESC`;
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
@@ -111,29 +130,40 @@ class ImprestLedgerModel extends MasterModel {
   /**
    * Get current balance for a user (SUM of all ledger amounts)
    */
-  async getBalance(userId, pool) {
-    const query = `
+  async getBalance(userId, siteId, pool) {
+    let query = `
       SELECT COALESCE(SUM(amount), 0)::numeric AS balance
       FROM imprest_ledger
       WHERE user_id = $1
     `;
-    const result = await pool.query(query, [userId]);
+    const params = [userId];
+    if (siteId) {
+      query += ` AND site_id = $2`;
+      params.push(siteId);
+    }
+    const result = await pool.query(query, params);
     return parseFloat(result.rows[0].balance);
   }
 
   /**
    * All ledger entries for a user, ordered DESC (with pagination)
    */
-  async findByUserId(userId, limit = null, offset = null, pool) {
+  async findByUserId(userId, siteId, limit = null, offset = null, pool) {
     let query = `
       SELECT il.*, u.name as created_by_name
       FROM imprest_ledger il
       LEFT JOIN users u ON il.created_by = u.id
       WHERE il.user_id = $1
-      ORDER BY il.created_at DESC, il.id DESC
     `;
     const params = [userId];
     let paramIndex = 2;
+
+    if (siteId) {
+      query += ` AND il.site_id = $${paramIndex++}`;
+      params.push(siteId);
+    }
+
+    query += ` ORDER BY il.created_at DESC, il.id DESC`;
 
     if (limit) {
       query += ` LIMIT $${paramIndex++}`;
@@ -151,7 +181,7 @@ class ImprestLedgerModel extends MasterModel {
   /**
    * Ledger entries for a user within a date range (with pagination)
    */
-  async findByUserIdAndDateRange(userId, dateFrom, dateTo, limit = null, offset = null, pool) {
+  async findByUserIdAndDateRange(userId, siteId, dateFrom, dateTo, limit = null, offset = null, pool) {
     let query = `
       SELECT il.*, u.name as created_by_name
       FROM imprest_ledger il
@@ -160,6 +190,11 @@ class ImprestLedgerModel extends MasterModel {
     `;
     const params = [userId];
     let paramIndex = 2;
+
+    if (siteId) {
+      query += ` AND il.site_id = $${paramIndex++}`;
+      params.push(siteId);
+    }
 
     if (dateFrom) {
       query += ` AND il.created_at >= $${paramIndex++}`;
@@ -188,7 +223,7 @@ class ImprestLedgerModel extends MasterModel {
   /**
    * Count ledger entries for pagination
    */
-  async countByUserIdAndDateRange(userId, dateFrom, dateTo, pool) {
+  async countByUserIdAndDateRange(userId, siteId, dateFrom, dateTo, pool) {
     let query = `
       SELECT COUNT(*)::int AS total
       FROM imprest_ledger
@@ -196,6 +231,11 @@ class ImprestLedgerModel extends MasterModel {
     `;
     const params = [userId];
     let paramIndex = 2;
+
+    if (siteId) {
+      query += ` AND site_id = $${paramIndex++}`;
+      params.push(siteId);
+    }
 
     if (dateFrom) {
       query += ` AND created_at >= $${paramIndex++}`;
@@ -213,8 +253,8 @@ class ImprestLedgerModel extends MasterModel {
   /**
    * Monthly summary for a user
    */
-  async getMonthlySummary(userId, pool) {
-    const query = `
+  async getMonthlySummary(userId, siteId, pool) {
+    let query = `
       SELECT
         EXTRACT(YEAR FROM created_at)::int AS year,
         EXTRACT(MONTH FROM created_at)::int AS month,
@@ -223,10 +263,17 @@ class ImprestLedgerModel extends MasterModel {
         COUNT(*)::int AS entries
       FROM imprest_ledger
       WHERE user_id = $1
+    `;
+    const params = [userId];
+    if (siteId) {
+      query += ` AND site_id = $2`;
+      params.push(siteId);
+    }
+    query += `
       GROUP BY EXTRACT(YEAR FROM created_at), EXTRACT(MONTH FROM created_at)
       ORDER BY year DESC, month DESC
     `;
-    const result = await pool.query(query, [userId]);
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
@@ -235,7 +282,7 @@ class ImprestLedgerModel extends MasterModel {
    */
   async createEntry(data, pool) {
     // Get current balance
-    const currentBalance = await this.getBalance(data.user_id, pool);
+    const currentBalance = await this.getBalance(data.user_id, data.site_id || null, pool);
     const newBalance = currentBalance + parseFloat(data.amount);
 
     const entryData = {
@@ -247,10 +294,25 @@ class ImprestLedgerModel extends MasterModel {
   }
 
   /**
+   * Find imprest ledger entries by site and date (for daybook integration)
+   */
+  async findBySiteAndDate(siteId, date, pool) {
+    const query = `
+      SELECT il.*, u.name as user_name
+      FROM imprest_ledger il
+      LEFT JOIN users u ON il.user_id = u.id
+      WHERE il.site_id = $1 AND il.created_at::date = $2
+      ORDER BY il.id ASC
+    `;
+    const result = await pool.query(query, [siteId, date]);
+    return result.rows;
+  }
+
+  /**
    * Get all sub-admin balances (admin overview)
    */
-  async getAllBalances(pool) {
-    const query = `
+  async getAllBalances(siteId, pool) {
+    let query = `
       SELECT
         u.id as user_id,
         u.name,
@@ -259,12 +321,13 @@ class ImprestLedgerModel extends MasterModel {
         COUNT(il.id)::int AS total_transactions,
         MAX(il.created_at) AS last_transaction_at
       FROM users u
-      LEFT JOIN imprest_ledger il ON u.id = il.user_id
+      LEFT JOIN imprest_ledger il ON u.id = il.user_id${siteId ? ' AND il.site_id = $1' : ''}
       WHERE u.role = 'sub_admin' AND u.is_active = true
       GROUP BY u.id, u.name, u.email
       ORDER BY u.name ASC
     `;
-    const result = await pool.query(query);
+    const params = siteId ? [siteId] : [];
+    const result = await pool.query(query, params);
     return result.rows;
   }
 }
@@ -278,8 +341,8 @@ class ImprestExpenseRequestModel extends MasterModel {
   /**
    * Find pending requests (admin view)
    */
-  async findPending(pool) {
-    const query = `
+  async findPending(siteId, pool) {
+    let query = `
       SELECT ier.*, u.name as sub_admin_name, u.email as sub_admin_email,
              s.name as site_name, asa.name as assigned_admin_name
       FROM imprest_expense_requests ier
@@ -287,9 +350,14 @@ class ImprestExpenseRequestModel extends MasterModel {
       LEFT JOIN sites s ON ier.site_id = s.id
       LEFT JOIN users asa ON ier.assigned_admin_id = asa.id
       WHERE ier.status = 'PENDING'
-      ORDER BY ier.created_at DESC
     `;
-    const result = await pool.query(query);
+    const params = [];
+    if (siteId) {
+      query += ` AND ier.site_id = $1`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ier.created_at DESC`;
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
@@ -320,8 +388,8 @@ class ImprestExpenseRequestModel extends MasterModel {
   /**
    * Find requests by sub-admin
    */
-  async findBySubAdminId(subAdminId, pool) {
-    const query = `
+  async findBySubAdminId(subAdminId, siteId, pool) {
+    let query = `
       SELECT ier.*, s.name as site_name, r.name as reviewer_name,
              asa.name as assigned_admin_name
       FROM imprest_expense_requests ier
@@ -329,9 +397,14 @@ class ImprestExpenseRequestModel extends MasterModel {
       LEFT JOIN users r ON ier.reviewed_by = r.id
       LEFT JOIN users asa ON ier.assigned_admin_id = asa.id
       WHERE ier.sub_admin_id = $1
-      ORDER BY ier.created_at DESC
     `;
-    const result = await pool.query(query, [subAdminId]);
+    const params = [subAdminId];
+    if (siteId) {
+      query += ` AND ier.site_id = $2`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ier.created_at DESC`;
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
@@ -375,8 +448,8 @@ class ImprestReturnModel extends MasterModel {
   /**
    * Find all pending returns (admin view)
    */
-  async findPending(pool) {
-    const query = `
+  async findPending(siteId, pool) {
+    let query = `
       SELECT ir.*, u.name as sub_admin_name, u.email as sub_admin_email,
              s.name as site_name, asa.name as assigned_admin_name
       FROM imprest_returns ir
@@ -384,17 +457,19 @@ class ImprestReturnModel extends MasterModel {
       LEFT JOIN sites s ON ir.site_id = s.id
       LEFT JOIN users asa ON ir.assigned_admin_id = asa.id
       WHERE ir.status = 'PENDING'
-      ORDER BY ir.created_at DESC
     `;
-    const result = await pool.query(query);
+    const params = [];
+    if (siteId) {
+      query += ` AND ir.site_id = $1`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ir.created_at DESC`;
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
-  /**
-   * Find all returns with details (admin view)
-   */
-  async findAllWithDetails(pool) {
-    const query = `
+  async findAllWithDetails(siteId, pool) {
+    let query = `
       SELECT ir.*, u.name as sub_admin_name, u.email as sub_admin_email,
              s.name as site_name, r.name as reviewer_name,
              asa.name as assigned_admin_name
@@ -403,17 +478,19 @@ class ImprestReturnModel extends MasterModel {
       LEFT JOIN sites s ON ir.site_id = s.id
       LEFT JOIN users r ON ir.reviewed_by = r.id
       LEFT JOIN users asa ON ir.assigned_admin_id = asa.id
-      ORDER BY ir.created_at DESC
     `;
-    const result = await pool.query(query);
+    const params = [];
+    if (siteId) {
+      query += ` WHERE ir.site_id = $1`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ir.created_at DESC`;
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
-  /**
-   * Find returns by sub-admin
-   */
-  async findBySubAdminId(subAdminId, pool) {
-    const query = `
+  async findBySubAdminId(subAdminId, siteId, pool) {
+    let query = `
       SELECT ir.*, s.name as site_name, r.name as reviewer_name,
              asa.name as assigned_admin_name
       FROM imprest_returns ir
@@ -421,9 +498,14 @@ class ImprestReturnModel extends MasterModel {
       LEFT JOIN users r ON ir.reviewed_by = r.id
       LEFT JOIN users asa ON ir.assigned_admin_id = asa.id
       WHERE ir.sub_admin_id = $1
-      ORDER BY ir.created_at DESC
     `;
-    const result = await pool.query(query, [subAdminId]);
+    const params = [subAdminId];
+    if (siteId) {
+      query += ` AND ir.site_id = $2`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ir.created_at DESC`;
+    const result = await pool.query(query, params);
     return result.rows;
   }
 

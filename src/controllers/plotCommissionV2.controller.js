@@ -204,7 +204,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const totalPaid = agents.reduce((s, a) => s + a.total_paid, 0);
   const totalPaidAll = agents.reduce((s, a) => s + a.total_paid_all, 0);
 
-  // Find related plots with same plot_no (history timeline)
+  // Find related plots with same plot_no (history timeline) — includes per-agent breakdown
   const timelineQuery = `
     SELECT
       p.id AS plot_id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate,
@@ -215,7 +215,16 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
       COALESCE(SUM(paid_agg.payment_count), 0) AS payment_count,
       MIN(pc.created_at) AS first_created,
       MAX(pc.created_at) AS last_created,
-      MAX(pc.status) AS latest_status
+      MAX(pc.status) AS latest_status,
+      JSON_AGG(JSON_BUILD_OBJECT(
+        'commission_id', pc.id,
+        'agent_name', m.full_name,
+        'agent_phone', m.phone,
+        'total_commission', pc.total_commission,
+        'status', pc.status,
+        'total_paid', COALESCE(paid_agg.total_paid, 0),
+        'payment_count', COALESCE(paid_agg.payment_count, 0)
+      ) ORDER BY pc.created_at ASC) AS agents_detail
     FROM plots p
     JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = $2
     JOIN members m ON pc.agent_id = m.id
@@ -237,6 +246,12 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     payment_count: parseInt(r.payment_count) || 0,
     balance: (parseFloat(r.total_commission) || 0) - (parseFloat(r.total_paid) || 0),
     is_current: r.plot_id === numPlotId,
+    agents_detail: (r.agents_detail || []).map(a => ({
+      ...a,
+      total_commission: parseFloat(a.total_commission) || 0,
+      total_paid: parseFloat(a.total_paid) || 0,
+      payment_count: parseInt(a.payment_count) || 0,
+    })),
   }));
 
   res.json({
