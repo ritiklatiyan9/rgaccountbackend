@@ -116,12 +116,12 @@ export const listExpenses = asyncHandler(async (req, res) => {
   const {
     site_id, page = 1, limit = 20,
     search, mode, category, to_entity,
-    dateFrom, dateTo, export: isExport, missing_bill, order
+    dateFrom, dateTo, export: isExport, missing_bill, order, only_site
   } = req.query;
 
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const filters = { search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order };
+  const filters = { search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order, only_site };
 
   // If exporting, fetch all filtered records by bypassing the limit
   const fetchLimit = isExport === 'true' ? 0 : parseInt(limit);

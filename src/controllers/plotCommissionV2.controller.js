@@ -432,8 +432,19 @@ export const deletePlotCommissionPayment = asyncHandler(async (req, res) => {
   const numId = parseInt(id);
   if (isNaN(numId)) return res.status(400).json({ message: 'Invalid payment ID' });
 
+  // Fetch commission ID before deleting so we can recalculate status
+  const paymentRes = await pool.query(
+    'SELECT plot_commission_id FROM plot_commission_payments WHERE id = $1',
+    [numId]
+  );
+  if (paymentRes.rows.length === 0) return res.status(404).json({ message: 'Payment not found' });
+  const commissionId = paymentRes.rows[0].plot_commission_id;
+
   const deleted = await plotCommissionPaymentModel.delete(numId, pool);
   if (!deleted) return res.status(404).json({ message: 'Payment not found' });
+
+  // Recalculate commission status after payment deletion
+  await autoUpdateCommissionStatus(commissionId, pool);
 
   res.json({ message: 'Payment deleted successfully' });
 });

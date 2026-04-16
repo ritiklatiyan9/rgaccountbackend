@@ -41,9 +41,10 @@ class DayBookModel extends MasterModel {
    */
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
-      SELECT d.*, u.name as assigned_admin_name
+      SELECT d.*, u.name as assigned_admin_name, approver.name as approved_by_name
       FROM day_book d
       LEFT JOIN users u ON d.assigned_admin_id = u.id
+      LEFT JOIN users approver ON d.approved_by = approver.id
       WHERE d.site_id = $1 AND d.date = $2
       ORDER BY d.id ASC
     `;

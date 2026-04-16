@@ -370,18 +370,25 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
 
 /**
  * POST /imprest/expense-requests
- * Sub-admin requests approval to create an expense with zero/insufficient imprest
+ * Sub-admin requests money (IMPREST type) or approval for an expense (EXPENSE type)
  */
 export const createExpenseRequest = asyncHandler(async (req, res) => {
   const {
     site_id, amount, reason,
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category, assigned_admin_id,
+    request_type: explicitType,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   const requestAmount = parseFloat(amount || debit) || 0;
   if (requestAmount <= 0) return res.status(400).json({ message: 'Amount must be positive' });
+
+  // Determine request_type: if no expense-specific fields → IMPREST (cash flow), else EXPENSE (overdraft)
+  const hasExpenseFields = from_entity || to_entity || payment_mode || account_no || branch || category || remark;
+  const requestType = explicitType === 'IMPREST' || explicitType === 'EXPENSE'
+    ? explicitType
+    : hasExpenseFields ? 'EXPENSE' : 'IMPREST';
 
   const expenseData = {
     site_id: parseInt(site_id),
@@ -405,12 +412,15 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
     expense_data: JSON.stringify(expenseData),
     reason: reason ? reason.trim() : null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+    request_type: requestType,
     status: 'PENDING',
   }, pool);
 
   res.status(201).json({
     request,
-    message: 'Expense request submitted for admin approval',
+    message: requestType === 'IMPREST'
+      ? 'Imprest request submitted for admin approval'
+      : 'Expense request submitted for admin approval',
   });
 });
 
@@ -439,7 +449,7 @@ export const listExpenseRequests = asyncHandler(async (req, res) => {
 
 /**
  * PUT /imprest/expense-requests/:id/approve
- * Admin approves an expense request (overdraft)
+ * Admin approves: IMPREST type → allocation (positive cash flow), EXPENSE type → overdraft expense
  */
 export const approveExpenseRequest = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -462,12 +472,51 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       return res.status(404).json({ message: 'Request not found or already processed' });
     }
 
+    const requestType = request.request_type || 'EXPENSE';
+    const requestAmount = parseFloat(request.amount);
+
+    // ── IMPREST type: just allocate cash to sub-admin (no expense, no daybook expense) ──
+    if (requestType === 'IMPREST') {
+      // 2a. Create allocation record
+      const allocation = await imprestAllocationModel.create({
+        admin_id: req.user.id,
+        sub_admin_id: request.sub_admin_id,
+        amount: requestAmount,
+        remark: request.reason || 'Imprest request approved',
+        assigned_admin_id: request.assigned_admin_id || null,
+        site_id: request.site_id,
+        status: 'RECEIVED', // auto-confirmed since sub-admin requested it
+        confirmed_at: new Date(),
+        confirmation_remark: 'Auto-confirmed (requested by sub-admin)',
+      }, client);
+
+      // 3a. Add positive balance to imprest ledger
+      await imprestLedgerModel.createEntry({
+        user_id: request.sub_admin_id,
+        type: 'ALLOCATION',
+        reference_id: allocation.id,
+        amount: requestAmount,
+        remarks: `Imprest allocated (request #${request.id} approved): ${request.reason || ''}`.trim(),
+        created_by: req.user.id,
+        site_id: request.site_id,
+      }, client);
+
+      await client.query('COMMIT');
+
+      return res.json({
+        request,
+        allocation,
+        message: 'Imprest request approved — funds allocated to sub-admin',
+      });
+    }
+
+    // ── EXPENSE type: overdraft expense flow (original behavior) ──
     const expenseData = typeof request.expense_data === 'string'
       ? JSON.parse(request.expense_data)
       : request.expense_data;
-    const expenseAmount = parseFloat(expenseData.debit) || parseFloat(request.amount);
+    const expenseAmount = parseFloat(expenseData.debit) || requestAmount;
 
-    // 2. Create the expense
+    // 2b. Create the expense
     const expense = await expenseModel.create({
       ...expenseData,
       status: 'approved',
@@ -475,7 +524,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       created_by: request.sub_admin_id,
     }, client);
 
-    // 3. Record in imprest ledger (negative balance = overdraft)
+    // 3b. Record in imprest ledger (negative balance = overdraft)
     await imprestLedgerModel.createEntry({
       user_id: request.sub_admin_id,
       type: 'EXPENSE',
@@ -486,7 +535,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       site_id: request.site_id ? parseInt(request.site_id) : null,
     }, client);
 
-    // 4. Create Day Book entry
+    // 4b. Create Day Book entry
     const dayBookData = {
       site_id: parseInt(expenseData.site_id),
       date: expenseData.date || new Date().toISOString().split('T')[0],

@@ -207,8 +207,9 @@ class ExpenseModel extends MasterModel {
    */
   async findBySiteAndDate(siteId, date, pool) {
     const query = `
-      SELECT e.*, admin_u.name as assigned_admin_name
+      SELECT e.*, u.name as approved_by_name, admin_u.name as assigned_admin_name
       FROM expenses e
+      LEFT JOIN users u ON e.approved_by = u.id
       LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
       WHERE e.site_id = $1 AND e.date = $2
       ORDER BY e.id ASC
@@ -302,7 +303,7 @@ class ExpenseModel extends MasterModel {
    * Calculates running balance dynamically across both tables.
    */
   async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
-    const { search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order = 'desc' } = filters;
+    const { search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
     const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -311,6 +312,7 @@ class ExpenseModel extends MasterModel {
     let pIdx = 2;
     let whereClause = '';
 
+    if (only_site === 'true') { whereClause += ` AND u.source = 'expenses'`; }
     if (mode) { whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode); }
     if (category) { whereClause += ` AND u.category = $${pIdx++}`; params.push(category); }
     if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
@@ -482,7 +484,7 @@ class ExpenseModel extends MasterModel {
    * Unified Breakdown stats based on the active filters
    */
   async getUnifiedBreakdowns(siteId, filters, pool) {
-    const { search, mode, category, to_entity, dateFrom, dateTo } = filters;
+    const { search, mode, category, to_entity, dateFrom, dateTo, only_site } = filters;
     const params = [siteId];
     let pIdx = 2;
     let whereClause = '';
@@ -496,6 +498,37 @@ class ExpenseModel extends MasterModel {
       whereClause += ` AND (u.from_entity ILIKE $${pIdx} OR u.to_entity ILIKE $${pIdx} OR u.remark ILIKE $${pIdx} OR u.account_no ILIKE $${pIdx} OR u.branch ILIKE $${pIdx} OR u.category ILIKE $${pIdx})`;
       params.push(`%${search}%`);
       pIdx++;
+    }
+
+    // When only_site=true, use simplified queries against expenses table only
+    if (only_site === 'true') {
+      const modeQ = `
+        SELECT COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode,
+          COALESCE(SUM(debit), 0)::numeric as total_debit,
+          COALESCE(SUM(credit), 0)::numeric as total_credit,
+          COUNT(*)::int as entries
+        FROM (
+          SELECT payment_mode, debit, credit, date, from_entity, to_entity, remark, account_no, branch, category
+          FROM expenses WHERE site_id = $1
+            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
+        ) u WHERE 1=1 ${whereClause}
+        GROUP BY COALESCE(payment_mode, 'UNSPECIFIED') ORDER BY total_debit DESC`;
+      const catQ = `
+        SELECT COALESCE(category, 'UNCATEGORIZED') as category,
+          COALESCE(SUM(debit), 0)::numeric as total_debit,
+          COALESCE(SUM(credit), 0)::numeric as total_credit,
+          COUNT(*)::int as entries
+        FROM (
+          SELECT payment_mode, debit, credit, date, from_entity, to_entity, remark, account_no, branch, category
+          FROM expenses WHERE site_id = $1
+            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
+        ) u WHERE 1=1 ${whereClause}
+        GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY total_debit DESC`;
+      const [modeRes, catRes] = await Promise.all([
+        pool.query(modeQ, params),
+        pool.query(catQ, params)
+      ]);
+      return { modeBreakdown: modeRes.rows, categoryBreakdown: catRes.rows };
     }
 
     const modeQuery = `

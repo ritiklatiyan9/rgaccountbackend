@@ -458,6 +458,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     updated_at: exp.updated_at,
     assigned_admin_id: exp.assigned_admin_id,
     assigned_admin_name: exp.assigned_admin_name,
+    status: exp.status,
+    approved_by_name: exp.approved_by_name,
     source: 'expense',
   }));
 
@@ -1838,24 +1840,24 @@ export const getLatestDate = asyncHandler(async (req, res) => {
   const siteId = parseInt(site_id);
 
   const result = await pool.query(
-    `SELECT MAX(d) AS latest_date FROM (
-       SELECT MAX(date) AS d FROM day_book WHERE site_id = $1
+    `SELECT MAX(d)::text AS latest_date FROM (
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) AS d FROM day_book WHERE site_id = $1
        UNION ALL
-       SELECT MAX(date) FROM expenses WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM expenses WHERE site_id = $1
        UNION ALL
-       SELECT MAX(fp.date) FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE f.site_id = $1
+       SELECT MAX((fp.date AT TIME ZONE 'Asia/Kolkata')::date) FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE f.site_id = $1
        UNION ALL
-       SELECT MAX(date) FROM plot_commissions WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_commissions WHERE site_id = $1
        UNION ALL
-       SELECT MAX(date) FROM cash_flow_entries WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM cash_flow_entries WHERE site_id = $1
        UNION ALL
-       SELECT MAX(date) FROM firm_transactions WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM firm_transactions WHERE site_id = $1
        UNION ALL
-       SELECT MAX(date) FROM plot_payments WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_payments WHERE site_id = $1
      ) sub`,
     [siteId]
   );
 
   const latestDate = result.rows[0]?.latest_date || null;
-  res.json({ latest_date: latestDate ? latestDate.toISOString().slice(0, 10) : null });
+  res.json({ latest_date: latestDate || null });
 });
