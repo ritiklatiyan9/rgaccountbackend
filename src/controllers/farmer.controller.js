@@ -15,6 +15,7 @@ export const createFarmer = asyncHandler(async (req, res) => {
   const {
     name, phone, address, total_amount, interest_rate, site_id, notes, status, member_id,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
+    land_size_bigha, land_rate, commission_percentage, commission_amount,
   } = req.body;
 
   if (!name) {
@@ -47,6 +48,10 @@ export const createFarmer = asyncHandler(async (req, res) => {
     bank_account_no: bank_account_no || null,
     bank_reference: bank_reference || null,
     bank_ifsc: bank_ifsc || null,
+    land_size_bigha: land_size_bigha != null && land_size_bigha !== '' ? parseFloat(land_size_bigha) : null,
+    land_rate: land_rate != null && land_rate !== '' ? parseFloat(land_rate) : null,
+    commission_percentage: commission_percentage != null && commission_percentage !== '' ? parseFloat(commission_percentage) : null,
+    commission_amount: commission_amount != null && commission_amount !== '' ? parseFloat(commission_amount) : null,
   };
 
   const farmer = await farmerModel.create(farmerData, pool);
@@ -92,6 +97,7 @@ export const updateFarmer = asyncHandler(async (req, res) => {
   const {
     name, phone, address, total_amount, interest_rate, notes, status, member_id,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
+    land_size_bigha, land_rate, commission_percentage, commission_amount,
   } = req.body;
 
   const farmer = await farmerModel.findById(parseInt(id), pool);
@@ -115,6 +121,10 @@ export const updateFarmer = asyncHandler(async (req, res) => {
   if (bank_account_no !== undefined) updateData.bank_account_no = bank_account_no;
   if (bank_reference !== undefined) updateData.bank_reference = bank_reference;
   if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
+  if (land_size_bigha !== undefined) updateData.land_size_bigha = land_size_bigha != null && land_size_bigha !== '' ? parseFloat(land_size_bigha) : null;
+  if (land_rate !== undefined) updateData.land_rate = land_rate != null && land_rate !== '' ? parseFloat(land_rate) : null;
+  if (commission_percentage !== undefined) updateData.commission_percentage = commission_percentage != null && commission_percentage !== '' ? parseFloat(commission_percentage) : null;
+  if (commission_amount !== undefined) updateData.commission_amount = commission_amount != null && commission_amount !== '' ? parseFloat(commission_amount) : null;
 
   const updated = await farmerModel.update(parseInt(id), updateData, pool);
   res.json({ farmer: updated });
