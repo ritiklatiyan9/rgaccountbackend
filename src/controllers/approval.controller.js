@@ -492,8 +492,8 @@ export const approveEntry = asyncHandler(async (req, res) => {
     await ensureInboundFirmTransferForApproval(entry, req.user.id);
   }
 
-  // Auto-generate DayBook entry for new V2 commission payments
-  if (source === 'plot_commission_payment' && parseFloat(entry.amount) > 0) {
+  // Auto-generate DayBook entry for new V2 commission payments (pay out + money received)
+  if (source === 'plot_commission_payment' && parseFloat(entry.amount) !== 0) {
     try {
       const pcpQuery = `
         SELECT pcp.*, p.plot_no, ag.full_name AS agent_name
@@ -507,6 +507,9 @@ export const approveEntry = asyncHandler(async (req, res) => {
       
       if (pcpData.rows.length > 0) {
         const pcpRow = pcpData.rows[0];
+        const amountNum = parseFloat(pcpRow.amount) || 0;
+        const isMoneyReceived = amountNum < 0;
+        const absAmount = Math.abs(amountNum);
         const plotInfo = pcpRow.plot_no ? ` (Plot: ${pcpRow.plot_no})` : '';
         const dayBookQuery = `
           INSERT INTO day_book (site_id, date, particular, entry_type, debit, credit, remarks, payment_mode, category, to_entity, created_by, status)
@@ -515,10 +518,10 @@ export const approveEntry = asyncHandler(async (req, res) => {
         await pool.query(dayBookQuery, [
           pcpRow.site_id,
           pcpRow.date,
-          `${pcpRow.agent_name}${plotInfo} - COMMISSION`.toUpperCase(),
+          `${pcpRow.agent_name}${plotInfo} - ${isMoneyReceived ? 'COMMISSION RECEIVED' : 'COMMISSION'}`.toUpperCase(),
           'PLOT COMMISSION',
-          pcpRow.amount,
-          0,
+          isMoneyReceived ? 0 : absAmount,
+          isMoneyReceived ? absAmount : 0,
           pcpRow.remarks,
           pcpRow.payment_mode ? pcpRow.payment_mode.toUpperCase() : 'CASH',
           'COMMISSION',

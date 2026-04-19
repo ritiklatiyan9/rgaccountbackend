@@ -26,6 +26,7 @@ import folderRoutes from './folder.routes.js';
 import approvalRoutes from './approval.routes.js';
 import chatRoutes from './chat.routes.js';
 import vendorRoutes from './vendor.routes.js';
+import dashboardPermissionRoutes from './dashboardPermission.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -52,4 +53,5 @@ router.use('/folders', folderRoutes);
 router.use('/approvals', approvalRoutes);
 router.use('/chat', chatRoutes);
 router.use('/vendors', vendorRoutes);
+router.use('/dashboard-permissions', dashboardPermissionRoutes);
 export default router;

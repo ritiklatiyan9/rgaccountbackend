@@ -10,6 +10,7 @@ import {
 import { getAllKpis } from './services/kpi.service.js';
 import { verifyFinancialIntegrity, getQueryDescriptions } from './services/consistency.service.js';
 import { getRevenueVsExpense, getProfitTrend, getExpenseByCategory } from './services/charts.service.js';
+import { getExpensesPageData } from './services/expenses.service.js';
 import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
 import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes } from '../config/cache.js';
 
@@ -31,6 +32,29 @@ const ResolutionEnum = new GraphQLEnumType({
     MONTH:   { value: 'MONTH' },
     QUARTER: { value: 'QUARTER' },
     YEAR:    { value: 'YEAR' },
+  },
+});
+
+const ExpenseSortOrderEnum = new GraphQLEnumType({
+  name: 'ExpenseSortOrder',
+  values: {
+    ASC:  { value: 'asc' },
+    DESC: { value: 'desc' },
+  },
+});
+
+const ExpensesPageFiltersInput = new GraphQLInputObjectType({
+  name: 'ExpensesPageFiltersInput',
+  fields: {
+    search:      { type: GraphQLString },
+    mode:        { type: GraphQLString },
+    category:    { type: GraphQLString },
+    toEntity:    { type: GraphQLString },
+    dateFrom:    { type: GraphQLString },
+    dateTo:      { type: GraphQLString },
+    missingBill: { type: GraphQLBoolean },
+    order:       { type: ExpenseSortOrderEnum },
+    onlySite:    { type: GraphQLBoolean },
   },
 });
 
@@ -108,18 +132,31 @@ const BreakdownItemType = new GraphQLObjectType({
   },
 });
 
+const ImprestDistributionType = new GraphQLObjectType({
+  name: 'ImprestDistribution',
+  fields: {
+    subAdminId:     { type: new GraphQLNonNull(GraphQLID) },
+    recipientName:  { type: new GraphQLNonNull(GraphQLString) },
+    totalAmount:    { type: new GraphQLNonNull(GraphQLFloat) },
+    allocationCount:{ type: new GraphQLNonNull(GraphQLInt) },
+  },
+});
+
 const KpiCardsType = new GraphQLObjectType({
   name: 'KpiCards',
   fields: {
-    totalRevenue:      { type: new GraphQLNonNull(GraphQLFloat) },
-    totalExpense:      { type: new GraphQLNonNull(GraphQLFloat) },
-    netProfit:         { type: new GraphQLNonNull(GraphQLFloat) },
-    profitMargin:      { type: new GraphQLNonNull(GraphQLFloat) },
-    outstanding:       { type: new GraphQLNonNull(GraphQLFloat) },
-    cashflow:          { type: new GraphQLNonNull(GraphQLFloat) },
-    breakdown:         { type: new GraphQLList(BreakdownItemType) },
-    cashflowDetail:    { type: CashflowDetailType },
-    outstandingDetail: { type: OutstandingDetailType },
+    totalRevenue:          { type: new GraphQLNonNull(GraphQLFloat) },
+    totalExpense:          { type: new GraphQLNonNull(GraphQLFloat) },
+    netProfit:             { type: new GraphQLNonNull(GraphQLFloat) },
+    profitMargin:          { type: new GraphQLNonNull(GraphQLFloat) },
+    outstanding:           { type: new GraphQLNonNull(GraphQLFloat) },
+    cashflow:              { type: new GraphQLNonNull(GraphQLFloat) },
+    personalLedgerCredit:  { type: new GraphQLNonNull(GraphQLFloat) },
+    imprestGiven:          { type: new GraphQLNonNull(GraphQLFloat) },
+    imprestDistribution:   { type: new GraphQLList(ImprestDistributionType) },
+    breakdown:             { type: new GraphQLList(BreakdownItemType) },
+    cashflowDetail:        { type: CashflowDetailType },
+    outstandingDetail:     { type: OutstandingDetailType },
   },
 });
 
@@ -139,6 +176,92 @@ const CategoryExpenseType = new GraphQLObjectType({
   fields: {
     category: { type: new GraphQLNonNull(GraphQLString) },
     amount:   { type: new GraphQLNonNull(GraphQLFloat) },
+  },
+});
+
+const ExpensePageSummaryType = new GraphQLObjectType({
+  name: 'ExpensePageSummary',
+  fields: {
+    total_debit:  { type: GraphQLFloat },
+    total_credit: { type: GraphQLFloat },
+    total_count:  { type: GraphQLInt },
+  },
+});
+
+const ExpensePagePaginationType = new GraphQLObjectType({
+  name: 'ExpensePagePagination',
+  fields: {
+    totalItems:  { type: new GraphQLNonNull(GraphQLInt) },
+    totalPages:  { type: new GraphQLNonNull(GraphQLInt) },
+    currentPage: { type: new GraphQLNonNull(GraphQLInt) },
+    itemsPerPage:{ type: new GraphQLNonNull(GraphQLInt) },
+  },
+});
+
+const ExpenseModeBreakdownType = new GraphQLObjectType({
+  name: 'ExpenseModeBreakdown',
+  fields: {
+    payment_mode: { type: GraphQLString },
+    total_debit:  { type: GraphQLFloat },
+    total_credit: { type: GraphQLFloat },
+    entries:      { type: GraphQLInt },
+  },
+});
+
+const ExpenseCategoryBreakdownType = new GraphQLObjectType({
+  name: 'ExpenseCategoryBreakdown',
+  fields: {
+    category:     { type: GraphQLString },
+    total_debit:  { type: GraphQLFloat },
+    total_credit: { type: GraphQLFloat },
+    entries:      { type: GraphQLInt },
+  },
+});
+
+const ExpenseEntryType = new GraphQLObjectType({
+  name: 'ExpenseEntry',
+  fields: {
+    id:                { type: new GraphQLNonNull(GraphQLID) },
+    original_id:       { type: GraphQLInt },
+    site_id:           { type: GraphQLInt },
+    date:              { type: GraphQLString },
+    from_entity:       { type: GraphQLString },
+    to_entity:         { type: GraphQLString },
+    payment_mode:      { type: GraphQLString },
+    debit:             { type: GraphQLFloat },
+    credit:            { type: GraphQLFloat },
+    balance:           { type: GraphQLFloat },
+    remark:            { type: GraphQLString },
+    account_no:        { type: GraphQLString },
+    branch:            { type: GraphQLString },
+    category:          { type: GraphQLString },
+    status:            { type: GraphQLString },
+    approved_by:       { type: GraphQLInt },
+    approved_at:       { type: GraphQLString },
+    approved_by_name:  { type: GraphQLString },
+    created_by:        { type: GraphQLInt },
+    created_at:        { type: GraphQLString },
+    updated_at:        { type: GraphQLString },
+    assigned_user_id:  { type: GraphQLInt },
+    assigned_user_name:{ type: GraphQLString },
+    assigned_admin_id: { type: GraphQLInt },
+    assigned_admin_name:{ type: GraphQLString },
+    voucher_url:       { type: GraphQLString },
+    bill_url:          { type: GraphQLString },
+    source:            { type: GraphQLString },
+    cheque_no:         { type: GraphQLString },
+    cheque_status:     { type: GraphQLString },
+  },
+});
+
+const ExpensesPageDataType = new GraphQLObjectType({
+  name: 'ExpensesPageData',
+  fields: {
+    expenses:          { type: new GraphQLList(ExpenseEntryType) },
+    summary:           { type: ExpensePageSummaryType },
+    pagination:        { type: ExpensePagePaginationType },
+    modeBreakdown:     { type: new GraphQLList(ExpenseModeBreakdownType) },
+    categoryBreakdown: { type: new GraphQLList(ExpenseCategoryBreakdownType) },
   },
 });
 
@@ -316,6 +439,18 @@ function cacheKey(prefix, siteId, start, end) {
   return `dashboard:${prefix}:${siteId}:${start}:${end}`;
 }
 
+function serializeFilters(filters = {}) {
+  return Object.entries(filters)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}:${String(value)}`)
+    .join('|') || 'none';
+}
+
+function expensesCacheKey(userId, siteId, page, limit, filters) {
+  return `expenses:page:${userId}:${siteId}:${page}:${limit}:${filters}`;
+}
+
 // ── Root Query ──
 
 const QueryType = new GraphQLObjectType({
@@ -354,8 +489,8 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, range }, ctx) {
         if (!ctx.user) throw new Error('Authentication required');
-        if (ctx.user.role !== 'admin' && ctx.user.role !== 'super_admin') {
-          throw new Error('Admin access required for verification');
+        if (ctx.user.role !== 'admin' && ctx.user.role !== 'super_admin' && ctx.user.role !== 'sub_admin') {
+          throw new Error('Access required for verification');
         }
         const result = await verifyFinancialIntegrity(parseInt(siteId), range.start, range.end);
         return {
@@ -423,6 +558,57 @@ const QueryType = new GraphQLObjectType({
       async resolve(_, { siteId, range, top = 8 }, ctx) {
         if (!ctx.user) throw new Error('Authentication required');
         const data = await getExpenseByCategory(parseInt(siteId), range.start, range.end, top);
+        return data;
+      },
+    },
+
+    expensesPageData: {
+      type: ExpensesPageDataType,
+      args: {
+        siteId: { type: new GraphQLNonNull(GraphQLID) },
+        page:   { type: GraphQLInt },
+        limit:  { type: GraphQLInt },
+        filters:{ type: ExpensesPageFiltersInput },
+      },
+      async resolve(_, { siteId, page = 1, limit = 20, filters = {} }, ctx) {
+        if (!ctx.user) throw new Error('Authentication required');
+
+        const id = parseInt(siteId);
+        const safePage = Number.isFinite(page) ? Math.max(1, page) : 1;
+        const safeLimit = Number.isFinite(limit) ? Math.max(0, limit) : 20;
+        const normalizedFilters = {
+          search: filters.search || undefined,
+          mode: filters.mode || undefined,
+          category: filters.category || undefined,
+          to_entity: filters.toEntity || undefined,
+          dateFrom: filters.dateFrom || undefined,
+          dateTo: filters.dateTo || undefined,
+          missing_bill: filters.missingBill ? 'true' : undefined,
+          order: filters.order || 'desc',
+          // Expenses module should show only entries from expense page.
+          only_site: filters.onlySite === false ? undefined : 'true',
+        };
+
+        const key = expensesCacheKey(
+          ctx.user.id || 'anon',
+          id,
+          safePage,
+          safeLimit,
+          serializeFilters(normalizedFilters),
+        );
+
+        if (cacheEnabled()) {
+          const cached = await cacheGet(key);
+          if (cached) return cached;
+        }
+
+        const data = await getExpensesPageData(id, {
+          filters: normalizedFilters,
+          page: safePage,
+          limit: safeLimit,
+        });
+
+        if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
         return data;
       },
     },

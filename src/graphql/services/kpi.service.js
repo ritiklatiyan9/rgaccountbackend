@@ -139,13 +139,68 @@ export async function getOutstanding(siteId, start, end) {
   return { given, returned, pending: given - returned };
 }
 
+// ── Personal Ledger Credit (date-filtered) — money received from persons ──
+export async function getPersonalLedgerCredit(siteId, start, end) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(cfe.credit), 0)::numeric AS total_credit
+     FROM cash_flow_entries cfe
+     JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+     WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
+       AND LOWER(cfm.ledger_type) = 'person'
+       AND cfe.credit > 0
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+    [siteId, start, end]
+  );
+  return parseFloat(rows[0].total_credit) || 0;
+}
+
+// ── Imprest: total money given (allocated) for a site ──
+export async function getImprestGiven(siteId, start, end) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(amount), 0)::numeric AS total
+     FROM imprest_allocations
+     WHERE site_id = $1 ${dateFilter('created_at', 2)}
+       AND status != 'CANCELLED'`,
+    [siteId, start, end]
+  );
+  return parseFloat(rows[0].total) || 0;
+}
+
+// ── Imprest distribution: who received how much ──
+export async function getImprestDistribution(siteId, start, end) {
+  const { rows } = await pool.query(
+    `SELECT
+       ia.sub_admin_id,
+       COALESCE(NULLIF(TRIM(sa.name), ''), sa.email, CONCAT('USER #', ia.sub_admin_id::text)) AS recipient_name,
+       COALESCE(SUM(ia.amount), 0)::numeric AS total_amount,
+       COUNT(*)::int AS allocation_count
+     FROM imprest_allocations ia
+     LEFT JOIN users sa ON sa.id = ia.sub_admin_id
+     WHERE ia.site_id = $1 ${dateFilter('ia.created_at', 2)}
+       AND ia.status != 'CANCELLED'
+     GROUP BY ia.sub_admin_id, recipient_name
+     ORDER BY total_amount DESC, recipient_name ASC`,
+    [siteId, start, end]
+  );
+
+  return rows.map((r) => ({
+    subAdminId: parseInt(r.sub_admin_id, 10),
+    recipientName: r.recipient_name,
+    totalAmount: parseFloat(r.total_amount) || 0,
+    allocationCount: parseInt(r.allocation_count, 10) || 0,
+  }));
+}
+
 // ── Combined KPI fetch (single round-trip where possible) ──
 export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
-  const [revenue, expData, cashflow, outstanding] = await Promise.all([
+  const [revenue, expData, cashflow, outstanding, personalLedgerCredit, imprestGiven, imprestDistribution] = await Promise.all([
     getRevenue(siteId, start, end, excludeOldPlots),
     getExpenseBreakdown(siteId, start, end),
     getSiteCashflow(siteId, start, end),
     getOutstanding(siteId, start, end),
+    getPersonalLedgerCredit(siteId, start, end),
+    getImprestGiven(siteId, start, end),
+    getImprestDistribution(siteId, start, end),
   ]);
 
   // Total Incoming = Plot Payments only
@@ -161,6 +216,9 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     profitMargin: Math.round(profitMargin * 100) / 100,
     outstanding: outstanding.pending,
     cashflow: cashflow.net,
+    personalLedgerCredit,
+    imprestGiven,
+    imprestDistribution,
     breakdown: {
       ...expData.breakdown,
       plot_payments: { credit: revenue, debit: 0, count: 0 },
