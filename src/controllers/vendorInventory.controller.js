@@ -1,6 +1,10 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 
+// Vendor inventory module — transactions-only (no deliveries / stock-in/out).
+// An "order" is: item + qty_ordered * rate - discount = net value.
+// Against that net value, each payment is a transaction that reduces outstanding.
+
 const asInt = (v) => parseInt(v, 10);
 
 const getSiteId = (req) => {
@@ -8,9 +12,13 @@ const getSiteId = (req) => {
   return Number.isInteger(siteId) && siteId > 0 ? siteId : null;
 };
 
-// ─────────────────────────────────────────────────────────────
-// LIST  GET /vendors/inventory?site_id=&page=&limit=&search=&status=&vendor_id=
-// ─────────────────────────────────────────────────────────────
+// Reusable SQL fragment computing order_value (net) and outstanding
+const ORDER_VALUE_SQL = `ROUND(o.qty_ordered * o.rate
+  - COALESCE(CASE
+      WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
+      ELSE o.discount_amount
+    END, 0), 2)`;
+
 export const listInventoryOrders = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
@@ -61,38 +69,13 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
 
   const ordersRes = await pool.query(
     `SELECT
-       o.id,
-       o.site_id,
-       o.vendor_member_id,
-       o.vendor_name,
-       o.item_name,
-       o.item_category,
-       o.unit,
-       o.qty_ordered,
-       o.qty_received,
-       o.rate,
-       o.discount_pct,
-       o.discount_amount,
-       o.gross_amount,
-       o.net_amount,
-       o.total_paid,
-       o.commitment_id,
-       ROUND(o.qty_ordered * o.rate, 2) AS order_gross,
-       ROUND(o.qty_ordered * o.rate
-         - COALESCE(CASE
-           WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
-           ELSE o.discount_amount
-         END, 0), 2) AS order_value,
-       (ROUND(o.qty_ordered * o.rate
-         - COALESCE(CASE
-           WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
-           ELSE o.discount_amount
-         END, 0), 2) - o.total_paid) AS outstanding,
-       o.order_date,
-       o.expected_date,
-       o.note,
-       o.status,
-       o.created_at,
+       o.id, o.site_id, o.vendor_member_id, o.vendor_name,
+       o.item_name, o.item_category, o.unit,
+       o.qty_ordered, o.rate, o.discount_pct, o.discount_amount,
+       o.total_paid, o.commitment_id,
+       ${ORDER_VALUE_SQL} AS order_value,
+       (${ORDER_VALUE_SQL} - o.total_paid) AS outstanding,
+       o.order_date, o.expected_date, o.note, o.status, o.created_at,
        m.full_name AS vendor_member_name,
        vc.head_name, vc.work_title
      FROM vendor_inventory_orders o
@@ -104,24 +87,21 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
     [...values, limit, offset]
   );
 
-  // site-wide summary (unfiltered) – use qty_ordered-based amounts
   const sumRes = await pool.query(
     `SELECT
        COUNT(*)::int AS total_orders,
-       COALESCE(SUM(qty_ordered), 0)  AS total_qty_ordered,
-       COALESCE(SUM(qty_received), 0) AS total_qty_received,
        COALESCE(SUM(ROUND(qty_ordered * rate
          - COALESCE(CASE
            WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
            ELSE discount_amount
-         END, 0), 2)), 0) AS total_net_amount,
-       COALESCE(SUM(total_paid), 0)   AS total_paid,
+         END, 0), 2)), 0)::numeric(14,2) AS total_value,
+       COALESCE(SUM(total_paid), 0)::numeric(14,2) AS total_paid,
        COALESCE(SUM(ROUND(qty_ordered * rate
          - COALESCE(CASE
            WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
            ELSE discount_amount
-         END, 0), 2) - total_paid), 0) AS total_outstanding,
-       COALESCE(SUM(discount_amount + CASE WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2) ELSE 0 END), 0) AS total_discount
+         END, 0), 2) - total_paid), 0)::numeric(14,2) AS total_outstanding,
+       COALESCE(SUM(CASE WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2) ELSE discount_amount END), 0)::numeric(14,2) AS total_discount
      FROM vendor_inventory_orders
      WHERE site_id = $1`,
     [siteId]
@@ -134,9 +114,6 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────
-// DETAIL  GET /vendors/inventory/:id?site_id=
-// ─────────────────────────────────────────────────────────────
 export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   const orderId = asInt(req.params.id);
@@ -145,17 +122,8 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
 
   const orderRes = await pool.query(
     `SELECT o.*,
-       ROUND(o.qty_ordered * o.rate, 2) AS order_gross,
-       ROUND(o.qty_ordered * o.rate
-         - COALESCE(CASE
-           WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
-           ELSE o.discount_amount
-         END, 0), 2) AS order_value,
-       (ROUND(o.qty_ordered * o.rate
-         - COALESCE(CASE
-           WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
-           ELSE o.discount_amount
-         END, 0), 2) - o.total_paid) AS outstanding,
+       ${ORDER_VALUE_SQL} AS order_value,
+       (${ORDER_VALUE_SQL} - o.total_paid) AS outstanding,
        m.full_name AS vendor_member_name,
        vc.head_name, vc.work_title
      FROM vendor_inventory_orders o
@@ -167,15 +135,6 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
   const order = orderRes.rows[0];
   if (!order) return res.status(404).json({ message: 'Order not found' });
 
-  const deliveriesRes = await pool.query(
-    `SELECT d.*, u.name AS created_by_name
-     FROM vendor_inventory_deliveries d
-     LEFT JOIN users u ON u.id = d.created_by
-     WHERE d.order_id = $1
-     ORDER BY d.delivery_date DESC, d.id DESC`,
-    [orderId]
-  );
-
   const paymentsRes = await pool.query(
     `SELECT p.*, u.name AS created_by_name
      FROM vendor_inventory_payments p
@@ -185,12 +144,9 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
     [orderId]
   );
 
-  res.json({ order, deliveries: deliveriesRes.rows, payments: paymentsRes.rows });
+  res.json({ order, payments: paymentsRes.rows });
 });
 
-// ─────────────────────────────────────────────────────────────
-// CREATE ORDER  POST /vendors/inventory
-// ─────────────────────────────────────────────────────────────
 export const createInventoryOrder = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
@@ -265,9 +221,6 @@ export const createInventoryOrder = asyncHandler(async (req, res) => {
   res.status(201).json({ order: result.rows[0] });
 });
 
-// ─────────────────────────────────────────────────────────────
-// UPDATE ORDER  PUT /vendors/inventory/:id
-// ─────────────────────────────────────────────────────────────
 export const updateInventoryOrder = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   const orderId = asInt(req.params.id);
@@ -322,9 +275,6 @@ export const updateInventoryOrder = asyncHandler(async (req, res) => {
   res.json({ order: result.rows[0] });
 });
 
-// ─────────────────────────────────────────────────────────────
-// DELETE ORDER  DELETE /vendors/inventory/:id
-// ─────────────────────────────────────────────────────────────
 export const deleteInventoryOrder = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   const orderId = asInt(req.params.id);
@@ -340,65 +290,6 @@ export const deleteInventoryOrder = asyncHandler(async (req, res) => {
   res.json({ message: 'Order deleted' });
 });
 
-// ─────────────────────────────────────────────────────────────
-// ADD DELIVERY  POST /vendors/inventory/:id/deliveries
-// ─────────────────────────────────────────────────────────────
-export const addDelivery = asyncHandler(async (req, res) => {
-  const siteId = getSiteId(req);
-  const orderId = asInt(req.params.id);
-  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
-  if (!Number.isInteger(orderId)) return res.status(400).json({ message: 'Invalid order id' });
-
-  const qty = parseFloat(req.body.qty);
-  if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be > 0' });
-
-  const orderCheck = await pool.query(
-    `SELECT id FROM vendor_inventory_orders WHERE id = $1 AND site_id = $2`,
-    [orderId, siteId]
-  );
-  if (!orderCheck.rows[0]) return res.status(404).json({ message: 'Order not found' });
-
-  const result = await pool.query(
-    `INSERT INTO vendor_inventory_deliveries (order_id, site_id, delivery_date, qty, note, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING *`,
-    [
-      orderId,
-      siteId,
-      req.body.delivery_date || new Date().toISOString().slice(0, 10),
-      qty,
-      (req.body.note || '').trim() || null,
-      req.user.id,
-    ]
-  );
-
-  res.status(201).json({ delivery: result.rows[0] });
-});
-
-// ─────────────────────────────────────────────────────────────
-// DELETE DELIVERY  DELETE /vendors/inventory/deliveries/:deliveryId
-// ─────────────────────────────────────────────────────────────
-export const deleteDelivery = asyncHandler(async (req, res) => {
-  const siteId = getSiteId(req);
-  const deliveryId = asInt(req.params.deliveryId);
-  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
-  if (!Number.isInteger(deliveryId)) return res.status(400).json({ message: 'Invalid delivery id' });
-
-  const result = await pool.query(
-    `DELETE FROM vendor_inventory_deliveries d
-     USING vendor_inventory_orders o
-     WHERE d.id = $1 AND d.order_id = o.id AND o.site_id = $2
-     RETURNING d.id`,
-    [deliveryId, siteId]
-  );
-  if (!result.rows[0]) return res.status(404).json({ message: 'Delivery not found' });
-
-  res.json({ message: 'Delivery deleted' });
-});
-
-// ─────────────────────────────────────────────────────────────
-// ADD PAYMENT  POST /vendors/inventory/:id/payments
-// ─────────────────────────────────────────────────────────────
 export const addInventoryPayment = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   const orderId = asInt(req.params.id);
@@ -438,9 +329,6 @@ export const addInventoryPayment = asyncHandler(async (req, res) => {
   res.status(201).json({ payment: result.rows[0] });
 });
 
-// ─────────────────────────────────────────────────────────────
-// DELETE PAYMENT  DELETE /vendors/inventory/payments/:paymentId
-// ─────────────────────────────────────────────────────────────
 export const deleteInventoryPayment = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   const paymentId = asInt(req.params.paymentId);
@@ -459,9 +347,6 @@ export const deleteInventoryPayment = asyncHandler(async (req, res) => {
   res.json({ message: 'Payment deleted' });
 });
 
-// ─────────────────────────────────────────────────────────────
-// GET ITEM CATEGORIES  GET /vendors/inventory/categories?site_id=
-// ─────────────────────────────────────────────────────────────
 export const listInventoryCategories = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
@@ -477,22 +362,15 @@ export const listInventoryCategories = asyncHandler(async (req, res) => {
   res.json({ categories: result.rows.map((r) => r.item_category) });
 });
 
-// ─────────────────────────────────────────────────────────────
-// STOCK SUMMARY  GET /vendors/inventory/stock-summary?site_id=
-// Per-category aggregated stock: ordered, received, remaining, value, paid
-// ─────────────────────────────────────────────────────────────
+// Per-category aggregated summary (no in/out — just item count, value, paid, outstanding)
 export const getInventoryStockSummary = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
 
-  // Per-category breakdown
   const catRes = await pool.query(
     `SELECT
        COALESCE(NULLIF(o.item_category, ''), 'UNCATEGORIZED') AS category,
        COUNT(*)::int AS item_count,
-       COALESCE(SUM(o.qty_ordered), 0)::numeric(14,3) AS total_ordered,
-       COALESCE(SUM(o.qty_received), 0)::numeric(14,3) AS total_received,
-       COALESCE(SUM(o.qty_ordered - o.qty_received), 0)::numeric(14,3) AS remaining,
        COALESCE(SUM(ROUND(o.qty_ordered * o.rate
          - COALESCE(CASE
            WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
@@ -506,8 +384,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
          END, 0), 2) - o.total_paid), 0)::numeric(14,2) AS outstanding,
        COUNT(*) FILTER (WHERE o.status = 'open')::int AS open_count,
        COUNT(*) FILTER (WHERE o.status = 'partial')::int AS partial_count,
-       COUNT(*) FILTER (WHERE o.status = 'completed')::int AS completed_count,
-       MODE() WITHIN GROUP (ORDER BY o.unit) AS common_unit
+       COUNT(*) FILTER (WHERE o.status = 'completed')::int AS completed_count
      FROM vendor_inventory_orders o
      WHERE o.site_id = $1 AND o.status != 'cancelled'
      GROUP BY COALESCE(NULLIF(o.item_category, ''), 'UNCATEGORIZED')
@@ -515,19 +392,10 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
     [siteId]
   );
 
-  // Recent activity (last 10 deliveries + last 10 inventory payments)
-  const recentInRes = await pool.query(
-    `SELECT d.id, d.delivery_date AS date, d.qty, o.item_name, o.unit, o.item_category, 'delivery' AS type
-     FROM vendor_inventory_deliveries d
-     INNER JOIN vendor_inventory_orders o ON o.id = d.order_id
-     WHERE d.site_id = $1
-     ORDER BY d.delivery_date DESC, d.id DESC
-     LIMIT 10`,
-    [siteId]
-  );
-
-  const recentOutRes = await pool.query(
-    `SELECT p.id, p.payment_date AS date, p.amount, o.item_name, o.item_category, 'payment' AS type
+  // Most recent payment transactions across the site
+  const recentTxRes = await pool.query(
+    `SELECT p.id, p.payment_date AS date, p.amount, p.payment_mode,
+            o.item_name, o.item_category, o.unit
      FROM vendor_inventory_payments p
      INNER JOIN vendor_inventory_orders o ON o.id = p.order_id
      WHERE p.site_id = $1
@@ -536,18 +404,20 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
     [siteId]
   );
 
-  // Site-wide totals
   const totalRes = await pool.query(
     `SELECT
        COUNT(*)::int AS total_items,
-       COALESCE(SUM(qty_ordered), 0)::numeric(14,3) AS total_ordered,
-       COALESCE(SUM(qty_received), 0)::numeric(14,3) AS total_received,
        COALESCE(SUM(ROUND(qty_ordered * rate
          - COALESCE(CASE
            WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
            ELSE discount_amount
          END, 0), 2)), 0)::numeric(14,2) AS total_value,
-       COALESCE(SUM(total_paid), 0)::numeric(14,2) AS total_paid
+       COALESCE(SUM(total_paid), 0)::numeric(14,2) AS total_paid,
+       COALESCE(SUM(ROUND(qty_ordered * rate
+         - COALESCE(CASE
+           WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
+           ELSE discount_amount
+         END, 0), 2) - total_paid), 0)::numeric(14,2) AS total_outstanding
      FROM vendor_inventory_orders
      WHERE site_id = $1 AND status != 'cancelled'`,
     [siteId]
@@ -555,8 +425,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
 
   res.json({
     categories: catRes.rows,
-    recentIn: recentInRes.rows,
-    recentOut: recentOutRes.rows,
+    recentTransactions: recentTxRes.rows,
     totals: totalRes.rows[0],
   });
 });

@@ -25,8 +25,6 @@ import {
   createInventoryOrder,
   updateInventoryOrder,
   deleteInventoryOrder,
-  addDelivery,
-  deleteDelivery,
   addInventoryPayment,
   deleteInventoryPayment,
   listInventoryCategories,
@@ -65,14 +63,13 @@ router.put('/payments/:paymentId', requirePermission('vendors', 'update'), bustV
 router.delete('/payments/:paymentId', requirePermission('vendors', 'delete'), bustVendorCache, deleteVendorPayment);
 
 // ── Inventory ──────────────────────────────────────────────────────────────
-router.get('/inventory/categories', requirePermission('vendors', 'read'), vendorReadCache, listInventoryCategories);router.get('/inventory/stock-summary', requirePermission('vendors', 'read'), vendorReadCache, getInventoryStockSummary);router.get('/inventory', requirePermission('vendors', 'read'), vendorReadCache, listInventoryOrders);
+router.get('/inventory/categories', requirePermission('vendors', 'read'), vendorReadCache, listInventoryCategories);
+router.get('/inventory/stock-summary', requirePermission('vendors', 'read'), vendorReadCache, getInventoryStockSummary);
+router.get('/inventory', requirePermission('vendors', 'read'), vendorReadCache, listInventoryOrders);
 router.post('/inventory', requirePermission('vendors', 'write'), bustVendorCache, createInventoryOrder);
 router.get('/inventory/:id', requirePermission('vendors', 'read'), vendorReadCache, getInventoryOrderDetail);
 router.put('/inventory/:id', requirePermission('vendors', 'update'), bustVendorCache, updateInventoryOrder);
 router.delete('/inventory/:id', requirePermission('vendors', 'delete'), bustVendorCache, deleteInventoryOrder);
-
-router.post('/inventory/:id/deliveries', requirePermission('vendors', 'write'), bustVendorCache, addDelivery);
-router.delete('/inventory/deliveries/:deliveryId', requirePermission('vendors', 'delete'), bustVendorCache, deleteDelivery);
 
 router.post('/inventory/:id/payments', requirePermission('vendors', 'write'), bustVendorCache, addInventoryPayment);
 router.delete('/inventory/inv-payments/:paymentId', requirePermission('vendors', 'delete'), bustVendorCache, deleteInventoryPayment);

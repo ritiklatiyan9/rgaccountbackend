@@ -200,9 +200,13 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
      LEFT JOIN (
        SELECT commitment_id,
               COUNT(*)::int AS item_count,
-              SUM(net_amount)::numeric(14,2) AS inv_net_amount,
+              SUM(ROUND(qty_ordered * rate
+                - COALESCE(CASE WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
+                               ELSE discount_amount END, 0), 2))::numeric(14,2) AS inv_net_amount,
               SUM(total_paid)::numeric(14,2) AS inv_total_paid,
-              SUM(net_amount - total_paid)::numeric(14,2) AS inv_outstanding
+              SUM(ROUND(qty_ordered * rate
+                - COALESCE(CASE WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
+                               ELSE discount_amount END, 0), 2) - total_paid)::numeric(14,2) AS inv_outstanding
        FROM vendor_inventory_orders
        WHERE site_id = $1
        GROUP BY commitment_id
@@ -235,9 +239,13 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
      CROSS JOIN (
       SELECT
         COUNT(*)::int AS total_inv_items,
-        COALESCE(SUM(net_amount), 0)::numeric(14,2) AS total_inv_net,
+        COALESCE(SUM(ROUND(qty_ordered * rate
+          - COALESCE(CASE WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
+                         ELSE discount_amount END, 0), 2)), 0)::numeric(14,2) AS total_inv_net,
         COALESCE(SUM(total_paid), 0)::numeric(14,2) AS total_inv_paid,
-        COALESCE(SUM(net_amount - total_paid), 0)::numeric(14,2) AS total_inv_outstanding
+        COALESCE(SUM(ROUND(qty_ordered * rate
+          - COALESCE(CASE WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
+                         ELSE discount_amount END, 0), 2) - total_paid), 0)::numeric(14,2) AS total_inv_outstanding
       FROM vendor_inventory_orders
       WHERE site_id = $1
      ) inv
@@ -299,13 +307,11 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
     [commitmentId, siteId]
   );
 
-  // Fetch inventory orders linked to this commitment
+  // Fetch inventory orders linked to this commitment (transactions only, no deliveries)
   const inventoryResult = await pool.query(
     `SELECT
        o.id, o.vendor_member_id, o.vendor_name, o.item_name, o.item_category, o.unit,
-       o.qty_ordered, o.qty_received, o.rate, o.discount_pct, o.discount_amount,
-       o.gross_amount, o.net_amount, o.total_paid,
-       -- order_value = what the order is WORTH based on qty_ordered (not qty_received)
+       o.qty_ordered, o.rate, o.discount_pct, o.discount_amount, o.total_paid,
        ROUND(o.qty_ordered * o.rate, 2) AS order_gross,
        ROUND(o.qty_ordered * o.rate
          - COALESCE(CASE
@@ -324,30 +330,16 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
     [commitmentId, siteId]
   );
 
-  // For each inventory order, fetch deliveries and payments
   const inventoryOrders = [];
   for (const order of inventoryResult.rows) {
-    const [delRes, payRes] = await Promise.all([
-      pool.query(
-        `SELECT d.id, d.delivery_date, d.qty, d.note, d.created_at, u.name AS created_by_name
-         FROM vendor_inventory_deliveries d
-         LEFT JOIN users u ON u.id = d.created_by
-         WHERE d.order_id = $1 ORDER BY d.delivery_date DESC, d.id DESC`,
-        [order.id]
-      ),
-      pool.query(
-        `SELECT p.id, p.payment_date, p.amount, p.payment_mode, p.reference_no, p.note, p.voucher_url, p.created_at, u.name AS created_by_name
-         FROM vendor_inventory_payments p
-         LEFT JOIN users u ON u.id = p.created_by
-         WHERE p.order_id = $1 ORDER BY p.payment_date DESC, p.id DESC`,
-        [order.id]
-      ),
-    ]);
-    inventoryOrders.push({
-      ...order,
-      deliveries: delRes.rows,
-      payments: payRes.rows,
-    });
+    const payRes = await pool.query(
+      `SELECT p.id, p.payment_date, p.amount, p.payment_mode, p.reference_no, p.note, p.voucher_url, p.created_at, u.name AS created_by_name
+       FROM vendor_inventory_payments p
+       LEFT JOIN users u ON u.id = p.created_by
+       WHERE p.order_id = $1 ORDER BY p.payment_date DESC, p.id DESC`,
+      [order.id]
+    );
+    inventoryOrders.push({ ...order, payments: payRes.rows });
   }
 
   res.json({ commitment, payments: paymentsResult.rows, inventoryOrders });
@@ -844,8 +836,7 @@ export const listAllInventoryItems = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `SELECT
        o.id, o.commitment_id, o.item_name, o.item_category, o.unit,
-       o.qty_ordered, o.qty_received, o.rate,
-       o.gross_amount, o.net_amount, o.total_paid,
+       o.qty_ordered, o.rate, o.total_paid,
        ROUND(o.qty_ordered * o.rate
          - COALESCE(CASE
            WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
@@ -869,7 +860,6 @@ export const listAllInventoryItems = asyncHandler(async (req, res) => {
     `SELECT
        COUNT(*)::int AS total_items,
        COALESCE(SUM(qty_ordered), 0)::numeric(14,2) AS total_qty_ordered,
-       COALESCE(SUM(qty_received), 0)::numeric(14,2) AS total_qty_received,
        COALESCE(SUM(ROUND(qty_ordered * rate
          - COALESCE(CASE
            WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
