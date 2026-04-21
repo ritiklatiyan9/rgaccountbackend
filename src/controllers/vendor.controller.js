@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
+import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 
 const asInt = (v) => parseInt(v, 10);
 
@@ -345,7 +346,29 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
     inventoryOrders.push({ ...order, payments: payRes.rows });
   }
 
-  res.json({ commitment, payments: paymentsResult.rows, inventoryOrders });
+  // Attach a signed verifyUrl to each vendor payment so the receipt can embed
+  // a QR that lands on the public verification page.
+  const siteRow = (await pool.query(
+    'SELECT name, city, state FROM sites WHERE id = $1',
+    [siteId]
+  )).rows[0] || null;
+  const payments = paymentsResult.rows.map((p) => ({
+    ...p,
+    verifyUrl: buildVerifyUrl({
+      t: ReceiptType.VENDOR,
+      i: p.id,
+      pn: commitment.vendor_name || null,
+      a: p.amount,
+      d: p.payment_date,
+      pm: p.payment_mode || null,
+      rf: p.reference_no || null,
+      sn: siteRow?.name || null,
+      sy: siteRow?.city || null,
+      ss: siteRow?.state || null,
+    }),
+  }));
+
+  res.json({ commitment, payments, inventoryOrders });
 });
 
 export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {

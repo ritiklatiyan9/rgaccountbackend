@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { plotCommissionV2Model, plotCommissionPaymentModel } from '../models/PlotCommissionV2.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
+import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 
 /**
  * Helper: Auto-update commission status based on payment completion
@@ -158,13 +159,36 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const paymentsResult = await pool.query(allPaymentsQuery, [commissionIds]);
   const allPayments = paymentsResult.rows;
 
-  // Group payments by commission_id
+  // Resolve site info for the signed token payload.
+  const siteRow = (await pool.query(
+    'SELECT name, city, state FROM sites WHERE id = $1',
+    [parseInt(site_id)]
+  )).rows[0] || null;
+
+  // Group payments by commission_id and attach a signed verifyUrl to each.
   const paymentsByCommission = {};
   for (const p of allPayments) {
     if (!paymentsByCommission[p.plot_commission_id]) {
       paymentsByCommission[p.plot_commission_id] = [];
     }
-    paymentsByCommission[p.plot_commission_id].push(p);
+    // Find the agent name on this commission for the token payload
+    const parentCommission = commissions.find((c) => c.id === p.plot_commission_id);
+    const payment = {
+      ...p,
+      verifyUrl: buildVerifyUrl({
+        t: ReceiptType.COMMISSION,
+        i: p.id,
+        pn: parentCommission?.agent_name || null,
+        a: p.amount,
+        d: p.date,
+        pm: p.payment_mode || null,
+        pl: commissions[0]?.plot_no || null,
+        sn: siteRow?.name || commissions[0]?.site_name || null,
+        sy: siteRow?.city || null,
+        ss: siteRow?.state || null,
+      }),
+    };
+    paymentsByCommission[p.plot_commission_id].push(payment);
   }
 
   // Plot-level info from first commission (all share the same plot)

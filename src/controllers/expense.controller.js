@@ -3,6 +3,7 @@ import { expenseModel } from '../models/Expense.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import { imprestLedgerModel } from '../models/Imprest.model.js';
 import pool from '../config/db.js';
+import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 
 // ══════════════════════════════════════════════════
 //  EXPENSE ENDPOINTS
@@ -132,8 +133,31 @@ export const listExpenses = asyncHandler(async (req, res) => {
     expenseModel.getUnifiedBreakdowns(parseInt(site_id), filters, pool)
   ]);
 
+  // Resolve site for signed token payload.
+  const siteRow = (await pool.query(
+    'SELECT name, city, state FROM sites WHERE id = $1',
+    [parseInt(site_id)]
+  )).rows[0] || null;
+
+  const expensesWithVerify = paginatedData.items.map((e) => ({
+    ...e,
+    verifyUrl: buildVerifyUrl({
+      t: ReceiptType.EXPENSE,
+      i: e.id,
+      a: parseFloat(e.debit) || parseFloat(e.credit) || 0,
+      dr: (parseFloat(e.debit) || 0) > 0 ? 'OUT' : 'IN',
+      d: e.date,
+      pm: e.payment_mode || null,
+      pn: e.to_entity || e.from_entity || null,
+      pl: e.category || null,
+      sn: siteRow?.name || null,
+      sy: siteRow?.city || null,
+      ss: siteRow?.state || null,
+    }),
+  }));
+
   res.json({
-    expenses: paginatedData.items,
+    expenses: expensesWithVerify,
     summary: paginatedData.summary,
     pagination: {
       totalItems: paginatedData.totalItems,

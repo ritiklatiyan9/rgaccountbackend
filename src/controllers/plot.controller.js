@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import { plotRegistryModel } from '../models/PlotRegistry.model.js';
 import pool from '../config/db.js';
+import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -566,7 +567,28 @@ export const listPayments = asyncHandler(async (req, res) => {
     plotPaymentModel.getReceivedByBreakdown(parseInt(plot_id), pool),
   ]);
 
-  res.json({ payments, plot, fromBreakdown, receivedByBreakdown });
+  // Resolve site for token payload.
+  const siteRow = plot?.site_id
+    ? (await pool.query('SELECT name, city, state FROM sites WHERE id = $1', [plot.site_id])).rows[0] || null
+    : null;
+
+  const paymentsWithVerify = payments.map((p) => ({
+    ...p,
+    verifyUrl: buildVerifyUrl({
+      t: ReceiptType.PLOT,
+      i: p.id,
+      pn: p.buyer_name || plot?.buyer_name || null,
+      pl: plot?.plot_no || null,
+      a: p.amount,
+      d: p.date,
+      pm: p.payment_from || p.payment_type || null,
+      sn: siteRow?.name || null,
+      sy: siteRow?.city || null,
+      ss: siteRow?.state || null,
+    }),
+  }));
+
+  res.json({ payments: paymentsWithVerify, plot, fromBreakdown, receivedByBreakdown });
 });
 
 /** GET /plots/payments/:id — Get a single payment */

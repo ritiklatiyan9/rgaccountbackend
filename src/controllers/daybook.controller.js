@@ -9,6 +9,7 @@ import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model
 import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
+import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 
 // ══════════════════════════════════════════════════
 //  OPENING BALANCE HELPERS
@@ -948,10 +949,40 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     balance = { opening_balance: null, closing_balance: null, running_balance: null, is_live: false, tracked: false };
   }
 
+  // Attach a signed verifyUrl to each entry so the DayBook receipt can embed
+  // a QR. Payload fields are minimal — display info only. The `i` field uses
+  // the entry's full id (including prefix like "expense_123") so each QR is
+  // uniquely identifiable.
+  const siteRow = (await pool.query(
+    'SELECT name, city, state FROM sites WHERE id = $1',
+    [parseInt(siteId)]
+  )).rows[0] || null;
+
+  const amount = (e) => parseFloat(e.debit) || parseFloat(e.credit) || 0;
+  const partyName = (e) =>
+    e.to_entity || e.from_entity || e.farmer_name || e.agent_name ||
+    e.particular || null;
+
+  const entriesWithVerify = allEntries.map((e) => ({
+    ...e,
+    verifyUrl: buildVerifyUrl({
+      t: ReceiptType.DAYBOOK,
+      i: String(e.id),
+      a: amount(e),
+      d: e.date,
+      pm: e.payment_mode || null,
+      pn: partyName(e),
+      pl: e.entry_type || null,
+      sn: siteRow?.name || null,
+      sy: siteRow?.city || null,
+      ss: siteRow?.state || null,
+    }),
+  }));
+
   res.json({
-    entries: allEntries,
+    entries: entriesWithVerify,
     date: queryDate,
-    summary: { total_debit, total_credit, total_count: allEntries.length },
+    summary: { total_debit, total_credit, total_count: entriesWithVerify.length },
     balance,
     typeBreakdown: Object.values(typeMap).sort((a, b) => b.total_debit - a.total_debit),
     modeBreakdown: Object.values(modeMap).sort((a, b) => b.total_debit - a.total_debit),
