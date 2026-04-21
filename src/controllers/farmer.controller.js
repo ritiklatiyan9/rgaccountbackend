@@ -1,7 +1,30 @@
+import crypto from 'crypto';
 import asyncHandler from '../utils/asyncHandler.js';
 import { farmerModel, farmerPaymentModel } from '../models/Farmer.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
+
+// Public-facing verify page URL. QR on the printed receipt links here so a
+// scanner lands on a human-friendly page (not raw API JSON).
+// Override via env: PUBLIC_VERIFY_URL=https://www.your-site.com/verify-receipt
+const PUBLIC_VERIFY_URL =
+  process.env.PUBLIC_VERIFY_URL || 'http://localhost:5173/verify-receipt';
+
+const signReceiptToken = (payment, farmer) => {
+  const payload = {
+    id: payment.id,
+    farmer_id: payment.farmer_id,
+    amount: payment.amount,
+    date: payment.date,
+    site_id: farmer.site_id,
+    ts: Date.now(),
+  };
+  const sig = crypto
+    .createHmac('sha256', process.env.RECEIPT_VERIFY_SECRET || '')
+    .update(JSON.stringify(payload))
+    .digest('hex');
+  return Buffer.from(JSON.stringify({ payload, sig })).toString('base64url');
+};
 
 // ──────────────────────────────────────────────────────────────
 // FARMER CRUD
@@ -274,9 +297,18 @@ export const listPayments = asyncHandler(async (req, res) => {
     bankPaid += parseFloat(p.bank_amount) || 0;
   }
 
+  const paymentsWithVerify = payments.map((p) => {
+    const verifyToken = signReceiptToken(p, farmer);
+    return {
+      ...p,
+      verifyToken,
+      verifyUrl: `${PUBLIC_VERIFY_URL}?token=${verifyToken}`,
+    };
+  });
+
   res.json({
     farmer,
-    payments,
+    payments: paymentsWithVerify,
     summary: {
       total_amount: parseFloat(farmer.total_amount),
       total_paid: totalPaid,
@@ -373,3 +405,41 @@ export const listFarmerMembers = asyncHandler(async (req, res) => {
 
   res.json({ members: result.rows });
 });
+
+// ──────────────────────────────────────────────────────────────
+// PUBLIC RECEIPT VERIFY
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * GET /farmers/verify-receipt?token=...
+ * Public endpoint — verifies an HMAC-signed farmer payment receipt token.
+ */
+export const verifyFarmerReceipt = (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      return res.status(400).json({ valid: false, message: 'Missing token' });
+    }
+
+    const decoded = JSON.parse(Buffer.from(String(token), 'base64url').toString('utf8'));
+    const { payload, sig } = decoded || {};
+    if (!payload || !sig) {
+      return res.status(400).json({ valid: false, message: 'Malformed token' });
+    }
+
+    const expectedSig = crypto
+      .createHmac('sha256', process.env.RECEIPT_VERIFY_SECRET || '')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+
+    const sigBuf = Buffer.from(sig, 'hex');
+    const expBuf = Buffer.from(expectedSig, 'hex');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return res.status(400).json({ valid: false, message: 'Invalid or tampered receipt' });
+    }
+
+    return res.json({ valid: true, receipt: payload });
+  } catch (err) {
+    return res.status(400).json({ valid: false, message: 'Malformed token' });
+  }
+};

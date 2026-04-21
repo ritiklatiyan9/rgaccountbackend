@@ -12,6 +12,7 @@ import {
   updatePayment,
   deletePayment,
   listFarmerMembers,
+  verifyFarmerReceipt,
 } from '../controllers/farmer.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -21,6 +22,9 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 const farmerReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'farmers' });
 // Farmer mutations affect daybook dashboard too
 const bustFarmerCache = invalidateCacheOnSuccess(['/farmers', '/daybook']);
+
+// Public: verify receipt (no auth) — MUST be before authMiddleware
+router.get('/verify-receipt', verifyFarmerReceipt);
 
 // All farmer routes require auth
 router.use(authMiddleware);
