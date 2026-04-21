@@ -3,6 +3,7 @@ import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model
 import { firmModel } from '../models/Firm.model.js';
 import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
+import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 
 // ══════════════════════════════════════════════════
 //  CASH FLOW MONTH ENDPOINTS
@@ -219,7 +220,35 @@ export const listEntries = asyncHandler(async (req, res) => {
     cashFlowMonthModel.findByIdWithTotals(monthId, pool),
   ]);
 
-  res.json({ entries, summary, categories, month: monthData });
+  // Attach a signed verifyUrl to each entry so the printed receipt can embed
+  // a scannable QR code.
+  const siteRow = monthData?.site_id
+    ? (await pool.query('SELECT name, city, state FROM sites WHERE id = $1', [monthData.site_id])).rows[0] || null
+    : null;
+
+  const entriesWithVerify = entries.map((e) => {
+    const debit = parseFloat(e.debit) || 0;
+    const credit = parseFloat(e.credit) || 0;
+    const amount = credit > 0 ? credit : debit;
+    return {
+      ...e,
+      verifyUrl: buildVerifyUrl({
+        t: ReceiptType.DAYBOOK,
+        i: `cf_${e.id}`,
+        a: amount,
+        dr: credit > 0 ? 'IN' : 'OUT',
+        d: e.date,
+        pm: e.cash_type || null,
+        pn: e.to_firm_name || e.from_firm_name || e.to_name || e.particular || null,
+        pl: 'Cash Flow',
+        sn: siteRow?.name || null,
+        sy: siteRow?.city || null,
+        ss: siteRow?.state || null,
+      }),
+    };
+  });
+
+  res.json({ entries: entriesWithVerify, summary, categories, month: monthData });
 });
 
 /**
