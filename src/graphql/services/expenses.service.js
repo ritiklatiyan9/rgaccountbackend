@@ -22,6 +22,17 @@ function normalizeFilters(filters = {}) {
     order: String(filters.order || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc',
   };
 
+  // Multi-category AND filter (ILIKE tokens). Pass-through only when it's a non-empty array so
+  // the SQL model can chain one `AND category ILIKE %token%` clause per entry.
+  if (Array.isArray(filters.categories) && filters.categories.length > 0) {
+    const tokens = filters.categories.map((c) => String(c).trim()).filter(Boolean);
+    if (tokens.length > 0) {
+      normalized.categories = tokens;
+      // Avoid conflict with the legacy single-category path — the model will prefer `categories`.
+      normalized.category = undefined;
+    }
+  }
+
   if (filters.missing_bill === true || filters.missing_bill === 'true') {
     normalized.missing_bill = 'true';
   }
@@ -32,7 +43,7 @@ function normalizeFilters(filters = {}) {
   return normalized;
 }
 
-export async function getExpensesPageData(siteId, { filters = {}, page = 1, limit = 20 } = {}) {
+export async function getExpensesPageData(siteId, { filters = {}, page = 1, limit = 20, includeBreakdowns = false } = {}) {
   const safeSiteId = parseInt(siteId, 10);
   const safePage = Number.isFinite(page) ? Math.max(1, parseInt(page, 10) || 1) : 1;
   const rawLimit = Number.isFinite(limit) ? parseInt(limit, 10) : 20;
@@ -40,10 +51,14 @@ export async function getExpensesPageData(siteId, { filters = {}, page = 1, limi
 
   const normalizedFilters = normalizeFilters(filters);
 
-  const [paginatedData, breakdowns] = await Promise.all([
+  const tasks = [
     expenseModel.findPaginatedUnified(safeSiteId, normalizedFilters, safePage, safeLimit, pool),
-    expenseModel.getUnifiedBreakdowns(safeSiteId, normalizedFilters, pool),
-  ]);
+  ];
+  if (includeBreakdowns) {
+    tasks.push(expenseModel.getUnifiedBreakdowns(safeSiteId, normalizedFilters, pool));
+  }
+
+  const [paginatedData, breakdowns] = await Promise.all(tasks);
 
   const totalItems = parseInt(paginatedData.totalItems || 0, 10);
 
@@ -56,6 +71,16 @@ export async function getExpensesPageData(siteId, { filters = {}, page = 1, limi
       currentPage: safePage,
       itemsPerPage: safeLimit > 0 ? safeLimit : totalItems,
     },
+    modeBreakdown: breakdowns?.modeBreakdown || [],
+    categoryBreakdown: breakdowns?.categoryBreakdown || [],
+  };
+}
+
+export async function getExpensesBreakdown(siteId, { filters = {} } = {}) {
+  const safeSiteId = parseInt(siteId, 10);
+  const normalizedFilters = normalizeFilters(filters);
+  const breakdowns = await expenseModel.getUnifiedBreakdowns(safeSiteId, normalizedFilters, pool);
+  return {
     modeBreakdown: breakdowns.modeBreakdown || [],
     categoryBreakdown: breakdowns.categoryBreakdown || [],
   };

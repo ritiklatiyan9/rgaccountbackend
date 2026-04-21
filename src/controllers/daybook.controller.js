@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { dayBookModel } from '../models/DayBook.model.js';
+import { dayBookDailyBalanceModel } from '../models/DayBookDailyBalance.model.js';
 import { expenseModel } from '../models/Expense.model.js';
 import { farmerModel, farmerPaymentModel } from '../models/Farmer.model.js';
 import { plotCommissionModel } from '../models/PlotCommission.model.js';
@@ -8,6 +9,114 @@ import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model
 import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
+
+// ══════════════════════════════════════════════════
+//  OPENING BALANCE HELPERS
+//  Computes the Site Balance (dashboard "gamma") as of a cutoff date.
+//  Used to seed the first day's opening when no prior snapshot exists.
+// ══════════════════════════════════════════════════
+const EPOCH = '1900-01-01';
+
+async function siteBalanceAsOf(siteId, cutoffDate, pool) {
+  // cutoffDate exclusive — include only transactions strictly BEFORE this date.
+  // gamma = revenue − outstanding(person-ledger pending) − totalExpense − imprestGiven
+  const [revRow, expRow, outRow, imprestRow] = await Promise.all([
+    pool.query(
+      `SELECT COALESCE(SUM(amount), 0)::numeric AS total FROM (
+         SELECT pp.amount FROM plot_payments pp
+         WHERE pp.site_id = $1 AND pp.date >= $2 AND pp.date < $3
+           AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         UNION ALL
+         SELECT pip.amount FROM plot_installment_payments pip
+         JOIN plots p ON p.id = pip.plot_id
+         WHERE p.site_id = $1 AND pip.payment_date >= $2 AND pip.payment_date < $3
+           AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       ) u`,
+      [siteId, EPOCH, cutoffDate]
+    ),
+    pool.query(
+      `SELECT COALESCE(SUM(debit), 0)::numeric AS total FROM (
+         SELECT fp.amount AS debit FROM farmer_payments fp
+         JOIN farmers f ON f.id = fp.farmer_id
+         WHERE f.site_id = $1 AND fp.date >= $2 AND fp.date < $3
+           AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND fp.status != 'rejected'
+         UNION ALL
+         SELECT debit FROM expenses
+         WHERE site_id = $1 AND date >= $2 AND date < $3
+           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND status != 'rejected'
+         UNION ALL
+         SELECT amount AS debit FROM plot_commission_payments
+         WHERE site_id = $1 AND date >= $2 AND date < $3
+           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND status != 'rejected'
+         UNION ALL
+         SELECT amount AS debit FROM vendor_payments
+         WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
+           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND status != 'rejected'
+         UNION ALL
+         SELECT cfe.debit FROM cash_flow_entries cfe
+         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+         WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+           AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
+           AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         UNION ALL
+         SELECT debit FROM day_book
+         WHERE site_id = $1 AND date >= $2 AND date < $3
+           AND entry_type = 'EXPENSE'
+           AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
+           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND status != 'rejected'
+       ) u`,
+      [siteId, EPOCH, cutoffDate]
+    ),
+    pool.query(
+      `SELECT
+         COALESCE(SUM(cfe.debit), 0)::numeric AS given,
+         COALESCE(SUM(cfe.credit), 0)::numeric AS returned
+       FROM cash_flow_entries cfe
+       JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+       WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+         AND LOWER(cfm.ledger_type) = 'person'
+         AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+      [siteId, EPOCH, cutoffDate]
+    ),
+    pool.query(
+      `SELECT COALESCE(SUM(amount), 0)::numeric AS total
+       FROM imprest_allocations
+       WHERE site_id = $1 AND created_at >= $2 AND created_at < $3
+         AND status != 'CANCELLED'`,
+      [siteId, EPOCH, cutoffDate]
+    ),
+  ]);
+
+  const revenue = parseFloat(revRow.rows[0].total) || 0;
+  const expense = parseFloat(expRow.rows[0].total) || 0;
+  const given = parseFloat(outRow.rows[0].given) || 0;
+  const returned = parseFloat(outRow.rows[0].returned) || 0;
+  const outstanding = given - returned;
+  const imprestGiven = parseFloat(imprestRow.rows[0].total) || 0;
+
+  return revenue - outstanding - expense - imprestGiven;
+}
+
+// Fetch or seed the daily-balance row for (siteId, date).
+// Seeds are only created for today-or-later, per product decision to start tracking from today.
+async function getOrSeedDailyBalance(siteId, date, pool) {
+  const today = new Date().toISOString().split('T')[0];
+  const existing = await dayBookDailyBalanceModel.findBySiteAndDate(siteId, date, pool);
+  if (existing) return existing;
+  if (date < today) return null;
+
+  const prev = await dayBookDailyBalanceModel.findLatestBefore(siteId, date, pool);
+  const opening = prev
+    ? parseFloat(prev.closing_balance) || 0
+    : await siteBalanceAsOf(siteId, date, pool);
+
+  return dayBookDailyBalanceModel.upsertOpening(siteId, date, opening, pool);
+}
 
 // ══════════════════════════════════════════════════
 //  DAY BOOK ENDPOINTS
@@ -806,13 +915,75 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     catMap[c].total_debit += dr; catMap[c].total_credit += cr; catMap[c].entries += 1;
   }
 
+  // ── Daily balance (opening + running/closing) ──
+  // Seeds today's row if missing; closing is kept in sync with live entries for every tracked date.
+  let balance = null;
+  try {
+    const todayIso = new Date().toISOString().split('T')[0];
+    const row = await getOrSeedDailyBalance(siteId, queryDate, pool);
+    if (row) {
+      const opening = parseFloat(row.opening_balance) || 0;
+      const running = opening + total_credit - total_debit;
+      // Always refresh closing for any tracked date so edits to historical entries stay consistent.
+      const updated = await dayBookDailyBalanceModel.updateClosing(siteId, queryDate, running, pool);
+      const closing = updated ? parseFloat(updated.closing_balance) || 0 : running;
+      balance = {
+        opening_balance: opening,
+        closing_balance: closing,
+        running_balance: running,
+        is_live: queryDate >= todayIso,
+        tracked: true,
+      };
+    } else {
+      balance = {
+        opening_balance: null,
+        closing_balance: null,
+        running_balance: null,
+        is_live: false,
+        tracked: false,
+      };
+    }
+  } catch (err) {
+    console.error('[daybook] balance compute error:', err.message);
+    balance = { opening_balance: null, closing_balance: null, running_balance: null, is_live: false, tracked: false };
+  }
+
   res.json({
     entries: allEntries,
     date: queryDate,
     summary: { total_debit, total_credit, total_count: allEntries.length },
+    balance,
     typeBreakdown: Object.values(typeMap).sort((a, b) => b.total_debit - a.total_debit),
     modeBreakdown: Object.values(modeMap).sort((a, b) => b.total_debit - a.total_debit),
     categoryBreakdown: Object.values(catMap).sort((a, b) => b.total_debit - a.total_debit),
+  });
+});
+
+/**
+ * GET /daybook/daily-balance?site_id=X&date=YYYY-MM-DD
+ * Returns the opening + closing balance for a site+date.
+ * Seeds today's record if missing (opening = yesterday's closing OR Site Balance gamma).
+ * Returns tracked:false for past dates that pre-date the feature rollout.
+ */
+export const getDailyBalance = asyncHandler(async (req, res) => {
+  const { site_id, date } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const queryDate = date || new Date().toISOString().split('T')[0];
+
+  const row = await getOrSeedDailyBalance(site_id, queryDate, pool);
+  if (!row) {
+    return res.json({
+      date: queryDate,
+      opening_balance: null,
+      closing_balance: null,
+      tracked: false,
+    });
+  }
+  res.json({
+    date: queryDate,
+    opening_balance: parseFloat(row.opening_balance) || 0,
+    closing_balance: parseFloat(row.closing_balance) || 0,
+    tracked: true,
   });
 });
 

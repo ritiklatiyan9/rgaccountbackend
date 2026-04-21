@@ -10,7 +10,7 @@ import {
 import { getAllKpis } from './services/kpi.service.js';
 import { verifyFinancialIntegrity, getQueryDescriptions } from './services/consistency.service.js';
 import { getRevenueVsExpense, getProfitTrend, getExpenseByCategory } from './services/charts.service.js';
-import { getExpensesPageData } from './services/expenses.service.js';
+import { getExpensesPageData, getExpensesBreakdown } from './services/expenses.service.js';
 import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
 import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes } from '../config/cache.js';
 
@@ -49,6 +49,10 @@ const ExpensesPageFiltersInput = new GraphQLInputObjectType({
     search:      { type: GraphQLString },
     mode:        { type: GraphQLString },
     category:    { type: GraphQLString },
+    // Multi-category filter — each entry is ILIKE-matched against the category column and
+    // all conditions are AND'd (e.g. ["PHASE 2", "JCB"] returns rows whose category contains
+    // both substrings). Takes precedence over `category` when non-empty.
+    categories:  { type: new GraphQLList(new GraphQLNonNull(GraphQLString)) },
     toEntity:    { type: GraphQLString },
     dateFrom:    { type: GraphQLString },
     dateTo:      { type: GraphQLString },
@@ -142,6 +146,20 @@ const ImprestDistributionType = new GraphQLObjectType({
   },
 });
 
+const ImprestPairType = new GraphQLObjectType({
+  name: 'ImprestPair',
+  fields: {
+    giverId:         { type: new GraphQLNonNull(GraphQLID) },
+    giverName:       { type: new GraphQLNonNull(GraphQLString) },
+    giverRole:       { type: new GraphQLNonNull(GraphQLString) },
+    receiverId:      { type: new GraphQLNonNull(GraphQLID) },
+    receiverName:    { type: new GraphQLNonNull(GraphQLString) },
+    receiverRole:    { type: new GraphQLNonNull(GraphQLString) },
+    totalAmount:     { type: new GraphQLNonNull(GraphQLFloat) },
+    allocationCount: { type: new GraphQLNonNull(GraphQLInt) },
+  },
+});
+
 const KpiCardsType = new GraphQLObjectType({
   name: 'KpiCards',
   fields: {
@@ -153,7 +171,10 @@ const KpiCardsType = new GraphQLObjectType({
     cashflow:              { type: new GraphQLNonNull(GraphQLFloat) },
     personalLedgerCredit:  { type: new GraphQLNonNull(GraphQLFloat) },
     imprestGiven:          { type: new GraphQLNonNull(GraphQLFloat) },
+    registryPayments:      { type: new GraphQLNonNull(GraphQLFloat) },
+    registryPaymentsCount: { type: new GraphQLNonNull(GraphQLInt) },
     imprestDistribution:   { type: new GraphQLList(ImprestDistributionType) },
+    imprestPairs:          { type: new GraphQLList(ImprestPairType) },
     breakdown:             { type: new GraphQLList(BreakdownItemType) },
     cashflowDetail:        { type: CashflowDetailType },
     outstandingDetail:     { type: OutstandingDetailType },
@@ -240,6 +261,7 @@ const ExpenseEntryType = new GraphQLObjectType({
     approved_at:       { type: GraphQLString },
     approved_by_name:  { type: GraphQLString },
     created_by:        { type: GraphQLInt },
+    created_by_name:   { type: GraphQLString },
     created_at:        { type: GraphQLString },
     updated_at:        { type: GraphQLString },
     assigned_user_id:  { type: GraphQLInt },
@@ -260,6 +282,14 @@ const ExpensesPageDataType = new GraphQLObjectType({
     expenses:          { type: new GraphQLList(ExpenseEntryType) },
     summary:           { type: ExpensePageSummaryType },
     pagination:        { type: ExpensePagePaginationType },
+    modeBreakdown:     { type: new GraphQLList(ExpenseModeBreakdownType) },
+    categoryBreakdown: { type: new GraphQLList(ExpenseCategoryBreakdownType) },
+  },
+});
+
+const ExpensesBreakdownType = new GraphQLObjectType({
+  name: 'ExpensesBreakdown',
+  fields: {
     modeBreakdown:     { type: new GraphQLList(ExpenseModeBreakdownType) },
     categoryBreakdown: { type: new GraphQLList(ExpenseCategoryBreakdownType) },
   },
@@ -569,8 +599,9 @@ const QueryType = new GraphQLObjectType({
         page:   { type: GraphQLInt },
         limit:  { type: GraphQLInt },
         filters:{ type: ExpensesPageFiltersInput },
+        includeBreakdowns: { type: GraphQLBoolean },
       },
-      async resolve(_, { siteId, page = 1, limit = 20, filters = {} }, ctx) {
+      async resolve(_, { siteId, page = 1, limit = 20, filters = {}, includeBreakdowns = false }, ctx) {
         if (!ctx.user) throw new Error('Authentication required');
 
         const id = parseInt(siteId);
@@ -580,6 +611,9 @@ const QueryType = new GraphQLObjectType({
           search: filters.search || undefined,
           mode: filters.mode || undefined,
           category: filters.category || undefined,
+          categories: Array.isArray(filters.categories) && filters.categories.length > 0
+            ? filters.categories.map((c) => String(c).trim()).filter(Boolean)
+            : undefined,
           to_entity: filters.toEntity || undefined,
           dateFrom: filters.dateFrom || undefined,
           dateTo: filters.dateTo || undefined,
@@ -595,7 +629,7 @@ const QueryType = new GraphQLObjectType({
           safePage,
           safeLimit,
           serializeFilters(normalizedFilters),
-        );
+        ) + `:br=${includeBreakdowns ? 1 : 0}`;
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);
@@ -606,7 +640,47 @@ const QueryType = new GraphQLObjectType({
           filters: normalizedFilters,
           page: safePage,
           limit: safeLimit,
+          includeBreakdowns,
         });
+
+        if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
+        return data;
+      },
+    },
+
+    expensesBreakdown: {
+      type: ExpensesBreakdownType,
+      args: {
+        siteId: { type: new GraphQLNonNull(GraphQLID) },
+        filters:{ type: ExpensesPageFiltersInput },
+      },
+      async resolve(_, { siteId, filters = {} }, ctx) {
+        if (!ctx.user) throw new Error('Authentication required');
+
+        const id = parseInt(siteId);
+        const normalizedFilters = {
+          search: filters.search || undefined,
+          mode: filters.mode || undefined,
+          category: filters.category || undefined,
+          categories: Array.isArray(filters.categories) && filters.categories.length > 0
+            ? filters.categories.map((c) => String(c).trim()).filter(Boolean)
+            : undefined,
+          to_entity: filters.toEntity || undefined,
+          dateFrom: filters.dateFrom || undefined,
+          dateTo: filters.dateTo || undefined,
+          missing_bill: filters.missingBill ? 'true' : undefined,
+          order: filters.order || 'desc',
+          only_site: filters.onlySite === false ? undefined : 'true',
+        };
+
+        const key = `expenses:breakdown:${ctx.user.id || 'anon'}:${id}:${serializeFilters(normalizedFilters)}`;
+
+        if (cacheEnabled()) {
+          const cached = await cacheGet(key);
+          if (cached) return cached;
+        }
+
+        const data = await getExpensesBreakdown(id, { filters: normalizedFilters });
 
         if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
         return data;

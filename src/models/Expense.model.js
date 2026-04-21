@@ -303,7 +303,7 @@ class ExpenseModel extends MasterModel {
    * Calculates running balance dynamically across both tables.
    */
   async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
-    const { search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site } = filters;
+    const { search, mode, category, categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
     const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -313,8 +313,33 @@ class ExpenseModel extends MasterModel {
     let whereClause = '';
 
     if (only_site === 'true') { whereClause += ` AND u.source = 'expenses'`; }
-    if (mode) { whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode); }
-    if (category) { whereClause += ` AND u.category = $${pIdx++}`; params.push(category); }
+    if (mode) {
+      if (mode === 'UNSPECIFIED') {
+        whereClause += ` AND (u.payment_mode IS NULL OR u.payment_mode = '')`;
+      } else {
+        whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode);
+      }
+    }
+    // Multi-category filter (AND-combined ILIKE). When set, overrides legacy single `category`.
+    if (Array.isArray(categories) && categories.length > 0) {
+      for (const token of categories) {
+        const trimmed = String(token).trim();
+        if (!trimmed) continue;
+        if (trimmed.toUpperCase() === 'UNCATEGORIZED') {
+          whereClause += ` AND (u.category IS NULL OR u.category = '')`;
+        } else {
+          whereClause += ` AND u.category ILIKE $${pIdx}`;
+          params.push(`%${trimmed}%`);
+          pIdx++;
+        }
+      }
+    } else if (category) {
+      if (category === 'UNCATEGORIZED') {
+        whereClause += ` AND (u.category IS NULL OR u.category = '')`;
+      } else {
+        whereClause += ` AND u.category = $${pIdx++}`; params.push(category);
+      }
+    }
     if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
     if (dateFrom) { whereClause += ` AND u.date >= $${pIdx++}`; params.push(dateFrom); }
     if (dateTo) { whereClause += ` AND u.date <= $${pIdx++}`; params.push(dateTo); }
@@ -428,11 +453,16 @@ class ExpenseModel extends MasterModel {
     // ── Q1: Data ──
     let dataQuery = `
       ${unifiedCTE}
-      SELECT u.*, us.name as approved_by_name, m.full_name as assigned_user_name, admin_u.name as assigned_admin_name
+      SELECT u.*,
+             us.name as approved_by_name,
+             m.full_name as assigned_user_name,
+             admin_u.name as assigned_admin_name,
+             COALESCE(NULLIF(TRIM(cu.name), ''), cu.email) AS created_by_name
       FROM unified u
       LEFT JOIN users us ON u.approved_by = us.id
       LEFT JOIN members m ON u.assigned_user_id = m.id
       LEFT JOIN users admin_u ON u.assigned_admin_id = admin_u.id
+      LEFT JOIN users cu ON cu.id = u.created_by
       WHERE 1=1 ${whereClause}
       ORDER BY u.date ${sortDir}, u.created_at ${sortDir},
                CASE WHEN u.source = 'daybook' THEN 1 ELSE 0 END ${sortDir}, 
@@ -484,13 +514,37 @@ class ExpenseModel extends MasterModel {
    * Unified Breakdown stats based on the active filters
    */
   async getUnifiedBreakdowns(siteId, filters, pool) {
-    const { search, mode, category, to_entity, dateFrom, dateTo, only_site } = filters;
+    const { search, mode, category, categories, to_entity, dateFrom, dateTo, only_site } = filters;
     const params = [siteId];
     let pIdx = 2;
     let whereClause = '';
 
-    if (mode) { whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode); }
-    if (category) { whereClause += ` AND u.category = $${pIdx++}`; params.push(category); }
+    if (mode) {
+      if (mode === 'UNSPECIFIED') {
+        whereClause += ` AND (u.payment_mode IS NULL OR u.payment_mode = '')`;
+      } else {
+        whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode);
+      }
+    }
+    if (Array.isArray(categories) && categories.length > 0) {
+      for (const token of categories) {
+        const trimmed = String(token).trim();
+        if (!trimmed) continue;
+        if (trimmed.toUpperCase() === 'UNCATEGORIZED') {
+          whereClause += ` AND (u.category IS NULL OR u.category = '')`;
+        } else {
+          whereClause += ` AND u.category ILIKE $${pIdx}`;
+          params.push(`%${trimmed}%`);
+          pIdx++;
+        }
+      }
+    } else if (category) {
+      if (category === 'UNCATEGORIZED') {
+        whereClause += ` AND (u.category IS NULL OR u.category = '')`;
+      } else {
+        whereClause += ` AND u.category = $${pIdx++}`; params.push(category);
+      }
+    }
     if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
     if (dateFrom) { whereClause += ` AND u.date >= $${pIdx++}`; params.push(dateFrom); }
     if (dateTo) { whereClause += ` AND u.date <= $${pIdx++}`; params.push(dateTo); }
@@ -523,7 +577,7 @@ class ExpenseModel extends MasterModel {
           FROM expenses WHERE site_id = $1
             AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
         ) u WHERE 1=1 ${whereClause}
-        GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY total_debit DESC`;
+        GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY category ASC`;
       const [modeRes, catRes] = await Promise.all([
         pool.query(modeQ, params),
         pool.query(catQ, params)
@@ -618,7 +672,7 @@ class ExpenseModel extends MasterModel {
       FROM unified u
       WHERE 1=1 ${whereClause}
       GROUP BY COALESCE(category, 'UNCATEGORIZED')
-      ORDER BY total_debit DESC
+      ORDER BY COALESCE(category, 'UNCATEGORIZED') ASC
     `;
 
     const [modeRes, catRes] = await Promise.all([

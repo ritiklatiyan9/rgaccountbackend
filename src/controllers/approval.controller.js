@@ -127,6 +127,21 @@ function isModuleAllowed(allowed, moduleKey) {
 }
 
 /**
+ * Decide whether a sub-admin's pending-list query should include a module at all,
+ * and whether it should be scoped to "assigned to me" rows only.
+ *   - admin / super_admin → { include: true, scoped: false } (always full access)
+ *   - sub-admin with module grant → { include: true, scoped: false }
+ *   - sub-admin WITHOUT module grant → { include: true, scoped: true }
+ *     (they still see entries delegated specifically to them)
+ * `scoped: true` means the caller should add `AND <alias>.assigned_admin_id = user.id`.
+ */
+function moduleVisibility(user, allowed, moduleKey) {
+  if (!allowed) return { include: true, scoped: false };
+  if (isModuleAllowed(allowed, moduleKey)) return { include: true, scoped: false };
+  return { include: true, scoped: true };
+}
+
+/**
  * GET /approvals/pending
  * List all pending entries across all modules.
  * Sub-admins only see modules they've been granted.
@@ -137,8 +152,10 @@ export const listAllPending = asyncHandler(async (req, res) => {
 
   const results = [];
 
-  // Helper to build WHERE clause
-  const buildWhere = (tableAlias, siteAlias, extraConditions = []) => {
+  // Helper to build WHERE clause.
+  //   scopedAssigneeId: when set, forces assigned_admin_id = that user (used for sub-admins who
+  //   don't hold a module grant but still need to see entries explicitly delegated to them).
+  const buildWhere = (tableAlias, siteAlias, extraConditions = [], scopedAssigneeId = null) => {
     const sAlias = siteAlias || tableAlias;
     const conditions = [`${tableAlias}.status = 'pending'`, ...extraConditions];
     const params = [];
@@ -155,7 +172,10 @@ export const listAllPending = asyncHandler(async (req, res) => {
       conditions.push(`${tableAlias}.date <= $${idx++}`);
       params.push(date_to);
     }
-    if (assigned_admin_id) {
+    if (scopedAssigneeId) {
+      conditions.push(`${tableAlias}.assigned_admin_id = $${idx++}`);
+      params.push(parseInt(scopedAssigneeId));
+    } else if (assigned_admin_id) {
       if (assigned_admin_id === 'unassigned') {
         conditions.push(`${tableAlias}.assigned_admin_id IS NULL`);
       } else {
@@ -167,8 +187,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
   };
 
   // 1. Farmer Payments (from farmer_payments table)
-  if ((!module || module === 'farmer_payment') && isModuleAllowed(allowedModules, 'farmer_payment')) {
-    const { where, params } = buildWhere('fp', 'f');
+  const visFp = moduleVisibility(req.user, allowedModules, 'farmer_payment');
+  if ((!module || module === 'farmer_payment') && visFp.include) {
+    const { where, params } = buildWhere('fp', 'f', [], visFp.scoped ? req.user.id : null);
     const q = `
                   SELECT fp.*, f.name AS farmer_name, f.site_id,
                     s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -191,8 +212,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 2. Plot Commissions (Legacy)
-  if ((!module || module === 'plot_commission') && isModuleAllowed(allowedModules, 'plot_commission')) {
-    const { where, params } = buildWhere('pc', 'pc');
+  const visPc = moduleVisibility(req.user, allowedModules, 'plot_commission');
+  if ((!module || module === 'plot_commission') && visPc.include) {
+    const { where, params } = buildWhere('pc', 'pc', [], visPc.scoped ? req.user.id : null);
     const q = `
                   SELECT pc.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
@@ -213,8 +235,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 2.5 Plot Commission Payments (V2)
-  if ((!module || module === 'plot_commission_payment') && isModuleAllowed(allowedModules, 'plot_commission_payment')) {
-    const { where, params } = buildWhere('pcp', 'pcp');
+  const visPcp = moduleVisibility(req.user, allowedModules, 'plot_commission_payment');
+  if ((!module || module === 'plot_commission_payment') && visPcp.include) {
+    const { where, params } = buildWhere('pcp', 'pcp', [], visPcp.scoped ? req.user.id : null);
     const q = `
                   SELECT pcp.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
@@ -239,8 +262,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 3. Cash Flow Entries (exclude trigger-synced duplicates from other modules)
-  if ((!module || module === 'cash_flow_entry') && isModuleAllowed(allowedModules, 'cash_flow_entry')) {
-    const { where, params } = buildWhere('cfe', 'cfe');
+  const visCfe = moduleVisibility(req.user, allowedModules, 'cash_flow_entry');
+  if ((!module || module === 'cash_flow_entry') && visCfe.include) {
+    const { where, params } = buildWhere('cfe', 'cfe', [], visCfe.scoped ? req.user.id : null);
     const q = `
                   SELECT cfe.*, cfe.site_id, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
@@ -264,8 +288,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 4. Firm Transactions
-  if ((!module || module === 'firm_transaction') && isModuleAllowed(allowedModules, 'firm_transaction')) {
-    const { where, params } = buildWhere('ft', 'ft');
+  const visFt = moduleVisibility(req.user, allowedModules, 'firm_transaction');
+  if ((!module || module === 'firm_transaction') && visFt.include) {
+    const { where, params } = buildWhere('ft', 'ft', [], visFt.scoped ? req.user.id : null);
     const q = `
                   SELECT ft.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
@@ -294,8 +319,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 5. Plot Payments
-  if ((!module || module === 'plot_payment') && isModuleAllowed(allowedModules, 'plot_payment')) {
-    const { where, params } = buildWhere('pp', 'pp');
+  const visPp = moduleVisibility(req.user, allowedModules, 'plot_payment');
+  if ((!module || module === 'plot_payment') && visPp.include) {
+    const { where, params } = buildWhere('pp', 'pp', [], visPp.scoped ? req.user.id : null);
     const q = `
                   SELECT pp.*, pp.payment_type AS payment_mode, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
@@ -318,8 +344,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 6. Expenses
-  if ((!module || module === 'expense') && isModuleAllowed(allowedModules, 'expense')) {
-    const { where, params } = buildWhere('e', 'e');
+  const visEx = moduleVisibility(req.user, allowedModules, 'expense');
+  if ((!module || module === 'expense') && visEx.include) {
+    const { where, params } = buildWhere('e', 'e', [], visEx.scoped ? req.user.id : null);
     const q = `
                   SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
@@ -340,7 +367,8 @@ export const listAllPending = asyncHandler(async (req, res) => {
   }
 
   // 7. Day Book entries (farmer payments, commissions, expenses auto-created in day_book)
-  if (isModuleAllowed(allowedModules, 'daybook')) {
+  const visDb = moduleVisibility(req.user, allowedModules, 'daybook');
+  if (visDb.include) {
     const DAYBOOK_TYPE_MAP = {
       'FARMER PAYMENT': 'daybook_farmer',
       'PLOT COMMISSION': 'daybook_commission',
@@ -362,7 +390,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
     else if (module && !['farmer_payment', 'plot_commission', 'expense'].includes(module)) entryTypeFilter = null;
 
     if (entryTypeFilter) {
-      const { where, params } = buildWhere('d', 'd');
+      const { where, params } = buildWhere('d', 'd', [], visDb.scoped ? req.user.id : null);
       const q = `
             SELECT d.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
               COALESCE(aa.name, aa.email) AS assigned_admin_name,
@@ -405,19 +433,28 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   const allowedModules = await getAllowedModules(req.user);
 
+  // Build an "assigned to me" clause for sub-admins lacking module grants —
+  // they still need counts for entries delegated directly to them.
+  const isSubAdmin = req.user.role === 'sub_admin';
+  const scopeClauseFor = (alias, moduleKey) => {
+    if (!isSubAdmin) return '';
+    if (isModuleAllowed(allowedModules, moduleKey)) return '';
+    return ` AND ${alias}.assigned_admin_id = ${parseInt(req.user.id)}`;
+  };
+
   const siteFilter = site_id ? 'AND site_id = $1' : '';
   const fSiteFilter = site_id ? 'AND f.site_id = $1' : '';
   const params = site_id ? [parseInt(site_id)] : [];
 
   const queries = [
-    pool.query(`SELECT COUNT(*)::int AS count FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE fp.status = 'pending' ${fSiteFilter}`, params),
-    pool.query(`SELECT COUNT(*)::int AS count FROM plot_commissions WHERE status = 'pending' ${siteFilter}`, params),
-    pool.query(`SELECT COUNT(*)::int AS count FROM plot_commission_payments WHERE status = 'pending' ${siteFilter}`, params),
-    pool.query(`SELECT COUNT(*)::int AS count FROM cash_flow_entries WHERE status = 'pending' AND source_module IS NULL ${siteFilter}`, params),
-    pool.query(`SELECT COUNT(*)::int AS count FROM firm_transactions WHERE status = 'pending' ${siteFilter}`, params),
-    pool.query(`SELECT COUNT(*)::int AS count FROM plot_payments WHERE status = 'pending' ${siteFilter}`, params),
-    pool.query(`SELECT COUNT(*)::int AS count FROM expenses WHERE status = 'pending' ${siteFilter}`, params),
-    pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book WHERE status = 'pending' AND entry_type NOT IN ('CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT', 'VENDOR PAYMENT') ${siteFilter} GROUP BY entry_type`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE fp.status = 'pending' ${fSiteFilter}${scopeClauseFor('fp', 'farmer_payment')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM plot_commissions pc WHERE pc.status = 'pending' ${site_id ? 'AND pc.site_id = $1' : ''}${scopeClauseFor('pc', 'plot_commission')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM plot_commission_payments pcp WHERE pcp.status = 'pending' ${site_id ? 'AND pcp.site_id = $1' : ''}${scopeClauseFor('pcp', 'plot_commission_payment')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM cash_flow_entries cfe WHERE cfe.status = 'pending' AND cfe.source_module IS NULL ${site_id ? 'AND cfe.site_id = $1' : ''}${scopeClauseFor('cfe', 'cash_flow_entry')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM firm_transactions ft WHERE ft.status = 'pending' ${site_id ? 'AND ft.site_id = $1' : ''}${scopeClauseFor('ft', 'firm_transaction')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM plot_payments pp WHERE pp.status = 'pending' ${site_id ? 'AND pp.site_id = $1' : ''}${scopeClauseFor('pp', 'plot_payment')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM expenses e WHERE e.status = 'pending' ${site_id ? 'AND e.site_id = $1' : ''}${scopeClauseFor('e', 'expense')}`, params),
+    pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book d WHERE d.status = 'pending' AND d.entry_type NOT IN ('CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT', 'VENDOR PAYMENT') ${site_id ? 'AND d.site_id = $1' : ''}${scopeClauseFor('d', 'daybook')} GROUP BY entry_type`, params),
   ];
 
   const [fp, pc, pcp, cf, ft, pp, ex, db] = await Promise.all(queries);
@@ -426,7 +463,9 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   const dbMap = {};
   for (const row of db.rows) dbMap[row.entry_type] = row.count;
 
-  const a = (mod) => isModuleAllowed(allowedModules, mod);
+  // "Visible" check — admin / granted module / scoped sub-admin all count as visible.
+  // Scoped queries above already restricted to assigned-to-me rows, so their raw count is safe.
+  const a = (mod) => !allowedModules || isModuleAllowed(allowedModules, mod) || isSubAdmin;
 
   const fpCount = a('farmer_payment') ? fp.rows[0].count + (a('daybook') ? (dbMap['FARMER PAYMENT'] || 0) : 0) : 0;
   const pcCount = a('plot_commission') || a('plot_commission_payment')
@@ -464,21 +503,27 @@ export const approveEntry = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'source query param is required (farmer_payment, plot_commission, cash_flow_entry, firm_transaction, plot_payment, expense, daybook)' });
   }
 
-  // Check module-level permission for sub-admins
-  const allowedModules = await getAllowedModules(req.user);
-  if (!isModuleAllowed(allowedModules, source)) {
-    return res.status(403).json({ message: 'You do not have permission to approve this module' });
-  }
-
   const table = getTableName(source);
   const entryId = parseInt(id);
 
-  // Check current status
+  // Check current status + assignment up-front — assignment overrides module-level permission,
+  // so a sub-admin can approve an entry that was explicitly delegated to them even without a
+  // blanket module grant.
   const check = await pool.query(`SELECT status, assigned_admin_id FROM ${table} WHERE id = $1`, [entryId]);
   if (!check.rows[0]) return res.status(404).json({ message: 'Entry not found' });
   if (check.rows[0].status === 'approved') return res.status(400).json({ message: 'Entry is already approved' });
-  if (check.rows[0].assigned_admin_id && parseInt(check.rows[0].assigned_admin_id) !== parseInt(req.user.id)) {
-    return res.status(403).json({ message: 'This entry is assigned to another admin for approval' });
+
+  const assignedTo = check.rows[0].assigned_admin_id ? parseInt(check.rows[0].assigned_admin_id) : null;
+  const isAssignedToCaller = assignedTo === parseInt(req.user.id);
+
+  if (!isAssignedToCaller) {
+    if (assignedTo) {
+      return res.status(403).json({ message: 'This entry is assigned to another user for approval' });
+    }
+    const allowedModules = await getAllowedModules(req.user);
+    if (!isModuleAllowed(allowedModules, source)) {
+      return res.status(403).json({ message: 'You do not have permission to approve this module' });
+    }
   }
 
   const result = await pool.query(
@@ -576,20 +621,24 @@ export const rejectEntry = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'source query param is required' });
   }
 
-  // Check module-level permission for sub-admins
-  const allowedModules = await getAllowedModules(req.user);
-  if (!isModuleAllowed(allowedModules, source)) {
-    return res.status(403).json({ message: 'You do not have permission to reject this module' });
-  }
-
   const table = getTableName(source);
   const entryId = parseInt(id);
 
   const check = await pool.query(`SELECT status, assigned_admin_id, created_by FROM ${table} WHERE id = $1`, [entryId]);
   if (!check.rows[0]) return res.status(404).json({ message: 'Entry not found' });
   if (check.rows[0].status === 'rejected') return res.status(400).json({ message: 'Entry is already rejected' });
-  if (check.rows[0].assigned_admin_id && parseInt(check.rows[0].assigned_admin_id) !== parseInt(req.user.id)) {
-    return res.status(403).json({ message: 'This entry is assigned to another admin for approval' });
+
+  const assignedTo = check.rows[0].assigned_admin_id ? parseInt(check.rows[0].assigned_admin_id) : null;
+  const isAssignedToCaller = assignedTo === parseInt(req.user.id);
+
+  if (!isAssignedToCaller) {
+    if (assignedTo) {
+      return res.status(403).json({ message: 'This entry is assigned to another user for approval' });
+    }
+    const allowedModules = await getAllowedModules(req.user);
+    if (!isModuleAllowed(allowedModules, source)) {
+      return res.status(403).json({ message: 'You do not have permission to reject this module' });
+    }
   }
 
   const wasApproved = check.rows[0].status === 'approved';

@@ -13,13 +13,44 @@ const normalizeRole = (role) => {
 };
 
 /**
- * GET /admin/approvers
- * List active admins for assignment dropdowns.
+ * GET /admin/approvers?site_id=X
+ * List users eligible for approval / assignment dropdowns.
+ *   - Always: all active admins + super_admins (they can approve any site).
+ *   - If site_id is given: also include active sub-admins assigned to that site.
  * Accessible to both admin and sub-admin users.
  */
-export const listApprovers = asyncHandler(async (_req, res) => {
-  const approvers = await userModel.findActiveAdmins(pool);
-  res.json({ approvers });
+export const listApprovers = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  const parsedSiteId = site_id ? parseInt(site_id) : null;
+
+  const query = parsedSiteId
+    ? `
+      SELECT u.id, u.name, u.email, u.phone, u.role,
+             COALESCE(NULLIF(TRIM(u.name), ''), u.email) AS full_name
+      FROM users u
+      WHERE u.is_active = true
+        AND (
+          u.role IN ('admin', 'super_admin')
+          OR (
+            u.role = 'sub_admin'
+            AND EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id = u.id AND us.site_id = $1)
+          )
+        )
+      ORDER BY
+        CASE u.role WHEN 'super_admin' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+        u.name ASC
+    `
+    : `
+      SELECT id, name, email, phone, role,
+             COALESCE(NULLIF(TRIM(name), ''), email) AS full_name
+      FROM users
+      WHERE is_active = true AND role IN ('admin', 'super_admin')
+      ORDER BY name ASC
+    `;
+
+  const params = parsedSiteId ? [parsedSiteId] : [];
+  const { rows } = await pool.query(query, params);
+  res.json({ approvers: rows });
 });
 
 /**

@@ -15,60 +15,93 @@ import pool from '../config/db.js';
 
 /**
  * POST /imprest/allocations
- * Admin allocates imprest to a sub-admin
+ * Allocate imprest to another user.
+ *  - Admin → Sub-admin: creates allocation + day-book credit (admin funds entering site imprest pool).
+ *  - Sub-admin → Sub-admin (peer transfer): deducts from giver's ledger immediately so the funds are
+ *    locked. Recipient confirms receipt to credit their ledger. No day-book entry is created —
+ *    the money never leaves the sub-admin pool, so site-level debit/credit is unaffected.
  */
 export const createAllocation = asyncHandler(async (req, res) => {
   const { sub_admin_id, amount, remark, date, site_id, assigned_admin_id } = req.body;
 
-  if (!sub_admin_id) return res.status(400).json({ message: 'Sub-admin is required' });
+  if (!sub_admin_id) return res.status(400).json({ message: 'Recipient is required' });
   if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ message: 'Amount must be positive' });
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
+  if (parseInt(sub_admin_id) === req.user.id) return res.status(400).json({ message: 'Cannot send imprest to yourself' });
+
+  const giverIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+  const parsedSiteId = parseInt(site_id);
+  const allocationAmount = parseFloat(amount);
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // Peer transfers lock funds up-front so the giver can't double-spend while the request is pending.
+    if (!giverIsAdmin) {
+      const giverBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, client);
+      if (giverBalance < allocationAmount) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          message: `Insufficient imprest balance. Available ₹${giverBalance}, needed ₹${allocationAmount}`,
+          balance: giverBalance,
+        });
+      }
+    }
+
     const allocationDate = date || new Date().toISOString().split('T')[0];
 
-    // 1. Create the allocation record
     const allocation = await imprestAllocationModel.create({
       admin_id: req.user.id,
       sub_admin_id: parseInt(sub_admin_id),
-      amount: parseFloat(amount),
+      amount: allocationAmount,
       remark: remark ? remark.trim() : null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-      site_id: parseInt(site_id),
+      site_id: parsedSiteId,
       status: 'PENDING_RECEIPT',
     }, client);
 
-    // 2. Create Day Book entry (CREDIT to sub-admin imprest)
-    const subAdminResult = await client.query('SELECT name FROM users WHERE id = $1', [parseInt(sub_admin_id)]);
-    const subAdminName = subAdminResult.rows[0]?.name || 'Sub-Admin';
+    if (!giverIsAdmin) {
+      // Lock giver's funds — refunded on cancel, released on receipt confirmation.
+      await imprestLedgerModel.createEntry({
+        user_id: req.user.id,
+        type: 'TRANSFER_OUT',
+        reference_id: allocation.id,
+        amount: -allocationAmount,
+        remarks: `Peer transfer pending receipt by recipient. ${remark || ''}`.trim(),
+        created_by: req.user.id,
+        site_id: parsedSiteId,
+      }, client);
+    } else {
+      // Admin → sub-admin: record the admin-to-site fund movement in Day Book.
+      const subAdminResult = await client.query('SELECT name FROM users WHERE id = $1', [parseInt(sub_admin_id)]);
+      const subAdminName = subAdminResult.rows[0]?.name || 'Sub-Admin';
 
-    const dayBookData = {
-      site_id: site_id ? parseInt(site_id) : 1, // default site if not provided
-      date: allocationDate,
-      particular: `IMPREST ALLOCATION TO ${subAdminName.toUpperCase()}`,
-      entry_type: 'IMPREST',
-      debit: 0,
-      credit: parseFloat(amount),
-      remarks: remark ? remark.trim().toUpperCase() : 'IMPREST FUND ALLOCATION',
-      payment_mode: 'CASH',
-      category: 'IMPREST',
-      from_entity: 'ADMIN',
-      to_entity: subAdminName.toUpperCase(),
-      status: 'approved',
-      created_by: req.user.id,
-      imprest_allocation_id: allocation.id,
-    };
-
-    await dayBookModel.create(dayBookData, client);
+      await dayBookModel.create({
+        site_id: parsedSiteId,
+        date: allocationDate,
+        particular: `IMPREST ALLOCATION TO ${subAdminName.toUpperCase()}`,
+        entry_type: 'IMPREST',
+        debit: 0,
+        credit: allocationAmount,
+        remarks: remark ? remark.trim().toUpperCase() : 'IMPREST FUND ALLOCATION',
+        payment_mode: 'CASH',
+        category: 'IMPREST',
+        from_entity: 'ADMIN',
+        to_entity: subAdminName.toUpperCase(),
+        status: 'approved',
+        created_by: req.user.id,
+        imprest_allocation_id: allocation.id,
+      }, client);
+    }
 
     await client.query('COMMIT');
 
     res.status(201).json({
       allocation,
-      message: 'Imprest allocated successfully. Pending receipt confirmation.',
+      message: giverIsAdmin
+        ? 'Imprest allocated successfully. Pending receipt confirmation.'
+        : 'Peer imprest transfer created. Waiting for recipient confirmation.',
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -80,23 +113,102 @@ export const createAllocation = asyncHandler(async (req, res) => {
 
 /**
  * GET /imprest/allocations
- * Admin: list all allocations
+ * Admin: list all allocations. Sub-admin: list allocations where they are giver or receiver.
  */
 export const listAllocations = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
-  const allocations = await imprestAllocationModel.findAllWithDetails(site_id ? parseInt(site_id) : null, pool);
-  res.json({ allocations });
+  const parsedSiteId = site_id ? parseInt(site_id) : null;
+  const callerIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+
+  if (callerIsAdmin) {
+    const allocations = await imprestAllocationModel.findAllWithDetails(parsedSiteId, pool);
+    return res.json({ allocations });
+  }
+
+  // Sub-admin: surface both directions so the Imprest page shows the peer-transfer history.
+  const params = [req.user.id];
+  let query = `
+    SELECT ia.*,
+           sa.name as sub_admin_name, sa.email as sub_admin_email,
+           ad.name as admin_name, ad.role as admin_role,
+           asa.name as assigned_admin_name,
+           s.name as site_name
+    FROM imprest_allocations ia
+    LEFT JOIN users sa ON ia.sub_admin_id = sa.id
+    LEFT JOIN users ad ON ia.admin_id = ad.id
+    LEFT JOIN users asa ON ia.assigned_admin_id = asa.id
+    LEFT JOIN sites s ON ia.site_id = s.id
+    WHERE (ia.admin_id = $1 OR ia.sub_admin_id = $1)
+  `;
+  if (parsedSiteId) {
+    query += ` AND ia.site_id = $2`;
+    params.push(parsedSiteId);
+  }
+  query += ` ORDER BY ia.created_at DESC`;
+
+  const { rows } = await pool.query(query, params);
+  res.json({ allocations: rows });
 });
 
 /**
  * DELETE /imprest/allocations/:id
- * Admin: cancel a pending allocation
+ * Cancel a pending allocation.
+ *  - Admin: can cancel any pending allocation.
+ *  - Sub-admin: can cancel only their own pending-out peer transfers.
+ *  - If the giver was a sub-admin, their locked funds are refunded.
  */
 export const cancelAllocation = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const allocation = await imprestAllocationModel.cancelAllocation(parseInt(id), pool);
-  if (!allocation) return res.status(404).json({ message: 'Allocation not found or already confirmed' });
-  res.json({ allocation, message: 'Allocation cancelled' });
+  const callerIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const existing = await imprestAllocationModel.findById(parseInt(id), client);
+    if (!existing) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Allocation not found' });
+    }
+    if (existing.status !== 'PENDING_RECEIPT') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Allocation already confirmed or cancelled' });
+    }
+
+    if (!callerIsAdmin && existing.admin_id !== req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'You can only cancel your own pending transfers' });
+    }
+
+    const allocation = await imprestAllocationModel.cancelAllocation(parseInt(id), client);
+    if (!allocation) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Allocation could not be cancelled' });
+    }
+
+    // Peer-transfer refund: return the locked funds to the giver's ledger.
+    const giverResult = await client.query('SELECT role FROM users WHERE id = $1', [existing.admin_id]);
+    const giverRole = giverResult.rows[0]?.role;
+    if (giverRole === 'sub_admin') {
+      await imprestLedgerModel.createEntry({
+        user_id: existing.admin_id,
+        type: 'TRANSFER_REFUND',
+        reference_id: allocation.id,
+        amount: parseFloat(existing.amount),
+        remarks: `Peer transfer cancelled — funds returned to giver.`,
+        created_by: req.user.id,
+        site_id: existing.site_id,
+      }, client);
+    }
+
+    await client.query('COMMIT');
+    res.json({ allocation, message: 'Allocation cancelled' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 // ══════════════════════════════════════════════════
@@ -147,12 +259,16 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
     );
 
     // 3. Add to imprest ledger (positive amount = credit)
+    const giverResult = await client.query('SELECT name, role FROM users WHERE id = $1', [existing.admin_id]);
+    const giverName = giverResult.rows[0]?.name || 'Giver';
+    const giverIsSubAdmin = giverResult.rows[0]?.role === 'sub_admin';
+
     await imprestLedgerModel.createEntry({
       user_id: req.user.id,
-      type: 'ALLOCATION',
+      type: giverIsSubAdmin ? 'TRANSFER_IN' : 'ALLOCATION',
       reference_id: allocation.id,
       amount: parseFloat(allocation.amount),
-      remarks: `Imprest received from admin. ${confirmation_remark.trim()}`,
+      remarks: `Imprest received from ${giverIsSubAdmin ? 'peer ' : ''}${giverName}. ${confirmation_remark.trim()}`,
       created_by: req.user.id,
       site_id: existing.site_id,
     }, client);
@@ -235,6 +351,24 @@ export const getLedger = asyncHandler(async (req, res) => {
       itemsPerPage: parsedLimit
     }
   });
+});
+
+/**
+ * GET /imprest/peers
+ * List potential imprest transfer recipients (active sub-admins + admins) excluding the caller.
+ * Allows a sub-admin to pick another user for a peer transfer.
+ */
+export const listTransferPeers = asyncHandler(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, name, email, role
+     FROM users
+     WHERE is_active = true
+       AND id != $1
+       AND role IN ('admin', 'sub_admin', 'super_admin')
+     ORDER BY role ASC, name ASC`,
+    [req.user.id]
+  );
+  res.json({ peers: rows });
 });
 
 /**

@@ -185,7 +185,9 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       vc.note,
       vc.status,
       vc.assigned_admin_id,
+      vc.created_by,
       vc.created_at,
+      COALESCE(NULLIF(TRIM(cu.name), ''), cu.email) AS created_by_name,
       COALESCE(SUM(vp.amount), 0)::numeric(14,2) AS paid_amount,
       (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
       m.full_name AS vendor_member_name,
@@ -197,6 +199,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
      FROM vendor_commitments vc
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      LEFT JOIN members m ON m.id = vc.vendor_member_id
+     LEFT JOIN users cu ON cu.id = vc.created_by
      LEFT JOIN (
        SELECT commitment_id,
               COUNT(*)::int AS item_count,
@@ -212,7 +215,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
        GROUP BY commitment_id
      ) inv ON inv.commitment_id = vc.id
      WHERE ${whereClause}
-     GROUP BY vc.id, m.full_name, inv.item_count, inv.inv_net_amount, inv.inv_total_paid, inv.inv_outstanding
+     GROUP BY vc.id, m.full_name, cu.name, cu.email, inv.item_count, inv.inv_net_amount, inv.inv_total_paid, inv.inv_outstanding
      ORDER BY vc.created_at DESC, vc.id DESC
      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     [...values, limit, offset]

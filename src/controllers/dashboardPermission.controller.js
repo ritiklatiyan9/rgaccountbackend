@@ -16,6 +16,7 @@ export const ALL_COMPONENTS = [
   'revenue_charts',
   'kpi_totalIncoming',
   'kpi_plotPayments',
+  'kpi_registryPayments',
   'kpi_personalLedger',
   'kpi_totalExpense',
   'kpi_profit',
