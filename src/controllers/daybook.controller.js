@@ -49,6 +49,13 @@ async function siteBalanceAsOf(siteId, cutoffDate, pool) {
        ) u`,
       [siteId, EPOCH, cutoffDate]
     ),
+    // Expense: operational outflows ONLY. Person-ledger "given" (cfe.debit on
+    // person ledger) is deliberately EXCLUDED here even though an older
+    // version used to include it. The person-ledger `given` amount is already
+    // captured via `outstanding = given − returned` (see outRow below), which
+    // feeds `adjustedIncoming = revenue − outstanding`. Counting it again as
+    // expense double-deducted it from siteBalance and made Day Book module
+    // breakdowns show 2× the real loan amount.
     pool.query(
       `SELECT COALESCE(SUM(debit), 0)::numeric AS total FROM (
          SELECT fp.amount AS debit FROM farmer_payments fp
@@ -71,13 +78,6 @@ async function siteBalanceAsOf(siteId, cutoffDate, pool) {
          WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
            AND status != 'rejected'
-         UNION ALL
-         SELECT cfe.debit FROM cash_flow_entries cfe
-         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-         WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
-           AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
-           AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
-           AND (cfe.status IS NULL OR cfe.status != 'rejected')
          UNION ALL
          SELECT debit FROM day_book
          WHERE site_id = $1 AND date >= $2 AND date < $3
@@ -1077,22 +1077,40 @@ export const getModeBalance = asyncHandler(async (req, res) => {
   // Bucketing happens in JS via classifyPaymentMode() (same rules the list
   // filter uses). farmer_payments SPLIT rows are exploded into CASH + BANK
   // legs so they don't all pile into one bucket.
+  // Bogus-year rows (e.g. a hand-typed date that came out as year 0205 or
+  // 0024 for a 2025/2024 plot payment) are filtered out here using the same
+  // `>= '1900-01-01'` guard that siteBalanceAsOf applies. Without this the
+  // Cash Day Book's bucket opening would silently credit those junk rows
+  // while the Main Day Book's Site Balance correctly ignored them, so Main
+  // would not equal Cash + Bank + Cheque + UPI + Other.
+  //
+  // Each UNION tags its origin via the `src` column so the endpoint can
+  // return a per-source breakdown alongside the bucket totals, powering the
+  // "click the In/Out card for details" modal on the Day Book.
+  const EPOCH = '1900-01-01';
   const sql = `
     -- ── Revenue: plot payments (direct source, authoritative) ──
+    -- Classify by payment_type (CASH / BANK / CHEQUE) to match the Plot
+    -- Payments page (Plot.model.js sums received_cash/received_bank by
+    -- payment_type as well). payment_from used to be the primary classifier,
+    -- which made the Cash Day Book miss ADJUST/REFUND/RETURN rows whose
+    -- payment_type IS CASH but whose payment_from is a non-mode label.
     SELECT
+      'plot_payments' AS src,
       pp.date,
-      COALESCE(NULLIF(pp.payment_from, ''), pp.payment_type, '') AS pm,
+      COALESCE(pp.payment_type, '') AS pm,
       0::numeric                               AS debit,
       COALESCE(pp.amount, 0)::numeric          AS credit
     FROM plot_payments pp
     WHERE pp.site_id = $1
-      AND pp.date <= $2
+      AND pp.date >= '${EPOCH}' AND pp.date <= $2
       AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
 
     UNION ALL
 
     -- ── Revenue: plot installment payments ──
     SELECT
+      'plot_installment_payments',
       pip.payment_date,
       COALESCE(pip.payment_mode, '') AS pm,
       0::numeric,
@@ -1100,13 +1118,14 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     FROM plot_installment_payments pip
     JOIN plots p ON p.id = pip.plot_id
     WHERE p.site_id = $1
-      AND pip.payment_date <= $2
+      AND pip.payment_date >= '${EPOCH}' AND pip.payment_date <= $2
       AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
 
     UNION ALL
 
     -- ── Expense: farmer_payments non-SPLIT ──
     SELECT
+      'farmer_payments',
       fp.date,
       COALESCE(fp.payment_mode, 'CASH'),
       COALESCE(fp.amount, 0)::numeric,
@@ -1114,7 +1133,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     FROM farmer_payments fp
     JOIN farmers f ON f.id = fp.farmer_id
     WHERE f.site_id = $1
-      AND fp.date <= $2
+      AND fp.date >= '${EPOCH}' AND fp.date <= $2
       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (fp.status IS NULL OR fp.status != 'rejected')
       AND COALESCE(UPPER(fp.payment_mode), 'CASH') != 'SPLIT'
@@ -1123,6 +1142,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 
     -- ── Expense: farmer_payments SPLIT cash leg ──
     SELECT
+      'farmer_payments',
       fp.date,
       'CASH',
       COALESCE(fp.cash_amount, 0)::numeric,
@@ -1130,7 +1150,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     FROM farmer_payments fp
     JOIN farmers f ON f.id = fp.farmer_id
     WHERE f.site_id = $1
-      AND fp.date <= $2
+      AND fp.date >= '${EPOCH}' AND fp.date <= $2
       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (fp.status IS NULL OR fp.status != 'rejected')
       AND UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
@@ -1140,6 +1160,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 
     -- ── Expense: farmer_payments SPLIT bank leg ──
     SELECT
+      'farmer_payments',
       fp.date,
       'BANK',
       COALESCE(fp.bank_amount, 0)::numeric,
@@ -1147,7 +1168,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     FROM farmer_payments fp
     JOIN farmers f ON f.id = fp.farmer_id
     WHERE f.site_id = $1
-      AND fp.date <= $2
+      AND fp.date >= '${EPOCH}' AND fp.date <= $2
       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (fp.status IS NULL OR fp.status != 'rejected')
       AND UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
@@ -1157,13 +1178,14 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 
     -- ── Expense: expenses table (direct) ──
     SELECT
+      'expenses',
       date,
       COALESCE(payment_mode, ''),
       COALESCE(debit, 0)::numeric,
       0::numeric
     FROM expenses
     WHERE site_id = $1
-      AND date <= $2
+      AND date >= '${EPOCH}' AND date <= $2
       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (status IS NULL OR status != 'rejected')
 
@@ -1171,13 +1193,14 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 
     -- ── Expense: plot_commission_payments ──
     SELECT
+      'plot_commission_payments',
       date,
       COALESCE(payment_mode, ''),
       COALESCE(amount, 0)::numeric,
       0::numeric
     FROM plot_commission_payments
     WHERE site_id = $1
-      AND date <= $2
+      AND date >= '${EPOCH}' AND date <= $2
       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (status IS NULL OR status != 'rejected')
 
@@ -1185,13 +1208,14 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 
     -- ── Expense: vendor_payments ──
     SELECT
+      'vendor_payments',
       payment_date,
       COALESCE(payment_mode, ''),
       COALESCE(amount, 0)::numeric,
       0::numeric
     FROM vendor_payments
     WHERE site_id = $1
-      AND payment_date <= $2
+      AND payment_date >= '${EPOCH}' AND payment_date <= $2
       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (status IS NULL OR status != 'rejected')
 
@@ -1201,13 +1225,14 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     -- Matches siteBalanceAsOf's orphan filter exactly so sum-of-buckets
     -- lines up with the Main card's Opening.
     SELECT
+      'day_book_direct_expense',
       db.date,
       COALESCE(db.payment_mode, ''),
       COALESCE(db.debit, 0)::numeric,
       0::numeric
     FROM day_book db
     WHERE db.site_id = $1
-      AND db.date <= $2
+      AND db.date >= '${EPOCH}' AND db.date <= $2
       AND db.entry_type = 'EXPENSE'
       AND db.farmer_payment_id IS NULL
       AND db.commission_id IS NULL
@@ -1218,11 +1243,14 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     UNION ALL
 
     -- ── Person-ledger cash flows (both directions lift/lower site cash) ──
-    -- Counts the RAW cfe debit/credit — plus a duplicate debit leg below to
-    -- mirror siteBalanceAsOf which counts 'given' in BOTH outstanding and
-    -- expense. Keeps sum-of-buckets identical to the Main Opening even when
-    -- the site has loans given out.
+    -- Counts the RAW cfe debit/credit. Previously we also UNIONed a duplicate
+    -- debit leg to mirror a bug in siteBalanceAsOf that double-counted
+    -- person-ledger given in both outstanding and expense. Now
+    -- siteBalanceAsOf no longer double-counts, so a single union matches it.
+    -- No EPOCH guard on this union because siteBalanceAsOf outstanding query
+    -- (outRow) does not guard either — they must stay in lockstep.
     SELECT
+      'personal_ledger',
       cfe.date,
       COALESCE(cfe.cash_type, ''),
       COALESCE(cfe.debit, 0)::numeric,
@@ -1237,26 +1265,9 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 
     UNION ALL
 
-    -- Duplicate debit leg: matches the 'personal_ledger_debit' entry in
-    -- getExpenseBreakdown / siteBalanceAsOf so totals align.
-    SELECT
-      cfe.date,
-      COALESCE(cfe.cash_type, ''),
-      COALESCE(cfe.debit, 0)::numeric,
-      0::numeric
-    FROM cash_flow_entries cfe
-    JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-    WHERE cfe.site_id = $1
-      AND cfe.date <= $2
-      AND LOWER(cfm.ledger_type) = 'person'
-      AND cfe.debit > 0
-      AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-      AND (cfe.status IS NULL OR cfe.status != 'rejected')
-
-    UNION ALL
-
     -- ── Imprest allocations: cash leaving site into sub-admin's hand ──
     SELECT
+      'imprest',
       il.created_at::date,
       'CASH',
       COALESCE(il.amount, 0)::numeric,
@@ -1270,6 +1281,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 
     -- ── Imprest refunds: cash returning to site ──
     SELECT
+      'imprest',
       il.created_at::date,
       'CASH',
       0::numeric,
@@ -1281,6 +1293,21 @@ export const getModeBalance = asyncHandler(async (req, res) => {
   `;
 
   const accum = { before: emptyBucketMap(), on: emptyBucketMap() };
+  // Per-source per-bucket in/out accumulator, cumulative through queryDate
+  // (before + on combined). Feeds `breakdown` on each bucket in the response,
+  // which the UI renders inside the "click In/Out card" detail modal.
+  //   bySrc[bucket][src] = { in, out }
+  const SOURCES = [
+    'plot_payments', 'plot_installment_payments',
+    'farmer_payments', 'expenses', 'plot_commission_payments',
+    'vendor_payments', 'day_book_direct_expense',
+    'personal_ledger', 'imprest',
+  ];
+  const bySrc = {};
+  for (const b of BUCKETS) {
+    bySrc[b] = {};
+    for (const s of SOURCES) bySrc[b][s] = { in: 0, out: 0 };
+  }
 
   // Site-level balances:
   //   opening_balance — balance at the START of queryDate (historical view)
@@ -1309,8 +1336,22 @@ export const getModeBalance = asyncHandler(async (req, res) => {
       const bucket = classifyPaymentMode(r.pm);
       const period = toIso(r.date) < queryDate ? 'before' : 'on';
       const slot = accum[period][bucket];
-      slot.credit += parseFloat(r.credit) || 0;
-      slot.debit  += parseFloat(r.debit)  || 0;
+      // Negative credits (refund/reversal rows) count as outflows and
+      // symmetrically negative debits count as inflows, so the In/Out cards
+      // show real gross flow magnitudes instead of a negative "Cash In".
+      // Net (credit − debit) is unchanged either way.
+      const cr = parseFloat(r.credit) || 0;
+      const dr = parseFloat(r.debit)  || 0;
+      if (cr >= 0) slot.credit += cr; else slot.debit += -cr;
+      if (dr >= 0) slot.debit  += dr; else slot.credit += -dr;
+
+      // Mirror the sign-flipping into the per-source accumulator that feeds
+      // the breakdown modal. Cumulative through queryDate (before + on).
+      const src = r.src || 'unknown';
+      if (bySrc[bucket] && bySrc[bucket][src]) {
+        if (cr >= 0) bySrc[bucket][src].in  += cr; else bySrc[bucket][src].out += -cr;
+        if (dr >= 0) bySrc[bucket][src].out += dr; else bySrc[bucket][src].in  += -dr;
+      }
     }
   } catch (err) {
     console.error('[daybook] mode-balance error:', err.message);
@@ -1319,15 +1360,47 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 
   // Build per-bucket slice: opening = sum(credit - debit) before cutoff,
   // current = opening + today's credit - today's debit.
+  //
+  // `by_src` exposes per-source GROSS in/out (sign-flipped) cumulative
+  // through queryDate. The frontend merges this across buckets (e.g. Bank
+  // view = bank+cheque+upi+other), nets per source, and decides which card
+  // (In vs Out) each source belongs on — so the Day Book's "Farmer Payments"
+  // card shows the SAME number the Farmers page does (net), not a confusing
+  // split across both In and Out due to refund reversals.
+  //
+  // opening_credit / opening_debit are kept for backward compatibility but
+  // the frontend In/Out cards now reconstruct their totals from by_src.
+  const SRC_LABEL = {
+    plot_payments:            'Plot Sales (Direct)',
+    plot_installment_payments:'Plot Installments',
+    farmer_payments:          'Farmer Payments',
+    expenses:                 'Expenses',
+    plot_commission_payments: 'Plot Commissions',
+    vendor_payments:          'Vendor Payments',
+    day_book_direct_expense:  'Direct Day Book Expense',
+    personal_ledger:          'Personal Ledger',
+    imprest:                  'Imprest (Site ↔ Sub-admin)',
+  };
   const buildSlice = (bucket) => {
     const before = accum.before[bucket];
     const on     = accum.on[bucket];
     const opening = before.credit - before.debit;
+    const srcMap = bySrc[bucket] || {};
+    const by_src = {};
+    for (const s of SOURCES) {
+      const e = srcMap[s] || { in: 0, out: 0 };
+      if (e.in > 0.001 || e.out > 0.001) {
+        by_src[s] = { in: e.in, out: e.out, label: SRC_LABEL[s] || s };
+      }
+    }
     return {
       opening_balance: opening,
+      opening_credit: before.credit,
+      opening_debit:  before.debit,
       day_credit: on.credit,
       day_debit:  on.debit,
       current_balance: opening + on.credit - on.debit,
+      by_src,
     };
   };
 
@@ -1338,12 +1411,16 @@ export const getModeBalance = asyncHandler(async (req, res) => {
   // numbers tie exactly to sum(cash + bank + cheque + upi + other).
   const total = {
     opening_balance: 0,
+    opening_credit: 0,
+    opening_debit: 0,
     day_credit: 0,
     day_debit: 0,
     current_balance: 0,
   };
   for (const b of BUCKETS) {
     total.opening_balance += payload[b].opening_balance;
+    total.opening_credit  += payload[b].opening_credit;
+    total.opening_debit   += payload[b].opening_debit;
     total.day_credit      += payload[b].day_credit;
     total.day_debit       += payload[b].day_debit;
     total.current_balance += payload[b].current_balance;

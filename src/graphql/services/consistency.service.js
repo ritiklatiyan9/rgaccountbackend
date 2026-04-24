@@ -35,7 +35,9 @@ async function runFromSourceTables(siteId, start, end) {
   );
   const totalRevenue = parseFloat(revResult.rows[0].total) || 0;
 
-  // Expense: all source tables combined
+  // Expense: all source tables combined. Person-ledger debit is intentionally
+  // EXCLUDED — outstanding already subtracts given-returned from adjusted
+  // incoming, so counting cfe.debit as expense too would double-deduct it.
   const expResult = await pool.query(
     `SELECT COALESCE(SUM(debit), 0)::numeric AS total
      FROM (
@@ -55,13 +57,6 @@ async function runFromSourceTables(siteId, start, end) {
        SELECT amount AS debit FROM vendor_payments
        WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-       UNION ALL
-       SELECT cfe.debit FROM cash_flow_entries cfe
-       JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-       WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
-         AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
-         AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
-       AND (cfe.status IS NULL OR cfe.status != 'rejected')
        UNION ALL
        SELECT debit FROM day_book
        WHERE site_id = $1 AND date >= $2 AND date < $3

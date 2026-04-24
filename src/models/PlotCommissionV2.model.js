@@ -88,6 +88,10 @@ class PlotCommissionV2Model extends MasterModel {
           m.full_name AS agent_name,
           m.phone AS agent_phone,
           COALESCE(SUM(pcp.amount), 0) AS total_paid,
+          -- Cash vs bank split using the same classifier the Day Book / Farmers
+          -- page apply: CASH-mode → cash_paid; everything else → bank_paid.
+          COALESCE(SUM(CASE WHEN UPPER(COALESCE(pcp.payment_mode,'CASH')) = 'CASH' THEN pcp.amount ELSE 0 END), 0) AS cash_paid,
+          COALESCE(SUM(CASE WHEN UPPER(COALESCE(pcp.payment_mode,'CASH')) <> 'CASH' THEN pcp.amount ELSE 0 END), 0) AS bank_paid,
           (pc.total_commission - COALESCE(SUM(pcp.amount), 0)) AS balance,
           ROW_NUMBER() OVER (PARTITION BY pc.plot_id ORDER BY pc.created_at DESC) AS rn
         FROM plot_commissions_v2 pc
@@ -123,6 +127,8 @@ class PlotCommissionV2Model extends MasterModel {
           -- Use fixed plot commission instead of summing per-agent commissions
           COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) AS total_commission,
           SUM(ca.total_paid) AS total_paid,
+          SUM(ca.cash_paid) AS cash_paid,
+          SUM(ca.bank_paid) AS bank_paid,
           COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) - SUM(ca.total_paid) AS balance
         FROM commission_agg ca
         GROUP BY ca.plot_id, ca.plot_no, ca.plot_size, ca.plot_rate, ca.buyer_name, ca.commission_rate, ca.plot_tag, ca.plot_status, ca.site_id

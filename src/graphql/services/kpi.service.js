@@ -4,10 +4,16 @@
  *
  * Total Incoming = plot_payments + plot_installment_payments
  * Total Expenses = farmer_payments + expenses + plot_commission_payments
- *                  + vendor_payments + personal_ledger_debit + orphan day_book EXPENSE
+ *                  + vendor_payments + orphan day_book EXPENSE
  * Plot Registry  = mapping of plot_payments only, NOT counted as new incoming/outgoing
  * Cashflow       = site-type cash_flow_entries (credit − debit)
  * Outstanding    = person-ledger pending (given − returned)
+ *
+ * Person-ledger debit (cfe.debit on person ledger) is intentionally NOT in
+ * Total Expenses — it is already captured in Outstanding, which is subtracted
+ * from revenue via adjustedIncoming = revenue − outstanding. Double-counting
+ * it as an expense was a bug that made Site Balance too negative and Day Book
+ * breakdowns show 2× the real loan amount.
  */
 import pool from '../../config/db.js';
 
@@ -40,8 +46,13 @@ export async function getRevenue(siteId, start, end, excludeOldPlots = false) {
 
 // ── Expense breakdown by module ──
 // Total Expenses = farmer_payments + expenses + commissions + commission_payments
-//                  + vendor_payments + personal_ledger_debit + orphan daybook EXPENSE
-// NOTE: plot_registry_payments are EXCLUDED — they are just mapped plot payments
+//                  + vendor_payments + orphan daybook EXPENSE
+// NOTE: plot_registry_payments are EXCLUDED — they are just mapped plot payments.
+// NOTE: personal_ledger_debit (cfe.debit on person ledger) is intentionally
+// EXCLUDED here because `outstanding = given − returned` already reflects it
+// in the Site Balance formula (adjustedIncoming = revenue − outstanding).
+// Counting it again as expense double-deducted loans-given from Site Balance
+// and made the Day Book module breakdown show 2× the real loan amount.
 export async function getExpenseBreakdown(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT source_type,
@@ -72,15 +83,6 @@ export async function getExpenseBreakdown(siteId, start, end) {
        WHERE site_id = $1 ${dateFilter('payment_date', 2)}
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
          AND status != 'rejected'
-       UNION ALL
-       SELECT cfe.debit, 'personal_ledger_debit' AS source_type
-       FROM cash_flow_entries cfe
-       JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-       WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
-         AND LOWER(cfm.ledger_type) = 'person'
-         AND cfe.debit > 0
-         AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
-         AND (cfe.status IS NULL OR cfe.status != 'rejected')
        UNION ALL
        SELECT debit, 'daybook_expense' AS source_type
        FROM day_book
@@ -321,7 +323,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
   ]);
 
   // Total Incoming = Plot Payments only
-  // Total Expenses = farmer + expenses + commissions + vendors + personal_ledger_debit + orphan daybook
+  // Total Expenses = farmer + expenses + commissions + vendors + orphan daybook
   // Profit = Total Incoming - Total Expenses
   const netProfit = revenue - expData.total;
   const profitMargin = revenue > 0 ? (netProfit / revenue) * 100 : 0;

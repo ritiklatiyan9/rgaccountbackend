@@ -484,11 +484,18 @@ class ExpenseModel extends MasterModel {
     `;
 
     // ── Q3: Summary aggregates (exclude rejected) ──
+    // cash_debit / bank_debit etc. split totals by payment mode so the page
+    // can render Cash-vs-Bank flow cards with the same classifier the Day
+    // Book uses (CASH and SPLIT cash leg → cash; everything else → bank).
     const summaryQuery = `
       ${unifiedCTE}
-      SELECT 
-        COALESCE(SUM(debit), 0)::numeric as total_debit, 
+      SELECT
+        COALESCE(SUM(debit), 0)::numeric as total_debit,
         COALESCE(SUM(credit), 0)::numeric as total_credit,
+        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN debit ELSE 0 END), 0)::numeric as cash_debit,
+        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN credit ELSE 0 END), 0)::numeric as cash_credit,
+        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN debit ELSE 0 END), 0)::numeric as bank_debit,
+        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN credit ELSE 0 END), 0)::numeric as bank_credit,
         COUNT(*)::int as total_count
       FROM unified u
       WHERE 1=1 ${whereClause} AND u.status != 'rejected'

@@ -5,14 +5,39 @@ class FarmerModel extends MasterModel {
     super('farmers');
   }
 
-  /** All farmers for a specific site */
+  /** All farmers for a specific site.
+   *  `total_paid` = sum of every approved, non-returned/bounced farmer_payment.
+   *  `cash_paid` / `bank_paid` split that same total by payment mode so the
+   *  Farmers page can show a cash-vs-bank flow card. SPLIT rows are broken
+   *  into their cash_amount / bank_amount legs (the same way the Day Book's
+   *  mode-balance SQL handles them) so Cash+Bank always equals Total Paid.
+   */
   async findBySiteId(siteId, pool) {
     const query = `
-      SELECT f.*, 
+      SELECT f.*,
         COALESCE(SUM(fp.amount), 0) AS total_paid,
+        COALESCE(SUM(
+          CASE
+            WHEN UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
+              THEN COALESCE(fp.cash_amount, 0)
+            WHEN UPPER(COALESCE(fp.payment_mode, 'CASH')) IN ('CASH', 'CASH PLOT PAYMENT', 'CASH REFUND PLOT PAYMENT', 'PAY ADVANCE')
+              THEN fp.amount
+            ELSE 0
+          END
+        ), 0) AS cash_paid,
+        COALESCE(SUM(
+          CASE
+            WHEN UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
+              THEN COALESCE(fp.bank_amount, 0)
+            WHEN UPPER(COALESCE(fp.payment_mode, 'CASH')) IN ('CASH', 'CASH PLOT PAYMENT', 'CASH REFUND PLOT PAYMENT', 'PAY ADVANCE')
+              THEN 0
+            ELSE fp.amount
+          END
+        ), 0) AS bank_paid,
         COUNT(fp.id) AS payment_count
       FROM farmers f
-      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
+        AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       WHERE f.site_id = $1
       GROUP BY f.id
       ORDER BY f.created_at DESC
