@@ -21,7 +21,20 @@ const EPOCH = '1900-01-01';
 
 async function siteBalanceAsOf(siteId, cutoffDate, pool) {
   // cutoffDate exclusive — include only transactions strictly BEFORE this date.
-  // gamma = revenue − outstanding(person-ledger pending) − totalExpense − imprestGiven
+  //
+  // Mirrors the dashboard Site Balance card exactly:
+  //   adjustedIncoming = revenue − outstandingPending
+  //   alpha            = adjustedIncoming − totalExpense
+  //   siteBalance      = alpha − imprestOutstanding
+  //
+  // Where:
+  //   outstandingPending = person-ledger (given − returned); a NEGATIVE value
+  //     means the site was loaned money by a person — subtracting it from
+  //     revenue lifts it into incoming. A positive value means someone owes
+  //     the site, which is subtracted out since it's not yet in hand.
+  //   imprestOutstanding = sum of per-user POSITIVE imprest_ledger balances —
+  //     money still sitting with sub-admins. Expenses spent from imprest and
+  //     accepted returns cancel out automatically (same fix as kpi.service.js).
   const [revRow, expRow, outRow, imprestRow] = await Promise.all([
     pool.query(
       `SELECT COALESCE(SUM(amount), 0)::numeric AS total FROM (
@@ -64,6 +77,7 @@ async function siteBalanceAsOf(siteId, cutoffDate, pool) {
          WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
            AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
            AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND (cfe.status IS NULL OR cfe.status != 'rejected')
          UNION ALL
          SELECT debit FROM day_book
          WHERE site_id = $1 AND date >= $2 AND date < $3
@@ -80,17 +94,21 @@ async function siteBalanceAsOf(siteId, cutoffDate, pool) {
          COALESCE(SUM(cfe.credit), 0)::numeric AS returned
        FROM cash_flow_entries cfe
        JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-       WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+       WHERE cfe.site_id = $1 AND cfe.date < $2
          AND LOWER(cfm.ledger_type) = 'person'
-         AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
-      [siteId, EPOCH, cutoffDate]
+         AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
+      [siteId, cutoffDate]
     ),
     pool.query(
-      `SELECT COALESCE(SUM(amount), 0)::numeric AS total
-       FROM imprest_allocations
-       WHERE site_id = $1 AND created_at >= $2 AND created_at < $3
-         AND status != 'CANCELLED'`,
-      [siteId, EPOCH, cutoffDate]
+      `SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS total
+       FROM (
+         SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
+         FROM imprest_ledger
+         WHERE site_id IS NOT NULL AND site_id = $1 AND created_at < $2
+         GROUP BY user_id
+       ) u`,
+      [siteId, cutoffDate]
     ),
   ]);
 
@@ -99,9 +117,11 @@ async function siteBalanceAsOf(siteId, cutoffDate, pool) {
   const given = parseFloat(outRow.rows[0].given) || 0;
   const returned = parseFloat(outRow.rows[0].returned) || 0;
   const outstanding = given - returned;
-  const imprestGiven = parseFloat(imprestRow.rows[0].total) || 0;
+  const imprestOutstanding = parseFloat(imprestRow.rows[0].total) || 0;
 
-  return revenue - outstanding - expense - imprestGiven;
+  const adjustedIncoming = revenue - outstanding;
+  const alpha = adjustedIncoming - expense;
+  return alpha - imprestOutstanding;
 }
 
 // Fetch or seed the daily-balance row for (siteId, date).
@@ -1050,43 +1070,42 @@ export const getModeBalance = asyncHandler(async (req, res) => {
   const queryDate = date || new Date().toISOString().split('T')[0];
   const siteId = parseInt(site_id);
 
-  // Pulls (date, pm, debit, credit) rows across all 7 sources.
-  // `pm` is the raw mode string; bucketing happens in JS to stay in lockstep
-  // with classifyPaymentMode() — the same function the frontend filter uses.
-  // farmer_payments SPLIT rows are exploded into two rows (one CASH, one
-  // BANK) based on cash_amount / bank_amount so the split is counted
-  // correctly instead of everything landing in one bucket.
+  // Pulls (date, pm, debit, credit) rows across the SAME source tables as
+  // siteBalanceAsOf — revenue, expense and person-ledger/imprest flows — so
+  // sum-of-buckets equals the Site Balance instead of drifting because of
+  // day_book dual-writes, site-type cash_flow transfers and firm_transactions.
+  // Bucketing happens in JS via classifyPaymentMode() (same rules the list
+  // filter uses). farmer_payments SPLIT rows are exploded into CASH + BANK
+  // legs so they don't all pile into one bucket.
   const sql = `
-    -- 1) day_book (catch-all incl. dual-write rows for FP / COMM / CF / FIRM / PLOT_PAYMENT)
+    -- ── Revenue: plot payments (direct source, authoritative) ──
     SELECT
-      date,
-      COALESCE(payment_mode, '') AS pm,
-      COALESCE(debit, 0)::numeric  AS debit,
-      COALESCE(credit, 0)::numeric AS credit
-    FROM day_book
-    WHERE site_id = $1
-      AND entry_type != 'IMPREST'
-      AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-      AND (status IS NULL OR status != 'rejected')
-      AND date <= $2
+      pp.date,
+      COALESCE(NULLIF(pp.payment_from, ''), pp.payment_type, '') AS pm,
+      0::numeric                               AS debit,
+      COALESCE(pp.amount, 0)::numeric          AS credit
+    FROM plot_payments pp
+    WHERE pp.site_id = $1
+      AND pp.date <= $2
+      AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
 
     UNION ALL
 
-    -- 2) expenses (kept separate from day_book; mirrors siteBalanceAsOf)
+    -- ── Revenue: plot installment payments ──
     SELECT
-      date,
-      COALESCE(payment_mode, ''),
-      COALESCE(debit, 0)::numeric,
-      COALESCE(credit, 0)::numeric
-    FROM expenses
-    WHERE site_id = $1
-      AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-      AND (status IS NULL OR status != 'rejected')
-      AND date <= $2
+      pip.payment_date,
+      COALESCE(pip.payment_mode, '') AS pm,
+      0::numeric,
+      COALESCE(pip.amount, 0)::numeric
+    FROM plot_installment_payments pip
+    JOIN plots p ON p.id = pip.plot_id
+    WHERE p.site_id = $1
+      AND pip.payment_date <= $2
+      AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
 
     UNION ALL
 
-    -- 3a) farmer_payments NOT linked to day_book, non-SPLIT — counted as-is
+    -- ── Expense: farmer_payments non-SPLIT ──
     SELECT
       fp.date,
       COALESCE(fp.payment_mode, 'CASH'),
@@ -1095,15 +1114,14 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     FROM farmer_payments fp
     JOIN farmers f ON f.id = fp.farmer_id
     WHERE f.site_id = $1
+      AND fp.date <= $2
       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (fp.status IS NULL OR fp.status != 'rejected')
-      AND fp.date <= $2
       AND COALESCE(UPPER(fp.payment_mode), 'CASH') != 'SPLIT'
-      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.farmer_payment_id = fp.id)
 
     UNION ALL
 
-    -- 3b) farmer_payments SPLIT — cash leg
+    -- ── Expense: farmer_payments SPLIT cash leg ──
     SELECT
       fp.date,
       'CASH',
@@ -1112,16 +1130,15 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     FROM farmer_payments fp
     JOIN farmers f ON f.id = fp.farmer_id
     WHERE f.site_id = $1
+      AND fp.date <= $2
       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (fp.status IS NULL OR fp.status != 'rejected')
-      AND fp.date <= $2
       AND UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
       AND COALESCE(fp.cash_amount, 0) > 0
-      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.farmer_payment_id = fp.id)
 
     UNION ALL
 
-    -- 3c) farmer_payments SPLIT — bank leg
+    -- ── Expense: farmer_payments SPLIT bank leg ──
     SELECT
       fp.date,
       'BANK',
@@ -1130,70 +1147,160 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     FROM farmer_payments fp
     JOIN farmers f ON f.id = fp.farmer_id
     WHERE f.site_id = $1
+      AND fp.date <= $2
       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND (fp.status IS NULL OR fp.status != 'rejected')
-      AND fp.date <= $2
       AND UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
       AND COALESCE(fp.bank_amount, 0) > 0
-      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.farmer_payment_id = fp.id)
 
     UNION ALL
 
-    -- 4) plot_commissions NOT linked (no payment_mode column → "other")
+    -- ── Expense: expenses table (direct) ──
     SELECT
-      pc.date,
-      '' AS pm,
-      COALESCE(pc.amount, 0)::numeric,
+      date,
+      COALESCE(payment_mode, ''),
+      COALESCE(debit, 0)::numeric,
       0::numeric
-    FROM plot_commissions pc
-    WHERE pc.site_id = $1
-      AND pc.date <= $2
-      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.commission_id = pc.id)
+    FROM expenses
+    WHERE site_id = $1
+      AND date <= $2
+      AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (status IS NULL OR status != 'rejected')
 
     UNION ALL
 
-    -- 5) cash_flow_entries NOT linked (cash_type = 'cash' | 'bank')
+    -- ── Expense: plot_commission_payments ──
+    SELECT
+      date,
+      COALESCE(payment_mode, ''),
+      COALESCE(amount, 0)::numeric,
+      0::numeric
+    FROM plot_commission_payments
+    WHERE site_id = $1
+      AND date <= $2
+      AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (status IS NULL OR status != 'rejected')
+
+    UNION ALL
+
+    -- ── Expense: vendor_payments ──
+    SELECT
+      payment_date,
+      COALESCE(payment_mode, ''),
+      COALESCE(amount, 0)::numeric,
+      0::numeric
+    FROM vendor_payments
+    WHERE site_id = $1
+      AND payment_date <= $2
+      AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (status IS NULL OR status != 'rejected')
+
+    UNION ALL
+
+    -- ── Expense: day_book EXPENSE orphans (no FP/commission/vendor link) ──
+    -- Matches siteBalanceAsOf's orphan filter exactly so sum-of-buckets
+    -- lines up with the Main card's Opening.
+    SELECT
+      db.date,
+      COALESCE(db.payment_mode, ''),
+      COALESCE(db.debit, 0)::numeric,
+      0::numeric
+    FROM day_book db
+    WHERE db.site_id = $1
+      AND db.date <= $2
+      AND db.entry_type = 'EXPENSE'
+      AND db.farmer_payment_id IS NULL
+      AND db.commission_id IS NULL
+      AND db.vendor_payment_id IS NULL
+      AND (db.cheque_status IS NULL OR db.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (db.status IS NULL OR db.status != 'rejected')
+
+    UNION ALL
+
+    -- ── Person-ledger cash flows (both directions lift/lower site cash) ──
+    -- Counts the RAW cfe debit/credit — plus a duplicate debit leg below to
+    -- mirror siteBalanceAsOf which counts 'given' in BOTH outstanding and
+    -- expense. Keeps sum-of-buckets identical to the Main Opening even when
+    -- the site has loans given out.
     SELECT
       cfe.date,
       COALESCE(cfe.cash_type, ''),
       COALESCE(cfe.debit, 0)::numeric,
       COALESCE(cfe.credit, 0)::numeric
     FROM cash_flow_entries cfe
+    JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
     WHERE cfe.site_id = $1
-      AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       AND cfe.date <= $2
-      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.cash_flow_entry_id = cfe.id)
+      AND LOWER(cfm.ledger_type) = 'person'
+      AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (cfe.status IS NULL OR cfe.status != 'rejected')
 
     UNION ALL
 
-    -- 6) firm_transactions NOT linked
+    -- Duplicate debit leg: matches the 'personal_ledger_debit' entry in
+    -- getExpenseBreakdown / siteBalanceAsOf so totals align.
     SELECT
-      ft.date,
-      COALESCE(ft.payment_mode, ''),
-      COALESCE(ft.debit, 0)::numeric,
-      COALESCE(ft.credit, 0)::numeric
-    FROM firm_transactions ft
-    WHERE ft.site_id = $1
-      AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-      AND ft.date <= $2
-      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.firm_transaction_id = ft.id)
+      cfe.date,
+      COALESCE(cfe.cash_type, ''),
+      COALESCE(cfe.debit, 0)::numeric,
+      0::numeric
+    FROM cash_flow_entries cfe
+    JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+    WHERE cfe.site_id = $1
+      AND cfe.date <= $2
+      AND LOWER(cfm.ledger_type) = 'person'
+      AND cfe.debit > 0
+      AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (cfe.status IS NULL OR cfe.status != 'rejected')
 
     UNION ALL
 
-    -- 7) plot_payments NOT linked (payment_from with payment_type fallback)
+    -- ── Imprest allocations: cash leaving site into sub-admin's hand ──
     SELECT
-      pp.date,
-      COALESCE(NULLIF(pp.payment_from, ''), pp.payment_type, ''),
+      il.created_at::date,
+      'CASH',
+      COALESCE(il.amount, 0)::numeric,
+      0::numeric
+    FROM imprest_ledger il
+    WHERE il.site_id IS NOT NULL AND il.site_id = $1
+      AND il.created_at::date <= $2
+      AND il.type = 'ALLOCATION'
+
+    UNION ALL
+
+    -- ── Imprest refunds: cash returning to site ──
+    SELECT
+      il.created_at::date,
+      'CASH',
       0::numeric,
-      COALESCE(pp.amount, 0)::numeric
-    FROM plot_payments pp
-    WHERE pp.site_id = $1
-      AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-      AND pp.date <= $2
-      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.plot_payment_id = pp.id)
+      COALESCE(ABS(il.amount), 0)::numeric
+    FROM imprest_ledger il
+    WHERE il.site_id IS NOT NULL AND il.site_id = $1
+      AND il.created_at::date <= $2
+      AND il.type = 'REFUND'
   `;
 
   const accum = { before: emptyBucketMap(), on: emptyBucketMap() };
+
+  // Site-level balances:
+  //   opening_balance — balance at the START of queryDate (historical view)
+  //   current_balance — balance right NOW including every committed entry,
+  //                     including future-dated ones. Matches dashboard
+  //                     "Overall" Site Balance so Day Book today view agrees
+  //                     with the dashboard card users compare against.
+  const FAR_FUTURE = '2100-01-01';
+  let siteOpening = 0;
+  let siteCurrent = 0;
+  try {
+    [siteOpening, siteCurrent] = await Promise.all([
+      siteBalanceAsOf(siteId, queryDate, pool),
+      siteBalanceAsOf(siteId, FAR_FUTURE, pool),
+    ]);
+  } catch (err) {
+    console.error('[daybook] siteBalanceAsOf failed, falling back to bucket sum:', err.message);
+    siteOpening = null;
+    siteCurrent = null;
+  }
 
   try {
     const { rows } = await pool.query(sql, [siteId, queryDate]);
@@ -1242,6 +1349,21 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     total.current_balance += payload[b].current_balance;
   }
   payload.total = total;
+
+  // Site-level opening/current — overrides `total` for the Main Day Book card.
+  //   opening_balance: historical balance at start of queryDate
+  //   current_balance: live all-time balance (matches dashboard Site Balance)
+  // Falls back to `total` if siteBalanceAsOf threw above.
+  if (siteOpening !== null && siteCurrent !== null) {
+    payload.site = {
+      opening_balance: siteOpening,
+      current_balance: siteCurrent,
+      day_credit: total.day_credit,
+      day_debit: total.day_debit,
+    };
+  } else {
+    payload.site = total;
+  }
 
   res.json(payload);
 });
@@ -2111,6 +2233,7 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
      WHERE cfe.site_id = $1
        AND (cfe.source_module IS NULL OR cfe.source_module NOT IN (${profitModules.map((_, i) => `$${i + 2}`).join(', ')}))
        AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')
      GROUP BY COALESCE(cfe.source_module, 'direct'), cfm.ledger_type`,
     [siteId, ...profitModules]
   );
@@ -2152,14 +2275,16 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
        + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0))
                    FROM cash_flow_entries cfe JOIN firms f ON f.id = cfe.from_firm_id
                    WHERE f.site_id = $1 AND cfe.is_firm_transaction = true
-                   AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))), 0)
+                   AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+                   AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
        AS total_debit,
        COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft JOIN firms f ON f.id = ft.firm_id
                  WHERE f.site_id = $1 AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED','RETURNED'))), 0)
        + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0))
                    FROM cash_flow_entries cfe JOIN firms f ON f.id = cfe.to_firm_id
                    WHERE f.site_id = $1 AND cfe.is_firm_transaction = true
-                   AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))), 0)
+                   AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+                   AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
        AS total_credit`,
     [siteId]
   );

@@ -61,6 +61,7 @@ async function runFromSourceTables(siteId, start, end) {
        WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
          AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
          AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')
        UNION ALL
        SELECT debit FROM day_book
        WHERE site_id = $1 AND date >= $2 AND date < $3
@@ -81,7 +82,8 @@ async function runFromSourceTables(siteId, start, end) {
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      WHERE cfe.site_id = $1
        AND LOWER(cfm.ledger_type) = 'person'
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
     [siteId]
   );
   const outstanding = (parseFloat(outResult.rows[0].given) || 0) - (parseFloat(outResult.rows[0].returned) || 0);
@@ -118,7 +120,8 @@ async function runFromCashFlowEntries(siteId, start, end) {
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND cfe.source_module IN (${placeholders})
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
     [siteId, start, end, ...profitModules]
   );
 
@@ -132,6 +135,7 @@ async function runFromCashFlowEntries(siteId, start, end) {
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND cfe.source_module = 'day_book'
        AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')
        AND EXISTS (
          SELECT 1 FROM day_book db
          WHERE db.id = cfe.source_id AND db.entry_type = 'EXPENSE'
@@ -148,7 +152,8 @@ async function runFromCashFlowEntries(siteId, start, end) {
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
     [siteId, start, end]
   );
   const personalLedgerDebit = parseFloat(plResult.rows[0].total) || 0;
@@ -165,7 +170,8 @@ async function runFromCashFlowEntries(siteId, start, end) {
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      WHERE cfe.site_id = $1
        AND LOWER(cfm.ledger_type) = 'person'
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
     [siteId]
   );
   const outstanding = (parseFloat(outResult.rows[0].given) || 0) - (parseFloat(outResult.rows[0].returned) || 0);

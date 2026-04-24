@@ -11,10 +11,10 @@ class FirmModel extends MasterModel {
     const query = `
       SELECT f.*,
         COALESCE((SELECT SUM(ft.debit)  FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
+          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
           AS total_debit,
         COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
+          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
           AS total_credit,
         (SELECT COUNT(*)::int FROM firm_transactions ft WHERE ft.firm_id = f.id)
           + (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id) AND cfe.is_firm_transaction = true)
@@ -39,10 +39,10 @@ class FirmModel extends MasterModel {
     const query = `
       SELECT f.*,
         COALESCE((SELECT SUM(ft.debit)  FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
+          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
           AS total_debit,
         COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
+          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
           AS total_credit,
         (SELECT COUNT(*)::int FROM firm_transactions ft WHERE ft.firm_id = f.id)
           + (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id) AND cfe.is_firm_transaction = true)

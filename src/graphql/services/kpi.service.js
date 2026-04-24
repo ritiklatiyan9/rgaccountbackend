@@ -80,6 +80,7 @@ export async function getExpenseBreakdown(siteId, start, end) {
          AND LOWER(cfm.ledger_type) = 'person'
          AND cfe.debit > 0
          AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND (cfe.status IS NULL OR cfe.status != 'rejected')
        UNION ALL
        SELECT debit, 'daybook_expense' AS source_type
        FROM day_book
@@ -113,7 +114,8 @@ export async function getSiteCashflow(siteId, start, end) {
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
        AND LOWER(cfm.ledger_type) = 'site'
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
     [siteId, start, end]
   );
   const credit = parseFloat(rows[0].total_credit) || 0;
@@ -131,7 +133,8 @@ export async function getOutstanding(siteId, start, end) {
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      WHERE cfe.site_id = $1
        AND LOWER(cfm.ledger_type) = 'person'
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
     [siteId]
   );
   const given = parseFloat(rows[0].given) || 0;
@@ -148,39 +151,91 @@ export async function getPersonalLedgerCredit(siteId, start, end) {
      WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
        AND LOWER(cfm.ledger_type) = 'person'
        AND cfe.credit > 0
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))`,
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
     [siteId, start, end]
   );
   return parseFloat(rows[0].total_credit) || 0;
 }
 
-// ── Registry Payments: money received via Plot Registry (registry-only ledger) ──
-// Lives in plot_registry_payments and is intentionally independent from plot_payments /
-// installment payments. Excluded from revenue/expense totals — purely a registry-side KPI.
-export async function getRegistryPayments(siteId, start, end) {
+// ── Registry Payments: ALL money received for plots whose status = REGISTRY ──
+// Exactly mirrors the /plot-payments page footer (with the filter set to
+// REGISTRY). To guarantee the two numbers agree we deliberately:
+//   • drop the dashboard date range — the page has no date filter, so if we
+//     applied one the dashboard would silently miss any row with an
+//     out-of-range / sentinel date.
+//   • match OLD-tag detection case-insensitively — plot_tag data can be
+//     'OLD' / 'old' / 'Old' in the wild; both views now bucket them the same.
+//   • trim + uppercase the status check to catch 'Registry ' / 'registry' /
+//     ' REGISTRY' etc.
+//
+// Returns a breakdown:
+//   total      = OLD + NEW total
+//   newTotal   = UPPER(TRIM(plot_tag)) != 'OLD' (or NULL)
+//   oldTotal   = UPPER(TRIM(plot_tag)) == 'OLD'
+//   count      = total payment rows
+// Sums plot_payments + plot_installment_payments across every payment mode
+// (cash / bank / cheque / UPI / other). Scoped via plt.site_id (same join
+// the Plot Payments page uses). Bounced / returned cheques are excluded.
+export async function getRegistryPayments(siteId, _start, _end) {
   const { rows } = await pool.query(
     `SELECT
-       COALESCE(SUM(amount), 0)::numeric AS total,
-       COUNT(*)::int                     AS txn_count
-     FROM plot_registry_payments
-     WHERE site_id = $1 ${dateFilter('payment_date', 2)}
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))`,
-    [siteId, start, end]
+       COALESCE(SUM(amount), 0)::numeric                                         AS total,
+       COALESCE(SUM(amount) FILTER (WHERE is_old), 0)::numeric                   AS old_total,
+       COALESCE(SUM(amount) FILTER (WHERE NOT is_old), 0)::numeric               AS new_total,
+       COUNT(*)::int                                                             AS txn_count,
+       COUNT(*) FILTER (WHERE is_old)::int                                       AS old_count,
+       COUNT(*) FILTER (WHERE NOT is_old)::int                                   AS new_count
+     FROM (
+       SELECT pp.amount AS amount,
+              (UPPER(TRIM(COALESCE(plt.plot_tag, ''))) = 'OLD') AS is_old
+       FROM plot_payments pp
+       JOIN plots plt ON plt.id = pp.plot_id
+       WHERE plt.site_id = $1
+         AND UPPER(TRIM(COALESCE(plt.status, ''))) = 'REGISTRY'
+         AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+
+       UNION ALL
+
+       SELECT pip.amount AS amount,
+              (UPPER(TRIM(COALESCE(plt.plot_tag, ''))) = 'OLD') AS is_old
+       FROM plot_installment_payments pip
+       JOIN plots plt ON plt.id = pip.plot_id
+       WHERE plt.site_id = $1
+         AND UPPER(TRIM(COALESCE(plt.status, ''))) = 'REGISTRY'
+         AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+     ) u`,
+    [siteId]
   );
+  const r = rows[0];
   return {
-    total: parseFloat(rows[0].total) || 0,
-    count: parseInt(rows[0].txn_count, 10) || 0,
+    total:    parseFloat(r.total)     || 0,
+    newTotal: parseFloat(r.new_total) || 0,
+    oldTotal: parseFloat(r.old_total) || 0,
+    count:    parseInt(r.txn_count, 10) || 0,
+    newCount: parseInt(r.new_count, 10) || 0,
+    oldCount: parseInt(r.old_count, 10) || 0,
   };
 }
 
-// ── Imprest: total money given (allocated) for a site ──
+// ── Imprest: net outstanding (cash still held by sub-admins as imprest) ──
+// Sourced from imprest_ledger, which records every allocation (+), expense (−)
+// and refund (−). Summing per user and taking only positive balances yields
+// "money currently sitting with sub-admins" — the only portion that should
+// reduce Site Balance. Expenses spent from imprest are already in totalExpense,
+// and accepted returns cancel out allocations, so both drop out automatically.
+// Window is cumulative up to `end` (not `start..end`) because we want the
+// standing balance at period end, not in-period flow.
 export async function getImprestGiven(siteId, start, end) {
   const { rows } = await pool.query(
-    `SELECT COALESCE(SUM(amount), 0)::numeric AS total
-     FROM imprest_allocations
-     WHERE site_id = $1 ${dateFilter('created_at', 2)}
-       AND status != 'CANCELLED'`,
-    [siteId, start, end]
+    `SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS total
+     FROM (
+       SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
+       FROM imprest_ledger
+       WHERE site_id IS NOT NULL AND site_id = $1 AND created_at < $2
+       GROUP BY user_id
+     ) u`,
+    [siteId, end]
   );
   return parseFloat(rows[0].total) || 0;
 }
@@ -203,7 +258,7 @@ export async function getImprestPairs(siteId, start, end) {
      FROM imprest_allocations ia
      LEFT JOIN users gv ON gv.id = ia.admin_id
      LEFT JOIN users rc ON rc.id = ia.sub_admin_id
-     WHERE ia.site_id = $1 ${dateFilter('ia.created_at', 2)}
+     WHERE ia.site_id IS NOT NULL AND ia.site_id = $1 ${dateFilter('ia.created_at', 2)}
        AND ia.status != 'CANCELLED'
      GROUP BY ia.admin_id, gv.name, gv.email, gv.role, ia.sub_admin_id, rc.name, rc.email, rc.role
      HAVING COALESCE(SUM(ia.amount), 0) > 0
@@ -223,27 +278,30 @@ export async function getImprestPairs(siteId, start, end) {
   }));
 }
 
-// ── Imprest distribution: who received how much ──
+// ── Imprest distribution: net outstanding per recipient ──
+// Mirrors getImprestGiven semantics: per sub-admin, the current imprest_ledger
+// balance (allocations − expenses − refunds), keeping only positive balances
+// so the list sums to the Site Balance card's "Imprest Given" total.
 export async function getImprestDistribution(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT
-       ia.sub_admin_id,
-       COALESCE(NULLIF(TRIM(sa.name), ''), sa.email, CONCAT('USER #', ia.sub_admin_id::text)) AS recipient_name,
-       COALESCE(SUM(ia.amount), 0)::numeric AS total_amount,
-       COUNT(*)::int AS allocation_count
-     FROM imprest_allocations ia
-     LEFT JOIN users sa ON sa.id = ia.sub_admin_id
-     WHERE ia.site_id = $1 ${dateFilter('ia.created_at', 2)}
-       AND ia.status != 'CANCELLED'
-     GROUP BY ia.sub_admin_id, recipient_name
-     ORDER BY total_amount DESC, recipient_name ASC`,
-    [siteId, start, end]
+       il.user_id AS sub_admin_id,
+       COALESCE(NULLIF(TRIM(sa.name), ''), sa.email, CONCAT('USER #', il.user_id::text)) AS recipient_name,
+       SUM(il.amount)::numeric AS balance,
+       COUNT(*) FILTER (WHERE il.type = 'ALLOCATION')::int AS allocation_count
+     FROM imprest_ledger il
+     LEFT JOIN users sa ON sa.id = il.user_id
+     WHERE il.site_id IS NOT NULL AND il.site_id = $1 AND il.created_at < $2
+     GROUP BY il.user_id, recipient_name
+     HAVING SUM(il.amount) > 0
+     ORDER BY balance DESC, recipient_name ASC`,
+    [siteId, end]
   );
 
   return rows.map((r) => ({
     subAdminId: parseInt(r.sub_admin_id, 10),
     recipientName: r.recipient_name,
-    totalAmount: parseFloat(r.total_amount) || 0,
+    totalAmount: parseFloat(r.balance) || 0,
     allocationCount: parseInt(r.allocation_count, 10) || 0,
   }));
 }
@@ -281,6 +339,10 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     imprestPairs,
     registryPayments: registryPayments.total,
     registryPaymentsCount: registryPayments.count,
+    registryPaymentsNew: registryPayments.newTotal,
+    registryPaymentsOld: registryPayments.oldTotal,
+    registryPaymentsNewCount: registryPayments.newCount,
+    registryPaymentsOldCount: registryPayments.oldCount,
     breakdown: {
       ...expData.breakdown,
       plot_payments: { credit: revenue, debit: 0, count: 0 },

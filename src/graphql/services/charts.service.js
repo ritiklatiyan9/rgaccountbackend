@@ -84,6 +84,7 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
            AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
            AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+           AND (cfe.status IS NULL OR cfe.status != 'rejected')
        ) u
        GROUP BY 1
      )

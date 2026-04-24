@@ -9,15 +9,23 @@ import pool from '../../config/db.js';
  * using LEFT JOIN + GROUP BY instead of 6 correlated subqueries per row.
  */
 export async function getPlotsWithTotals(siteId) {
+  // Per-plot RECEIVED = plot_payments + plot_installment_payments (both across
+  // every payment mode). Two LATERAL joins keep the query readable; the final
+  // `total_received`, `received_bank` and `received_cash` are the sum of each
+  // leg. Bounced / returned cheques are excluded on both sources.
   const query = `
     SELECT
       p.*,
-      COALESCE(agg.total_received, 0)      AS total_received,
-      COALESCE(agg.received_bank, 0)        AS received_bank,
-      COALESCE(agg.received_cash, 0)        AS received_cash,
-      COALESCE(agg.payment_count, 0)::int   AS payment_count,
-      COALESCE(agg.payment_buyer_names, '')  AS payment_buyer_names,
-      COALESCE(agg.payment_booked_bys, '')   AS payment_booked_bys
+      COALESCE(pp_agg.total_received, 0) + COALESCE(ip_agg.total_received, 0)
+        AS total_received,
+      COALESCE(pp_agg.received_bank, 0)  + COALESCE(ip_agg.received_bank, 0)
+        AS received_bank,
+      COALESCE(pp_agg.received_cash, 0)  + COALESCE(ip_agg.received_cash, 0)
+        AS received_cash,
+      COALESCE(pp_agg.payment_count, 0)::int + COALESCE(ip_agg.payment_count, 0)::int
+        AS payment_count,
+      COALESCE(pp_agg.payment_buyer_names, '')  AS payment_buyer_names,
+      COALESCE(pp_agg.payment_booked_bys, '')   AS payment_booked_bys
     FROM plots p
     LEFT JOIN LATERAL (
       SELECT
@@ -34,7 +42,19 @@ export async function getPlotsWithTotals(siteId) {
           AS payment_booked_bys
       FROM plot_payments pp
       WHERE pp.plot_id = p.id
-    ) agg ON true
+    ) pp_agg ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        SUM(pip.amount) FILTER (WHERE pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AS total_received,
+        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, '')) IN ('BANK', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER') AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+          AS received_bank,
+        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, 'CASH')) = 'CASH' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+          AS received_cash,
+        COUNT(*)::int AS payment_count
+      FROM plot_installment_payments pip
+      WHERE pip.plot_id = p.id
+    ) ip_agg ON true
     WHERE p.site_id = $1
     ORDER BY p.plot_no ASC
   `;
@@ -160,10 +180,14 @@ export async function getPlotPaymentDetail(plotId, siteId) {
 
   const plotQuery = `
     SELECT p.*,
-      COALESCE(agg.total_received, 0)    AS total_received,
-      COALESCE(agg.received_bank, 0)     AS received_bank,
-      COALESCE(agg.received_cash, 0)     AS received_cash,
-      COALESCE(agg.payment_count, 0)::int AS payment_count
+      COALESCE(pp_agg.total_received, 0) + COALESCE(ip_agg.total_received, 0)
+        AS total_received,
+      COALESCE(pp_agg.received_bank, 0)  + COALESCE(ip_agg.received_bank, 0)
+        AS received_bank,
+      COALESCE(pp_agg.received_cash, 0)  + COALESCE(ip_agg.received_cash, 0)
+        AS received_cash,
+      COALESCE(pp_agg.payment_count, 0)::int + COALESCE(ip_agg.payment_count, 0)::int
+        AS payment_count
     FROM plots p
     LEFT JOIN LATERAL (
       SELECT
@@ -176,7 +200,19 @@ export async function getPlotPaymentDetail(plotId, siteId) {
         COUNT(*)::int AS payment_count
       FROM plot_payments pp
       WHERE pp.plot_id = p.id
-    ) agg ON true
+    ) pp_agg ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        SUM(pip.amount) FILTER (WHERE pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AS total_received,
+        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, '')) IN ('BANK', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER') AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+          AS received_bank,
+        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, 'CASH')) = 'CASH' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+          AS received_cash,
+        COUNT(*)::int AS payment_count
+      FROM plot_installment_payments pip
+      WHERE pip.plot_id = p.id
+    ) ip_agg ON true
     WHERE p.id = $1
   `;
 

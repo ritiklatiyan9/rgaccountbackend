@@ -431,6 +431,7 @@ class ExpenseModel extends MasterModel {
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
           AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND (cfe.status IS NULL OR cfe.status != 'rejected')
 
         UNION ALL
 
@@ -613,6 +614,7 @@ class ExpenseModel extends MasterModel {
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
           AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND (cfe.status IS NULL OR cfe.status != 'rejected')
         UNION ALL
         SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
@@ -658,6 +660,7 @@ class ExpenseModel extends MasterModel {
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
           AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND (cfe.status IS NULL OR cfe.status != 'rejected')
         UNION ALL
         SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
