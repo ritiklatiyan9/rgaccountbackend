@@ -273,6 +273,7 @@ const ExpenseEntryType = new GraphQLObjectType({
     source:            { type: GraphQLString },
     cheque_no:         { type: GraphQLString },
     cheque_status:     { type: GraphQLString },
+    verifyUrl:         { type: GraphQLString },
   },
 });
 

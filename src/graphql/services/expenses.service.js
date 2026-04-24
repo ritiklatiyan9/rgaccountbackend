@@ -4,6 +4,7 @@
  */
 import pool from '../../config/db.js';
 import { expenseModel } from '../../models/Expense.model.js';
+import { buildVerifyUrl, ReceiptType } from '../../utils/receiptToken.js';
 
 const DEFAULT_SUMMARY = {
   total_debit: 0,
@@ -53,17 +54,35 @@ export async function getExpensesPageData(siteId, { filters = {}, page = 1, limi
 
   const tasks = [
     expenseModel.findPaginatedUnified(safeSiteId, normalizedFilters, safePage, safeLimit, pool),
+    pool.query('SELECT name, city, state FROM sites WHERE id = $1', [safeSiteId]).then((r) => r.rows[0] || null),
   ];
   if (includeBreakdowns) {
     tasks.push(expenseModel.getUnifiedBreakdowns(safeSiteId, normalizedFilters, pool));
   }
 
-  const [paginatedData, breakdowns] = await Promise.all(tasks);
+  const [paginatedData, siteRow, breakdowns] = await Promise.all(tasks);
 
   const totalItems = parseInt(paginatedData.totalItems || 0, 10);
 
+  const expensesWithVerify = (paginatedData.items || []).map((e) => ({
+    ...e,
+    verifyUrl: buildVerifyUrl({
+      t: ReceiptType.EXPENSE,
+      i: e.id,
+      a: parseFloat(e.debit) || parseFloat(e.credit) || 0,
+      dr: (parseFloat(e.debit) || 0) > 0 ? 'OUT' : 'IN',
+      d: e.date,
+      pm: e.payment_mode || null,
+      pn: e.to_entity || e.from_entity || null,
+      pl: e.category || null,
+      sn: siteRow?.name || null,
+      sy: siteRow?.city || null,
+      ss: siteRow?.state || null,
+    }),
+  }));
+
   return {
-    expenses: paginatedData.items || [],
+    expenses: expensesWithVerify,
     summary: paginatedData.summary || DEFAULT_SUMMARY,
     pagination: {
       totalItems,

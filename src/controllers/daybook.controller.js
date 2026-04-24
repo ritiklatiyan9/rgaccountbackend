@@ -10,6 +10,7 @@ import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
+import { classifyPaymentMode, emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
 
 // ══════════════════════════════════════════════════
 //  OPENING BALANCE HELPERS
@@ -595,7 +596,12 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       debit: fp.amount,
       credit: 0,
       remarks: fp.remarks,
-      payment_mode: fp.particular, // farmer_payments.particular = payment mode
+      // farmer_payments.payment_mode is the source of truth ('CASH' / 'BANK' /
+      // 'SPLIT'). The old code read fp.particular here which is the narration,
+      // not the mode — that's why Cash Day Book totals disagreed with Main.
+      payment_mode: (fp.payment_mode || 'CASH').toUpperCase(),
+      cash_amount: parseFloat(fp.cash_amount) || 0,
+      bank_amount: parseFloat(fp.bank_amount) || 0,
       category: null,
       from_entity: null,
       to_entity: fp.farmer_name,
@@ -625,6 +631,11 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           by_note: fp.by_note,
           interest_rate: fp.interest_rate,
           interest_amount: fp.interest_amount,
+          // Passing split amounts through lets the client-side bucket
+          // classifier handle SPLIT rows the same way the backend
+          // mode-balance SQL does (cash_amount → cash, bank_amount → bank).
+          cash_amount: parseFloat(fp.cash_amount) || 0,
+          bank_amount: parseFloat(fp.bank_amount) || 0,
           source: 'daybook_farmer_payment',
         };
       }
@@ -1016,6 +1027,223 @@ export const getDailyBalance = asyncHandler(async (req, res) => {
     closing_balance: parseFloat(row.closing_balance) || 0,
     tracked: true,
   });
+});
+
+/**
+ * GET /daybook/mode-balance?site_id=X&date=YYYY-MM-DD
+ * Returns cumulative per-mode balances (opening + day flows + current) for
+ * every payment-mode bucket the Day Book tracks (cash / bank / cheque / upi /
+ * other) plus a combined `total` bucket that equals the sum of all modes —
+ * this is what the Main Day Book renders as Opening/Remaining.
+ *
+ * Classification is done in Node (not SQL) via classifyPaymentMode() so every
+ * surface — listDayBookEntries, the frontend filter on /daybook/cash |
+ * /daybook/bank, and these aggregates — uses the exact same bucketing rules.
+ *
+ * Dedup mirrors listDayBookEntries: if a source row has been dual-written
+ * into day_book (farmer_payment_id / commission_id / cash_flow_entry_id /
+ * firm_transaction_id / plot_payment_id), only the day_book copy is counted.
+ */
+export const getModeBalance = asyncHandler(async (req, res) => {
+  const { site_id, date } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const queryDate = date || new Date().toISOString().split('T')[0];
+  const siteId = parseInt(site_id);
+
+  // Pulls (date, pm, debit, credit) rows across all 7 sources.
+  // `pm` is the raw mode string; bucketing happens in JS to stay in lockstep
+  // with classifyPaymentMode() — the same function the frontend filter uses.
+  // farmer_payments SPLIT rows are exploded into two rows (one CASH, one
+  // BANK) based on cash_amount / bank_amount so the split is counted
+  // correctly instead of everything landing in one bucket.
+  const sql = `
+    -- 1) day_book (catch-all incl. dual-write rows for FP / COMM / CF / FIRM / PLOT_PAYMENT)
+    SELECT
+      date,
+      COALESCE(payment_mode, '') AS pm,
+      COALESCE(debit, 0)::numeric  AS debit,
+      COALESCE(credit, 0)::numeric AS credit
+    FROM day_book
+    WHERE site_id = $1
+      AND entry_type != 'IMPREST'
+      AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (status IS NULL OR status != 'rejected')
+      AND date <= $2
+
+    UNION ALL
+
+    -- 2) expenses (kept separate from day_book; mirrors siteBalanceAsOf)
+    SELECT
+      date,
+      COALESCE(payment_mode, ''),
+      COALESCE(debit, 0)::numeric,
+      COALESCE(credit, 0)::numeric
+    FROM expenses
+    WHERE site_id = $1
+      AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (status IS NULL OR status != 'rejected')
+      AND date <= $2
+
+    UNION ALL
+
+    -- 3a) farmer_payments NOT linked to day_book, non-SPLIT — counted as-is
+    SELECT
+      fp.date,
+      COALESCE(fp.payment_mode, 'CASH'),
+      COALESCE(fp.amount, 0)::numeric,
+      0::numeric
+    FROM farmer_payments fp
+    JOIN farmers f ON f.id = fp.farmer_id
+    WHERE f.site_id = $1
+      AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (fp.status IS NULL OR fp.status != 'rejected')
+      AND fp.date <= $2
+      AND COALESCE(UPPER(fp.payment_mode), 'CASH') != 'SPLIT'
+      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.farmer_payment_id = fp.id)
+
+    UNION ALL
+
+    -- 3b) farmer_payments SPLIT — cash leg
+    SELECT
+      fp.date,
+      'CASH',
+      COALESCE(fp.cash_amount, 0)::numeric,
+      0::numeric
+    FROM farmer_payments fp
+    JOIN farmers f ON f.id = fp.farmer_id
+    WHERE f.site_id = $1
+      AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (fp.status IS NULL OR fp.status != 'rejected')
+      AND fp.date <= $2
+      AND UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
+      AND COALESCE(fp.cash_amount, 0) > 0
+      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.farmer_payment_id = fp.id)
+
+    UNION ALL
+
+    -- 3c) farmer_payments SPLIT — bank leg
+    SELECT
+      fp.date,
+      'BANK',
+      COALESCE(fp.bank_amount, 0)::numeric,
+      0::numeric
+    FROM farmer_payments fp
+    JOIN farmers f ON f.id = fp.farmer_id
+    WHERE f.site_id = $1
+      AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND (fp.status IS NULL OR fp.status != 'rejected')
+      AND fp.date <= $2
+      AND UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
+      AND COALESCE(fp.bank_amount, 0) > 0
+      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.farmer_payment_id = fp.id)
+
+    UNION ALL
+
+    -- 4) plot_commissions NOT linked (no payment_mode column → "other")
+    SELECT
+      pc.date,
+      '' AS pm,
+      COALESCE(pc.amount, 0)::numeric,
+      0::numeric
+    FROM plot_commissions pc
+    WHERE pc.site_id = $1
+      AND pc.date <= $2
+      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.commission_id = pc.id)
+
+    UNION ALL
+
+    -- 5) cash_flow_entries NOT linked (cash_type = 'cash' | 'bank')
+    SELECT
+      cfe.date,
+      COALESCE(cfe.cash_type, ''),
+      COALESCE(cfe.debit, 0)::numeric,
+      COALESCE(cfe.credit, 0)::numeric
+    FROM cash_flow_entries cfe
+    WHERE cfe.site_id = $1
+      AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND cfe.date <= $2
+      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.cash_flow_entry_id = cfe.id)
+
+    UNION ALL
+
+    -- 6) firm_transactions NOT linked
+    SELECT
+      ft.date,
+      COALESCE(ft.payment_mode, ''),
+      COALESCE(ft.debit, 0)::numeric,
+      COALESCE(ft.credit, 0)::numeric
+    FROM firm_transactions ft
+    WHERE ft.site_id = $1
+      AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND ft.date <= $2
+      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.firm_transaction_id = ft.id)
+
+    UNION ALL
+
+    -- 7) plot_payments NOT linked (payment_from with payment_type fallback)
+    SELECT
+      pp.date,
+      COALESCE(NULLIF(pp.payment_from, ''), pp.payment_type, ''),
+      0::numeric,
+      COALESCE(pp.amount, 0)::numeric
+    FROM plot_payments pp
+    WHERE pp.site_id = $1
+      AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND pp.date <= $2
+      AND NOT EXISTS (SELECT 1 FROM day_book db WHERE db.plot_payment_id = pp.id)
+  `;
+
+  const accum = { before: emptyBucketMap(), on: emptyBucketMap() };
+
+  try {
+    const { rows } = await pool.query(sql, [siteId, queryDate]);
+    const toIso = (d) => (d instanceof Date ? d.toISOString().split('T')[0] : String(d).slice(0, 10));
+    for (const r of rows) {
+      const bucket = classifyPaymentMode(r.pm);
+      const period = toIso(r.date) < queryDate ? 'before' : 'on';
+      const slot = accum[period][bucket];
+      slot.credit += parseFloat(r.credit) || 0;
+      slot.debit  += parseFloat(r.debit)  || 0;
+    }
+  } catch (err) {
+    console.error('[daybook] mode-balance error:', err.message);
+    return res.status(500).json({ message: 'Failed to compute mode balance' });
+  }
+
+  // Build per-bucket slice: opening = sum(credit - debit) before cutoff,
+  // current = opening + today's credit - today's debit.
+  const buildSlice = (bucket) => {
+    const before = accum.before[bucket];
+    const on     = accum.on[bucket];
+    const opening = before.credit - before.debit;
+    return {
+      opening_balance: opening,
+      day_credit: on.credit,
+      day_debit:  on.debit,
+      current_balance: opening + on.credit - on.debit,
+    };
+  };
+
+  const payload = { date: queryDate };
+  for (const b of BUCKETS) payload[b] = buildSlice(b);
+
+  // Combined "total" bucket — the Main Day Book card renders this so its
+  // numbers tie exactly to sum(cash + bank + cheque + upi + other).
+  const total = {
+    opening_balance: 0,
+    day_credit: 0,
+    day_debit: 0,
+    current_balance: 0,
+  };
+  for (const b of BUCKETS) {
+    total.opening_balance += payload[b].opening_balance;
+    total.day_credit      += payload[b].day_credit;
+    total.day_debit       += payload[b].day_debit;
+    total.current_balance += payload[b].current_balance;
+  }
+  payload.total = total;
+
+  res.json(payload);
 });
 
 /**

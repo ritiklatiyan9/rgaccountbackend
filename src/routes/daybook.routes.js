@@ -29,6 +29,7 @@ import {
   getLatestDate,
   verifyData,
   getDailyBalance,
+  getModeBalance,
 } from '../controllers/daybook.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -59,6 +60,9 @@ router.get('/latest-date', requireRole('admin', 'sub_admin'), requirePermission(
 
 // Daily opening + closing balance (seeds today on first read)
 router.get('/daily-balance', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), getDailyBalance);
+
+// Cash + Bank cumulative balance (powers the cards on /daybook/cash and /daybook/bank)
+router.get('/mode-balance', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, getModeBalance);
 
 // Day Book CRUD
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'write'), bustDaybookCache, createDayBookEntry);
