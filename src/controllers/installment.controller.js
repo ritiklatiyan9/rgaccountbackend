@@ -923,27 +923,56 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   }
 
   // ── 3. Total received per plot ──
+  // Mirror the PlotPayments page: sum BOTH plot_payments and plot_installment_payments
+  // (excluding bounced/returned cheques on each side). Without the second leg, plots
+  // that have only installment-tracked payments incorrectly show ₹0 received.
   const payRes = await pool.query(
-    `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
-     FROM plot_payments WHERE plot_id = ANY($1) AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
+    `SELECT plot_id, SUM(amount) AS total_received FROM (
+        SELECT plot_id, amount FROM plot_payments
+         WHERE plot_id = ANY($1)
+           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        UNION ALL
+        SELECT plot_id, amount FROM plot_installment_payments
+         WHERE plot_id = ANY($1)
+           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     ) combined
+     GROUP BY plot_id`,
     [plotIds]
   );
   const receivedMap = {};
   for (const r of payRes.rows) receivedMap[r.plot_id] = parseFloat(r.total_received) || 0;
 
-  // ── 4. Last payment date per plot ──
+  // ── 3b. Direct per-installment payments (linked via installment_id) ──
+  const instPayRes = await pool.query(
+    `SELECT installment_id, COALESCE(SUM(amount), 0) AS paid_direct
+     FROM plot_installment_payments
+     WHERE plot_id = ANY($1)
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     GROUP BY installment_id`,
+    [plotIds]
+  );
+  const directPaidByInst = {};
+  for (const r of instPayRes.rows) directPaidByInst[r.installment_id] = parseFloat(r.paid_direct) || 0;
+
+  // ── 4. Last payment date per plot (across both sources) ──
   const lastPayRes = await pool.query(
-    `SELECT plot_id, MAX(date) AS last_payment_date
-     FROM plot_payments WHERE plot_id = ANY($1) GROUP BY plot_id`,
+    `SELECT plot_id, MAX(d) AS last_payment_date FROM (
+        SELECT plot_id, date AS d FROM plot_payments WHERE plot_id = ANY($1)
+        UNION ALL
+        SELECT plot_id, payment_date AS d FROM plot_installment_payments WHERE plot_id = ANY($1)
+     ) combined
+     GROUP BY plot_id`,
     [plotIds]
   );
   const lastPayMap = {};
   for (const r of lastPayRes.rows) lastPayMap[r.plot_id] = r.last_payment_date;
 
-  // ── 5. Payments per plot with dates ──
+  // ── 5. Payments per plot with dates (used by `no_payment_since` mode) ──
   const allPayRes = await pool.query(
-    `SELECT plot_id, date, amount, payment_from, payment_type
-     FROM plot_payments WHERE plot_id = ANY($1) ORDER BY plot_id, date ASC`,
+    `SELECT plot_id, date, amount FROM plot_payments WHERE plot_id = ANY($1)
+     UNION ALL
+     SELECT plot_id, payment_date AS date, amount FROM plot_installment_payments WHERE plot_id = ANY($1)
+     ORDER BY plot_id, date ASC`,
     [plotIds]
   );
   const paymentsByPlot = {};
@@ -952,19 +981,28 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     paymentsByPlot[r.plot_id].push(r);
   }
 
-  // Helper: enrich installments with paid amounts
+  // Helper: enrich installments with paid amounts.
+  // Each installment first claims its directly-linked plot_installment_payments,
+  // then any leftover generic plot_payments waterfall through the remaining
+  // installments in sort order. This matches PlotPayments / GraphQL totals.
   const enrichInstallments = (plotId) => {
     const installments = instByPlot[plotId] || [];
-    let pool_ = receivedMap[plotId] || 0;
+    const totalReceived = receivedMap[plotId] || 0;
+    const directTotal = installments.reduce((s, i) => s + (directPaidByInst[i.id] || 0), 0);
+    let pool_ = Math.max(totalReceived - directTotal, 0); // generic (un-linked) plot_payments pool
     return installments.map(inst => {
       const amt = parseFloat(inst.amount) || 0;
-      const paid = Math.min(pool_, amt);
-      pool_ -= paid;
+      const direct = directPaidByInst[inst.id] || 0;
+      const stillNeeded = Math.max(amt - direct, 0);
+      const fromPool = Math.min(pool_, stillNeeded);
+      pool_ -= fromPool;
+      const paid = Math.min(direct + fromPool, amt);
       const remaining = Math.max(amt - paid, 0);
       let status = 'pending';
       if (paid >= amt && amt > 0) status = 'paid';
       else if (paid > 0) status = 'partially_paid';
       else if (new Date(inst.due_date) < today) status = 'overdue';
+      if (remaining > 0 && new Date(inst.due_date) < today && status !== 'paid') status = 'overdue';
       return { ...inst, paid, remaining, status };
     });
   };
