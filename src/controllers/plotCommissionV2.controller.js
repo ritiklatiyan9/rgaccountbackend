@@ -5,40 +5,29 @@ import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 
 /**
- * Helper: Auto-update commission status based on payment completion
- * Called when a payment is approved or cheque status changes
+ * Helper: Auto-update commission status based on payment completion.
+ * Single round-trip — derives the new status from the live SUM(amount) and
+ * UPDATEs in one statement. Previously this was SELECT + UPDATE (2 RTTs).
  */
 const autoUpdateCommissionStatus = async (commissionId, poolConn) => {
   try {
-    // Get commission details including total and paid amounts
-    const commRes = await poolConn.query(
-      `SELECT pc.total_commission, 
-              COALESCE(SUM(pcp.amount) FILTER (WHERE pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_paid
-       FROM plot_commissions_v2 pc
-       LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id
-       WHERE pc.id = $1
-       GROUP BY pc.id`,
-      [commissionId]
-    );
-    
-    if (commRes.rows.length === 0) return;
-    
-    const { total_commission, total_paid } = commRes.rows[0];
-    const numCommission = parseFloat(total_commission) || 0;
-    const numPaid = parseFloat(total_paid) || 0;
-    
-    // Determine new status
-    let newStatus = 'Pending';
-    if (numPaid >= numCommission) {
-      newStatus = 'Completed';
-    } else if (numPaid > 0) {
-      newStatus = 'Partial';
-    }
-    
-    // Update commission status
     await poolConn.query(
-      `UPDATE plot_commissions_v2 SET status = $1, updated_at = NOW() WHERE id = $2`,
-      [newStatus, commissionId]
+      `UPDATE plot_commissions_v2 pc
+          SET status = CASE
+                WHEN agg.total_paid >= pc.total_commission THEN 'Completed'
+                WHEN agg.total_paid > 0 THEN 'Partial'
+                ELSE 'Pending'
+              END,
+              updated_at = NOW()
+        FROM (
+          SELECT COALESCE(SUM(amount), 0) AS total_paid
+          FROM plot_commission_payments
+          WHERE plot_commission_id = $1
+            AND status = 'approved'
+            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        ) agg
+        WHERE pc.id = $1`,
+      [commissionId]
     );
   } catch (err) {
     console.error('Error auto-updating commission status:', err);
@@ -71,31 +60,50 @@ export const getPlotsForCommission = asyncHandler(async (req, res) => {
  * Create new commission linked to a plot.
  */
 export const createPlotCommission = asyncHandler(async (req, res) => {
-  const { site_id, plot_id, agent_id, total_commission, remarks, assigned_admin_id } = req.body;
+  const { site_id, plot_id, agent_id, total_commission, remarks } = req.body;
 
   if (!site_id || !plot_id || !agent_id || !total_commission) {
     return res.status(400).json({ message: 'site_id, plot_id, agent_id, total_commission are required' });
   }
 
-  // Check if this plot already has a commission assigned to this agent
-  const existing = await plotCommissionV2Model.findByPlotAndAgent(parseInt(plot_id), parseInt(agent_id), pool);
-  if (existing) {
-     return res.status(409).json({ message: 'This agent already has a commission assigned for this plot' });
+  const plotIdInt = parseInt(plot_id);
+  const agentIdInt = parseInt(agent_id);
+
+  // Single-round-trip duplicate check: try the INSERT optimistically inside
+  // a CTE and let it return 0 rows if the (plot_id, agent_id) pair already
+  // exists. Saves one round-trip vs the previous SELECT-then-INSERT.
+  const result = await pool.query(
+    `WITH existing AS (
+       SELECT 1 FROM plot_commissions_v2
+        WHERE plot_id = $1 AND agent_id = $2
+        LIMIT 1
+     ),
+     ins AS (
+       INSERT INTO plot_commissions_v2 (
+         site_id, plot_id, agent_id, total_commission, remarks, status, created_by
+       )
+       SELECT $3, $1, $2, $4, $5, 'Pending', $6
+       WHERE NOT EXISTS (SELECT 1 FROM existing)
+       RETURNING *
+     )
+     SELECT
+       (SELECT row_to_json(ins) FROM ins) AS master,
+       EXISTS (SELECT 1 FROM existing) AS dup`,
+    [
+      plotIdInt,
+      agentIdInt,
+      parseInt(site_id),
+      parseFloat(total_commission),
+      remarks ? remarks.trim() : null,
+      req.user.id,
+    ]
+  );
+
+  const row = result.rows[0];
+  if (row.dup) {
+    return res.status(409).json({ message: 'This agent already has a commission assigned for this plot' });
   }
-
-  const data = {
-    site_id: parseInt(site_id),
-    plot_id: parseInt(plot_id),
-    agent_id: parseInt(agent_id),
-    total_commission: parseFloat(total_commission),
-    remarks: remarks ? remarks.trim() : null,
-    status: 'Pending',
-    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    created_by: req.user.id
-  };
-
-  const master = await plotCommissionV2Model.create(data, pool);
-  res.status(201).json({ master, message: 'Plot commission created successfully' });
+  res.status(201).json({ master: row.master, message: 'Plot commission created successfully' });
 });
 
 /**
@@ -138,32 +146,80 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const { plotId } = req.params;
   const { site_id } = req.query;
   const numPlotId = parseInt(plotId);
+  const numSiteId = parseInt(site_id);
   if (isNaN(numPlotId)) return res.status(400).json({ message: 'Invalid plot ID' });
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const commissions = await plotCommissionV2Model.findAllCommissionsByPlotId(numPlotId, parseInt(site_id), pool);
+  // Step 1: load commissions (we need the IDs to fetch payments).
+  const commissions = await plotCommissionV2Model.findAllCommissionsByPlotId(numPlotId, numSiteId, pool);
   if (!commissions || commissions.length === 0) {
     return res.status(404).json({ message: 'No commissions found for this plot' });
   }
 
-  // Get all payments for each commission
+  // Step 2: fire payments + site + timeline IN PARALLEL (was serial — 3 RTTs).
   const commissionIds = commissions.map(c => c.id);
-  const allPaymentsQuery = `
-    SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name
-    FROM plot_commission_payments pcp
-    LEFT JOIN users u ON pcp.created_by = u.id
-    LEFT JOIN users a ON pcp.approved_by = a.id
-    WHERE pcp.plot_commission_id = ANY($1)
-    ORDER BY pcp.date DESC, pcp.created_at DESC
-  `;
-  const paymentsResult = await pool.query(allPaymentsQuery, [commissionIds]);
-  const allPayments = paymentsResult.rows;
 
-  // Resolve site info for the signed token payload.
-  const siteRow = (await pool.query(
+  const allPaymentsPromise = pool.query(
+    `SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name
+       FROM plot_commission_payments pcp
+       LEFT JOIN users u ON pcp.created_by = u.id
+       LEFT JOIN users a ON pcp.approved_by = a.id
+      WHERE pcp.plot_commission_id = ANY($1)
+      ORDER BY pcp.date DESC, pcp.created_at DESC`,
+    [commissionIds]
+  );
+
+  const sitePromise = pool.query(
     'SELECT name, city, state FROM sites WHERE id = $1',
-    [parseInt(site_id)]
-  )).rows[0] || null;
+    [numSiteId]
+  );
+
+  // We'll also kick off the timeline query in parallel using the plot_no
+  // we already have on the first commission row.
+  const plotNoForTimeline = commissions[0].plot_no;
+  const timelinePromise = pool.query(
+    `SELECT
+       p.id AS plot_id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate,
+       COALESCE(p.plot_commission, 0) AS plot_commission,
+       STRING_AGG(DISTINCT m.full_name, ', ' ORDER BY m.full_name) AS agent_names,
+       COALESCE(NULLIF(COALESCE(p.plot_commission, 0), 0), MAX(pc.total_commission)) AS total_commission,
+       COALESCE(SUM(paid_agg.total_paid), 0) AS total_paid,
+       COALESCE(SUM(paid_agg.payment_count), 0) AS payment_count,
+       MIN(pc.created_at) AS first_created,
+       MAX(pc.created_at) AS last_created,
+       MAX(pc.status) AS latest_status,
+       JSON_AGG(JSON_BUILD_OBJECT(
+         'commission_id', pc.id,
+         'agent_name', m.full_name,
+         'agent_phone', m.phone,
+         'total_commission', pc.total_commission,
+         'status', pc.status,
+         'total_paid', COALESCE(paid_agg.total_paid, 0),
+         'payment_count', COALESCE(paid_agg.payment_count, 0)
+       ) ORDER BY pc.created_at ASC) AS agents_detail
+     FROM plots p
+     JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = $2
+     JOIN members m ON pc.agent_id = m.id
+     LEFT JOIN (
+       SELECT plot_commission_id, SUM(amount) AS total_paid, COUNT(*) AS payment_count
+       FROM plot_commission_payments
+       WHERE status = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       GROUP BY plot_commission_id
+     ) paid_agg ON paid_agg.plot_commission_id = pc.id
+     WHERE p.plot_no = $1 AND pc.site_id = $2
+     GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.plot_commission
+     ORDER BY MAX(pc.created_at) DESC`,
+    [plotNoForTimeline, numSiteId]
+  );
+
+  const [paymentsResult, siteResult, timelineResult] = await Promise.all([
+    allPaymentsPromise,
+    sitePromise,
+    timelinePromise,
+  ]);
+
+  const allPayments = paymentsResult.rows;
+  const siteRow = siteResult.rows[0] || null;
 
   // Group payments by commission_id and attach a signed verifyUrl to each.
   const paymentsByCommission = {};
@@ -228,41 +284,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const totalPaid = agents.reduce((s, a) => s + a.total_paid, 0);
   const totalPaidAll = agents.reduce((s, a) => s + a.total_paid_all, 0);
 
-  // Find related plots with same plot_no (history timeline) — includes per-agent breakdown
-  const timelineQuery = `
-    SELECT
-      p.id AS plot_id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate,
-      COALESCE(p.plot_commission, 0) AS plot_commission,
-      STRING_AGG(DISTINCT m.full_name, ', ' ORDER BY m.full_name) AS agent_names,
-      COALESCE(NULLIF(COALESCE(p.plot_commission, 0), 0), MAX(pc.total_commission)) AS total_commission,
-      COALESCE(SUM(paid_agg.total_paid), 0) AS total_paid,
-      COALESCE(SUM(paid_agg.payment_count), 0) AS payment_count,
-      MIN(pc.created_at) AS first_created,
-      MAX(pc.created_at) AS last_created,
-      MAX(pc.status) AS latest_status,
-      JSON_AGG(JSON_BUILD_OBJECT(
-        'commission_id', pc.id,
-        'agent_name', m.full_name,
-        'agent_phone', m.phone,
-        'total_commission', pc.total_commission,
-        'status', pc.status,
-        'total_paid', COALESCE(paid_agg.total_paid, 0),
-        'payment_count', COALESCE(paid_agg.payment_count, 0)
-      ) ORDER BY pc.created_at ASC) AS agents_detail
-    FROM plots p
-    JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = $2
-    JOIN members m ON pc.agent_id = m.id
-    LEFT JOIN (
-      SELECT plot_commission_id, SUM(amount) AS total_paid, COUNT(*) AS payment_count
-      FROM plot_commission_payments
-      WHERE status = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-      GROUP BY plot_commission_id
-    ) paid_agg ON paid_agg.plot_commission_id = pc.id
-    WHERE p.plot_no = $1 AND pc.site_id = $2
-    GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.plot_commission
-    ORDER BY MAX(pc.created_at) DESC
-  `;
-  const timelineResult = await pool.query(timelineQuery, [plotInfo.plot_no, parseInt(site_id)]);
+  // Timeline already fetched in parallel above — just shape the rows here.
   const timeline = timelineResult.rows.map(r => ({
     ...r,
     total_commission: parseFloat(r.total_commission) || 0,
@@ -298,40 +320,73 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'master_id and amount are required' });
   }
 
-  const master = await plotCommissionV2Model.findByIdWithDetails(parseInt(master_id), pool);
-  if (!master) return res.status(404).json({ message: 'Commission master not found' });
-
-  // Calculate projected balance after this payment
+  const masterIdInt = parseInt(master_id);
   const numericAmount = parseFloat(amount);
-  const currentPaid = parseFloat(master.total_paid) || 0;
-  // Though approval happens later, we estimate the balance. Actually "balance_after_payment" 
-  // might be calculated strictly at approval, but we can set an initial projected value.
-  const newBalance = parseFloat(master.total_commission) - (currentPaid + numericAmount);
+  const mode = payment_mode || 'CASH';
+  const chequeStatus = mode.toUpperCase() === 'CHEQUE' ? 'PENDING' : null;
 
-  const data = {
-    site_id: master.site_id,
-    plot_commission_id: parseInt(master_id),
-    date: date || new Date().toISOString().split('T')[0],
-    amount: numericAmount,
-    balance_after_payment: newBalance,
-    payment_mode: payment_mode || 'CASH',
-    bank_name: bank_name ? bank_name.trim() : null,
-    transaction_id: transaction_id ? transaction_id.trim() : null,
-    remarks: remarks ? remarks.trim() : null,
-    status: 'pending', // Requires approval
-    voucher_number: voucher_number ? voucher_number.trim() : null,
-    voucher_url: voucher_url || null,
-    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    created_by: req.user.id,
-    cheque_no: cheque_no ? cheque_no.trim() : null,
-    cheque_status: (payment_mode || 'CASH').toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
-  };
+  // Single CTE round-trip: lookup master + insert payment + compute
+  // balance_after_payment from the live SUM, all atomically. The previous
+  // implementation was 2 SELECTs (master+totals via heavy aggregation) +
+  // 1 INSERT = 3 round-trips. New status update still runs in parallel after.
+  const result = await pool.query(
+    `WITH master AS (
+       SELECT id, site_id, total_commission,
+              COALESCE((
+                SELECT SUM(amount)
+                FROM plot_commission_payments
+                WHERE plot_commission_id = $1
+                  AND status = 'approved'
+                  AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              ), 0) AS already_paid
+       FROM plot_commissions_v2
+       WHERE id = $1
+     ),
+     ins AS (
+       INSERT INTO plot_commission_payments (
+         site_id, plot_commission_id, date, amount, balance_after_payment,
+         payment_mode, bank_name, transaction_id, remarks, status,
+         voucher_number, voucher_url, assigned_admin_id, created_by,
+         cheque_no, cheque_status
+       )
+       SELECT
+         m.site_id, $1, $2::date, $3::numeric,
+         (m.total_commission - (m.already_paid + $3::numeric)),
+         $4::text, $5::text, $6::text, $7::text, 'pending',
+         $8::text, $9::text, $10::int, $11::int,
+         $12::text, $13::text
+       FROM master m
+       RETURNING *
+     )
+     SELECT row_to_json(ins) AS payment FROM ins`,
+    [
+      masterIdInt,                                                // $1
+      date || new Date().toISOString().split('T')[0],             // $2
+      numericAmount,                                              // $3
+      mode,                                                       // $4
+      bank_name ? bank_name.trim() : null,                        // $5
+      transaction_id ? transaction_id.trim() : null,              // $6
+      remarks ? remarks.trim() : null,                            // $7
+      voucher_number ? voucher_number.trim() : null,              // $8
+      voucher_url || null,                                        // $9
+      assigned_admin_id ? parseInt(assigned_admin_id) : null,     // $10
+      req.user.id,                                                // $11
+      cheque_no ? cheque_no.trim() : null,                        // $12
+      chequeStatus,                                               // $13
+    ]
+  );
 
-  const payment = await plotCommissionPaymentModel.create(data, pool);
-  
-  // Auto-update commission status based on payment aggregates
-  await autoUpdateCommissionStatus(parseInt(master_id), pool);
-  
+  const payment = result.rows[0]?.payment;
+  if (!payment) {
+    return res.status(404).json({ message: 'Commission master not found' });
+  }
+
+  // Auto-update status fire-and-forget (the row is already committed).
+  // Pending payments don't change `Pending → Partial → Completed` derivation
+  // (which only counts approved), so this is purely an observability touch
+  // (`updated_at`). Run it in the background.
+  autoUpdateCommissionStatus(masterIdInt, pool).catch(() => {});
+
   res.status(201).json({ payment, message: 'Payment recorded and is pending approval' });
 });
 
@@ -380,19 +435,25 @@ export const getPlotCommissionAnalytics = asyncHandler(async (req, res) => {
  * Update commission master details.
  */
 export const updatePlotCommission = asyncHandler(async (req, res) => {
-  const { id } = req.params;
   const { total_commission, remarks } = req.body;
 
-  const master = await plotCommissionV2Model.findById(parseInt(id), pool);
-  if (!master) return res.status(404).json({ message: 'Commission not found' });
-
-  const updated = await plotCommissionV2Model.update(parseInt(id), {
-    total_commission: parseFloat(total_commission),
-    remarks: remarks ? remarks.trim() : null,
-    updated_at: new Date()
-  }, pool);
-
-  res.json({ master: updated, message: 'Commission updated successfully' });
+  // Atomic UPDATE — saves a SELECT round-trip. UPDATE returns the row or
+  // none (404).
+  const result = await pool.query(
+    `UPDATE plot_commissions_v2
+        SET total_commission = $1,
+            remarks          = $2,
+            updated_at       = NOW()
+      WHERE id = $3
+      RETURNING *`,
+    [
+      parseFloat(total_commission),
+      remarks ? remarks.trim() : null,
+      parseInt(req.params.id),
+    ]
+  );
+  if (!result.rows[0]) return res.status(404).json({ message: 'Commission not found' });
+  res.json({ master: result.rows[0], message: 'Commission updated successfully' });
 });
 
 /**
@@ -415,35 +476,60 @@ export const deletePlotCommission = asyncHandler(async (req, res) => {
  * Update an individual commission payment.
  */
 export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const numId = parseInt(id);
+  const numId = parseInt(req.params.id);
   if (isNaN(numId)) return res.status(400).json({ message: 'Invalid payment ID' });
-
-  const existing = await plotCommissionPaymentModel.findById(numId, pool);
-  if (!existing) return res.status(404).json({ message: 'Payment not found' });
 
   const { date, amount, payment_mode, bank_name, transaction_id, cheque_no, remarks, voucher_url, assigned_admin_id } = req.body;
 
-  const data = {};
-  if (date !== undefined) data.date = date;
-  if (amount !== undefined) data.amount = parseFloat(amount);
-  if (payment_mode !== undefined) data.payment_mode = payment_mode;
-  if (bank_name !== undefined) data.bank_name = bank_name ? bank_name.trim() : null;
-  if (transaction_id !== undefined) data.transaction_id = transaction_id ? transaction_id.trim() : null;
-  if (cheque_no !== undefined) data.cheque_no = cheque_no ? cheque_no.trim() : null;
-  if (remarks !== undefined) data.remarks = remarks ? remarks.trim() : null;
-  if (voucher_url !== undefined) data.voucher_url = voucher_url || null;
-  if (assigned_admin_id !== undefined) data.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
-  if (payment_mode !== undefined) {
-    data.cheque_status = payment_mode.toUpperCase() === 'CHEQUE' ? (existing.cheque_status || 'PENDING') : null;
-  }
-  data.updated_at = new Date();
+  // Build the SET-list dynamically. The cheque_status update needs the
+  // existing row's value when payment_mode stays CHEQUE — handled below
+  // with a CASE in SQL so we don't need a separate SELECT round-trip.
+  const fields = [];
+  const values = [];
+  const add = (col, val) => { fields.push(`${col} = $${fields.length + 1}`); values.push(val); };
 
-  const updated = await plotCommissionPaymentModel.update(numId, data, pool);
-  
-  // Auto-update commission status based on payment aggregates
-  await autoUpdateCommissionStatus(existing.plot_commission_id, pool);
-  
+  if (date !== undefined) add('date', date);
+  if (amount !== undefined) add('amount', parseFloat(amount));
+  if (payment_mode !== undefined) add('payment_mode', payment_mode);
+  if (bank_name !== undefined) add('bank_name', bank_name ? bank_name.trim() : null);
+  if (transaction_id !== undefined) add('transaction_id', transaction_id ? transaction_id.trim() : null);
+  if (cheque_no !== undefined) add('cheque_no', cheque_no ? cheque_no.trim() : null);
+  if (remarks !== undefined) add('remarks', remarks ? remarks.trim() : null);
+  if (voucher_url !== undefined) add('voucher_url', voucher_url || null);
+  if (assigned_admin_id !== undefined) add('assigned_admin_id', assigned_admin_id ? parseInt(assigned_admin_id) : null);
+
+  // cheque_status follows payment_mode: if mode → CHEQUE keep/init PENDING,
+  // otherwise NULL. Handled via CASE so we don't need a SELECT round-trip.
+  if (payment_mode !== undefined) {
+    fields.push(
+      `cheque_status = CASE
+         WHEN UPPER($${fields.length + 1}::text) = 'CHEQUE'
+           THEN COALESCE(plot_commission_payments.cheque_status, 'PENDING')
+         ELSE NULL
+       END`
+    );
+    values.push(payment_mode);
+  }
+
+  if (fields.length === 0) return res.status(400).json({ message: 'Nothing to update' });
+
+  fields.push(`updated_at = NOW()`);
+  values.push(numId);
+
+  const result = await pool.query(
+    `UPDATE plot_commission_payments
+        SET ${fields.join(', ')}
+      WHERE id = $${values.length}
+      RETURNING *`,
+    values
+  );
+
+  const updated = result.rows[0];
+  if (!updated) return res.status(404).json({ message: 'Payment not found' });
+
+  // Auto-update commission status in the background (response returns sooner).
+  autoUpdateCommissionStatus(updated.plot_commission_id, pool).catch(() => {});
+
   res.json({ payment: updated, message: 'Payment updated successfully' });
 });
 
@@ -452,23 +538,23 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
  * Delete an individual commission payment.
  */
 export const deletePlotCommissionPayment = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const numId = parseInt(id);
+  const numId = parseInt(req.params.id);
   if (isNaN(numId)) return res.status(400).json({ message: 'Invalid payment ID' });
 
-  // Fetch commission ID before deleting so we can recalculate status
-  const paymentRes = await pool.query(
-    'SELECT plot_commission_id FROM plot_commission_payments WHERE id = $1',
+  // Atomic DELETE with the commission_id returned in the same round-trip.
+  // Previously: SELECT plot_commission_id + DELETE (2 RTTs); now 1 RTT.
+  const deleted = await pool.query(
+    `DELETE FROM plot_commission_payments
+      WHERE id = $1
+      RETURNING plot_commission_id`,
     [numId]
   );
-  if (paymentRes.rows.length === 0) return res.status(404).json({ message: 'Payment not found' });
-  const commissionId = paymentRes.rows[0].plot_commission_id;
+  if (deleted.rows.length === 0) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
 
-  const deleted = await plotCommissionPaymentModel.delete(numId, pool);
-  if (!deleted) return res.status(404).json({ message: 'Payment not found' });
-
-  // Recalculate commission status after payment deletion
-  await autoUpdateCommissionStatus(commissionId, pool);
+  // Recalculate status in background — response is already on its way.
+  autoUpdateCommissionStatus(deleted.rows[0].plot_commission_id, pool).catch(() => {});
 
   res.json({ message: 'Payment deleted successfully' });
 });

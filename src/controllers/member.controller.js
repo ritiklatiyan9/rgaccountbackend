@@ -64,20 +64,23 @@ const DOC_FIELDS = [
   'offer_letter_url', 'other_certificate_url',
 ];
 
-/** Upload all document files from req.files and return a map of field→url */
+/** Upload all document files from req.files in PARALLEL and return a map of field→url */
 const uploadDocuments = async (files) => {
   const urls = {};
   if (!files) return urls;
+
+  const tasks = [];
   for (const fieldName of DOC_FIELDS) {
     const fileArr = files[fieldName];
     if (fileArr && fileArr.length > 0) {
-      try {
-        urls[fieldName] = await uploadSingle(fileArr[0], 'cloudinary');
-      } catch (err) {
-        console.error(`Upload failed for ${fieldName}:`, err);
-      }
+      tasks.push(
+        uploadSingle(fileArr[0], 'cloudinary')
+          .then((url) => { urls[fieldName] = url; })
+          .catch((err) => { console.error(`Upload failed for ${fieldName}:`, err?.message || err); })
+      );
     }
   }
+  if (tasks.length > 0) await Promise.all(tasks);
   return urls;
 };
 
@@ -92,19 +95,23 @@ export const createMember = asyncHandler(async (req, res) => {
   data.site_id = parseInt(site_id);
   data.created_by = req.user.id;
 
-  // Check phone uniqueness within site
-  if (data.phone) {
-    const { rows } = await pool.query(
-      `SELECT id, full_name FROM members WHERE site_id = $1 AND phone = $2`,
-      [data.site_id, data.phone]
-    );
-    if (rows.length > 0) {
-      return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${rows[0].full_name}` });
-    }
+  // Run phone uniqueness check + document uploads in PARALLEL
+  const phoneCheckPromise = data.phone
+    ? pool.query(
+        `SELECT id, full_name FROM members WHERE site_id = $1 AND phone = $2 LIMIT 1`,
+        [data.site_id, data.phone]
+      )
+    : Promise.resolve({ rows: [] });
+
+  const [phoneCheck, docUrls] = await Promise.all([
+    phoneCheckPromise,
+    uploadDocuments(req.files),
+  ]);
+
+  if (phoneCheck.rows.length > 0) {
+    return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name}` });
   }
 
-  // Handle document uploads (photo + KYC + employee docs)
-  const docUrls = await uploadDocuments(req.files);
   Object.assign(data, docUrls);
 
   const member = await memberModel.create(data, pool);
@@ -148,25 +155,41 @@ export const getMember = asyncHandler(async (req, res) => {
 
 /** PUT /members/:id */
 export const updateMember = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const existing = await memberModel.findById(parseInt(id), pool);
-  if (!existing) return res.status(404).json({ message: 'Member not found' });
+  const memberId = parseInt(req.params.id);
 
+  // Run all 3 in PARALLEL: existence/site lookup, phone uniqueness, document uploads.
+  // The phone check runs unconditionally (with `$2 IS NULL` guard) so we don't add a serial step.
   const data = sanitize(req.body);
 
-  // Check phone uniqueness within site (exclude current member)
-  if (data.phone) {
-    const { rows } = await pool.query(
-      `SELECT id, full_name FROM members WHERE site_id = $1 AND phone = $2 AND id != $3`,
-      [existing.site_id, data.phone, parseInt(id)]
-    );
-    if (rows.length > 0) {
-      return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${rows[0].full_name}` });
-    }
+  const existingPromise = pool.query(
+    `SELECT id, site_id FROM members WHERE id = $1`,
+    [memberId]
+  );
+  const phoneCheckPromise = data.phone
+    ? pool.query(
+        `SELECT m.id, m.full_name
+           FROM members m
+           JOIN members me ON me.id = $2
+          WHERE m.site_id = me.site_id AND m.phone = $1 AND m.id != $2
+          LIMIT 1`,
+        [data.phone, memberId]
+      )
+    : Promise.resolve({ rows: [] });
+  const docUploadPromise = uploadDocuments(req.files);
+
+  const [existingRes, phoneCheck, docUrls] = await Promise.all([
+    existingPromise,
+    phoneCheckPromise,
+    docUploadPromise,
+  ]);
+
+  const existing = existingRes.rows[0];
+  if (!existing) return res.status(404).json({ message: 'Member not found' });
+
+  if (phoneCheck.rows.length > 0) {
+    return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name}` });
   }
 
-  // Handle document uploads (photo + KYC + employee docs)
-  const docUrls = await uploadDocuments(req.files);
   Object.assign(data, docUrls);
 
   // Handle removing documents
@@ -178,7 +201,7 @@ export const updateMember = asyncHandler(async (req, res) => {
 
   if (Object.keys(data).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
-  const updated = await memberModel.update(parseInt(id), data, pool);
+  const updated = await memberModel.update(memberId, data, pool);
   res.json({ member: updated });
 });
 

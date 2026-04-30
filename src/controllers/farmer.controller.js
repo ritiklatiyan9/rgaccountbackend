@@ -94,18 +94,15 @@ export const getFarmer = asyncHandler(async (req, res) => {
  * Update a farmer
  */
 export const updateFarmer = asyncHandler(async (req, res) => {
-  const { id } = req.params;
+  const farmerId = parseInt(req.params.id);
   const {
     name, phone, address, total_amount, interest_rate, notes, status, member_id,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
     land_size_bigha, land_rate, commission_percentage, commission_amount,
   } = req.body;
 
-  const farmer = await farmerModel.findById(parseInt(id), pool);
-  if (!farmer) {
-    return res.status(404).json({ message: 'Farmer not found' });
-  }
-
+  // Build the update set without an extra existence-check round-trip — the
+  // UPDATE itself returns 0 rows if the id doesn't exist.
   const updateData = {};
   if (name !== undefined) updateData.name = name;
   if (phone !== undefined) updateData.phone = phone;
@@ -127,7 +124,14 @@ export const updateFarmer = asyncHandler(async (req, res) => {
   if (commission_percentage !== undefined) updateData.commission_percentage = commission_percentage != null && commission_percentage !== '' ? parseFloat(commission_percentage) : null;
   if (commission_amount !== undefined) updateData.commission_amount = commission_amount != null && commission_amount !== '' ? parseFloat(commission_amount) : null;
 
-  const updated = await farmerModel.update(parseInt(id), updateData, pool);
+  if (Object.keys(updateData).length === 0) {
+    return res.status(400).json({ message: 'Nothing to update' });
+  }
+
+  const updated = await farmerModel.update(farmerId, updateData, pool);
+  if (!updated) {
+    return res.status(404).json({ message: 'Farmer not found' });
+  }
   res.json({ farmer: updated });
 });
 
@@ -136,14 +140,14 @@ export const updateFarmer = asyncHandler(async (req, res) => {
  * Delete a farmer and all payments
  */
 export const deleteFarmer = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  const farmer = await farmerModel.findById(parseInt(id), pool);
-  if (!farmer) {
+  // Atomic DELETE — if no row was deleted, return 404. Saves a SELECT round-trip.
+  const result = await pool.query(
+    `DELETE FROM farmers WHERE id = $1 RETURNING id`,
+    [parseInt(req.params.id)]
+  );
+  if (!result.rows[0]) {
     return res.status(404).json({ message: 'Farmer not found' });
   }
-
-  await farmerModel.delete(parseInt(id), pool);
   res.json({ message: 'Farmer deleted' });
 });
 
@@ -164,92 +168,125 @@ export const createPayment = asyncHandler(async (req, res) => {
     voucher_url, assigned_admin_id,
   } = req.body;
 
-  const farmer = await farmerModel.findById(parseInt(farmerId), pool);
-  if (!farmer) {
-    return res.status(404).json({ message: 'Farmer not found' });
-  }
-
   if (!particular) {
     return res.status(400).json({ message: 'Particular (payment method) is required' });
   }
 
+  const farmerIdInt = parseInt(farmerId);
   const totalAmount = parseFloat(amount) || 0;
   const mode = (payment_mode || 'CASH').toUpperCase();
   const cashAmt = mode === 'BANK' || mode === 'CHEQUE' ? 0 : (mode === 'SPLIT' ? (parseFloat(cash_amount) || 0) : totalAmount);
   const bankAmt = mode === 'CASH' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmount);
-
   const paymentDate = date || new Date().toISOString().split('T')[0];
+  const adminId = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+  const chequeNo = req.body.cheque_no ? String(req.body.cheque_no).trim() : null;
+  const chequeStatus = mode === 'CHEQUE' ? 'PENDING' : null;
+  const userId = req.user.id;
+  const trimmedRemarks = remarks ? remarks.trim() : null;
+  const particularUpper = String(particular).toUpperCase();
+  const bankNameUpper = bank_name ? String(bank_name).toUpperCase() : null;
+  const bankRemarks = [remarks, bank_reference ? `Ref: ${bank_reference}` : null, bank_name ? `Bank: ${bank_name}` : null].filter(Boolean).join(' | ') || null;
 
-  const paymentData = {
-    farmer_id: parseInt(farmerId),
-    date: paymentDate,
-    particular,
-    amount: totalAmount,
-    by_note: by_note || null,
-    remarks: remarks || null,
-    payment_mode: mode,
-    cash_amount: cashAmt,
-    bank_amount: bankAmt,
-    bank_name: bank_name || null,
-    bank_account_no: bank_account_no || null,
-    bank_reference: bank_reference || null,
-    bank_ifsc: bank_ifsc || null,
-    voucher_url: voucher_url || null,
-    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    status: 'pending',
-    cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
-    cheque_status: mode === 'CHEQUE' ? 'PENDING' : null,
-    created_by: req.user.id,
-  };
+  // ─────────────────────────────────────────────────────────────
+  // SINGLE-ROUND-TRIP create: farmer lookup + payment INSERT + 0/1/2
+  // day_book INSERTs in one CTE. Previously this was 3 serial round-trips
+  // (SELECT farmer → INSERT payment → INSERT day_book ×N).
+  // ─────────────────────────────────────────────────────────────
+  const result = await pool.query(
+    `WITH f AS (
+       SELECT id, site_id, name FROM farmers WHERE id = $1
+     ),
+     new_payment AS (
+       INSERT INTO farmer_payments (
+         farmer_id, date, particular, amount, by_note, remarks,
+         payment_mode, cash_amount, bank_amount, bank_name, bank_account_no,
+         bank_reference, bank_ifsc, voucher_url, assigned_admin_id, status,
+         cheque_no, cheque_status, created_by
+       )
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, $17, $18
+       FROM f
+       RETURNING *
+     ),
+     db_cash AS (
+       INSERT INTO day_book (
+         site_id, date, particular, entry_type, debit, credit, remarks,
+         payment_mode, category, from_entity, to_entity,
+         created_by, assigned_admin_id, farmer_payment_id
+       )
+       SELECT
+         f.site_id,
+         $2::date,
+         (UPPER(f.name) || ' - FARMER PAYMENT (CASH)'),
+         'FARMER PAYMENT',
+         $19::numeric, 0, $20::text,
+         'CASH', 'FARMER PAYMENT', NULL, UPPER(f.name),
+         $18::int, $15::int, np.id
+       FROM f, new_payment np
+       WHERE $19::numeric > 0
+       RETURNING *
+     ),
+     db_bank AS (
+       INSERT INTO day_book (
+         site_id, date, particular, entry_type, debit, credit, remarks,
+         payment_mode, category, from_entity, to_entity,
+         account_no, branch, created_by, assigned_admin_id, farmer_payment_id
+       )
+       SELECT
+         f.site_id,
+         $2::date,
+         (UPPER(f.name) || ' - FARMER PAYMENT (BANK)'),
+         'FARMER PAYMENT',
+         $21::numeric, 0, $22::text,
+         $23::text, 'FARMER PAYMENT', $24::text, UPPER(f.name),
+         $11::text, $13::text, $18::int, $15::int, np.id
+       FROM f, new_payment np
+       WHERE $21::numeric > 0
+       RETURNING *
+     )
+     SELECT
+       (SELECT row_to_json(np) FROM new_payment np) AS payment,
+       COALESCE(
+         (SELECT json_agg(row_to_json(d)) FROM (SELECT * FROM db_cash UNION ALL SELECT * FROM db_bank) d),
+         '[]'::json
+       ) AS daybook_entries,
+       (SELECT id FROM f) AS farmer_id`,
+    [
+      farmerIdInt,                  // $1
+      paymentDate,                  // $2
+      particular,                   // $3
+      totalAmount,                  // $4
+      by_note || null,              // $5
+      remarks || null,              // $6
+      mode,                         // $7
+      cashAmt,                      // $8
+      bankAmt,                      // $9
+      bank_name || null,            // $10
+      bank_account_no || null,      // $11
+      bank_reference || null,       // $12
+      bank_ifsc || null,            // $13
+      voucher_url || null,          // $14
+      adminId,                      // $15
+      chequeNo,                     // $16
+      chequeStatus,                 // $17
+      userId,                       // $18
+      cashAmt,                      // $19 (cash debit / WHERE > 0)
+      trimmedRemarks,               // $20 (cash remarks)
+      bankAmt,                      // $21 (bank debit / WHERE > 0)
+      bankRemarks,                  // $22 (bank remarks)
+      particularUpper,              // $23 (bank payment_mode)
+      bankNameUpper,                // $24 (bank from_entity)
+    ]
+  );
 
-  const payment = await farmerPaymentModel.create(paymentData, pool);
-
-  // ── Auto-create DayBook entries ──
-  const dayBookEntries = [];
-
-  if (cashAmt > 0) {
-    const cashEntry = await dayBookModel.create({
-      site_id: farmer.site_id,
-      date: paymentDate,
-      particular: `${farmer.name} - FARMER PAYMENT (CASH)`.toUpperCase(),
-      entry_type: 'FARMER PAYMENT',
-      debit: cashAmt,
-      credit: 0,
-      remarks: remarks ? remarks.trim() : null,
-      payment_mode: 'CASH',
-      category: 'FARMER PAYMENT',
-      from_entity: null,
-      to_entity: farmer.name.toUpperCase(),
-      created_by: req.user.id,
-      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-      farmer_payment_id: payment.id,
-    }, pool);
-    dayBookEntries.push(cashEntry);
+  const row = result.rows[0];
+  if (!row || !row.payment) {
+    return res.status(404).json({ message: 'Farmer not found' });
   }
 
-  if (bankAmt > 0) {
-    const bankEntry = await dayBookModel.create({
-      site_id: farmer.site_id,
-      date: paymentDate,
-      particular: `${farmer.name} - FARMER PAYMENT (BANK)`.toUpperCase(),
-      entry_type: 'FARMER PAYMENT',
-      debit: bankAmt,
-      credit: 0,
-      remarks: [remarks, bank_reference ? `Ref: ${bank_reference}` : null, bank_name ? `Bank: ${bank_name}` : null].filter(Boolean).join(' | ') || null,
-      payment_mode: particular.toUpperCase(),
-      category: 'FARMER PAYMENT',
-      from_entity: bank_name ? bank_name.toUpperCase() : null,
-      to_entity: farmer.name.toUpperCase(),
-      account_no: bank_account_no || null,
-      branch: bank_ifsc || null,
-      created_by: req.user.id,
-      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-      farmer_payment_id: payment.id,
-    }, pool);
-    dayBookEntries.push(bankEntry);
-  }
-
-  res.status(201).json({ payment, daybook_entries: dayBookEntries });
+  res.status(201).json({
+    payment: row.payment,
+    daybook_entries: row.daybook_entries || [],
+  });
 });
 
 /**
@@ -257,34 +294,51 @@ export const createPayment = asyncHandler(async (req, res) => {
  * List all payments for a farmer
  */
 export const listPayments = asyncHandler(async (req, res) => {
-  const { farmerId } = req.params;
+  const farmerId = parseInt(req.params.farmerId);
 
-  const farmer = await farmerModel.findByIdWithSummary(parseInt(farmerId), pool);
+  // The previous implementation ran 4–5 SERIAL queries:
+  //   findByIdWithSummary → findByFarmerId → getTotalPaid → getTotalInterest → site
+  // findByIdWithSummary already returns total_paid + total_interest, so two of
+  // those queries were duplicated work. Now: 2 parallel reads (farmer+site,
+  // payments) and totals are derived from the data we already have.
+  const farmerWithSitePromise = pool.query(
+    `SELECT
+       f.*,
+       COALESCE(SUM(fp.amount), 0) AS total_paid,
+       COALESCE(SUM(fp.interest_amount), 0) AS total_interest,
+       COUNT(fp.id) AS payment_count,
+       s.name  AS site_name,
+       s.code  AS site_code,
+       s.address AS site_address,
+       s.city  AS site_city,
+       s.state AS site_state
+     FROM farmers f
+     LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
+       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     LEFT JOIN sites s ON s.id = f.site_id
+     WHERE f.id = $1
+     GROUP BY f.id, s.id`,
+    [farmerId]
+  );
+  const paymentsPromise = farmerPaymentModel.findByFarmerId(farmerId, pool);
+
+  const [farmerRes, payments] = await Promise.all([farmerWithSitePromise, paymentsPromise]);
+  const farmer = farmerRes.rows[0];
   if (!farmer) {
     return res.status(404).json({ message: 'Farmer not found' });
   }
 
-  const payments = await farmerPaymentModel.findByFarmerId(parseInt(farmerId), pool);
-  const totalPaid = await farmerPaymentModel.getTotalPaid(parseInt(farmerId), pool);
-  const totalInterest = await farmerPaymentModel.getTotalInterest(parseInt(farmerId), pool);
-
-  // Cash/Bank paid totals from payments
+  // Cash / bank paid totals derived from the already-fetched payments — no
+  // extra DB round-trip required.
   let cashPaid = 0, bankPaid = 0;
   for (const p of payments) {
+    if (p.cheque_status && (p.cheque_status === 'BOUNCED' || p.cheque_status === 'RETURNED')) continue;
     cashPaid += parseFloat(p.cash_amount) || 0;
     bankPaid += parseFloat(p.bank_amount) || 0;
   }
 
-  // Fetch site details once so the QR token can embed site name/address
-  // (the payload is HMAC-signed, so this info is tamper-proof on the verify page).
-  let site = null;
-  if (farmer.site_id) {
-    const siteRes = await pool.query(
-      'SELECT name, code, address, city, state FROM sites WHERE id = $1',
-      [farmer.site_id]
-    );
-    site = siteRes.rows[0] || null;
-  }
+  const totalPaid = parseFloat(farmer.total_paid) || 0;
+  const totalInterest = parseFloat(farmer.total_interest) || 0;
 
   const paymentsWithVerify = payments.map((p) => ({
     ...p,
@@ -295,9 +349,9 @@ export const listPayments = asyncHandler(async (req, res) => {
       a: p.amount,
       d: p.date,
       pm: p.payment_mode || null,
-      sn: site?.name || null,
-      sy: site?.city || null,
-      ss: site?.state || null,
+      sn: farmer.site_name || null,
+      sy: farmer.site_city || null,
+      ss: farmer.site_state || null,
     }),
   }));
 
@@ -324,17 +378,13 @@ export const listPayments = asyncHandler(async (req, res) => {
  * Update a payment
  */
 export const updatePayment = asyncHandler(async (req, res) => {
-  const { farmerId, paymentId } = req.params;
+  const farmerId = parseInt(req.params.farmerId);
+  const paymentId = parseInt(req.params.paymentId);
   const {
     date, particular, amount, by_note, remarks,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
     voucher_url,
   } = req.body;
-
-  const payment = await farmerPaymentModel.findById(parseInt(paymentId), pool);
-  if (!payment || payment.farmer_id !== parseInt(farmerId)) {
-    return res.status(404).json({ message: 'Payment not found' });
-  }
 
   const updateData = {};
   if (date !== undefined) updateData.date = date;
@@ -351,8 +401,26 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
 
-  const updated = await farmerPaymentModel.update(parseInt(paymentId), updateData, pool);
-  res.json({ payment: updated });
+  if (Object.keys(updateData).length === 0) {
+    return res.status(400).json({ message: 'Nothing to update' });
+  }
+
+  // Atomic UPDATE scoped by both id AND farmer_id so we don't need a separate
+  // SELECT round-trip to verify ownership.
+  const keys = Object.keys(updateData);
+  const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = [...Object.values(updateData), paymentId, farmerId];
+  const result = await pool.query(
+    `UPDATE farmer_payments
+        SET ${setClause}
+      WHERE id = $${keys.length + 1} AND farmer_id = $${keys.length + 2}
+      RETURNING *`,
+    values
+  );
+  if (!result.rows[0]) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
+  res.json({ payment: result.rows[0] });
 });
 
 /**
@@ -360,21 +428,24 @@ export const updatePayment = asyncHandler(async (req, res) => {
  * Delete a payment
  */
 export const deletePayment = asyncHandler(async (req, res) => {
-  const { farmerId, paymentId } = req.params;
+  const farmerId = parseInt(req.params.farmerId);
+  const paymentId = parseInt(req.params.paymentId);
 
-  const payment = await farmerPaymentModel.findById(parseInt(paymentId), pool);
-  if (!payment || payment.farmer_id !== parseInt(farmerId)) {
+  // Single round-trip: cascade-delete the linked DayBook rows AND the payment
+  // in one atomic statement (CTE). Previously: SELECT + DELETE day_book +
+  // DELETE payment = 3 serial round-trips.
+  const result = await pool.query(
+    `WITH del_daybook AS (
+       DELETE FROM day_book WHERE farmer_payment_id = $1
+     )
+     DELETE FROM farmer_payments
+      WHERE id = $1 AND farmer_id = $2
+      RETURNING id`,
+    [paymentId, farmerId]
+  );
+  if (!result.rows[0]) {
     return res.status(404).json({ message: 'Payment not found' });
   }
-
-  // Delete linked DayBook entries
-  try {
-    await pool.query(`DELETE FROM day_book WHERE farmer_payment_id = $1`, [parseInt(paymentId)]);
-  } catch (err) {
-    console.error('[FarmerPayment] Failed to delete DayBook entries:', err.message);
-  }
-
-  await farmerPaymentModel.delete(parseInt(paymentId), pool);
   res.json({ message: 'Payment deleted' });
 });
 

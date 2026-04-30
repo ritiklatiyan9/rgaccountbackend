@@ -20,7 +20,7 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
 
   const { rows } = await pool.query(
     `WITH first_entry AS (
-       -- Find the earliest actual data date for this site (avoids empty leading buckets)
+       -- Earliest actual data date for this site (avoids empty leading buckets)
        SELECT MIN(d) AS min_date FROM (
          SELECT MIN(pp.date) AS d FROM plot_payments pp JOIN plots plt ON plt.id = pp.plot_id WHERE pp.site_id = $1 AND pp.date >= $2 AND pp.date < $3 ${oldFilter}
          UNION ALL
@@ -35,10 +35,37 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          SELECT MIN(payment_date) FROM vendor_payments          WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
        ) sub
      ),
+     last_entry AS (
+       -- Latest actual data date for this site. The 'overall' preset sends
+       -- end = 2100-01-01, which would otherwise produce ~74 empty yearly
+       -- buckets stretching out to 2099. Cap the upper bound at the real
+       -- max data date so the chart only spans years that actually contain
+       -- entries.
+       SELECT MAX(d) AS max_date FROM (
+         SELECT MAX(pp.date) AS d FROM plot_payments pp JOIN plots plt ON plt.id = pp.plot_id WHERE pp.site_id = $1 AND pp.date >= $2 AND pp.date < $3 ${oldFilter}
+         UNION ALL
+         SELECT MAX(pip.payment_date) FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id WHERE p.site_id = $1 AND pip.payment_date >= $2 AND pip.payment_date < $3 ${oldFilterP}
+         UNION ALL
+         SELECT MAX(fp.date) FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id WHERE f.site_id = $1 AND fp.date >= $2 AND fp.date < $3
+         UNION ALL
+         SELECT MAX(date)    AS d FROM expenses                 WHERE site_id = $1 AND date >= $2 AND date < $3
+         UNION ALL
+         SELECT MAX(date)    AS d FROM plot_commission_payments WHERE site_id = $1 AND date >= $2 AND date < $3
+         UNION ALL
+         SELECT MAX(payment_date) FROM vendor_payments          WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
+       ) sub
+     ),
      range_series AS (
        SELECT generate_series(
          date_trunc($4::text, COALESCE((SELECT min_date FROM first_entry), $2::date)),
-         date_trunc($4::text, $3::date - interval '1 day'),
+         -- Upper bound = LEAST(requested end − 1 day, latest actual data date).
+         -- For "Today / This Week / This Month / This Year" the requested
+         -- end is recent so LEAST is a no-op. For "Overall" (end = 2100-01-01)
+         -- it shrinks the series to the real max data date — no empty tail.
+         date_trunc($4::text, LEAST(
+           $3::date - interval '1 day',
+           COALESCE((SELECT max_date FROM last_entry), $3::date - interval '1 day')
+         )),
          ('1 ' || $4::text)::interval
        )::date AS bucket
      ),

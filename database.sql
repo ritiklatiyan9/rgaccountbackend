@@ -139,6 +139,12 @@ CREATE TABLE IF NOT EXISTS farmer_payments (
 
 CREATE INDEX IF NOT EXISTS idx_farmer_payments_farmer ON farmer_payments(farmer_id);
 CREATE INDEX IF NOT EXISTS idx_farmer_payments_date   ON farmer_payments(date);
+-- Farmer module performance indexes (see migration 051_farmer_performance_indexes.js)
+CREATE INDEX IF NOT EXISTS idx_farmers_site_status        ON farmers(site_id, status);
+CREATE INDEX IF NOT EXISTS idx_farmers_site_created_at    ON farmers(site_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_farmer_payments_active     ON farmer_payments(farmer_id)
+  WHERE cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED');
+CREATE INDEX IF NOT EXISTS idx_farmer_payments_farmer_date ON farmer_payments(farmer_id, date);
 
 CREATE TRIGGER trg_farmers_updated_at
   BEFORE UPDATE ON farmers
@@ -238,6 +244,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cfe_source_module_source_id ON cash_flow_en
 CREATE INDEX IF NOT EXISTS idx_cfe_from_firm_id ON cash_flow_entries(from_firm_id);
 CREATE INDEX IF NOT EXISTS idx_cfe_to_firm_id ON cash_flow_entries(to_firm_id);
 CREATE INDEX IF NOT EXISTS idx_cfe_is_firm_transaction ON cash_flow_entries(is_firm_transaction);
+-- Personal Ledger performance indexes (see migration 053_cashflow_performance_indexes.js)
+CREATE INDEX IF NOT EXISTS idx_cfe_active_month
+  ON cash_flow_entries(cash_flow_month_id)
+  WHERE (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+    AND (status IS NULL OR status != 'rejected');
+CREATE INDEX IF NOT EXISTS idx_cfe_month_cash_type ON cash_flow_entries(cash_flow_month_id, cash_type);
+CREATE INDEX IF NOT EXISTS idx_cfe_month_date      ON cash_flow_entries(cash_flow_month_id, date, created_at);
+CREATE INDEX IF NOT EXISTS idx_cfe_site_particular ON cash_flow_entries(site_id, particular);
+CREATE INDEX IF NOT EXISTS idx_cfm_site_ledger_period
+  ON cash_flow_months(site_id, ledger_name, year DESC, month DESC);
 
 CREATE TRIGGER trg_cash_flow_entries_updated_at
   BEFORE UPDATE ON cash_flow_entries
@@ -297,6 +313,14 @@ CREATE TABLE IF NOT EXISTS vendor_payments (
 CREATE INDEX IF NOT EXISTS idx_vendor_payments_commitment_id ON vendor_payments(commitment_id);
 CREATE INDEX IF NOT EXISTS idx_vendor_payments_site_id ON vendor_payments(site_id);
 CREATE INDEX IF NOT EXISTS idx_vendor_payments_date ON vendor_payments(payment_date);
+
+-- Vendor module performance indexes (see migration 050_vendor_performance_indexes.js)
+CREATE INDEX IF NOT EXISTS idx_vc_site_status        ON vendor_commitments(site_id, status);
+CREATE INDEX IF NOT EXISTS idx_vc_site_head          ON vendor_commitments(site_id, head_id);
+CREATE INDEX IF NOT EXISTS idx_vc_site_created_at    ON vendor_commitments(site_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_vp_commitment_active  ON vendor_payments(commitment_id)
+  WHERE cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED');
+CREATE INDEX IF NOT EXISTS idx_vp_site_date          ON vendor_payments(site_id, payment_date DESC);
 
 CREATE TRIGGER trg_vendor_heads_updated_at
   BEFORE UPDATE ON vendor_heads
@@ -379,6 +403,19 @@ CREATE INDEX IF NOT EXISTS idx_ft_cash_flow_entry_id ON firm_transactions(cash_f
 CREATE INDEX IF NOT EXISTS idx_ft_transfer_group_id ON firm_transactions(transfer_group_id);
 CREATE INDEX IF NOT EXISTS idx_ft_transfer_to_firm_id ON firm_transactions(transfer_to_firm_id);
 CREATE INDEX IF NOT EXISTS idx_ft_is_firm_to_firm_transfer ON firm_transactions(is_firm_to_firm_transfer);
+-- Firm Transactions performance indexes (see migration 054_firm_performance_indexes.js)
+CREATE INDEX IF NOT EXISTS idx_ft_active_firm ON firm_transactions(firm_id)
+  WHERE cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED');
+CREATE INDEX IF NOT EXISTS idx_ft_firm_date  ON firm_transactions(firm_id, date, created_at);
+CREATE INDEX IF NOT EXISTS idx_ft_site_date  ON firm_transactions(site_id, date DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ft_site_name  ON firm_transactions(site_id, name)    WHERE name IS NOT NULL AND name != '';
+CREATE INDEX IF NOT EXISTS idx_ft_site_purpose ON firm_transactions(site_id, purpose) WHERE purpose IS NOT NULL AND purpose != '';
+CREATE INDEX IF NOT EXISTS idx_ft_site_remark  ON firm_transactions(site_id, remark)  WHERE remark IS NOT NULL AND remark != '';
+CREATE INDEX IF NOT EXISTS idx_cfe_firm_active ON cash_flow_entries(from_firm_id, to_firm_id)
+  WHERE is_firm_transaction = TRUE
+    AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+    AND (status IS NULL OR status != 'rejected');
+CREATE INDEX IF NOT EXISTS idx_firms_site_name_upper ON firms(site_id, UPPER(name));
 
 CREATE TRIGGER trg_firm_transactions_updated_at
   BEFORE UPDATE ON firm_transactions
@@ -453,6 +490,19 @@ CREATE TABLE IF NOT EXISTS plot_payments (
 CREATE INDEX IF NOT EXISTS idx_pp_plot ON plot_payments(plot_id);
 CREATE INDEX IF NOT EXISTS idx_pp_site ON plot_payments(site_id);
 CREATE INDEX IF NOT EXISTS idx_pp_date ON plot_payments(date);
+-- Plot Payments performance indexes (see migration 056_plot_performance_indexes.js)
+CREATE INDEX IF NOT EXISTS idx_plots_site_plot_no_upper ON plots(site_id, UPPER(plot_no));
+CREATE INDEX IF NOT EXISTS idx_plots_site_status        ON plots(site_id, status);
+CREATE INDEX IF NOT EXISTS idx_pp_active_plot           ON plot_payments(plot_id)
+  WHERE cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED');
+CREATE INDEX IF NOT EXISTS idx_pp_plot_type             ON plot_payments(plot_id, payment_type);
+CREATE INDEX IF NOT EXISTS idx_pp_plot_date             ON plot_payments(plot_id, date, created_at);
+CREATE INDEX IF NOT EXISTS idx_pp_site_payment_from     ON plot_payments(site_id, payment_from)
+  WHERE payment_from IS NOT NULL AND payment_from != '';
+CREATE INDEX IF NOT EXISTS idx_pp_site_received_by      ON plot_payments(site_id, received_by)
+  WHERE received_by IS NOT NULL AND received_by != '';
+CREATE INDEX IF NOT EXISTS idx_pp_site_booked_by        ON plot_payments(site_id, booked_by)
+  WHERE booked_by IS NOT NULL AND booked_by != '';
 
 CREATE TRIGGER trg_plot_payments_updated_at
   BEFORE UPDATE ON plot_payments
@@ -491,6 +541,19 @@ CREATE INDEX IF NOT EXISTS idx_exp_site_date ON expenses(site_id, date);
 CREATE INDEX IF NOT EXISTS idx_exp_mode     ON expenses(payment_mode);
 CREATE INDEX IF NOT EXISTS idx_exp_category ON expenses(category);
 CREATE INDEX IF NOT EXISTS idx_exp_status   ON expenses(status);
+-- Expense module performance indexes (see migration 057_expense_performance_indexes.js)
+CREATE INDEX IF NOT EXISTS idx_exp_active_site ON expenses(site_id, date DESC)
+  WHERE (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+    AND status != 'rejected';
+CREATE INDEX IF NOT EXISTS idx_exp_site_status     ON expenses(site_id, status, date DESC);
+CREATE INDEX IF NOT EXISTS idx_exp_site_to_entity   ON expenses(site_id, to_entity)
+  WHERE to_entity IS NOT NULL AND to_entity != '';
+CREATE INDEX IF NOT EXISTS idx_exp_site_from_entity ON expenses(site_id, from_entity)
+  WHERE from_entity IS NOT NULL AND from_entity != '';
+CREATE INDEX IF NOT EXISTS idx_exp_site_payment_mode ON expenses(site_id, payment_mode)
+  WHERE payment_mode IS NOT NULL AND payment_mode != '';
+CREATE INDEX IF NOT EXISTS idx_exp_site_category_active ON expenses(site_id, category)
+  WHERE category IS NOT NULL AND category != '';
 
 CREATE TRIGGER trg_expenses_updated_at
   BEFORE UPDATE ON expenses
@@ -555,6 +618,19 @@ CREATE TABLE IF NOT EXISTS plot_registry_payments (
 CREATE INDEX IF NOT EXISTS idx_prp_registry ON plot_registry_payments(registry_id);
 CREATE INDEX IF NOT EXISTS idx_prp_site ON plot_registry_payments(site_id);
 CREATE INDEX IF NOT EXISTS idx_prp_date ON plot_registry_payments(payment_date);
+
+-- Plot Registry performance indexes (see migration 055_registry_performance_indexes.js)
+CREATE INDEX IF NOT EXISTS idx_pr_site_plot_no_upper      ON plot_registries(site_id, UPPER(plot_no));
+CREATE INDEX IF NOT EXISTS idx_pr_site_created_entry_date ON plot_registries(site_id, created_entry_date DESC);
+CREATE INDEX IF NOT EXISTS idx_pr_site_customer           ON plot_registries(site_id, customer_name)
+  WHERE customer_name IS NOT NULL AND customer_name != '';
+CREATE INDEX IF NOT EXISTS idx_pr_site_farmer             ON plot_registries(site_id, farmer_name)
+  WHERE farmer_name IS NOT NULL AND farmer_name != '';
+CREATE INDEX IF NOT EXISTS idx_prp_registry_date          ON plot_registry_payments(registry_id, payment_date, created_at);
+CREATE INDEX IF NOT EXISTS idx_prp_source_plot_payment    ON plot_registry_payments(source_plot_payment_id)
+  WHERE source_plot_payment_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_prp_site_mode              ON plot_registry_payments(site_id, payment_mode)
+  WHERE payment_mode IS NOT NULL AND payment_mode != '';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_prp_source_plot_payment ON plot_registry_payments(source_plot_payment_id) WHERE source_plot_payment_id IS NOT NULL;
 
 CREATE TRIGGER trg_plot_registry_payments_updated_at
@@ -656,6 +732,19 @@ CREATE INDEX IF NOT EXISTS idx_members_site ON members(site_id);
 CREATE INDEX IF NOT EXISTS idx_members_type ON members(member_type);
 CREATE INDEX IF NOT EXISTS idx_members_name ON members(site_id, full_name);
 CREATE INDEX IF NOT EXISTS idx_members_phone ON members(phone);
+-- User Management performance indexes (see migration 049_member_performance_indexes.js)
+-- Non-unique partial index — application code enforces uniqueness so legacy
+-- duplicates are preserved.
+CREATE INDEX IF NOT EXISTS idx_members_site_phone_lookup
+  ON members(site_id, phone) WHERE phone IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_members_site_type_status
+  ON members(site_id, member_type, status);
+CREATE INDEX IF NOT EXISTS idx_members_site_status
+  ON members(site_id, status);
+CREATE INDEX IF NOT EXISTS idx_members_site_created_at
+  ON members(site_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_members_site_full_name_upper
+  ON members(site_id, UPPER(full_name));
 
 CREATE TRIGGER trg_members_updated_at
   BEFORE UPDATE ON members

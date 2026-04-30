@@ -60,23 +60,36 @@ export const createFirm = asyncHandler(async (req, res) => {
 
   const trimmedName = name.trim().toUpperCase();
 
-  // Check duplicate
-  const existing = await firmModel.findByName(parseInt(site_id), trimmedName, pool);
-  if (existing) return res.status(409).json({ message: `Firm "${trimmedName}" already exists for this site` });
-
-  const data = {
-    site_id: parseInt(site_id),
-    name: trimmedName,
-    account_number: account_number ? account_number.trim() : null,
-    bank_name: bank_name ? bank_name.trim().toUpperCase() : null,
-    ifsc_code: ifsc_code ? ifsc_code.trim().toUpperCase() : null,
-    opening_balance: parseFloat(opening_balance) || 0,
-    notes: notes ? notes.trim() : null,
-    created_by: req.user.id,
-  };
-
-  const firm = await firmModel.create(data, pool);
-  res.status(201).json({ firm });
+  // Single CTE round-trip: dup check + INSERT. Was 2 serial RTTs.
+  const result = await pool.query(
+    `WITH existing AS (
+       SELECT 1 FROM firms
+        WHERE site_id = $1 AND UPPER(name) = $2
+        LIMIT 1
+     ),
+     ins AS (
+       INSERT INTO firms (site_id, name, account_number, bank_name, ifsc_code, opening_balance, notes, created_by)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8
+       WHERE NOT EXISTS (SELECT 1 FROM existing)
+       RETURNING *
+     )
+     SELECT
+       (SELECT row_to_json(ins) FROM ins) AS firm,
+       EXISTS (SELECT 1 FROM existing) AS dup`,
+    [
+      parseInt(site_id),
+      trimmedName,
+      account_number ? account_number.trim() : null,
+      bank_name ? bank_name.trim().toUpperCase() : null,
+      ifsc_code ? ifsc_code.trim().toUpperCase() : null,
+      parseFloat(opening_balance) || 0,
+      notes ? notes.trim() : null,
+      req.user.id,
+    ]
+  );
+  const row = result.rows[0];
+  if (row.dup) return res.status(409).json({ message: `Firm "${trimmedName}" already exists for this site` });
+  res.status(201).json({ firm: row.firm });
 });
 
 /**
@@ -107,30 +120,34 @@ export const getFirm = asyncHandler(async (req, res) => {
  * Update firm details
  */
 export const updateFirm = asyncHandler(async (req, res) => {
-  const { id } = req.params;
+  const firmId = parseInt(req.params.id);
   const { name, account_number, bank_name, ifsc_code, opening_balance, notes } = req.body;
 
-  const existing = await firmModel.findById(parseInt(id), pool);
-  if (!existing) return res.status(404).json({ message: 'Firm not found' });
-
   const updateData = {};
-  if (name !== undefined) {
-    const trimmedName = name.trim().toUpperCase();
-    // Check duplicate if name is changing
-    if (trimmedName !== existing.name) {
-      const dup = await firmModel.findByName(existing.site_id, trimmedName, pool);
-      if (dup) return res.status(409).json({ message: `Firm "${trimmedName}" already exists` });
-    }
-    updateData.name = trimmedName;
-  }
+  if (name !== undefined) updateData.name = name.trim().toUpperCase();
   if (account_number !== undefined) updateData.account_number = account_number ? account_number.trim() : null;
   if (bank_name !== undefined) updateData.bank_name = bank_name ? bank_name.trim().toUpperCase() : null;
   if (ifsc_code !== undefined) updateData.ifsc_code = ifsc_code ? ifsc_code.trim().toUpperCase() : null;
   if (opening_balance !== undefined) updateData.opening_balance = parseFloat(opening_balance) || 0;
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
 
-  const updated = await firmModel.update(parseInt(id), updateData, pool);
-  res.json({ firm: updated });
+  if (Object.keys(updateData).length === 0) {
+    return res.status(400).json({ message: 'Nothing to update' });
+  }
+
+  // Atomic UPDATE — saves a SELECT round-trip. Duplicate name handled by
+  // the rare 23505 unique-violation case below if a real UNIQUE constraint
+  // is in place; otherwise the application-level check is best-effort.
+  try {
+    const updated = await firmModel.update(firmId, updateData, pool);
+    if (!updated) return res.status(404).json({ message: 'Firm not found' });
+    res.json({ firm: updated });
+  } catch (err) {
+    if (err?.code === '23505') {
+      return res.status(409).json({ message: `Firm "${updateData.name}" already exists` });
+    }
+    throw err;
+  }
 });
 
 /**
@@ -138,11 +155,12 @@ export const updateFirm = asyncHandler(async (req, res) => {
  * Delete a firm and all its transactions (CASCADE)
  */
 export const deleteFirm = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const existing = await firmModel.findById(parseInt(id), pool);
-  if (!existing) return res.status(404).json({ message: 'Firm not found' });
-
-  await firmModel.delete(parseInt(id), pool);
+  // Atomic DELETE — saves a SELECT round-trip.
+  const result = await pool.query(
+    `DELETE FROM firms WHERE id = $1 RETURNING id`,
+    [parseInt(req.params.id)]
+  );
+  if (!result.rows[0]) return res.status(404).json({ message: 'Firm not found' });
   res.json({ message: 'Firm deleted' });
 });
 
@@ -162,7 +180,8 @@ export const createTransaction = asyncHandler(async (req, res) => {
   if (!firm_id) return res.status(400).json({ message: 'Firm is required' });
   if (!description || !description.trim()) return res.status(400).json({ message: 'Description is required' });
 
-  const firm = await firmModel.findById(parseInt(firm_id), pool);
+  const firmIdInt = parseInt(firm_id);
+  const firm = await firmModel.findById(firmIdInt, pool);
   if (!firm) return res.status(404).json({ message: 'Firm not found' });
 
   const txnDate = date || new Date().toISOString().split('T')[0];
@@ -173,7 +192,7 @@ export const createTransaction = asyncHandler(async (req, res) => {
 
   let cfEntryId = null;
 
-  // ── Cash Flow dual-write ──
+  // ── Cash Flow dual-write (single CTE round-trip when auto-creating month) ──
   if (cash_flow_month_id || ledger_name) {
     const cfLedgerName = ledger_name ? ledger_name.trim().toUpperCase() : null;
     const cfLedgerType = ledger_type || 'site';
@@ -182,36 +201,72 @@ export const createTransaction = asyncHandler(async (req, res) => {
     const d = new Date(txnDate + 'T00:00:00');
     const cfMonth = d.getMonth() + 1;
     const cfYear = d.getFullYear();
+    const prevMonth = cfMonth === 1 ? 12 : cfMonth - 1;
+    const prevYear  = cfMonth === 1 ? cfYear - 1 : cfYear;
 
-    // Find month record: by ID first, then by period+name, or auto-create
+    // Find month record: by ID first, then by period+name, or auto-create.
+    // The "by ID" path needs a cheap existence + lock check so we keep it
+    // simple. Auto-create + period-lookup are folded into ONE CTE below.
     let monthRecord = null;
     if (cash_flow_month_id) {
-      monthRecord = await cashFlowMonthModel.findById(parseInt(cash_flow_month_id), pool);
+      const mres = await pool.query(
+        `SELECT id, is_locked, ledger_name FROM cash_flow_months WHERE id = $1`,
+        [parseInt(cash_flow_month_id)]
+      );
+      monthRecord = mres.rows[0];
       if (!monthRecord) return res.status(404).json({ message: 'Selected cash flow month not found' });
-    }
-    if (!monthRecord && cfLedgerName) {
-      monthRecord = await cashFlowMonthModel.findByPeriod(firm.site_id, cfMonth, cfYear, cfLedgerName, pool);
-    }
-    if (!monthRecord) {
-      // Auto-create with opening balance carry-forward
-      let openingBal = 0;
-      const prev = await cashFlowMonthModel.getPreviousMonth(firm.site_id, cfMonth, cfYear, cfLedgerName || '', pool);
-      if (prev) {
-        const closing = await cashFlowMonthModel.getClosingBalance(prev.id, pool);
-        if (closing) openingBal = parseFloat(closing.closing_balance) || 0;
-      }
-      monthRecord = await cashFlowMonthModel.create({
-        site_id: firm.site_id,
-        month: cfMonth,
-        year: cfYear,
-        opening_balance: openingBal,
-        ledger_name: cfLedgerName || null,
-        ledger_type: cfLedgerType,
-        created_by: req.user.id,
-      }, pool);
+    } else {
+      // SINGLE round-trip: try to find existing OR insert new month with
+      // opening balance carry-forward from prev month. Replaces:
+      //   findByPeriod (1) + getPreviousMonth (1) + getClosingBalance (1)
+      //   + cashFlowMonthModel.create (1) = 4 round-trips.
+      const monthRes = await pool.query(
+        `WITH existing AS (
+           SELECT id, is_locked, ledger_name
+             FROM cash_flow_months
+            WHERE site_id = $1 AND month = $2 AND year = $3 AND ledger_name = $4
+            LIMIT 1
+         ),
+         prev_close AS (
+           SELECT cfm.opening_balance
+                    + COALESCE(SUM(cfe.credit), 0)
+                    - COALESCE(SUM(cfe.debit),  0) AS closing_balance
+             FROM cash_flow_months cfm
+             LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+            WHERE cfm.site_id = $1 AND cfm.month = $5 AND cfm.year = $6 AND cfm.ledger_name = $4
+            GROUP BY cfm.id, cfm.opening_balance
+            LIMIT 1
+         ),
+         ins AS (
+           INSERT INTO cash_flow_months (site_id, month, year, opening_balance, ledger_name, ledger_type, created_by)
+           SELECT $1, $2, $3,
+                  COALESCE((SELECT closing_balance FROM prev_close), 0),
+                  $4, $7, $8
+            WHERE NOT EXISTS (SELECT 1 FROM existing)
+            RETURNING id, is_locked, ledger_name
+         )
+         SELECT id, is_locked, ledger_name FROM existing
+         UNION ALL
+         SELECT id, is_locked, ledger_name FROM ins`,
+        [
+          firm.site_id,                 // $1
+          cfMonth,                      // $2
+          cfYear,                       // $3
+          cfLedgerName || '',           // $4
+          prevMonth,                    // $5
+          prevYear,                     // $6
+          cfLedgerType,                 // $7
+          req.user.id,                  // $8
+        ]
+      );
+      monthRecord = monthRes.rows[0];
     }
 
-    // Check lock
+    if (!monthRecord) {
+      return res.status(500).json({ message: 'Failed to resolve cash flow month' });
+    }
     if (monthRecord.is_locked) {
       return res.status(403).json({ message: `Cash flow month "${monthRecord.ledger_name || 'Ledger'}" (${cfMonth}/${cfYear}) is locked` });
     }
@@ -233,7 +288,7 @@ export const createTransaction = asyncHandler(async (req, res) => {
   }
 
   const data = {
-    firm_id: parseInt(firm_id),
+    firm_id: firmIdInt,
     site_id: firm.site_id,
     date: txnDate,
     description: description.trim(),
@@ -284,21 +339,35 @@ export const createFirmToFirmTransfer = asyncHandler(async (req, res) => {
   const transferAmount = parseFloat(amount) || 0;
   if (transferAmount <= 0) return res.status(400).json({ message: 'Transfer amount must be greater than 0' });
 
-  const sourceFirm = await firmModel.findById(parseInt(from_firm_id), pool);
-  if (!sourceFirm) return res.status(404).json({ message: 'Source firm not found' });
+  const fromFirmInt = parseInt(from_firm_id);
+  const toFirmInt = parseInt(to_firm_id);
+  const toSiteInt = parseInt(to_site_id);
 
-  const targetFirm = await firmModel.findById(parseInt(to_firm_id), pool);
+  // Parallelize: 2 firm lookups + site lookup. Was 3 serial round-trips.
+  const [firmsRes, targetSiteRes] = await Promise.all([
+    pool.query(
+      `SELECT id, site_id, name FROM firms WHERE id = ANY($1::int[])`,
+      [[fromFirmInt, toFirmInt]]
+    ),
+    pool.query(
+      `SELECT id, name FROM sites WHERE id = $1`,
+      [toSiteInt]
+    ),
+  ]);
+  const firmsById = new Map(firmsRes.rows.map((f) => [f.id, f]));
+  const sourceFirm = firmsById.get(fromFirmInt);
+  const targetFirm = firmsById.get(toFirmInt);
+  if (!sourceFirm) return res.status(404).json({ message: 'Source firm not found' });
   if (!targetFirm) return res.status(404).json({ message: 'Target firm not found' });
 
-  if (parseInt(sourceFirm.id) === parseInt(targetFirm.id)) {
+  if (sourceFirm.id === targetFirm.id) {
     return res.status(400).json({ message: 'Source and target firm cannot be same' });
   }
 
-  if (parseInt(targetFirm.site_id) !== parseInt(to_site_id)) {
+  if (parseInt(targetFirm.site_id) !== toSiteInt) {
     return res.status(400).json({ message: 'Selected target firm does not belong to selected site' });
   }
 
-  const targetSiteRes = await pool.query('SELECT id, name FROM sites WHERE id = $1', [parseInt(to_site_id)]);
   if (!targetSiteRes.rows[0]) return res.status(404).json({ message: 'Target site not found' });
 
   const transferDate = date || new Date().toISOString().split('T')[0];
@@ -510,29 +579,64 @@ export const listTransactions = asyncHandler(async (req, res) => {
   if (!firm_id) return res.status(400).json({ message: 'firm_id is required' });
 
   const fId = parseInt(firm_id);
-  const [transactions, summary, remarkBreakdown, nameBreakdown, firmData] = await Promise.all([
+
+  // Step 1: load transactions + parallel breakdowns + firm + cf-firm-entries.
+  // The cf-firm-entries query no longer depends on the transactions list,
+  // so it can run in the same parallel batch (was a serial follow-up).
+  const cfFirmPromise = pool.query(
+    `SELECT
+       cfe.id,
+       cfe.date,
+       cfe.particular AS description,
+       CASE WHEN cfe.from_firm_id = $1 THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0) ELSE 0 END AS debit,
+       CASE WHEN cfe.to_firm_id   = $1 THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0) ELSE 0 END AS credit,
+       cfe.cash_type AS payment_mode,
+       cfe.status,
+       cfe.remarks AS remark,
+       CASE
+         WHEN cfe.from_firm_id = $1 AND cfe.to_name IS NOT NULL THEN cfe.to_name
+         WHEN cfe.from_firm_id = $1 THEN tf.name
+         ELSE ff.name
+       END AS name,
+       cfm.ledger_name AS cf_ledger_name,
+       cfm.ledger_type AS cf_ledger_type,
+       cfm.month AS cf_month,
+       cfm.year AS cf_year
+     FROM cash_flow_entries cfe
+     JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+     LEFT JOIN firms ff ON ff.id = cfe.from_firm_id
+     LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
+     WHERE cfe.is_firm_transaction = TRUE
+       AND (cfe.from_firm_id = $1 OR cfe.to_firm_id = $1)
+     ORDER BY cfe.date ASC, cfe.created_at ASC`,
+    [fId]
+  );
+
+  const [transactions, summary, remarkBreakdown, nameBreakdown, firmData, cfFirmResult] = await Promise.all([
     firmTransactionModel.findByFirmId(fId, pool),
     firmTransactionModel.getFirmSummary(fId, pool),
     firmTransactionModel.getRemarkBreakdown(fId, pool),
     firmTransactionModel.getNameBreakdown(fId, pool),
     firmModel.findByIdWithTotals(fId, pool),
+    cfFirmPromise,
   ]);
 
-  // Enrich transactions that have a linked cash_flow_entry
-  const cfEntryIds = transactions.filter(t => t.cash_flow_entry_id).map(t => t.cash_flow_entry_id);
+  // Step 2: enrich transactions that link to a cash_flow_entry. Only one
+  // extra query when there are linked entries — most pages will skip this.
+  const cfEntryIds = transactions.filter((t) => t.cash_flow_entry_id).map((t) => t.cash_flow_entry_id);
   let cfMap = {};
   if (cfEntryIds.length > 0) {
-    const cfQuery = `
-      SELECT cfe.id, cfm.ledger_name, cfm.ledger_type, cfm.month AS cf_month, cfm.year AS cf_year
-      FROM cash_flow_entries cfe
-      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-      WHERE cfe.id = ANY($1)
-    `;
-    const cfResult = await pool.query(cfQuery, [cfEntryIds]);
-    cfResult.rows.forEach(r => { cfMap[r.id] = r; });
+    const cfResult = await pool.query(
+      `SELECT cfe.id, cfm.ledger_name, cfm.ledger_type, cfm.month AS cf_month, cfm.year AS cf_year
+         FROM cash_flow_entries cfe
+         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+        WHERE cfe.id = ANY($1::int[])`,
+      [cfEntryIds]
+    );
+    cfResult.rows.forEach((r) => { cfMap[r.id] = r; });
   }
 
-  const enriched = transactions.map(t => {
+  const enriched = transactions.map((t) => {
     if (t.cash_flow_entry_id && cfMap[t.cash_flow_entry_id]) {
       const cf = cfMap[t.cash_flow_entry_id];
       return { ...t, cf_ledger_name: cf.ledger_name, cf_ledger_type: cf.ledger_type, cf_month: cf.cf_month, cf_year: cf.cf_year };
@@ -540,41 +644,6 @@ export const listTransactions = asyncHandler(async (req, res) => {
     return t;
   });
 
-  // Also fetch cashflow entries that directly reference this firm via from_firm_id / to_firm_id
-  const cfFirmQuery = `
-    SELECT
-      cfe.id,
-      cfe.date,
-      cfe.particular AS description,
-      CASE WHEN cfe.from_firm_id = $1
-        THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)
-        ELSE 0
-      END AS debit,
-      CASE WHEN cfe.to_firm_id = $1
-        THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)
-        ELSE 0
-      END AS credit,
-      cfe.cash_type AS payment_mode,
-      cfe.status,
-      cfe.remarks AS remark,
-      CASE
-        WHEN cfe.from_firm_id = $1 AND cfe.to_name IS NOT NULL THEN cfe.to_name
-        WHEN cfe.from_firm_id = $1 THEN tf.name
-        ELSE ff.name
-      END AS name,
-      cfm.ledger_name AS cf_ledger_name,
-      cfm.ledger_type AS cf_ledger_type,
-      cfm.month AS cf_month,
-      cfm.year AS cf_year
-    FROM cash_flow_entries cfe
-    JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-    LEFT JOIN firms ff ON ff.id = cfe.from_firm_id
-    LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
-    WHERE cfe.is_firm_transaction = true
-      AND (cfe.from_firm_id = $1 OR cfe.to_firm_id = $1)
-    ORDER BY cfe.date ASC, cfe.created_at ASC
-  `;
-  const cfFirmResult = await pool.query(cfFirmQuery, [fId]);
   const cfFirmEntries = cfFirmResult.rows.map(row => ({
     ...row,
     payment_mode: (row.payment_mode || 'cash').toLowerCase() === 'bank' ? 'bank' : 'cash',
@@ -609,10 +678,10 @@ export const getTransaction = asyncHandler(async (req, res) => {
  * Syncs changes to linked cash_flow_entry if present
  */
 export const updateTransaction = asyncHandler(async (req, res) => {
-  const { id } = req.params;
+  const txnId = parseInt(req.params.id);
   const { date, description, debit, credit, name, purpose, remark, cheque_no, transaction_no, voucher_url, payment_mode, assigned_admin_id } = req.body;
 
-  const existing = await firmTransactionModel.findById(parseInt(id), pool);
+  const existing = await firmTransactionModel.findById(txnId, pool);
   if (!existing) return res.status(404).json({ message: 'Transaction not found' });
 
   const updateData = {};
@@ -629,25 +698,38 @@ export const updateTransaction = asyncHandler(async (req, res) => {
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
 
-  const updated = await firmTransactionModel.update(parseInt(id), updateData, pool);
+  // ── If a linked CF entry exists, fetch (cf_entry + cf_month + firm) in
+  //    ONE query in parallel with the main UPDATE. Was up to 4 serial RTTs:
+  //    UPDATE → cfEntry SELECT → cfMonth SELECT → firm SELECT → cfEntry UPDATE.
+  const updatePromise = firmTransactionModel.update(txnId, updateData, pool);
 
-  // Sync to linked cash flow entry
+  let cfContextPromise = null;
   if (existing.cash_flow_entry_id) {
-    const cfExisting = await cashFlowEntryModel.findById(existing.cash_flow_entry_id, pool);
-    if (cfExisting) {
-      const cfMonth = cfExisting.cash_flow_month_id ? await cashFlowMonthModel.findById(cfExisting.cash_flow_month_id, pool) : null;
-      if (cfMonth && !cfMonth.is_locked) {
-        const firm = await firmModel.findById(existing.firm_id, pool);
-        const cfUpdate = {};
-        if (date !== undefined) cfUpdate.date = date;
-        if (description !== undefined) cfUpdate.particular = description.trim().toUpperCase();
-        if (payment_mode !== undefined) cfUpdate.cash_type = payment_mode.toLowerCase() === 'bank' ? 'bank' : 'cash';
-        if (debit !== undefined) cfUpdate.debit = parseFloat(debit) || 0;
-        if (credit !== undefined) cfUpdate.credit = parseFloat(credit) || 0;
-        cfUpdate.remarks = [firm?.name, remark ?? existing.remark, purpose ?? existing.purpose, name ?? existing.name].filter(Boolean).join(' | ');
-        await cashFlowEntryModel.update(existing.cash_flow_entry_id, cfUpdate, pool);
-      }
-    }
+    cfContextPromise = pool.query(
+      `SELECT cfe.id AS cf_id,
+              cfe.cash_flow_month_id,
+              cfm.is_locked,
+              f.name AS firm_name
+         FROM cash_flow_entries cfe
+         LEFT JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
+         LEFT JOIN firms f ON f.id = $2
+        WHERE cfe.id = $1`,
+      [existing.cash_flow_entry_id, existing.firm_id]
+    );
+  }
+
+  const [updated, cfContextRes] = await Promise.all([updatePromise, cfContextPromise || Promise.resolve(null)]);
+
+  if (cfContextRes && cfContextRes.rows[0] && !cfContextRes.rows[0].is_locked) {
+    const ctx = cfContextRes.rows[0];
+    const cfUpdate = {};
+    if (date !== undefined) cfUpdate.date = date;
+    if (description !== undefined) cfUpdate.particular = description.trim().toUpperCase();
+    if (payment_mode !== undefined) cfUpdate.cash_type = payment_mode.toLowerCase() === 'bank' ? 'bank' : 'cash';
+    if (debit !== undefined) cfUpdate.debit = parseFloat(debit) || 0;
+    if (credit !== undefined) cfUpdate.credit = parseFloat(credit) || 0;
+    cfUpdate.remarks = [ctx.firm_name, remark ?? existing.remark, purpose ?? existing.purpose, name ?? existing.name].filter(Boolean).join(' | ');
+    await cashFlowEntryModel.update(existing.cash_flow_entry_id, cfUpdate, pool);
   }
 
   res.json({ transaction: updated });
@@ -658,23 +740,33 @@ export const updateTransaction = asyncHandler(async (req, res) => {
  * Also deletes linked cash_flow_entry if present
  */
 export const deleteTransaction = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const existing = await firmTransactionModel.findById(parseInt(id), pool);
-  if (!existing) return res.status(404).json({ message: 'Transaction not found' });
+  const txnId = parseInt(req.params.id);
 
-  // Delete linked cash flow entry first (before the FK is gone)
-  if (existing.cash_flow_entry_id) {
-    const cfEntry = await cashFlowEntryModel.findById(existing.cash_flow_entry_id, pool);
-    if (cfEntry) {
-      const cfMonth = await cashFlowMonthModel.findById(cfEntry.cash_flow_month_id, pool);
-      if (cfMonth && cfMonth.is_locked) {
-        return res.status(403).json({ message: 'Cannot delete — linked cash flow month is locked' });
-      }
-      await cashFlowEntryModel.delete(existing.cash_flow_entry_id, pool);
-    }
+  // Single round-trip lookup: existing transaction + its linked CF entry's
+  // lock state. Was 3 serial RTTs (txn lookup, cf entry, cf month).
+  const ctxRes = await pool.query(
+    `SELECT ft.id, ft.cash_flow_entry_id, cfm.is_locked AS cf_is_locked
+       FROM firm_transactions ft
+       LEFT JOIN cash_flow_entries cfe ON cfe.id = ft.cash_flow_entry_id
+       LEFT JOIN cash_flow_months cfm  ON cfm.id = cfe.cash_flow_month_id
+      WHERE ft.id = $1`,
+    [txnId]
+  );
+  const existing = ctxRes.rows[0];
+  if (!existing) return res.status(404).json({ message: 'Transaction not found' });
+  if (existing.cash_flow_entry_id && existing.cf_is_locked) {
+    return res.status(403).json({ message: 'Cannot delete — linked cash flow month is locked' });
   }
 
-  await firmTransactionModel.delete(parseInt(id), pool);
+  // Atomic CTE delete: cf entry first (if any) then the firm transaction.
+  await pool.query(
+    `WITH del_cf AS (
+       DELETE FROM cash_flow_entries WHERE id = $2
+     )
+     DELETE FROM firm_transactions WHERE id = $1`,
+    [txnId, existing.cash_flow_entry_id || null]
+  );
+
   res.json({ message: 'Transaction deleted' });
 });
 

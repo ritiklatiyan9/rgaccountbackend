@@ -593,7 +593,11 @@ class ExpenseModel extends MasterModel {
       return { modeBreakdown: modeRes.rows, categoryBreakdown: catRes.rows };
     }
 
-    const modeQuery = `
+    // Combine BOTH breakdowns into a SINGLE query using GROUPING SETS.
+    // Previously: same heavy 6-table UNION executed TWICE in parallel.
+    // Now: ONE execution scans the unified data once, and PostgreSQL
+    // computes both groupings using GROUPING SETS.
+    const combinedQuery = `
       WITH unified AS (
         SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
         FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
@@ -627,73 +631,53 @@ class ExpenseModel extends MasterModel {
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
           AND (d.cheque_status IS NULL OR d.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND d.status != 'rejected'
+      ),
+      filtered AS (
+        SELECT
+          COALESCE(payment_mode, 'UNSPECIFIED') AS pm,
+          COALESCE(category, 'UNCATEGORIZED') AS cat,
+          debit, credit
+        FROM unified u WHERE 1=1 ${whereClause}
       )
-      SELECT 
-        COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode, 
-        COALESCE(SUM(debit), 0)::numeric as total_debit, 
-        COALESCE(SUM(credit), 0)::numeric as total_credit, 
-        COUNT(*)::int as entries
-      FROM unified u
-      WHERE 1=1 ${whereClause}
-      GROUP BY COALESCE(payment_mode, 'UNSPECIFIED')
-      ORDER BY total_debit DESC
+      -- GROUPING SETS lets PostgreSQL compute mode-totals AND category-totals
+      -- in a single pass over the unified data. The CASE on GROUPING() tags
+      -- each row as 'mode' or 'category' so the JS layer can split them.
+      SELECT
+        CASE WHEN GROUPING(cat) = 1 THEN 'mode' ELSE 'category' END AS bucket,
+        pm AS payment_mode,
+        cat AS category,
+        COALESCE(SUM(debit), 0)::numeric AS total_debit,
+        COALESCE(SUM(credit), 0)::numeric AS total_credit,
+        COUNT(*)::int AS entries
+      FROM filtered
+      GROUP BY GROUPING SETS ((pm), (cat))
     `;
 
-    const catQuery = `
-      WITH unified AS (
-        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit
-        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
-        UNION ALL
-        SELECT fp.date, fp.payment_mode, 'FARMER PAYMENT' as category, UPPER(f.name) as to_entity, NULL as from_entity,
-          UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit
-        FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
-        WHERE f.site_id = $1 AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND fp.status != 'rejected'
-        UNION ALL
-        SELECT pcp.date, pcp.payment_mode, 'COMMISSION' as category, UPPER(ag.full_name) as to_entity, NULL as from_entity,
-          UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch, pcp.amount as debit, 0::numeric as credit
-        FROM plot_commission_payments pcp
-        JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
-        JOIN members ag ON pcm.agent_id = ag.id
-        WHERE pcp.site_id = $1 AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND pcp.status != 'rejected'
-        UNION ALL
-        SELECT vp.payment_date as date, UPPER(vp.payment_mode) as payment_mode, 'VENDOR PAYMENT' as category, UPPER(vc.vendor_name) as to_entity, NULL as from_entity,
-          UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' as remark, NULL as account_no, NULL as branch, vp.amount as debit, 0::numeric as credit
-        FROM vendor_payments vp JOIN vendor_commitments vc ON vp.commitment_id = vc.id
-        WHERE vp.site_id = $1 AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND vp.status != 'rejected'
-        UNION ALL
-        SELECT cfe.date, UPPER(cfe.cash_type) as payment_mode, 'PERSONAL LEDGER' as category, cfe.to_name as to_entity, NULL as from_entity,
-          COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit
-        FROM cash_flow_entries cfe
-        JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-        WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
-          AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-          AND (cfe.status IS NULL OR cfe.status != 'rejected')
-        UNION ALL
-        SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit
-        FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
-          AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
-          AND (d.cheque_status IS NULL OR d.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND d.status != 'rejected'
-      )
-      SELECT 
-        COALESCE(category, 'UNCATEGORIZED') as category, 
-        COALESCE(SUM(debit), 0)::numeric as total_debit, 
-        COALESCE(SUM(credit), 0)::numeric as total_credit, 
-        COUNT(*)::int as entries
-      FROM unified u
-      WHERE 1=1 ${whereClause}
-      GROUP BY COALESCE(category, 'UNCATEGORIZED')
-      ORDER BY COALESCE(category, 'UNCATEGORIZED') ASC
-    `;
+    const combinedRes = await pool.query(combinedQuery, params);
+    const modeBreakdown = [];
+    const categoryBreakdown = [];
+    for (const row of combinedRes.rows) {
+      if (row.bucket === 'mode') {
+        modeBreakdown.push({
+          payment_mode: row.payment_mode,
+          total_debit: row.total_debit,
+          total_credit: row.total_credit,
+          entries: row.entries,
+        });
+      } else {
+        categoryBreakdown.push({
+          category: row.category,
+          total_debit: row.total_debit,
+          total_credit: row.total_credit,
+          entries: row.entries,
+        });
+      }
+    }
+    // Match the previous sort order (mode by total_debit DESC, category by name ASC).
+    modeBreakdown.sort((a, b) => parseFloat(b.total_debit) - parseFloat(a.total_debit));
+    categoryBreakdown.sort((a, b) => a.category.localeCompare(b.category));
 
-    const [modeRes, catRes] = await Promise.all([
-      pool.query(modeQuery, params),
-      pool.query(catQuery, params)
-    ]);
-
-    return {
-      modeBreakdown: modeRes.rows,
-      categoryBreakdown: catRes.rows
-    };
+    return { modeBreakdown, categoryBreakdown };
   }
 }
 

@@ -6,20 +6,50 @@ class FirmModel extends MasterModel {
     super('firms');
   }
 
-  /** All firms for a site with transaction stats (includes cashflow entries referencing the firm) */
+  /** All firms for a site with transaction stats (includes cashflow entries referencing the firm).
+   *  Previously this ran SIX scalar subqueries PER ROW — three on
+   *  firm_transactions and three on cash_flow_entries. With 5 firms that's
+   *  30+ subqueries on every page load.
+   *
+   *  Now: two LATERAL aggregations (one per source table) that scan once
+   *  per firm and use FILTER clauses for the cheque/status conditions. */
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT f.*,
-        COALESCE((SELECT SUM(ft.debit)  FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
-          AS total_debit,
-        COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
-          AS total_credit,
-        (SELECT COUNT(*)::int FROM firm_transactions ft WHERE ft.firm_id = f.id)
-          + (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id) AND cfe.is_firm_transaction = true)
-          AS txn_count
+        COALESCE(ft_agg.ft_debit,  0) + COALESCE(cf_agg.cf_debit,  0) AS total_debit,
+        COALESCE(ft_agg.ft_credit, 0) + COALESCE(cf_agg.cf_credit, 0) AS total_credit,
+        COALESCE(ft_agg.ft_count,  0) + COALESCE(cf_agg.cf_count,  0) AS txn_count
       FROM firms f
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(ft.debit)  FILTER (WHERE ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AS ft_debit,
+          SUM(ft.credit) FILTER (WHERE ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AS ft_credit,
+          COUNT(*)::int AS ft_count
+        FROM firm_transactions ft
+        WHERE ft.firm_id = f.id
+      ) ft_agg ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)) FILTER (
+            WHERE cfe.from_firm_id = f.id
+              AND cfe.is_firm_transaction = TRUE
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS cf_debit,
+          SUM(COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)) FILTER (
+            WHERE cfe.to_firm_id = f.id
+              AND cfe.is_firm_transaction = TRUE
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS cf_credit,
+          COUNT(*) FILTER (
+            WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id)
+              AND cfe.is_firm_transaction = TRUE
+          )::int AS cf_count
+        FROM cash_flow_entries cfe
+        WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id)
+          AND cfe.is_firm_transaction = TRUE
+      ) cf_agg ON TRUE
       WHERE f.site_id = $1
       ORDER BY f.name ASC
     `;
@@ -34,20 +64,44 @@ class FirmModel extends MasterModel {
     return result.rows[0];
   }
 
-  /** Get firm with totals (includes cashflow entries referencing the firm) */
+  /** Get firm with totals (single firm — same LATERAL pattern as findBySiteId) */
   async findByIdWithTotals(id, pool) {
     const query = `
       SELECT f.*,
-        COALESCE((SELECT SUM(ft.debit)  FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.from_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
-          AS total_debit,
-        COALESCE((SELECT SUM(ft.credit) FROM firm_transactions ft WHERE ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0)
-          + COALESCE((SELECT SUM(COALESCE(cfe.debit,0) + COALESCE(cfe.credit,0)) FROM cash_flow_entries cfe WHERE cfe.to_firm_id = f.id AND cfe.is_firm_transaction = true AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0)
-          AS total_credit,
-        (SELECT COUNT(*)::int FROM firm_transactions ft WHERE ft.firm_id = f.id)
-          + (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id) AND cfe.is_firm_transaction = true)
-          AS txn_count
+        COALESCE(ft_agg.ft_debit,  0) + COALESCE(cf_agg.cf_debit,  0) AS total_debit,
+        COALESCE(ft_agg.ft_credit, 0) + COALESCE(cf_agg.cf_credit, 0) AS total_credit,
+        COALESCE(ft_agg.ft_count,  0) + COALESCE(cf_agg.cf_count,  0) AS txn_count
       FROM firms f
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(ft.debit)  FILTER (WHERE ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AS ft_debit,
+          SUM(ft.credit) FILTER (WHERE ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AS ft_credit,
+          COUNT(*)::int AS ft_count
+        FROM firm_transactions ft
+        WHERE ft.firm_id = f.id
+      ) ft_agg ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)) FILTER (
+            WHERE cfe.from_firm_id = f.id
+              AND cfe.is_firm_transaction = TRUE
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS cf_debit,
+          SUM(COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)) FILTER (
+            WHERE cfe.to_firm_id = f.id
+              AND cfe.is_firm_transaction = TRUE
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS cf_credit,
+          COUNT(*) FILTER (
+            WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id)
+              AND cfe.is_firm_transaction = TRUE
+          )::int AS cf_count
+        FROM cash_flow_entries cfe
+        WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id)
+          AND cfe.is_firm_transaction = TRUE
+      ) cf_agg ON TRUE
       WHERE f.id = $1
     `;
     const result = await pool.query(query, [id]);
@@ -72,36 +126,44 @@ class FirmTransactionModel extends MasterModel {
     return result.rows;
   }
 
-  /** Summary for a firm (includes cashflow entries referencing the firm) */
+  /** Summary for a firm (includes cashflow entries referencing the firm).
+   *  Single round-trip combining both source tables — was 2 serial queries. */
   async getFirmSummary(firmId, pool) {
-    const query = `
+    const result = await pool.query(
+      `
+      WITH ft_agg AS (
+        SELECT
+          COUNT(*)::int AS ft_count,
+          COALESCE(SUM(debit), 0)  AS ft_debit,
+          COALESCE(SUM(credit), 0) AS ft_credit
+        FROM firm_transactions
+        WHERE firm_id = $1
+          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      ),
+      cf_agg AS (
+        SELECT
+          COUNT(*)::int AS cf_count,
+          COALESCE(SUM(CASE WHEN from_firm_id = $1 THEN COALESCE(debit, 0) + COALESCE(credit, 0) ELSE 0 END), 0) AS cf_debit,
+          COALESCE(SUM(CASE WHEN to_firm_id   = $1 THEN COALESCE(debit, 0) + COALESCE(credit, 0) ELSE 0 END), 0) AS cf_credit
+        FROM cash_flow_entries
+        WHERE (from_firm_id = $1 OR to_firm_id = $1)
+          AND is_firm_transaction = TRUE
+          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      )
       SELECT
-        COUNT(*)::int AS total_entries,
-        COALESCE(SUM(debit), 0)  AS total_debit,
-        COALESCE(SUM(credit), 0) AS total_credit
-      FROM firm_transactions
-      WHERE firm_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-    `;
-    const result = await pool.query(query, [firmId]);
-    const base = result.rows[0];
-
-    const cfQuery = `
-      SELECT
-        COUNT(*)::int AS cf_count,
-        COALESCE(SUM(CASE WHEN from_firm_id = $1 THEN COALESCE(debit,0) + COALESCE(credit,0) ELSE 0 END), 0) AS cf_debit,
-        COALESCE(SUM(CASE WHEN to_firm_id   = $1 THEN COALESCE(debit,0) + COALESCE(credit,0) ELSE 0 END), 0) AS cf_credit
-      FROM cash_flow_entries
-      WHERE (from_firm_id = $1 OR to_firm_id = $1) AND is_firm_transaction = true AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-    `;
-    const cfResult = await pool.query(cfQuery, [firmId]);
-    const cf = cfResult.rows[0];
-
+        (ft_agg.ft_count + cf_agg.cf_count)::int AS total_entries,
+        (ft_agg.ft_debit  + cf_agg.cf_debit)     AS total_debit,
+        (ft_agg.ft_credit + cf_agg.cf_credit)    AS total_credit
+      FROM ft_agg, cf_agg
+      `,
+      [firmId]
+    );
+    const row = result.rows[0] || {};
     return {
-      total_entries: (base.total_entries || 0) + (cf.cf_count || 0),
-      total_debit:   (parseFloat(base.total_debit)  || 0) + (parseFloat(cf.cf_debit)  || 0),
-      total_credit:  (parseFloat(base.total_credit) || 0) + (parseFloat(cf.cf_credit) || 0),
-      // keep legacy fields the summary cards might read
-      count: (base.total_entries || 0) + (cf.cf_count || 0),
+      total_entries: row.total_entries || 0,
+      total_debit:   parseFloat(row.total_debit)  || 0,
+      total_credit:  parseFloat(row.total_credit) || 0,
+      count: row.total_entries || 0, // legacy alias
     };
   }
 

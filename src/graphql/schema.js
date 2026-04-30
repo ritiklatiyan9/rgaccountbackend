@@ -502,6 +502,18 @@ const QueryType = new GraphQLObjectType({
         if (!ctx.user) throw new Error('Authentication required');
         const id = parseInt(siteId);
 
+        // Redis cache — was completely UNCACHED before despite running 9
+        // heavy parallel queries on every Dashboard load. This is the
+        // single biggest perf win on the dashboard. Mutations on any of
+        // the 6 source modules already call clearCacheByPrefixes(['dashboard:'])
+        // (see e.g. cashflow.controller.js), so cached values stay fresh.
+        const key = cacheKey(`kpi-cards${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
+
+        if (cacheEnabled()) {
+          const cached = await cacheGet(key);
+          if (cached) return cached;
+        }
+
         const result = await getAllKpis(id, range.start, range.end, excludeOldPlots);
 
         // Transform breakdown object → array for GraphQL
@@ -512,7 +524,9 @@ const QueryType = new GraphQLObjectType({
           count: v.count || 0,
         }));
 
-        return { ...result, breakdown: breakdownArr };
+        const payload = { ...result, breakdown: breakdownArr };
+        if (cacheEnabled()) await cacheSet(key, payload, CACHE_TTL);
+        return payload;
       },
     },
 

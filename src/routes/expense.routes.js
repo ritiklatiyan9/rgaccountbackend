@@ -16,12 +16,15 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 router.use(authMiddleware);
 
 const expenseReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'expenses' });
-// Expense mutations affect daybook dashboard too
-const bustExpenseCache = invalidateCacheOnSuccess(['/expenses', '/daybook', 'expenses:page:']);
+// Autocomplete (DISTINCT scans across 7 columns) rarely changes; long-TTL
+// meta cache that survives expense writes.
+const expenseMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'expenses-meta' });
+// Anchored prefix so 'expenses-meta|...' isn't busted by writes.
+const bustExpenseCache = invalidateCacheOnSuccess(['expenses|', '/daybook', 'expenses:page:']);
 
 // Standard expense CRUD
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, listExpenses);                            // ?site_id=X
-router.get('/autocomplete', requireRole('admin', 'sub_admin'), expenseReadCache, getAutocomplete);             // ?site_id=X
+router.get('/autocomplete', requireRole('admin', 'sub_admin'), expenseMetaCache, getAutocomplete);             // ?site_id=X
 router.get('/pending', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'), expenseReadCache, listPendingExpenses);     // Expense approval: get pending expenses
 router.get('/status-counts', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'), expenseReadCache, getStatusCounts);   // Expense approval: get status counts
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, getExpense);

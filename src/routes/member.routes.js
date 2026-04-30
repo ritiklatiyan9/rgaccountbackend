@@ -12,7 +12,12 @@ import upload from '../middlewares/multer.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const memberReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'members' });
-const bustMemberCache = invalidateCacheOnSuccess(['/members']);
+// Autocomplete values (cities/occupations/companies/references) rarely change,
+// so they get a longer TTL and a separate namespace so they're NOT busted
+// by every member write. The bust prefix below is anchored with `|` so the
+// "members-ac" namespace doesn't accidentally match.
+const autocompleteCache = cacheResponse({ ttlSeconds: 300, namespace: 'members-ac' });
+const bustMemberCache = invalidateCacheOnSuccess(['members|']);
 
 router.use(authMiddleware);
 
@@ -38,7 +43,7 @@ const memberUpload = upload.fields([
 
 // Static routes first
 router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, searchMembers);
-router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberAutocomplete);
+router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), autocompleteCache, getMemberAutocomplete);
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, listMembers);
 
 // With file upload for documents

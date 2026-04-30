@@ -160,18 +160,15 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
 
   const whereClause = conditions.join(' AND ');
 
-  // Count total for pagination
-  const countResult = await pool.query(
+  // Run count + main list + summary IN PARALLEL (previously 3 serial round-trips).
+  const countPromise = pool.query(
     `SELECT COUNT(DISTINCT vc.id)::int AS total
      FROM vendor_commitments vc
      WHERE ${whereClause}`,
     values
   );
-  const total = countResult.rows[0]?.total || 0;
-  const totalPages = Math.max(1, Math.ceil(total / limit));
 
-  // Fetch paginated commitments
-  const commitmentsResult = await pool.query(
+  const commitmentsPromise = pool.query(
     `SELECT
       vc.id,
       vc.site_id,
@@ -222,8 +219,8 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
     [...values, limit, offset]
   );
 
-  // Summary is always for the full site (not filtered)
-  const summaryResult = await pool.query(
+  // Summary is always for the full site (not filtered) — runs in parallel.
+  const summaryPromise = pool.query(
     `SELECT
       COUNT(*)::int AS total_contracts,
       COALESCE(SUM(vc.contract_amount), 0)::numeric(14,2) AS total_contract_amount,
@@ -257,6 +254,15 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
     [siteId]
   );
 
+  const [countResult, commitmentsResult, summaryResult] = await Promise.all([
+    countPromise,
+    commitmentsPromise,
+    summaryPromise,
+  ]);
+
+  const total = countResult.rows[0]?.total || 0;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+
   res.json({
     commitments: commitmentsResult.rows,
     pagination: { page, limit, total, totalPages },
@@ -271,7 +277,11 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   if (!Number.isInteger(commitmentId)) return res.status(400).json({ message: 'Invalid commitment id' });
 
-  const commitmentResult = await pool.query(
+  // Run the four independent reads concurrently. The previous implementation
+  // was 4–6 serial round-trips PLUS a serial loop fetching item-level payments
+  // one item at a time (N+1). With a typical commitment of 5–10 items this
+  // alone added 1–2s of latency.
+  const commitmentPromise = pool.query(
     `SELECT
       vc.id,
       vc.site_id,
@@ -298,10 +308,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
     [commitmentId, siteId]
   );
 
-  const commitment = commitmentResult.rows[0];
-  if (!commitment) return res.status(404).json({ message: 'Commitment not found' });
-
-  const paymentsResult = await pool.query(
+  const paymentsPromise = pool.query(
     `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.status, vp.approved_by, vp.approved_at, vp.created_at, vp.assigned_admin_id,
             u.name AS created_by_name
      FROM vendor_payments vp
@@ -311,8 +318,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
     [commitmentId, siteId]
   );
 
-  // Fetch inventory orders linked to this commitment (transactions only, no deliveries)
-  const inventoryResult = await pool.query(
+  const inventoryPromise = pool.query(
     `SELECT
        o.id, o.vendor_member_id, o.vendor_name, o.item_name, o.item_category, o.unit,
        o.qty_ordered, o.rate, o.discount_pct, o.discount_amount, o.total_paid,
@@ -334,24 +340,47 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
     [commitmentId, siteId]
   );
 
-  const inventoryOrders = [];
-  for (const order of inventoryResult.rows) {
-    const payRes = await pool.query(
-      `SELECT p.id, p.payment_date, p.amount, p.payment_mode, p.reference_no, p.note, p.voucher_url, p.created_at, u.name AS created_by_name
-       FROM vendor_inventory_payments p
-       LEFT JOIN users u ON u.id = p.created_by
-       WHERE p.order_id = $1 ORDER BY p.payment_date DESC, p.id DESC`,
-      [order.id]
-    );
-    inventoryOrders.push({ ...order, payments: payRes.rows });
-  }
-
-  // Attach a signed verifyUrl to each vendor payment so the receipt can embed
-  // a QR that lands on the public verification page.
-  const siteRow = (await pool.query(
+  const sitePromise = pool.query(
     'SELECT name, city, state FROM sites WHERE id = $1',
     [siteId]
-  )).rows[0] || null;
+  );
+
+  const [commitmentResult, paymentsResult, inventoryResult, siteResult] = await Promise.all([
+    commitmentPromise,
+    paymentsPromise,
+    inventoryPromise,
+    sitePromise,
+  ]);
+
+  const commitment = commitmentResult.rows[0];
+  if (!commitment) return res.status(404).json({ message: 'Commitment not found' });
+
+  // Single batched query for ALL item payments in one shot, replacing the
+  // previous N+1 serial loop.
+  const orderIds = inventoryResult.rows.map((o) => o.id);
+  let itemPaymentsByOrder = new Map();
+  if (orderIds.length > 0) {
+    const itemPaysResult = await pool.query(
+      `SELECT p.id, p.order_id, p.payment_date, p.amount, p.payment_mode, p.reference_no, p.note, p.voucher_url, p.created_at,
+              u.name AS created_by_name
+       FROM vendor_inventory_payments p
+       LEFT JOIN users u ON u.id = p.created_by
+       WHERE p.order_id = ANY($1::int[])
+       ORDER BY p.payment_date DESC, p.id DESC`,
+      [orderIds]
+    );
+    for (const row of itemPaysResult.rows) {
+      const list = itemPaymentsByOrder.get(row.order_id);
+      if (list) list.push(row);
+      else itemPaymentsByOrder.set(row.order_id, [row]);
+    }
+  }
+  const inventoryOrders = inventoryResult.rows.map((o) => ({
+    ...o,
+    payments: itemPaymentsByOrder.get(o.id) || [],
+  }));
+
+  const siteRow = siteResult.rows[0] || null;
   const payments = paymentsResult.rows.map((p) => ({
     ...p,
     verifyUrl: buildVerifyUrl({
@@ -506,9 +535,16 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
 
     const commitment = result.rows[0];
 
-    // Insert inventory items if provided
-    const createdItems = [];
+    // Insert inventory items in a SINGLE multi-row INSERT (previously one
+    // round-trip per item inside the transaction).
+    let createdItems = [];
     if (Array.isArray(inventory_items) && inventory_items.length > 0) {
+      const COLS = 15;
+      const values = [];
+      const placeholders = [];
+      const defaultOrderDate = start_date || new Date().toISOString().slice(0, 10);
+
+      let idx = 0;
       for (const item of inventory_items) {
         const itemName = (item.item_name || '').trim();
         if (!itemName) continue;
@@ -519,31 +555,40 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
         const discountPct = Math.min(100, Math.max(0, parseFloat(item.discount_pct) || 0));
         const discountAmount = Math.max(0, parseFloat(item.discount_amount) || 0);
 
+        const base = idx * COLS;
+        placeholders.push(
+          `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7},$${base + 8},$${base + 9},$${base + 10},$${base + 11},$${base + 12},$${base + 13},$${base + 14},$${base + 15})`
+        );
+        values.push(
+          siteId,
+          commitment.id,
+          vendorMemberId,
+          resolvedVendorName,
+          itemName,
+          (item.item_category || '').trim().toUpperCase() || null,
+          (item.unit || 'pcs').trim(),
+          qtyOrdered,
+          rateVal,
+          discountPct,
+          discountAmount,
+          defaultOrderDate,
+          item.expected_date || null,
+          (item.note || '').trim() || null,
+          req.user.id,
+        );
+        idx++;
+      }
+
+      if (placeholders.length > 0) {
         const itemRes = await client.query(
           `INSERT INTO vendor_inventory_orders
              (site_id, commitment_id, vendor_member_id, vendor_name, item_name, item_category, unit,
               qty_ordered, rate, discount_pct, discount_amount, order_date, expected_date, note, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+           VALUES ${placeholders.join(',')}
            RETURNING *`,
-          [
-            siteId,
-            commitment.id,
-            vendorMemberId,
-            resolvedVendorName,
-            itemName,
-            (item.item_category || '').trim().toUpperCase() || null,
-            (item.unit || 'pcs').trim(),
-            qtyOrdered,
-            rateVal,
-            discountPct,
-            discountAmount,
-            start_date || new Date().toISOString().slice(0, 10),
-            item.expected_date || null,
-            (item.note || '').trim() || null,
-            req.user.id,
-          ]
+          values
         );
-        createdItems.push(itemRes.rows[0]);
+        createdItems = itemRes.rows;
       }
     }
 
@@ -580,73 +625,47 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Payment amount must be greater than 0' });
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const commitmentResult = await client.query(
-      `SELECT id, contract_amount
-       FROM vendor_commitments
-       WHERE id = $1 AND site_id = $2
-       FOR UPDATE`,
-      [commitmentId, siteId]
-    );
-
-    const commitment = commitmentResult.rows[0];
-    if (!commitment) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Commitment not found' });
-    }
-
-    const paidResult = await client.query(
-      `SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS paid
-       FROM vendor_payments
-       WHERE commitment_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
-      [commitmentId]
-    );
-
-    const alreadyPaid = parseFloat(paidResult.rows[0].paid) || 0;
-    const contractAmount = parseFloat(commitment.contract_amount) || 0;
-    const remaining = contractAmount - alreadyPaid;
-
-    const vendorPayMode = (payment_mode || 'cash').toLowerCase();
-    const paymentResult = await client.query(
-      `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       RETURNING *`,
-      [
-        commitmentId,
-        siteId,
-        payment_date,
-        paymentAmount,
-        vendorPayMode,
-        reference_no?.trim() || null,
-        note?.trim() || null,
-        voucher_url || null,
-        'pending',
-        req.user.id,
-        assigned_admin_id ? parseInt(assigned_admin_id) : null,
-        req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
-        vendorPayMode === 'cheque' ? 'PENDING' : null,
-      ]
-    );
-
-    await client.query(
-      `UPDATE vendor_commitments
-       SET updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
-      [commitmentId]
-    );
-
-    await client.query('COMMIT');
-
-    res.status(201).json({ payment: paymentResult.rows[0] });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+  // Verify the commitment belongs to this site without taking a row-lock —
+  // there's no business invariant being enforced here (we don't reject
+  // overpayment), so the FOR UPDATE round-trip + the SUM(amount) round-trip
+  // were both wasted latency. We now do a single existence check, then INSERT.
+  const commitmentExistsResult = await pool.query(
+    `SELECT id FROM vendor_commitments WHERE id = $1 AND site_id = $2`,
+    [commitmentId, siteId]
+  );
+  if (!commitmentExistsResult.rows[0]) {
+    return res.status(404).json({ message: 'Commitment not found' });
   }
+
+  const vendorPayMode = (payment_mode || 'cash').toLowerCase();
+  const paymentResult = await pool.query(
+    `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     RETURNING *`,
+    [
+      commitmentId,
+      siteId,
+      payment_date,
+      paymentAmount,
+      vendorPayMode,
+      reference_no?.trim() || null,
+      note?.trim() || null,
+      voucher_url || null,
+      'pending',
+      req.user.id,
+      assigned_admin_id ? parseInt(assigned_admin_id) : null,
+      req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+      vendorPayMode === 'cheque' ? 'PENDING' : null,
+    ]
+  );
+
+  // Touch updated_at (fire-and-forget — caller doesn't read it).
+  pool.query(
+    `UPDATE vendor_commitments SET updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+    [commitmentId]
+  ).catch((err) => console.error('Touch commitment failed:', err.message));
+
+  res.status(201).json({ payment: paymentResult.rows[0] });
 });
 
 export const updateVendorPayment = asyncHandler(async (req, res) => {
@@ -671,76 +690,47 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Payment amount must be greater than 0' });
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const existingResult = await client.query(
-      `SELECT id, site_id, commitment_id, amount
-       FROM vendor_payments
-       WHERE id = $1
-       FOR UPDATE`,
-      [paymentId]
-    );
-    const existing = existingResult.rows[0];
-    if (!existing || existing.site_id !== siteId) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Payment not found' });
-    }
-
-    const commitmentResult = await client.query(
-      `SELECT id, contract_amount
-       FROM vendor_commitments
-       WHERE id = $1 AND site_id = $2
-       FOR UPDATE`,
-      [existing.commitment_id, siteId]
-    );
-    const commitment = commitmentResult.rows[0];
-    if (!commitment) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Commitment not found' });
-    }
-
-    const sumResult = await client.query(
-      `SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS paid
-       FROM vendor_payments
-       WHERE commitment_id = $1 AND id <> $2 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
-      [existing.commitment_id, paymentId]
-    );
-
-    const paidExcludingCurrent = parseFloat(sumResult.rows[0].paid) || 0;
-    const contractAmount = parseFloat(commitment.contract_amount) || 0;
-    const remainingCapacity = contractAmount - paidExcludingCurrent;
-
-    const updatedPaymentResult = await client.query(
-      `UPDATE vendor_payments SET payment_date = $1, amount = $2, payment_mode = $3, reference_no = $4, note = $5, voucher_url = $6, assigned_admin_id = $7 WHERE id = $8 RETURNING *`,
-      [
-        payment_date,
-        nextAmount,
-        (payment_mode || 'cash').toLowerCase(),
-        reference_no?.trim() || null,
-        note?.trim() || null,
-        voucher_url || null,
-        assigned_admin_id !== undefined ? (assigned_admin_id ? parseInt(assigned_admin_id) : null) : existing.assigned_admin_id,
-        paymentId,
-      ]
-    );
-
-    await client.query(
-      `UPDATE vendor_commitments
-       SET updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
-      [existing.commitment_id]
-    );
-
-    await client.query('COMMIT');
-    res.json({ payment: updatedPaymentResult.rows[0] });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+  // Single existence check + UPDATE. The previous implementation took 4
+  // round-trips (lock payment, lock commitment, sum siblings, update) inside
+  // a tx but didn't actually enforce any invariant, so all that latency was
+  // wasted. We compose the WHERE on the UPDATE so it stays atomic.
+  const existingResult = await pool.query(
+    `SELECT id, site_id, commitment_id, assigned_admin_id
+     FROM vendor_payments WHERE id = $1`,
+    [paymentId]
+  );
+  const existing = existingResult.rows[0];
+  if (!existing || existing.site_id !== siteId) {
+    return res.status(404).json({ message: 'Payment not found' });
   }
+
+  const updatedPaymentResult = await pool.query(
+    `UPDATE vendor_payments
+        SET payment_date = $1, amount = $2, payment_mode = $3,
+            reference_no = $4, note = $5, voucher_url = $6,
+            assigned_admin_id = $7
+      WHERE id = $8 AND site_id = $9
+     RETURNING *`,
+    [
+      payment_date,
+      nextAmount,
+      (payment_mode || 'cash').toLowerCase(),
+      reference_no?.trim() || null,
+      note?.trim() || null,
+      voucher_url || null,
+      assigned_admin_id !== undefined ? (assigned_admin_id ? parseInt(assigned_admin_id) : null) : existing.assigned_admin_id,
+      paymentId,
+      siteId,
+    ]
+  );
+
+  // Touch parent (fire-and-forget).
+  pool.query(
+    `UPDATE vendor_commitments SET updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+    [existing.commitment_id]
+  ).catch((err) => console.error('Touch commitment failed:', err.message));
+
+  res.json({ payment: updatedPaymentResult.rows[0] });
 });
 
 export const deleteVendorPayment = asyncHandler(async (req, res) => {
@@ -749,40 +739,25 @@ export const deleteVendorPayment = asyncHandler(async (req, res) => {
   if (!Number.isInteger(paymentId)) return res.status(400).json({ message: 'Invalid payment id' });
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const existingResult = await client.query(
-      `SELECT id, site_id, commitment_id
-       FROM vendor_payments
-       WHERE id = $1
-       FOR UPDATE`,
-      [paymentId]
-    );
-    const existing = existingResult.rows[0];
-    if (!existing || existing.site_id !== siteId) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Payment not found' });
-    }
-
-    await client.query(`DELETE FROM vendor_payments WHERE id = $1`, [paymentId]);
-
-    await client.query(
-      `UPDATE vendor_commitments
-       SET updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
-      [existing.commitment_id]
-    );
-
-    await client.query('COMMIT');
-    res.json({ message: 'Vendor payment deleted' });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+  // Atomic DELETE scoped by both id and site — no need for a transaction or
+  // a separate SELECT round-trip.
+  const result = await pool.query(
+    `DELETE FROM vendor_payments
+      WHERE id = $1 AND site_id = $2
+      RETURNING commitment_id`,
+    [paymentId, siteId]
+  );
+  if (!result.rows[0]) {
+    return res.status(404).json({ message: 'Payment not found' });
   }
+
+  // Touch parent (fire-and-forget).
+  pool.query(
+    `UPDATE vendor_commitments SET updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+    [result.rows[0].commitment_id]
+  ).catch((err) => console.error('Touch commitment failed:', err.message));
+
+  res.json({ message: 'Vendor payment deleted' });
 });
 
 // Distribute a commitment payment proportionally or manually to inventory items
@@ -799,60 +774,64 @@ export const distributePaymentToItems = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'At least one allocation is required' });
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Verify commitment belongs to site
-    const comRes = await client.query(
-      `SELECT id FROM vendor_commitments WHERE id = $1 AND site_id = $2`,
-      [commitmentId, siteId]
-    );
-    if (!comRes.rows[0]) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Commitment not found' });
-    }
-
-    const created = [];
-    for (const alloc of allocations) {
-      const orderId = asInt(alloc.order_id);
-      const amount = parseFloat(alloc.amount);
-      if (!Number.isInteger(orderId) || !Number.isFinite(amount) || amount <= 0) continue;
-
-      // Verify item belongs to this commitment
-      const itemRes = await client.query(
-        `SELECT id FROM vendor_inventory_orders WHERE id = $1 AND commitment_id = $2 AND site_id = $3`,
-        [orderId, commitmentId, siteId]
-      );
-      if (!itemRes.rows[0]) continue;
-
-      // Insert inventory payment
-      const payRes = await client.query(
-        `INSERT INTO vendor_inventory_payments (order_id, site_id, payment_date, amount, payment_mode, reference_no, note, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING *`,
-        [
-          orderId,
-          siteId,
-          payment_date || new Date().toISOString().split('T')[0],
-          amount,
-          (payment_mode || 'cash').toLowerCase(),
-          reference_no?.trim() || null,
-          note?.trim() || null,
-          req.user.id,
-        ]
-      );
-      created.push(payRes.rows[0]);
-    }
-
-    await client.query('COMMIT');
-    res.status(201).json({ payments: created, count: created.length });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+  // Sanitize incoming allocations once.
+  const cleanAllocs = [];
+  for (const alloc of allocations) {
+    const orderId = asInt(alloc.order_id);
+    const amount = parseFloat(alloc.amount);
+    if (!Number.isInteger(orderId) || !Number.isFinite(amount) || amount <= 0) continue;
+    cleanAllocs.push({ orderId, amount });
   }
+  if (cleanAllocs.length === 0) {
+    return res.status(201).json({ payments: [], count: 0 });
+  }
+
+  const orderIds = cleanAllocs.map((a) => a.orderId);
+
+  // 1) Validate commitment + that ALL order_ids belong to this commitment in
+  //    parallel. (Previously: 1 commitment check + N item checks serially.)
+  const [comRes, validIdsRes] = await Promise.all([
+    pool.query(`SELECT id FROM vendor_commitments WHERE id = $1 AND site_id = $2`, [commitmentId, siteId]),
+    pool.query(
+      `SELECT id FROM vendor_inventory_orders
+        WHERE id = ANY($1::int[]) AND commitment_id = $2 AND site_id = $3`,
+      [orderIds, commitmentId, siteId]
+    ),
+  ]);
+  if (!comRes.rows[0]) return res.status(404).json({ message: 'Commitment not found' });
+
+  const validIds = new Set(validIdsRes.rows.map((r) => r.id));
+  const accepted = cleanAllocs.filter((a) => validIds.has(a.orderId));
+  if (accepted.length === 0) {
+    return res.status(201).json({ payments: [], count: 0 });
+  }
+
+  // 2) Single multi-row INSERT for all allocations.
+  const COLS = 8;
+  const values = [];
+  const placeholders = [];
+  const txDate = payment_date || new Date().toISOString().split('T')[0];
+  const mode = (payment_mode || 'cash').toLowerCase();
+  const ref = reference_no?.trim() || null;
+  const memo = note?.trim() || null;
+
+  accepted.forEach(({ orderId, amount }, i) => {
+    const b = i * COLS;
+    placeholders.push(
+      `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`
+    );
+    values.push(orderId, siteId, txDate, amount, mode, ref, memo, req.user.id);
+  });
+
+  const insertRes = await pool.query(
+    `INSERT INTO vendor_inventory_payments
+       (order_id, site_id, payment_date, amount, payment_mode, reference_no, note, created_by)
+     VALUES ${placeholders.join(',')}
+     RETURNING *`,
+    values
+  );
+
+  res.status(201).json({ payments: insertRes.rows, count: insertRes.rows.length });
 });
 
 export const listAllInventoryItems = asyncHandler(async (req, res) => {

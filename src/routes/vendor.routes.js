@@ -38,16 +38,22 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 const router = express.Router();
 
 const vendorReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'vendors' });
-const bustVendorCache = invalidateCacheOnSuccess(['/vendors']);
+// Vendor users + heads + categories rarely change; cache longer in a
+// dedicated namespace and don't bust them on every commitment write.
+const vendorMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'vendors-meta' });
+// Anchored prefix so 'vendors|...' is busted but 'vendors-meta|...' survives.
+const bustVendorCache = invalidateCacheOnSuccess(['vendors|']);
+const bustVendorMetaCache = invalidateCacheOnSuccess(['vendors|', 'vendors-meta|']);
 
 router.use(authMiddleware);
 router.use(requireRole('admin', 'sub_admin'));
 
-router.get('/users', requirePermission('vendors', 'read'), vendorReadCache, getVendorUsers);
-router.get('/heads', requirePermission('vendors', 'read'), vendorReadCache, listVendorHeads);
-router.post('/heads', requirePermission('vendors', 'write'), bustVendorCache, createVendorHead);
-router.put('/heads/:id', requirePermission('vendors', 'update'), bustVendorCache, updateVendorHead);
-router.delete('/heads/:id', requirePermission('vendors', 'delete'), bustVendorCache, deleteVendorHead);
+router.get('/users', requirePermission('vendors', 'read'), vendorMetaCache, getVendorUsers);
+router.get('/heads', requirePermission('vendors', 'read'), vendorMetaCache, listVendorHeads);
+// Head writes also have to bust the vendors-meta cache (heads listing).
+router.post('/heads', requirePermission('vendors', 'write'), bustVendorMetaCache, createVendorHead);
+router.put('/heads/:id', requirePermission('vendors', 'update'), bustVendorMetaCache, updateVendorHead);
+router.delete('/heads/:id', requirePermission('vendors', 'delete'), bustVendorMetaCache, deleteVendorHead);
 
 router.get('/commitments', requirePermission('vendors', 'read'), vendorReadCache, listVendorCommitments);
 router.get('/inventory-all', requirePermission('vendors', 'read'), vendorReadCache, listAllInventoryItems);
@@ -63,7 +69,7 @@ router.put('/payments/:paymentId', requirePermission('vendors', 'update'), bustV
 router.delete('/payments/:paymentId', requirePermission('vendors', 'delete'), bustVendorCache, deleteVendorPayment);
 
 // ── Inventory ──────────────────────────────────────────────────────────────
-router.get('/inventory/categories', requirePermission('vendors', 'read'), vendorReadCache, listInventoryCategories);
+router.get('/inventory/categories', requirePermission('vendors', 'read'), vendorMetaCache, listInventoryCategories);
 router.get('/inventory/stock-summary', requirePermission('vendors', 'read'), vendorReadCache, getInventoryStockSummary);
 router.get('/inventory', requirePermission('vendors', 'read'), vendorReadCache, listInventoryOrders);
 router.post('/inventory', requirePermission('vendors', 'write'), bustVendorCache, createInventoryOrder);

@@ -35,9 +35,9 @@ async function runFromSourceTables(siteId, start, end) {
   );
   const totalRevenue = parseFloat(revResult.rows[0].total) || 0;
 
-  // Expense: all source tables combined. Person-ledger debit is intentionally
-  // EXCLUDED — outstanding already subtracts given-returned from adjusted
-  // incoming, so counting cfe.debit as expense too would double-deduct it.
+  // Expense: mirror getProfitSummary exactly. Person-ledger debit is intentionally
+  // EXCLUDED — outstanding already subtracts given-returned, so counting it as
+  // expense too would double-deduct.
   const expResult = await pool.query(
     `SELECT COALESCE(SUM(debit), 0)::numeric AS total
      FROM (
@@ -50,6 +50,10 @@ async function runFromSourceTables(siteId, start, end) {
        WHERE site_id = $1 AND date >= $2 AND date < $3
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
        UNION ALL
+       SELECT amount AS debit FROM plot_commissions
+       WHERE site_id = $1 AND date >= $2 AND date < $3
+         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       UNION ALL
        SELECT amount AS debit FROM plot_commission_payments
        WHERE site_id = $1 AND date >= $2 AND date < $3
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
@@ -57,6 +61,11 @@ async function runFromSourceTables(siteId, start, end) {
        SELECT amount AS debit FROM vendor_payments
        WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       UNION ALL
+       SELECT amount AS debit FROM plot_registry_payments
+       WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
+         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND source_plot_payment_id IS NULL
        UNION ALL
        SELECT debit FROM day_book
        WHERE site_id = $1 AND date >= $2 AND date < $3
@@ -96,34 +105,61 @@ async function runFromSourceTables(siteId, start, end) {
 
 /**
  * Run B — Cash flow entries table (trigger-synced mirror).
- * Profit modules only, matching the same source_modules used in Run A.
+ * Profit modules only, matching the exact set used in Run A / getProfitSummary.
  */
 async function runFromCashFlowEntries(siteId, start, end) {
-  const profitModules = [
-    'plot_payments', 'plot_installment_payments',
+  // Revenue side: plot payments + installments
+  const revenueModules = ['plot_payments', 'plot_installment_payments'];
+  // Expense side: every source table that contributes to canonical totalExpense
+  // (plot_registry_payments handled separately to filter source_plot_payment_id)
+  const expenseModules = [
     'farmer_payments', 'expenses',
-    'plot_commission_payments',
+    'plot_commissions', 'plot_commission_payments',
     'vendor_payments',
   ];
 
-  const placeholders = profitModules.map((_, i) => `$${i + 4}`).join(', ');
-
-  const result = await pool.query(
-    `SELECT
-       COALESCE(SUM(credit), 0)::numeric AS total_credit,
-       COALESCE(SUM(debit),  0)::numeric AS total_debit
+  const revPlaceholders = revenueModules.map((_, i) => `$${i + 4}`).join(', ');
+  const revResult = await pool.query(
+    `SELECT COALESCE(SUM(credit), 0)::numeric AS total_credit
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
-       AND cfe.source_module IN (${placeholders})
+       AND cfe.source_module IN (${revPlaceholders})
        AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
        AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
-    [siteId, start, end, ...profitModules]
+    [siteId, start, end, ...revenueModules]
   );
+  const totalRevenue = parseFloat(revResult.rows[0].total_credit) || 0;
 
-  const totalRevenue = parseFloat(result.rows[0].total_credit) || 0;
-  const totalExpense = parseFloat(result.rows[0].total_debit) || 0;
+  const expPlaceholders = expenseModules.map((_, i) => `$${i + 4}`).join(', ');
+  const expResult = await pool.query(
+    `SELECT COALESCE(SUM(debit), 0)::numeric AS total_debit
+     FROM cash_flow_entries cfe
+     WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+       AND cfe.source_module IN (${expPlaceholders})
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
+    [siteId, start, end, ...expenseModules]
+  );
+  const totalExpense = parseFloat(expResult.rows[0].total_debit) || 0;
 
-  // Also fetch orphan day_book EXPENSE entries synced to cash_flow
+  // Plot registry payments — only those NOT auto-paid via a plot_payment
+  // (matches canonical: source_plot_payment_id IS NULL).
+  const registryResult = await pool.query(
+    `SELECT COALESCE(SUM(cfe.debit), 0)::numeric AS total
+     FROM cash_flow_entries cfe
+     WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
+       AND cfe.source_module = 'plot_registry_payments'
+       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND (cfe.status IS NULL OR cfe.status != 'rejected')
+       AND EXISTS (
+         SELECT 1 FROM plot_registry_payments prp
+         WHERE prp.id = cfe.source_id AND prp.source_plot_payment_id IS NULL
+       )`,
+    [siteId, start, end]
+  );
+  const registryExpense = parseFloat(registryResult.rows[0].total) || 0;
+
+  // Orphan day_book EXPENSE entries synced to cash_flow
   const orphanResult = await pool.query(
     `SELECT COALESCE(SUM(cfe.debit), 0)::numeric AS total
      FROM cash_flow_entries cfe
@@ -140,20 +176,10 @@ async function runFromCashFlowEntries(siteId, start, end) {
   );
   const orphanExpense = parseFloat(orphanResult.rows[0].total) || 0;
 
-  // Personal ledger debit (person-type entries are native to cash_flow_entries, not synced)
-  const plResult = await pool.query(
-    `SELECT COALESCE(SUM(cfe.debit), 0)::numeric AS total
-     FROM cash_flow_entries cfe
-     JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-     WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
-       AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
-       AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
-       AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
-    [siteId, start, end]
-  );
-  const personalLedgerDebit = parseFloat(plResult.rows[0].total) || 0;
-
-  const adjExpense = totalExpense + orphanExpense + personalLedgerDebit;
+  // NOTE: Person-ledger debit is intentionally NOT added here. It belongs to
+  // outstanding (given-returned), not expense — including it would double-deduct
+  // and break parity with Run A / getProfitSummary.
+  const adjExpense = totalExpense + registryExpense + orphanExpense;
   const netProfit = totalRevenue - adjExpense;
 
   // Outstanding from person ledger (same source for both runs)
@@ -214,8 +240,8 @@ export function getQueryDescriptions() {
       runB: 'SUM(credit) FROM cash_flow_entries WHERE source_module IN (plot_payments, plot_installment_payments) AND date range',
     },
     totalExpense: {
-      runA: 'SUM(amount/debit) FROM farmer_payments + expenses + plot_commissions + plot_commission_payments + vendor_payments + plot_registry_payments + day_book(EXPENSE orphan) WHERE site_id AND date range',
-      runB: 'SUM(debit) FROM cash_flow_entries WHERE source_module IN (profit modules) + day_book EXPENSE orphans AND date range',
+      runA: 'SUM(amount/debit) FROM farmer_payments + expenses + plot_commissions + plot_commission_payments + vendor_payments + plot_registry_payments(orphan only) + day_book(EXPENSE orphan) WHERE site_id AND date range',
+      runB: 'SUM(debit) FROM cash_flow_entries WHERE source_module IN (farmer_payments, expenses, plot_commissions, plot_commission_payments, vendor_payments) + plot_registry_payments orphans + day_book EXPENSE orphans AND date range. Person-ledger debit excluded (counted in outstanding, not expense).',
     },
     netProfit: {
       formula: 'totalRevenue − totalExpense',

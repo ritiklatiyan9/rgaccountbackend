@@ -21,12 +21,15 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 router.use(authMiddleware);
 
 const plotReadCache = cacheResponse({ ttlSeconds: 45, namespace: 'plots' });
-// Plot mutations affect daybook dashboard too
-const bustPlotCache = invalidateCacheOnSuccess(['/plots', '/daybook']);
+// Autocomplete (members + plot-payment fields like buyer_name/payment_from)
+// rarely changes; long-TTL meta cache that survives plot/payment writes.
+const plotMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'plots-meta' });
+// Anchored prefix so 'plots-meta|...' isn't busted by writes.
+const bustPlotCache = invalidateCacheOnSuccess(['plots|', '/daybook']);
 
 // ── Plot endpoints ──
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, listPlots);                                        // ?site_id=X
-router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, getAutocomplete);                      // ?site_id=X
+router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotMetaCache, getAutocomplete);                      // ?site_id=X
 router.get('/payment-management', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, paymentManagementList);           // ?site_id=X
 router.get('/payment-reminders', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, paymentReminders);                  // ?site_id=X&page=1&limit=10
 router.get('/payment-analytics', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, paymentAnalytics);                   // ?site_id=X&mode=...

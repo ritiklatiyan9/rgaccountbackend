@@ -6,13 +6,23 @@ class PlotRegistryModel extends MasterModel {
     super('plot_registries');
   }
 
-  /** All registries for a site with payment aggregates */
+  /** All registries for a site with payment aggregates.
+   *  Previously: 2 scalar subqueries PER ROW (sum + count). Now: a single
+   *  LATERAL aggregation that scans plot_registry_payments once per registry
+   *  and computes both numbers in one go. */
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT pr.*,
-        COALESCE((SELECT SUM(prp.amount) FROM plot_registry_payments prp WHERE prp.registry_id = pr.id), 0) AS total_paid,
-        (SELECT COUNT(*)::int FROM plot_registry_payments prp WHERE prp.registry_id = pr.id) AS payment_count
+        COALESCE(agg.total_paid,    0) AS total_paid,
+        COALESCE(agg.payment_count, 0) AS payment_count
       FROM plot_registries pr
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(prp.amount)::numeric AS total_paid,
+          COUNT(*)::int            AS payment_count
+        FROM plot_registry_payments prp
+        WHERE prp.registry_id = pr.id
+      ) agg ON TRUE
       WHERE pr.site_id = $1
       ORDER BY pr.plot_no ASC
     `;
@@ -27,13 +37,20 @@ class PlotRegistryModel extends MasterModel {
     return result.rows[0];
   }
 
-  /** Get single registry with aggregates */
+  /** Get single registry with aggregates (same LATERAL pattern) */
   async findByIdWithTotals(id, pool) {
     const query = `
       SELECT pr.*,
-        COALESCE((SELECT SUM(prp.amount) FROM plot_registry_payments prp WHERE prp.registry_id = pr.id), 0) AS total_paid,
-        (SELECT COUNT(*)::int FROM plot_registry_payments prp WHERE prp.registry_id = pr.id) AS payment_count
+        COALESCE(agg.total_paid,    0) AS total_paid,
+        COALESCE(agg.payment_count, 0) AS payment_count
       FROM plot_registries pr
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(prp.amount)::numeric AS total_paid,
+          COUNT(*)::int            AS payment_count
+        FROM plot_registry_payments prp
+        WHERE prp.registry_id = pr.id
+      ) agg ON TRUE
       WHERE pr.id = $1
     `;
     const result = await pool.query(query, [id]);
@@ -42,9 +59,36 @@ class PlotRegistryModel extends MasterModel {
 }
 
 // ── Plot Registry Payment Model ──
+// Cache the one-time schema check at module load. The column was added by
+// migration 025 and never removed; checking it on every autocomplete call
+// burned an extra round-trip for no reason.
+let _hasSourcePlotPaymentCol = null;
+const _resolveSchemaOnce = async (pool) => {
+  if (_hasSourcePlotPaymentCol !== null) return _hasSourcePlotPaymentCol;
+  try {
+    const r = await pool.query(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'plot_registry_payments'
+          AND column_name = 'source_plot_payment_id'
+      ) AS exists
+    `);
+    _hasSourcePlotPaymentCol = !!r.rows?.[0]?.exists;
+  } catch {
+    _hasSourcePlotPaymentCol = false;
+  }
+  return _hasSourcePlotPaymentCol;
+};
+
 class PlotRegistryPaymentModel extends MasterModel {
   constructor() {
     super('plot_registry_payments');
+  }
+
+  /** Has the source_plot_payment_id column? Cached after first check. */
+  async hasSourcePlotPaymentCol(pool) {
+    return _resolveSchemaOnce(pool);
   }
 
   /** All payments for a registry, ordered by date ASC */
@@ -60,17 +104,13 @@ class PlotRegistryPaymentModel extends MasterModel {
     return result.rows;
   }
 
-  /** Unique autocomplete values for UI */
+  /** Unique autocomplete values for UI.
+   *  Previously: 9 round-trips (8 parallel + 1 leading information_schema
+   *  check). Two of those queries (clientNames / clientUsers) returned
+   *  basically the same data (DISTINCT m.full_name FROM members) — now
+   *  derived from the shared `clientUsers` result. */
   async getAutocomplete(siteId, pool) {
-    const hasSourcePlotPaymentColResult = await pool.query(`
-      SELECT EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = 'plot_registry_payments'
-          AND column_name = 'source_plot_payment_id'
-      ) AS exists
-    `);
-    const hasSourcePlotPaymentCol = !!hasSourcePlotPaymentColResult.rows?.[0]?.exists;
+    const hasSourcePlotPaymentCol = await _resolveSchemaOnce(pool);
 
     const recentBankPlotPaymentsQuery = hasSourcePlotPaymentCol
       ? `
@@ -119,45 +159,32 @@ class PlotRegistryPaymentModel extends MasterModel {
         ORDER BY pp.date DESC, pp.created_at DESC
       `;
 
-    const [customerNames, farmerNames, paymentModes, plotOptions, clientNames, clientUsers, firmNames, recentBankPlotPayments] = await Promise.all([
+    // 7 parallel reads (was 8). `clientNames` is derived from the
+    // `clientUsers` result on the JS side — they're DISTINCT on the same
+    // member rows.
+    const [customerNames, farmerNames, paymentModes, plotOptions, clientUsers, firmNames, recentBankPlotPayments] = await Promise.all([
       pool.query(`SELECT DISTINCT customer_name AS val FROM plot_registries WHERE site_id = $1 AND customer_name IS NOT NULL AND customer_name != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT farmer_name AS val FROM plot_registries WHERE site_id = $1 AND farmer_name IS NOT NULL AND farmer_name != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT payment_mode AS val FROM plot_registry_payments WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val ASC`, [siteId]),
       pool.query(`
         SELECT
-          p.id,
-          p.plot_no,
-          p.buyer_name,
-          p.plot_size,
-          p.circle_rate,
-          p.to_receive_bank,
-          p.registry_area
+          p.id, p.plot_no, p.buyer_name, p.plot_size,
+          p.circle_rate, p.to_receive_bank, p.registry_area
         FROM plots p
         WHERE p.site_id = $1
         ORDER BY p.plot_no ASC
       `, [siteId]),
       pool.query(`
-        SELECT DISTINCT m.full_name AS val
-        FROM members m
-        WHERE m.site_id = $1
-          AND m.full_name IS NOT NULL
-          AND m.full_name != ''
-        ORDER BY val ASC
-      `, [siteId]),
-      pool.query(`
         SELECT DISTINCT m.full_name AS name, COALESCE(m.phone, '') AS phone
         FROM members m
         WHERE m.site_id = $1
-          AND m.full_name IS NOT NULL
-          AND m.full_name != ''
+          AND m.full_name IS NOT NULL AND m.full_name != ''
         ORDER BY name ASC
       `, [siteId]),
       pool.query(`
         SELECT DISTINCT f.name AS val
         FROM firms f
-        WHERE f.site_id = $1
-          AND f.name IS NOT NULL
-          AND f.name != ''
+        WHERE f.site_id = $1 AND f.name IS NOT NULL AND f.name != ''
         ORDER BY val ASC
       `, [siteId]),
       pool.query(recentBankPlotPaymentsQuery, [siteId]),
@@ -167,7 +194,9 @@ class PlotRegistryPaymentModel extends MasterModel {
       farmerNames: farmerNames.rows.map(r => r.val),
       paymentModes: paymentModes.rows.map(r => r.val),
       plotOptions: plotOptions.rows,
-      clientNames: clientNames.rows.map(r => r.val),
+      // Derived locally from clientUsers — saves one full DISTINCT scan
+      // of the members table.
+      clientNames: clientUsers.rows.map(r => r.name),
       clientUsers: clientUsers.rows,
       firmNames: firmNames.rows.map(r => r.val),
       recentBankPlotPayments: recentBankPlotPayments.rows,

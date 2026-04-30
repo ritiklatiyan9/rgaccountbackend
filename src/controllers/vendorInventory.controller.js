@@ -60,14 +60,12 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
 
   const where = conditions.join(' AND ');
 
-  const countRes = await pool.query(
+  // Run count + paged list + global summary IN PARALLEL (was 3 serial round-trips).
+  const countPromise = pool.query(
     `SELECT COUNT(*)::int AS total FROM vendor_inventory_orders o WHERE ${where}`,
     values
   );
-  const total = countRes.rows[0]?.total || 0;
-  const totalPages = Math.max(1, Math.ceil(total / limit));
-
-  const ordersRes = await pool.query(
+  const ordersPromise = pool.query(
     `SELECT
        o.id, o.site_id, o.vendor_member_id, o.vendor_name,
        o.item_name, o.item_category, o.unit,
@@ -86,8 +84,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
      LIMIT $${idx} OFFSET $${idx + 1}`,
     [...values, limit, offset]
   );
-
-  const sumRes = await pool.query(
+  const sumPromise = pool.query(
     `SELECT
        COUNT(*)::int AS total_orders,
        COALESCE(SUM(ROUND(qty_ordered * rate
@@ -106,6 +103,10 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
      WHERE site_id = $1`,
     [siteId]
   );
+
+  const [countRes, ordersRes, sumRes] = await Promise.all([countPromise, ordersPromise, sumPromise]);
+  const total = countRes.rows[0]?.total || 0;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
 
   res.json({
     orders: ordersRes.rows,
@@ -367,7 +368,8 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
 
-  const catRes = await pool.query(
+  // 3 independent reads in parallel — was 3 serial round-trips.
+  const catPromise = pool.query(
     `SELECT
        COALESCE(NULLIF(o.item_category, ''), 'UNCATEGORIZED') AS category,
        COUNT(*)::int AS item_count,
@@ -392,8 +394,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
     [siteId]
   );
 
-  // Most recent payment transactions across the site
-  const recentTxRes = await pool.query(
+  const recentTxPromise = pool.query(
     `SELECT p.id, p.payment_date AS date, p.amount, p.payment_mode,
             o.item_name, o.item_category, o.unit
      FROM vendor_inventory_payments p
@@ -404,7 +405,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
     [siteId]
   );
 
-  const totalRes = await pool.query(
+  const totalPromise = pool.query(
     `SELECT
        COUNT(*)::int AS total_items,
        COALESCE(SUM(ROUND(qty_ordered * rate
@@ -422,6 +423,10 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
      WHERE site_id = $1 AND status != 'cancelled'`,
     [siteId]
   );
+
+  const [catRes, recentTxRes, totalRes] = await Promise.all([
+    catPromise, recentTxPromise, totalPromise,
+  ]);
 
   res.json({
     categories: catRes.rows,

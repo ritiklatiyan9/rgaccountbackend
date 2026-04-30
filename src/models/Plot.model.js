@@ -6,17 +6,44 @@ class PlotModel extends MasterModel {
     super('plots');
   }
 
-  /** All plots for a site with payment aggregates */
+  /** All plots for a site with payment aggregates.
+   *  Previously: SIX scalar subqueries PER ROW (3 SUM filters + COUNT +
+   *  2 string_aggs). With 50 plots that's 300+ subqueries per page load.
+   *  Now: a single LATERAL aggregation that scans plot_payments once per
+   *  plot and computes everything via FILTER. */
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT p.*,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_received,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type IN ('BANK', 'CHEQUE') AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_cash,
-        (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count,
-        COALESCE((SELECT string_agg(DISTINCT pp.buyer_name, ', ') FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.buyer_name IS NOT NULL AND pp.buyer_name != ''), '') AS payment_buyer_names,
-        COALESCE((SELECT string_agg(DISTINCT pp.booked_by, ', ') FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.booked_by IS NOT NULL AND pp.booked_by != ''), '') AS payment_booked_bys
+        COALESCE(agg.total_received,    0) AS total_received,
+        COALESCE(agg.received_bank,     0) AS received_bank,
+        COALESCE(agg.received_cash,     0) AS received_cash,
+        COALESCE(agg.payment_count,     0) AS payment_count,
+        COALESCE(agg.payment_buyer_names, '') AS payment_buyer_names,
+        COALESCE(agg.payment_booked_bys,  '') AS payment_booked_bys
       FROM plots p
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(pp.amount) FILTER (
+            WHERE pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')
+          ) AS total_received,
+          SUM(pp.amount) FILTER (
+            WHERE pp.payment_type IN ('BANK', 'CHEQUE')
+              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          ) AS received_bank,
+          SUM(pp.amount) FILTER (
+            WHERE pp.payment_type = 'CASH'
+              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          ) AS received_cash,
+          COUNT(*)::int AS payment_count,
+          STRING_AGG(DISTINCT pp.buyer_name, ', ') FILTER (
+            WHERE pp.buyer_name IS NOT NULL AND pp.buyer_name != ''
+          ) AS payment_buyer_names,
+          STRING_AGG(DISTINCT pp.booked_by, ', ') FILTER (
+            WHERE pp.booked_by IS NOT NULL AND pp.booked_by != ''
+          ) AS payment_booked_bys
+        FROM plot_payments pp
+        WHERE pp.plot_id = p.id
+      ) agg ON TRUE
       WHERE p.site_id = $1
       ORDER BY p.plot_no ASC
     `;
@@ -31,15 +58,32 @@ class PlotModel extends MasterModel {
     return result.rows;
   }
 
-  /** Get single plot with aggregates */
+  /** Get single plot with aggregates (single LATERAL — was 4 subqueries). */
   async findByIdWithTotals(id, pool) {
     const query = `
       SELECT p.*,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_received,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type IN ('BANK', 'CHEQUE') AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_bank,
-        COALESCE((SELECT SUM(pp.amount) FROM plot_payments pp WHERE pp.plot_id = p.id AND pp.payment_type = 'CASH' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS received_cash,
-        (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count
+        COALESCE(agg.total_received, 0) AS total_received,
+        COALESCE(agg.received_bank,  0) AS received_bank,
+        COALESCE(agg.received_cash,  0) AS received_cash,
+        COALESCE(agg.payment_count,  0) AS payment_count
       FROM plots p
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(pp.amount) FILTER (
+            WHERE pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')
+          ) AS total_received,
+          SUM(pp.amount) FILTER (
+            WHERE pp.payment_type IN ('BANK', 'CHEQUE')
+              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          ) AS received_bank,
+          SUM(pp.amount) FILTER (
+            WHERE pp.payment_type = 'CASH'
+              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          ) AS received_cash,
+          COUNT(*)::int AS payment_count
+        FROM plot_payments pp
+        WHERE pp.plot_id = p.id
+      ) agg ON TRUE
       WHERE p.id = $1
     `;
     const result = await pool.query(query, [id]);

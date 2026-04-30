@@ -20,13 +20,18 @@ import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const plotCommissionReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'plot-commissions' });
-const bustPlotCommissionCache = invalidateCacheOnSuccess(['/plot-commissions']);
+// /plots is just the list of plots a commission can be assigned to — it
+// rarely changes, so it gets its own namespace with a longer TTL and is
+// NOT busted by every commission/payment write.
+const plotsForCommissionCache = cacheResponse({ ttlSeconds: 300, namespace: 'plot-commissions-plots' });
+// Anchored prefix so the dedicated cache survives writes.
+const bustPlotCommissionCache = invalidateCacheOnSuccess(['plot-commissions|']);
 
 // All routes require auth
 router.use(authMiddleware);
 
 // These permissions use the existing 'commissions' module permission identifier for backward compatibility/simplicity
-router.get('/plots', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getPlotsForCommission);
+router.get('/plots', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotsForCommissionCache, getPlotsForCommission);
 router.post('/create', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustPlotCommissionCache, createPlotCommission);
 router.get('/list', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listPlotCommissions);
 

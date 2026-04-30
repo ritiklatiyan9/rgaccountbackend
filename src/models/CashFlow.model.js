@@ -6,18 +6,59 @@ class CashFlowMonthModel extends MasterModel {
     super('cash_flow_months');
   }
 
-  /** All months for a site, ordered newest first */
+  /** All months for a site, ordered newest first.
+   *  Previously this ran SEVEN scalar subqueries PER ROW (total_debit,
+   *  total_credit, cash_given, cash_received, bank_given, bank_received,
+   *  entry_count). With 12 ledgers that's 84 subqueries per request — by
+   *  far the slowest part of opening the Personal Ledger page.
+   *
+   *  Now: a single LATERAL aggregation that scans cash_flow_entries once
+   *  per month and computes all six sums + the count using FILTER clauses. */
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT cfm.*,
-        COALESCE((SELECT SUM(cfe.debit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0) AS total_debit,
-        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0) AS total_credit,
-        COALESCE((SELECT SUM(cfe.debit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND cfe.cash_type = 'cash' AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0) AS cash_given,
-        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND cfe.cash_type = 'cash' AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0) AS cash_received,
-        COALESCE((SELECT SUM(cfe.debit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND cfe.cash_type = 'bank' AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0) AS bank_given,
-        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND cfe.cash_type = 'bank' AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0) AS bank_received,
-        (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id) AS entry_count
+        COALESCE(agg.total_debit,    0) AS total_debit,
+        COALESCE(agg.total_credit,   0) AS total_credit,
+        COALESCE(agg.cash_given,     0) AS cash_given,
+        COALESCE(agg.cash_received,  0) AS cash_received,
+        COALESCE(agg.bank_given,     0) AS bank_given,
+        COALESCE(agg.bank_received,  0) AS bank_received,
+        COALESCE(agg.entry_count,    0) AS entry_count
       FROM cash_flow_months cfm
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(cfe.debit) FILTER (
+            WHERE (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS total_debit,
+          SUM(cfe.credit) FILTER (
+            WHERE (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS total_credit,
+          SUM(cfe.debit) FILTER (
+            WHERE cfe.cash_type = 'cash'
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS cash_given,
+          SUM(cfe.credit) FILTER (
+            WHERE cfe.cash_type = 'cash'
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS cash_received,
+          SUM(cfe.debit) FILTER (
+            WHERE cfe.cash_type = 'bank'
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS bank_given,
+          SUM(cfe.credit) FILTER (
+            WHERE cfe.cash_type = 'bank'
+              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS bank_received,
+          COUNT(*)::int AS entry_count
+        FROM cash_flow_entries cfe
+        WHERE cfe.cash_flow_month_id = cfm.id
+      ) agg ON TRUE
       WHERE cfm.site_id = $1
       ORDER BY cfm.year DESC, cfm.month DESC, cfm.ledger_name ASC
     `;
@@ -32,14 +73,28 @@ class CashFlowMonthModel extends MasterModel {
     return result.rows[0];
   }
 
-  /** Get a single month with totals */
+  /** Get a single month with totals (1 lateral aggregation, was 3 subqueries) */
   async findByIdWithTotals(id, pool) {
     const query = `
       SELECT cfm.*,
-        COALESCE((SELECT SUM(cfe.debit)  FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0) AS total_debit,
-        COALESCE((SELECT SUM(cfe.credit) FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')), 0) AS total_credit,
-        (SELECT COUNT(*)::int FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id = cfm.id) AS entry_count
+        COALESCE(agg.total_debit,  0) AS total_debit,
+        COALESCE(agg.total_credit, 0) AS total_credit,
+        COALESCE(agg.entry_count,  0) AS entry_count
       FROM cash_flow_months cfm
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(cfe.debit)  FILTER (
+            WHERE (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS total_debit,
+          SUM(cfe.credit) FILTER (
+            WHERE (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+          ) AS total_credit,
+          COUNT(*)::int AS entry_count
+        FROM cash_flow_entries cfe
+        WHERE cfe.cash_flow_month_id = cfm.id
+      ) agg ON TRUE
       WHERE cfm.id = $1
     `;
     const result = await pool.query(query, [id]);

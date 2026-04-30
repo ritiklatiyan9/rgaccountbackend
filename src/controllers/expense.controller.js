@@ -128,16 +128,14 @@ export const listExpenses = asyncHandler(async (req, res) => {
   const fetchLimit = isExport === 'true' ? 0 : parseInt(limit);
   const fetchPage = parseInt(page);
 
-  const [paginatedData, breakdowns] = await Promise.all([
+  // Run the heavy unified query, the breakdowns query AND the site lookup
+  // ALL in parallel. Was: 2 parallel + 1 serial after.
+  const [paginatedData, breakdowns, siteRowRes] = await Promise.all([
     expenseModel.findPaginatedUnified(parseInt(site_id), filters, fetchPage, fetchLimit, pool),
-    expenseModel.getUnifiedBreakdowns(parseInt(site_id), filters, pool)
+    expenseModel.getUnifiedBreakdowns(parseInt(site_id), filters, pool),
+    pool.query('SELECT name, city, state FROM sites WHERE id = $1', [parseInt(site_id)]),
   ]);
-
-  // Resolve site for signed token payload.
-  const siteRow = (await pool.query(
-    'SELECT name, city, state FROM sites WHERE id = $1',
-    [parseInt(site_id)]
-  )).rows[0] || null;
+  const siteRow = siteRowRes.rows[0] || null;
 
   const expensesWithVerify = paginatedData.items.map((e) => ({
     ...e,
@@ -191,36 +189,40 @@ export const getExpense = asyncHandler(async (req, res) => {
 
 /**
  * PUT /expenses/:id
+ *
+ * Atomic — only updates the columns the caller actually sends. Saves a
+ * SELECT round-trip vs the previous SELECT-then-UPDATE pattern.
  */
 export const updateExpense = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const existing = await expenseModel.findById(parseInt(id), pool);
-  if (!existing) return res.status(404).json({ message: 'Expense not found' });
-
+  const expenseId = parseInt(req.params.id);
   const {
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
     assigned_user_id, assigned_admin_id, voucher_url, bill_url
   } = req.body;
 
-  const data = {
-    date: date || existing.date,
-    from_entity: from_entity !== undefined ? (from_entity ? from_entity.trim().toUpperCase() : null) : existing.from_entity,
-    to_entity: to_entity !== undefined ? (to_entity ? to_entity.trim().toUpperCase() : null) : existing.to_entity,
-    payment_mode: payment_mode !== undefined ? (payment_mode ? payment_mode.trim().toUpperCase() : null) : existing.payment_mode,
-    debit: debit !== undefined ? (parseFloat(debit) || 0) : existing.debit,
-    credit: credit !== undefined ? (parseFloat(credit) || 0) : existing.credit,
-    remark: remark !== undefined ? (remark ? remark.trim().toUpperCase() : null) : existing.remark,
-    account_no: account_no !== undefined ? (account_no ? account_no.trim().toUpperCase() : null) : existing.account_no,
-    branch: branch !== undefined ? (branch ? branch.trim().toUpperCase() : null) : existing.branch,
-    category: category !== undefined ? (category ? category.trim().toUpperCase() : null) : existing.category,
-    assigned_user_id: assigned_user_id !== undefined ? (assigned_user_id ? parseInt(assigned_user_id) : null) : existing.assigned_user_id,
-    assigned_admin_id: assigned_admin_id !== undefined ? (assigned_admin_id ? parseInt(assigned_admin_id) : null) : existing.assigned_admin_id,
-    voucher_url: voucher_url !== undefined ? (voucher_url || null) : existing.voucher_url,
-    bill_url: bill_url !== undefined ? (bill_url || null) : existing.bill_url,
-  };
+  const data = {};
+  if (date !== undefined) data.date = date;
+  if (from_entity !== undefined) data.from_entity = from_entity ? from_entity.trim().toUpperCase() : null;
+  if (to_entity !== undefined) data.to_entity = to_entity ? to_entity.trim().toUpperCase() : null;
+  if (payment_mode !== undefined) data.payment_mode = payment_mode ? payment_mode.trim().toUpperCase() : null;
+  if (debit !== undefined) data.debit = parseFloat(debit) || 0;
+  if (credit !== undefined) data.credit = parseFloat(credit) || 0;
+  if (remark !== undefined) data.remark = remark ? remark.trim().toUpperCase() : null;
+  if (account_no !== undefined) data.account_no = account_no ? account_no.trim().toUpperCase() : null;
+  if (branch !== undefined) data.branch = branch ? branch.trim().toUpperCase() : null;
+  if (category !== undefined) data.category = category ? category.trim().toUpperCase() : null;
+  if (assigned_user_id !== undefined) data.assigned_user_id = assigned_user_id ? parseInt(assigned_user_id) : null;
+  if (assigned_admin_id !== undefined) data.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+  if (voucher_url !== undefined) data.voucher_url = voucher_url || null;
+  if (bill_url !== undefined) data.bill_url = bill_url || null;
 
-  const updated = await expenseModel.update(parseInt(id), data, pool);
+  if (Object.keys(data).length === 0) {
+    return res.status(400).json({ message: 'Nothing to update' });
+  }
+
+  const updated = await expenseModel.update(expenseId, data, pool);
+  if (!updated) return res.status(404).json({ message: 'Expense not found' });
   res.json({ expense: updated });
 });
 
@@ -228,9 +230,12 @@ export const updateExpense = asyncHandler(async (req, res) => {
  * DELETE /expenses/:id
  */
 export const deleteExpense = asyncHandler(async (req, res) => {
-  const existing = await expenseModel.findById(parseInt(req.params.id), pool);
-  if (!existing) return res.status(404).json({ message: 'Expense not found' });
-  await expenseModel.delete(parseInt(req.params.id), pool);
+  // Atomic DELETE — saves a SELECT round-trip.
+  const result = await pool.query(
+    `DELETE FROM expenses WHERE id = $1 RETURNING id`,
+    [parseInt(req.params.id)]
+  );
+  if (!result.rows[0]) return res.status(404).json({ message: 'Expense not found' });
   res.json({ message: 'Expense deleted' });
 });
 
@@ -400,35 +405,38 @@ export const approveExpense = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { source } = req.query; // 'daybook' or 'expenses'
 
+  // ── Vendor payment branch ──
   if (source === 'vendor_payment') {
-    const existing = await pool.query('SELECT * FROM vendor_payments WHERE id = $1', [parseInt(id)]);
-    const payment = existing.rows[0];
-    if (!payment) return res.status(404).json({ message: 'Vendor payment not found' });
-    if (payment.status === 'approved') {
-      return res.status(400).json({ message: 'Vendor payment is already approved' });
-    }
-
-    const approvedResult = await pool.query(
+    // Atomic: only flip status when not already 'approved'. Saves the
+    // SELECT round-trip and rejects the dup in a single query.
+    const result = await pool.query(
       `UPDATE vendor_payments
-       SET status = 'approved', approved_by = $2, approved_at = NOW()
-       WHERE id = $1
-       RETURNING *`,
+          SET status = 'approved', approved_by = $2, approved_at = NOW()
+        WHERE id = $1 AND status != 'approved'
+        RETURNING *`,
       [parseInt(id), req.user.id]
     );
+    if (!result.rows[0]) {
+      // Either not found or already approved — distinguish via a tiny lookup.
+      const check = await pool.query('SELECT status FROM vendor_payments WHERE id = $1', [parseInt(id)]);
+      if (check.rows.length === 0) return res.status(404).json({ message: 'Vendor payment not found' });
+      return res.status(400).json({ message: 'Vendor payment is already approved' });
+    }
+    const approvedPayment = result.rows[0];
 
-    const approvedPayment = approvedResult.rows[0];
-
-    await deductImprestOnApproval(
+    // Imprest deduction in BACKGROUND — caller doesn't need to wait.
+    deductImprestOnApproval(
       approvedPayment.created_by,
       parseFloat(approvedPayment.amount) || 0,
       approvedPayment.id,
       `VENDOR PAYMENT #${approvedPayment.id}`,
       req.user.id
-    );
+    ).catch(() => {});
 
     return res.json({ expense: approvedPayment, message: 'Vendor payment approved successfully' });
   }
 
+  // ── DayBook branch ──
   if (source === 'daybook') {
     const existing = await dayBookModel.findById(parseInt(id), pool);
     if (!existing) {
@@ -439,25 +447,41 @@ export const approveExpense = asyncHandler(async (req, res) => {
     }
     const entry = await dayBookModel.approveEntry(parseInt(id), req.user.id, pool);
 
-    // Deduct from sub-admin's imprest balance on approval
-    await deductImprestOnApproval(entry.created_by, parseFloat(entry.debit) || 0, entry.id, `DAYBOOK #${entry.id}: ${entry.entry_type || 'EXPENSE'}`, req.user.id);
+    // Imprest deduction in BACKGROUND.
+    deductImprestOnApproval(
+      entry.created_by,
+      parseFloat(entry.debit) || 0,
+      entry.id,
+      `DAYBOOK #${entry.id}: ${entry.entry_type || 'EXPENSE'}`,
+      req.user.id
+    ).catch(() => {});
 
     return res.json({ expense: entry, message: 'Day Book expense approved successfully' });
   }
 
-  // Default: expenses table
-  const existing = await expenseModel.findById(parseInt(id), pool);
-  if (!existing) {
-    return res.status(404).json({ message: 'Expense not found' });
-  }
-  if (existing.status === 'approved') {
+  // ── Default: expenses table — atomic flip ──
+  const result = await pool.query(
+    `UPDATE expenses
+        SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW()
+      WHERE id = $1 AND status != 'approved'
+      RETURNING *`,
+    [parseInt(id), req.user.id]
+  );
+  if (!result.rows[0]) {
+    const check = await pool.query('SELECT status FROM expenses WHERE id = $1', [parseInt(id)]);
+    if (check.rows.length === 0) return res.status(404).json({ message: 'Expense not found' });
     return res.status(400).json({ message: 'Expense is already approved' });
   }
+  const expense = result.rows[0];
 
-  const expense = await expenseModel.approveExpense(parseInt(id), req.user.id, pool);
-
-  // Deduct from sub-admin's imprest balance on approval
-  await deductImprestOnApproval(expense.created_by, parseFloat(expense.debit) || 0, expense.id, `EXPENSE #${expense.id}: ${expense.remark || 'EXPENSE'}`, req.user.id);
+  // Imprest deduction in BACKGROUND — response can return immediately.
+  deductImprestOnApproval(
+    expense.created_by,
+    parseFloat(expense.debit) || 0,
+    expense.id,
+    `EXPENSE #${expense.id}: ${expense.remark || 'EXPENSE'}`,
+    req.user.id
+  ).catch(() => {});
 
   res.json({ expense, message: 'Expense approved successfully' });
 });
@@ -470,36 +494,39 @@ export const rejectExpense = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { source } = req.query; // 'daybook' or 'expenses'
 
+  // ── Vendor payment branch ── single SELECT + atomic UPDATE
   if (source === 'vendor_payment') {
-    const existing = await pool.query('SELECT * FROM vendor_payments WHERE id = $1', [parseInt(id)]);
-    const payment = existing.rows[0];
-    if (!payment) return res.status(404).json({ message: 'Vendor payment not found' });
-    if (payment.status === 'rejected') {
-      return res.status(400).json({ message: 'Vendor payment is already rejected' });
-    }
-
-    const rejectedResult = await pool.query(
+    const result = await pool.query(
       `UPDATE vendor_payments
-       SET status = 'rejected', approved_by = $2, approved_at = NOW()
-       WHERE id = $1
-       RETURNING *`,
+          SET status = 'rejected', approved_by = $2, approved_at = NOW()
+        WHERE id = $1 AND status != 'rejected'
+        RETURNING *, (
+          SELECT status FROM vendor_payments WHERE id = $1
+        ) AS prev_status`,
       [parseInt(id), req.user.id]
     );
-
-    // Reverse imprest deduction if this was previously approved
-    if (payment.status === 'approved') {
-      await reverseImprestOnRejection(
-        payment.created_by,
-        parseFloat(payment.amount) || 0,
-        payment.id,
-        `VENDOR PAYMENT #${payment.id}`,
-        req.user.id
-      );
+    if (!result.rows[0]) {
+      const check = await pool.query('SELECT status FROM vendor_payments WHERE id = $1', [parseInt(id)]);
+      if (check.rows.length === 0) return res.status(404).json({ message: 'Vendor payment not found' });
+      return res.status(400).json({ message: 'Vendor payment is already rejected' });
     }
+    const rejectedPayment = result.rows[0];
 
-    return res.json({ expense: rejectedResult.rows[0], message: 'Vendor payment rejected' });
+    // Reverse imprest deduction in BACKGROUND if previously approved.
+    // (`reverseImprestOnRejection` already filters via a row check, so it's
+    // safe to fire even when there was no prior deduction.)
+    reverseImprestOnRejection(
+      rejectedPayment.created_by,
+      parseFloat(rejectedPayment.amount) || 0,
+      rejectedPayment.id,
+      `VENDOR PAYMENT #${rejectedPayment.id}`,
+      req.user.id
+    ).catch(() => {});
+
+    return res.json({ expense: rejectedPayment, message: 'Vendor payment rejected' });
   }
 
+  // ── DayBook branch ──
   if (source === 'daybook') {
     const existing = await dayBookModel.findById(parseInt(id), pool);
     if (!existing) {
@@ -510,40 +537,45 @@ export const rejectExpense = asyncHandler(async (req, res) => {
     }
     const entry = await dayBookModel.rejectEntry(parseInt(id), req.user.id, pool);
 
-    // Reverse imprest deduction if this was previously approved
     if (existing.status === 'approved') {
-      await reverseImprestOnRejection(
+      reverseImprestOnRejection(
         existing.created_by,
         parseFloat(existing.debit) || 0,
         existing.id,
         `DAYBOOK #${existing.id}: ${existing.entry_type || 'EXPENSE'}`,
         req.user.id
-      );
+      ).catch(() => {});
     }
 
     return res.json({ expense: entry, message: 'Day Book expense rejected' });
   }
 
-  // Default: expenses table
-  const existing = await expenseModel.findById(parseInt(id), pool);
-  if (!existing) {
-    return res.status(404).json({ message: 'Expense not found' });
-  }
-  if (existing.status === 'rejected') {
+  // ── Default: expenses table — atomic flip with prev_status detection ──
+  const result = await pool.query(
+    `WITH prev AS (
+       SELECT status AS prev_status FROM expenses WHERE id = $1
+     )
+     UPDATE expenses
+        SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
+      WHERE id = $1 AND status != 'rejected'
+      RETURNING *, (SELECT prev_status FROM prev) AS prev_status`,
+    [parseInt(id), req.user.id]
+  );
+  if (!result.rows[0]) {
+    const check = await pool.query('SELECT status FROM expenses WHERE id = $1', [parseInt(id)]);
+    if (check.rows.length === 0) return res.status(404).json({ message: 'Expense not found' });
     return res.status(400).json({ message: 'Expense is already rejected' });
   }
+  const expense = result.rows[0];
 
-  const expense = await expenseModel.rejectExpense(parseInt(id), req.user.id, pool);
-
-  // Reverse imprest deduction if this was previously approved
-  if (existing.status === 'approved') {
-    await reverseImprestOnRejection(
-      existing.created_by,
-      parseFloat(existing.debit) || 0,
-      existing.id,
-      `EXPENSE #${existing.id}: ${existing.remark || 'EXPENSE'}`,
+  if (expense.prev_status === 'approved') {
+    reverseImprestOnRejection(
+      expense.created_by,
+      parseFloat(expense.debit) || 0,
+      expense.id,
+      `EXPENSE #${expense.id}: ${expense.remark || 'EXPENSE'}`,
       req.user.id
-    );
+    ).catch(() => {});
   }
 
   res.json({ expense, message: 'Expense rejected' });
@@ -556,6 +588,47 @@ export const rejectExpense = asyncHandler(async (req, res) => {
 export const bulkApproveExpenses = asyncHandler(async (req, res) => {
   const { items } = req.body; // Array of { id, source }
 
+  // ── Bulk imprest helper: looks up sub_admin role status for all
+  //     unique creators in ONE query (was N queries via the per-item
+  //     deductImprestOnApproval helper) and inserts all deductions in a
+  //     single multi-row INSERT. Runs fire-and-forget after the response.
+  const bulkImprestDeduct = async (allItems) => {
+    if (!allItems || allItems.length === 0) return;
+    try {
+      const creatorIds = [...new Set(allItems.map((i) => i.creator).filter(Boolean))];
+      if (creatorIds.length === 0) return;
+      const userRes = await pool.query(
+        `SELECT id, role FROM users WHERE id = ANY($1::int[])`,
+        [creatorIds]
+      );
+      const subAdminIds = new Set(
+        userRes.rows.filter((u) => u.role === 'sub_admin').map((u) => u.id)
+      );
+      const ledgerRows = allItems.filter(
+        (i) => subAdminIds.has(i.creator) && i.amount > 0
+      );
+      if (ledgerRows.length === 0) return;
+
+      const COLS = 6;
+      const placeholders = [];
+      const values = [];
+      ledgerRows.forEach((r, i) => {
+        const b = i * COLS;
+        placeholders.push(
+          `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6})`
+        );
+        values.push(r.creator, r.type, r.referenceId, -r.amount, r.remarks.toUpperCase(), req.user.id);
+      });
+      await pool.query(
+        `INSERT INTO imprest_ledger (user_id, type, reference_id, amount, remarks, created_by)
+         VALUES ${placeholders.join(',')}`,
+        values
+      );
+    } catch (err) {
+      console.error('[Imprest] Bulk deduct failed:', err.message);
+    }
+  };
+
   // Support legacy format (expense_ids array)
   if (req.body.expense_ids) {
     const expense_ids = req.body.expense_ids;
@@ -563,15 +636,20 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'expense_ids array is required' });
     }
     const expenses = await expenseModel.bulkApprove(
-      expense_ids.map(id => parseInt(id)),
+      expense_ids.map((id) => parseInt(id)),
       req.user.id,
       pool
     );
 
-    // Deduct imprest for each approved expense
-    for (const exp of expenses) {
-      await deductImprestOnApproval(exp.created_by, parseFloat(exp.debit) || 0, exp.id, `EXPENSE #${exp.id}: ${exp.remark || 'EXPENSE'}`, req.user.id);
-    }
+    // Build the imprest payload but DON'T await — caller gets the response
+    // immediately, and the ledger writes happen after.
+    bulkImprestDeduct(expenses.map((exp) => ({
+      creator: exp.created_by,
+      type: 'EXPENSE',
+      referenceId: exp.id,
+      amount: parseFloat(exp.debit) || 0,
+      remarks: `EXPENSE #${exp.id}: ${exp.remark || 'EXPENSE'}`,
+    })));
 
     return res.json({
       expenses,
@@ -586,12 +664,12 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
 
   // Separate by source (farmer_payment and commission entries live in day_book table)
   const daybookSources = ['daybook', 'farmer_payment', 'commission'];
-  const daybookIds = items.filter(i => daybookSources.includes(i.source)).map(i => parseInt(i.id));
-  const vendorPaymentIds = items.filter(i => i.source === 'vendor_payment').map(i => parseInt(i.id));
+  const daybookIds = items.filter((i) => daybookSources.includes(i.source)).map((i) => parseInt(i.id));
+  const vendorPaymentIds = items.filter((i) => i.source === 'vendor_payment').map((i) => parseInt(i.id));
 
   const pureExpenseIds = items
-    .filter(i => !daybookSources.includes(i.source) && i.source !== 'vendor_payment')
-    .map(i => parseInt(i.id));
+    .filter((i) => !daybookSources.includes(i.source) && i.source !== 'vendor_payment')
+    .map((i) => parseInt(i.id));
 
   const results = await Promise.all([
     pureExpenseIds.length > 0 ? expenseModel.bulkApprove(pureExpenseIds, req.user.id, pool) : [],
@@ -609,17 +687,32 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
       : [],
   ]);
 
-  // Deduct imprest for each approved expense entry
-  for (const exp of results[0]) {
-    await deductImprestOnApproval(exp.created_by, parseFloat(exp.debit) || 0, exp.id, `EXPENSE #${exp.id}: ${exp.remark || 'EXPENSE'}`, req.user.id);
-  }
-  // Deduct imprest for each approved daybook entry
-  for (const entry of results[1]) {
-    await deductImprestOnApproval(entry.created_by, parseFloat(entry.debit) || 0, entry.id, `DAYBOOK #${entry.id}: ${entry.entry_type || 'EXPENSE'}`, req.user.id);
-  }
-  for (const vp of results[2]) {
-    await deductImprestOnApproval(vp.created_by, parseFloat(vp.amount) || 0, vp.id, `VENDOR PAYMENT #${vp.id}`, req.user.id);
-  }
+  // Build a single batched imprest payload (was 3 nested for loops × N
+  // serial round-trips). Run in BACKGROUND.
+  const ledgerPayload = [
+    ...results[0].map((exp) => ({
+      creator: exp.created_by,
+      type: 'EXPENSE',
+      referenceId: exp.id,
+      amount: parseFloat(exp.debit) || 0,
+      remarks: `EXPENSE #${exp.id}: ${exp.remark || 'EXPENSE'}`,
+    })),
+    ...results[1].map((entry) => ({
+      creator: entry.created_by,
+      type: 'EXPENSE',
+      referenceId: entry.id,
+      amount: parseFloat(entry.debit) || 0,
+      remarks: `DAYBOOK #${entry.id}: ${entry.entry_type || 'EXPENSE'}`,
+    })),
+    ...results[2].map((vp) => ({
+      creator: vp.created_by,
+      type: 'EXPENSE',
+      referenceId: vp.id,
+      amount: parseFloat(vp.amount) || 0,
+      remarks: `VENDOR PAYMENT #${vp.id}`,
+    })),
+  ];
+  bulkImprestDeduct(ledgerPayload);
 
   const totalApproved = results[0].length + results[1].length + results[2].length;
 

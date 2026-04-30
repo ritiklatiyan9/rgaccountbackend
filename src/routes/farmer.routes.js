@@ -20,8 +20,12 @@ import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const farmerReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'farmers' });
-// Farmer mutations affect daybook dashboard too
-const bustFarmerCache = invalidateCacheOnSuccess(['/farmers', '/daybook']);
+// Member-list dropdown rarely changes; longer TTL in a separate namespace so
+// farmer-payment writes don't bust it.
+const farmerMembersCache = cacheResponse({ ttlSeconds: 300, namespace: 'farmers-members' });
+// Farmer mutations affect daybook dashboard too. Anchored prefix so the
+// "farmers-members" cache survives.
+const bustFarmerCache = invalidateCacheOnSuccess(['farmers|', '/daybook']);
 
 // Public: verify receipt (no auth) — MUST be before authMiddleware
 router.get('/verify-receipt', verifyFarmerReceipt);
@@ -30,7 +34,7 @@ router.get('/verify-receipt', verifyFarmerReceipt);
 router.use(authMiddleware);
 
 // Farmer members (for registration dropdown) — must come before /:id
-router.get('/members', farmerReadCache, listFarmerMembers);
+router.get('/members', farmerMembersCache, listFarmerMembers);
 
 // Farmer CRUD
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), farmerReadCache, listFarmers);                                     // ?site_id=X
