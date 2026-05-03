@@ -382,6 +382,7 @@ CREATE TABLE IF NOT EXISTS firm_transactions (
   name            VARCHAR(255),
   purpose         VARCHAR(500),
   remark          VARCHAR(100),
+  remark2         VARCHAR(255),
   cheque_no       VARCHAR(50),
   cash_flow_entry_id INTEGER REFERENCES cash_flow_entries(id) ON DELETE SET NULL,
   is_firm_to_firm_transfer BOOLEAN NOT NULL DEFAULT false,
