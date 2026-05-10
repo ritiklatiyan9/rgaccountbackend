@@ -31,7 +31,18 @@ const normalizeTxnDate = (value) => {
   return raw;
 };
 
-const txnSignature = ({ date, description, debit, credit }) => {
+// Cheque-aware signature. Cheque no is part of the dedup key so two real
+// transactions with the same date/description/amount but different cheque
+// numbers (common with batched cheque clearings) are NOT collapsed. A blank
+// cheque ('-' or '') normalizes to empty so prior-imported cash entries still
+// dedup against fresh cash entries with the same fields.
+const normalizeChequeNo = (value) => {
+  const s = (value || '').toString().trim();
+  if (!s || s === '-') return '';
+  return s.toUpperCase();
+};
+
+const txnSignature = ({ date, description, debit, credit, cheque_no }) => {
   const amtDebit = Number.parseFloat(debit || 0).toFixed(2);
   const amtCredit = Number.parseFloat(credit || 0).toFixed(2);
   return [
@@ -39,6 +50,7 @@ const txnSignature = ({ date, description, debit, credit }) => {
     normalizeTxnText(description),
     amtDebit,
     amtCredit,
+    normalizeChequeNo(cheque_no),
   ].join('|');
 };
 
@@ -412,8 +424,22 @@ export const createFirmToFirmTransfer = asyncHandler(async (req, res) => {
 
 /**
  * POST /firms/transactions/bulk
- * Bulk create transactions from Excel import
+ * Bulk import — three phases:
+ *   1. validate + normalize all rows in memory (no I/O)
+ *   2. resolve every referenced firm + every existing signature in TWO queries
+ *   3. multi-row INSERT chunked at ~1000 rows inside a single transaction
+ *
+ *  Old path issued ~3N round-trips for N rows. This path issues 2 lookups +
+ *  ceil(N/CHUNK) inserts (typically ~3 RTTs for any reasonable batch).
  */
+const BULK_INSERT_COLUMNS = [
+  'firm_id', 'site_id', 'date', 'description', 'payment_mode',
+  'debit', 'credit', 'name', 'purpose', 'remark', 'remark2',
+  'cheque_no', 'voucher_url', 'assigned_admin_id', 'status', 'created_by',
+];
+const BULK_INSERT_CHUNK = 1000; // 1000 * 16 = 16k params, safely under PG's 65535 cap
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 export const bulkCreateTransactions = asyncHandler(async (req, res) => {
   const { transactions } = req.body;
 
@@ -421,156 +447,213 @@ export const bulkCreateTransactions = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'transactions array is required and must not be empty' });
   }
 
-  const results = [];
+  const startTs = Date.now();
   const errors = [];
   const duplicates = [];
-  const firmCache = new Map();
-  const existingSignatureCache = new Map();
-  const batchSignatures = new Set();
+  const validRows = [];           // post-validation candidates
+  const referencedFirmIds = new Set();
 
-  const getFirm = async (firmId) => {
-    if (firmCache.has(firmId)) return firmCache.get(firmId);
-    const firm = await firmModel.findById(firmId, pool);
-    firmCache.set(firmId, firm || null);
-    return firm || null;
-  };
-
-  const getExistingSignatures = async (firmId) => {
-    if (existingSignatureCache.has(firmId)) return existingSignatureCache.get(firmId);
-
-    const existingRows = await pool.query(
-      `SELECT TO_CHAR(date, 'YYYY-MM-DD') AS date, description, debit, credit
-       FROM firm_transactions
-       WHERE firm_id = $1`,
-      [firmId],
-    );
-
-    const signatureSet = new Set(
-      existingRows.rows.map((row) => txnSignature({
-        date: row.date || '',
-        description: row.description,
-        debit: row.debit,
-        credit: row.credit,
-      })),
-    );
-
-    existingSignatureCache.set(firmId, signatureSet);
-    return signatureSet;
-  };
-
-  const existsInDb = async (firmId, txnDate, description, txnDebit, txnCredit) => {
-    const duplicateQuery = `
-      SELECT id
-      FROM firm_transactions
-      WHERE firm_id = $1
-        AND date = $2::date
-        AND UPPER(REGEXP_REPLACE(TRIM(description), '\\s+', ' ', 'g')) = UPPER(REGEXP_REPLACE(TRIM($3), '\\s+', ' ', 'g'))
-        AND COALESCE(debit, 0)::numeric = $4::numeric
-        AND COALESCE(credit, 0)::numeric = $5::numeric
-      LIMIT 1
-    `;
-
-    const result = await pool.query(duplicateQuery, [firmId, txnDate, description, txnDebit, txnCredit]);
-    return result.rows.length > 0;
-  };
-
+  // ── Phase 1: pure JS validation + normalization ──────────────────
   for (let i = 0; i < transactions.length; i++) {
-    try {
-      const txn = transactions[i];
-      const { firm_id, date, description, debit, credit, name, purpose, remark, remark2, cheque_no, payment_mode } = txn;
+    const txn = transactions[i] || {};
+    const rowIdx = i + 1;
+    const { firm_id, date, description, debit, credit, name, purpose,
+            remark, remark2, cheque_no, payment_mode } = txn;
 
-      // Validate
-      if (!firm_id) {
-        errors.push({ row: i + 1, error: 'Firm ID is required' });
-        continue;
-      }
-      if (!description || !description.toString().trim()) {
-        errors.push({ row: i + 1, error: 'Description is required' });
-        continue;
-      }
-      const txnDebit = parseFloat(debit) || 0;
-      const txnCredit = parseFloat(credit) || 0;
-      if (txnDebit === 0 && txnCredit === 0) {
-        errors.push({ row: i + 1, error: 'Either debit or credit amount is required' });
-        continue;
-      }
+    if (!firm_id) { errors.push({ row: rowIdx, error: 'Firm ID is required' }); continue; }
+    if (!description || !description.toString().trim()) {
+      errors.push({ row: rowIdx, error: 'Description is required' }); continue;
+    }
+    const txnDebit  = parseFloat(debit)  || 0;
+    const txnCredit = parseFloat(credit) || 0;
+    if (txnDebit === 0 && txnCredit === 0) {
+      errors.push({ row: rowIdx, error: 'Either debit or credit amount is required' }); continue;
+    }
+    const parsedFirmId = parseInt(firm_id);
+    if (Number.isNaN(parsedFirmId)) {
+      errors.push({ row: rowIdx, error: 'Invalid firm ID' }); continue;
+    }
+    const txnDate = normalizeTxnDate(date || new Date());
+    if (!ISO_DATE_RE.test(txnDate)) {
+      errors.push({ row: rowIdx, error: `Invalid date: ${date}` }); continue;
+    }
 
-      const parsedFirmId = parseInt(firm_id);
-      const firm = await getFirm(parsedFirmId);
-      if (!firm) {
-        errors.push({ row: i + 1, error: 'Firm not found' });
-        continue;
-      }
+    const normalizedDescription = description.toString().trim();
+    const normalizedChequeNo = cheque_no ? cheque_no.toString().trim() : null;
+    const txnPaymentMode = (payment_mode || 'bank').toLowerCase() === 'cash' ? 'cash' : 'bank';
+    const signature = txnSignature({
+      date: txnDate,
+      description: normalizedDescription,
+      debit: txnDebit,
+      credit: txnCredit,
+      cheque_no: normalizedChequeNo,
+    });
 
-      const txnDate = normalizeTxnDate(date || new Date());
-      const txnPaymentMode = (payment_mode || 'bank').toLowerCase() === 'cash' ? 'cash' : 'bank';
-      const normalizedDescription = description.toString().trim();
-      const normalizedName = name ? name.toString().trim().toUpperCase() : null;
-      const normalizedPurpose = purpose ? purpose.toString().trim().toUpperCase() : null;
-
-      const signature = txnSignature({
-        date: txnDate,
-        description: normalizedDescription,
-        debit: txnDebit,
-        credit: txnCredit,
-      });
-
-      const batchSignatureKey = `${parsedFirmId}|${signature}`;
-      if (batchSignatures.has(batchSignatureKey)) {
-        duplicates.push({ row: i + 1, reason: 'Duplicate in uploaded file' });
-        continue;
-      }
-
-      const existingSignatures = await getExistingSignatures(parsedFirmId);
-      if (existingSignatures.has(signature)) {
-        duplicates.push({ row: i + 1, reason: 'Already exists in firm transactions' });
-        continue;
-      }
-
-      // Final DB-level duplicate guard for format/normalization edge cases.
-      if (await existsInDb(parsedFirmId, txnDate, normalizedDescription, txnDebit, txnCredit)) {
-        duplicates.push({ row: i + 1, reason: 'Already exists in firm transactions' });
-        existingSignatures.add(signature);
-        continue;
-      }
-
-      batchSignatures.add(batchSignatureKey);
-
-      const data = {
+    referencedFirmIds.add(parsedFirmId);
+    validRows.push({
+      rowIdx,
+      firmId: parsedFirmId,
+      signature,
+      data: {
         firm_id: parsedFirmId,
-        site_id: firm.site_id,
         date: txnDate,
         description: normalizedDescription,
         payment_mode: txnPaymentMode,
         debit: txnDebit,
         credit: txnCredit,
-        name: normalizedName,
-        purpose: normalizedPurpose,
-        remark: remark ? remark.toString().trim().toUpperCase() : null,
-        remark2: remark2 ? remark2.toString().trim() : null,
-        cheque_no: cheque_no ? cheque_no.toString().trim() : null,
-        created_by: req.user.id,
+        name:    name    ? name.toString().trim().toUpperCase()    : null,
+        purpose: purpose ? purpose.toString().trim().toUpperCase() : null,
+        remark:  remark  ? remark.toString().trim().toUpperCase()  : null,
+        remark2: remark2 ? remark2.toString().trim()               : null,
+        cheque_no: cheque_no ? cheque_no.toString().trim()         : null,
         voucher_url: null,
         assigned_admin_id: null,
         status: 'pending',
-      };
-
-      const created = await firmTransactionModel.create(data, pool);
-      results.push({ row: i + 1, id: created.id, status: 'success' });
-      existingSignatures.add(signature);
-    } catch (err) {
-      errors.push({ row: i + 1, error: err.message });
-    }
+      },
+    });
   }
 
+  if (validRows.length === 0) {
+    return res.status(201).json({
+      count: 0,
+      total: transactions.length,
+      duplicateCount: 0,
+      errors: errors.length > 0 ? errors : undefined,
+      elapsedMs: Date.now() - startTs,
+      message: `Imported 0/${transactions.length} transactions`,
+    });
+  }
+
+  // ── Phase 2: resolve every firm + every existing signature in 2 queries ──
+  const firmIdsArr = [...referencedFirmIds];
+  const [firmsRes, existingRes] = await Promise.all([
+    pool.query(`SELECT id, site_id FROM firms WHERE id = ANY($1::int[])`, [firmIdsArr]),
+    pool.query(
+      `SELECT firm_id, TO_CHAR(date, 'YYYY-MM-DD') AS date, description, debit, credit, cheque_no
+         FROM firm_transactions
+        WHERE firm_id = ANY($1::int[])`,
+      [firmIdsArr],
+    ),
+  ]);
+
+  const firmById = new Map(firmsRes.rows.map((f) => [f.id, f]));
+  const existingKeys = new Set();
+  for (const row of existingRes.rows) {
+    const sig = txnSignature({
+      date: row.date || '',
+      description: row.description,
+      debit: row.debit,
+      credit: row.credit,
+      cheque_no: row.cheque_no,
+    });
+    existingKeys.add(`${row.firm_id}|${sig}`);
+  }
+
+  // ── Phase 3: dedup against existing + within-batch, build insert tuples ──
+  const insertable = [];
+  const seenInBatch = new Set();
+  for (const row of validRows) {
+    const firm = firmById.get(row.firmId);
+    if (!firm) {
+      errors.push({ row: row.rowIdx, error: 'Firm not found' });
+      continue;
+    }
+    const key = `${row.firmId}|${row.signature}`;
+    if (seenInBatch.has(key)) {
+      duplicates.push({ row: row.rowIdx, reason: 'Duplicate in uploaded file' });
+      continue;
+    }
+    if (existingKeys.has(key)) {
+      duplicates.push({ row: row.rowIdx, reason: 'Already exists in firm transactions' });
+      continue;
+    }
+    seenInBatch.add(key);
+    insertable.push({
+      rowIdx: row.rowIdx,
+      values: { ...row.data, site_id: firm.site_id, created_by: req.user.id },
+    });
+  }
+
+  if (insertable.length === 0) {
+    return res.status(201).json({
+      count: 0,
+      total: transactions.length,
+      duplicateCount: duplicates.length,
+      duplicates: duplicates.length > 0 ? duplicates : undefined,
+      errors: errors.length > 0 ? errors : undefined,
+      elapsedMs: Date.now() - startTs,
+      message: `Imported 0/${transactions.length} transactions${duplicates.length ? ` (${duplicates.length} duplicates skipped)` : ''}`,
+    });
+  }
+
+  // ── Phase 4: batched multi-row INSERT inside one transaction ──────
+  const COLS = BULK_INSERT_COLUMNS;
+  const COLS_PER_ROW = COLS.length;
+  const insertedResults = [];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    for (let offset = 0; offset < insertable.length; offset += BULK_INSERT_CHUNK) {
+      const chunk = insertable.slice(offset, offset + BULK_INSERT_CHUNK);
+      const params = new Array(chunk.length * COLS_PER_ROW);
+      const valueGroups = new Array(chunk.length);
+
+      for (let i = 0; i < chunk.length; i++) {
+        const v = chunk[i].values;
+        const base = i * COLS_PER_ROW;
+        params[base + 0]  = v.firm_id;
+        params[base + 1]  = v.site_id;
+        params[base + 2]  = v.date;
+        params[base + 3]  = v.description;
+        params[base + 4]  = v.payment_mode;
+        params[base + 5]  = v.debit;
+        params[base + 6]  = v.credit;
+        params[base + 7]  = v.name;
+        params[base + 8]  = v.purpose;
+        params[base + 9]  = v.remark;
+        params[base + 10] = v.remark2;
+        params[base + 11] = v.cheque_no;
+        params[base + 12] = v.voucher_url;
+        params[base + 13] = v.assigned_admin_id;
+        params[base + 14] = v.status;
+        params[base + 15] = v.created_by;
+
+        const placeholders = new Array(COLS_PER_ROW);
+        for (let c = 0; c < COLS_PER_ROW; c++) placeholders[c] = `$${base + c + 1}`;
+        valueGroups[i] = `(${placeholders.join(',')})`;
+      }
+
+      const sql = `INSERT INTO firm_transactions (${COLS.join(',')}) VALUES ${valueGroups.join(',')} RETURNING id`;
+      const inserted = await client.query(sql, params);
+
+      for (let i = 0; i < inserted.rows.length; i++) {
+        insertedResults.push({ row: chunk[i].rowIdx, id: inserted.rows[i].id, status: 'success' });
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    return res.status(500).json({
+      message: 'Bulk insert failed',
+      error: err.message,
+      elapsedMs: Date.now() - startTs,
+    });
+  } finally {
+    client.release();
+  }
+
+  const elapsedMs = Date.now() - startTs;
   res.status(201).json({
-    count: results.length,
+    count: insertedResults.length,
     total: transactions.length,
     duplicateCount: duplicates.length,
-    results,
+    results: insertedResults,
     duplicates: duplicates.length > 0 ? duplicates : undefined,
     errors: errors.length > 0 ? errors : undefined,
-    message: `Imported ${results.length}/${transactions.length} transactions${duplicates.length ? ` (${duplicates.length} duplicates skipped)` : ''}`,
+    elapsedMs,
+    message: `Imported ${insertedResults.length}/${transactions.length} transactions${duplicates.length ? ` (${duplicates.length} duplicates skipped)` : ''} in ${elapsedMs}ms`,
   });
 });
 
