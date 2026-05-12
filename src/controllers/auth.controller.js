@@ -206,3 +206,50 @@ export const updateProfile = asyncHandler(async (req, res) => {
   const updatedUser = await userModel.update(userId, updateData, pool);
   res.json({ user: userModel.sanitize(updatedUser) });
 });
+
+/**
+ * PUT /auth/change-password
+ * Securely change password (requires current password verification)
+ */
+export const changePassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword, confirmPassword } = req.body;
+  const userId = req.user.id;
+
+  // Validate required fields
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    return res.status(400).json({ message: 'All fields are required' });
+  }
+
+  // Validate new password length
+  if (newPassword.length < 6) {
+    return res.status(400).json({ message: 'New password must be at least 6 characters long' });
+  }
+
+  // Check passwords match
+  if (newPassword !== confirmPassword) {
+    return res.status(400).json({ message: 'New password and confirm password do not match' });
+  }
+
+  // Fetch user with password hash
+  const user = await userModel.findById(userId, pool);
+  if (!user) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  // Verify current password
+  const isMatch = await comparePassword(currentPassword, user.password);
+  if (!isMatch) {
+    return res.status(401).json({ message: 'Current password is incorrect' });
+  }
+
+  // Don't allow same password
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ message: 'New password must be different from current password' });
+  }
+
+  // Hash and update
+  const hashedPassword = await hashPassword(newPassword);
+  await userModel.update(userId, { password: hashedPassword }, pool);
+
+  res.json({ message: 'Password updated successfully' });
+});
