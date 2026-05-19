@@ -333,14 +333,8 @@ export const createPlot = asyncHandler(async (req, res) => {
       });
     }
 
-    // force_duplicate is true and all existing are RESALE — proceed with tagging
+    // force_duplicate is true and all existing are RESALE — compute new tag, defer DB writes to transaction below
     const totalExisting = existingPlots.length;
-    for (let i = 0; i < existingPlots.length; i++) {
-      const tag = i === 0 ? 'OLD' : `NEW ${i}`;
-      if (existingPlots[i].plot_tag !== tag) {
-        await pool.query(`UPDATE plots SET plot_tag = $1 WHERE id = $2`, [tag, existingPlots[i].id]);
-      }
-    }
     newPlotTag = totalExisting === 1 ? 'NEW' : `NEW ${totalExisting}`;
   }
 
@@ -383,7 +377,31 @@ export const createPlot = asyncHandler(async (req, res) => {
   }
   if (columns.has('commission_value')) data.commission_value = parseFloat(commission_value) || 0;
 
-  const plot = await plotModel.create(data, pool);
+  // When this is a resale duplicate, tag existing plots AND create the new one inside a
+  // single transaction. Without this, a failed creation would leave existing plots stuck
+  // with stale OLD tags and no corresponding new entry (data corruption like A34/C7).
+  let plot;
+  if (typeof newPlotTag !== 'undefined') {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (let i = 0; i < existingPlots.length; i++) {
+        const tag = i === 0 ? 'OLD' : `NEW ${i}`;
+        if (existingPlots[i].plot_tag !== tag) {
+          await client.query(`UPDATE plots SET plot_tag = $1 WHERE id = $2`, [tag, existingPlots[i].id]);
+        }
+      }
+      plot = await plotModel.create(data, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  } else {
+    plot = await plotModel.create(data, pool);
+  }
 
   let autoCommission = null;
   try {
