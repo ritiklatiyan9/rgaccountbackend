@@ -184,31 +184,39 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
        STRING_AGG(DISTINCT m.full_name, ', ' ORDER BY m.full_name) AS agent_names,
        COALESCE(NULLIF(COALESCE(p.plot_commission, 0), 0), MAX(pc.total_commission)) AS total_commission,
        COALESCE(SUM(paid_agg.total_paid), 0) AS total_paid,
+       COALESCE(SUM(paid_agg.total_paid_all), 0) AS total_paid_all,
        COALESCE(SUM(paid_agg.payment_count), 0) AS payment_count,
        MIN(pc.created_at) AS first_created,
        MAX(pc.created_at) AS last_created,
        MAX(pc.status) AS latest_status,
        JSON_AGG(JSON_BUILD_OBJECT(
          'commission_id', pc.id,
+         'plot_id', p.id,
+         'agent_id', pc.agent_id,
          'agent_name', m.full_name,
          'agent_phone', m.phone,
          'total_commission', pc.total_commission,
          'status', pc.status,
          'total_paid', COALESCE(paid_agg.total_paid, 0),
+         'total_paid_all', COALESCE(paid_agg.total_paid_all, 0),
+         'balance', pc.total_commission - COALESCE(paid_agg.total_paid_all, 0),
          'payment_count', COALESCE(paid_agg.payment_count, 0)
        ) ORDER BY pc.created_at ASC) AS agents_detail
      FROM plots p
      JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = $2
      JOIN members m ON pc.agent_id = m.id
      LEFT JOIN (
-       SELECT plot_commission_id, SUM(amount) AS total_paid, COUNT(*) AS payment_count
+       SELECT plot_commission_id,
+              SUM(amount) FILTER (WHERE status = 'approved') AS total_paid,
+              SUM(amount) FILTER (WHERE status IN ('approved', 'pending')) AS total_paid_all,
+              COUNT(*) AS payment_count
        FROM plot_commission_payments
-       WHERE status = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       WHERE (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
        GROUP BY plot_commission_id
      ) paid_agg ON paid_agg.plot_commission_id = pc.id
      WHERE p.plot_no = $1 AND pc.site_id = $2
      GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.plot_commission
-     ORDER BY MAX(pc.created_at) DESC`,
+     ORDER BY MIN(pc.created_at) ASC`,
     [plotNoForTimeline, numSiteId]
   );
 
@@ -285,26 +293,47 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const totalPaidAll = agents.reduce((s, a) => s + a.total_paid_all, 0);
 
   // Timeline already fetched in parallel above — just shape the rows here.
+  // Rows are ordered oldest → newest so the UI can render a left-to-right
+  // parcel-style progress tracker.
   const timeline = timelineResult.rows.map(r => ({
     ...r,
     total_commission: parseFloat(r.total_commission) || 0,
     total_paid: parseFloat(r.total_paid) || 0,
+    total_paid_all: parseFloat(r.total_paid_all) || 0,
     payment_count: parseInt(r.payment_count) || 0,
-    balance: (parseFloat(r.total_commission) || 0) - (parseFloat(r.total_paid) || 0),
+    balance: (parseFloat(r.total_commission) || 0) - (parseFloat(r.total_paid_all) || 0),
     is_current: r.plot_id === numPlotId,
     agents_detail: (r.agents_detail || []).map(a => ({
       ...a,
       total_commission: parseFloat(a.total_commission) || 0,
       total_paid: parseFloat(a.total_paid) || 0,
+      total_paid_all: parseFloat(a.total_paid_all) || 0,
+      balance: parseFloat(a.balance) || 0,
       payment_count: parseInt(a.payment_count) || 0,
     })),
   }));
+
+  // ── Plot-wide grand totals (across EVERY booking/resale of this plot_no) ──
+  // The summary cards use this so a resold plot reflects the *total* money
+  // committed, given and pending across the previous + new agents — not just
+  // the current booking.
+  const grand = timeline.reduce(
+    (acc, t) => ({
+      total_commission: acc.total_commission + t.total_commission,
+      total_paid: acc.total_paid + t.total_paid,
+      total_paid_all: acc.total_paid_all + t.total_paid_all,
+      booking_count: acc.booking_count + 1,
+    }),
+    { total_commission: 0, total_paid: 0, total_paid_all: 0, booking_count: 0 }
+  );
+  grand.balance = grand.total_commission - grand.total_paid_all;
 
   res.json({
     plot: plotInfo,
     agents,
     totals: { total_commission: totalCommission, total_paid: totalPaid, total_paid_all: totalPaidAll, balance: totalCommission - totalPaidAll },
-    is_resale: commissions.length > 1,
+    grand,
+    is_resale: commissions.length > 1 || timeline.length > 1,
     timeline,
   });
 });
