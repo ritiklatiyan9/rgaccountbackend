@@ -160,6 +160,12 @@ const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssigned
   const bookingBy = String(plot.booking_by || '').trim();
   if (!bookingBy) return null;
 
+  // Guard: never auto-create a commission when the booking agent IS the buyer
+  // (booking_by accidentally set to the buyer's own name). A buyer is not their
+  // own commission agent — this previously produced bogus "buyer = agent" rows.
+  const buyerName = String(plot.buyer_name || '').trim();
+  if (buyerName && bookingBy.toUpperCase() === buyerName.toUpperCase()) return null;
+
   // Use plot_commission (Size × Commission Rate) if available, else fall back to old commission_enabled logic
   let totalCommission = parseFloat(plot.plot_commission) || 0;
 
@@ -514,6 +520,35 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
   const updated = await plotModel.update(parseInt(id), updateData, pool);
+
+  // ── Retire the previous agent's orphaned commission when booking_by changes ──
+  // Auto-create only ever ADDS a (plot_id, agent_id) commission, so re-assigning
+  // the booking agent used to leave the old agent stranded on the plot forever
+  // (the "current agent still shows on the previous booking" bug). When the
+  // booking agent changes we delete the PREVIOUS agent's AUTO-created commission
+  // — but only if NO payments were recorded against it, so money is never lost.
+  if (
+    updateData.booking_by !== undefined &&
+    String(existing.booking_by || '').trim() &&
+    String(updateData.booking_by || '').trim().toUpperCase() !== String(existing.booking_by || '').trim().toUpperCase()
+  ) {
+    try {
+      await pool.query(
+        `DELETE FROM plot_commissions_v2 pc
+           USING members m
+          WHERE pc.plot_id = $1
+            AND pc.agent_id = m.id
+            AND UPPER(m.full_name) = UPPER($2)
+            AND pc.remarks = 'Auto-created from Plot Payments booking'
+            AND NOT EXISTS (
+              SELECT 1 FROM plot_commission_payments p WHERE p.plot_commission_id = pc.id
+            )`,
+        [parseInt(id), String(existing.booking_by).trim()]
+      );
+    } catch (err) {
+      if (err?.code !== '42P01') throw err;
+    }
+  }
 
   // Persist circle rate change history (backward-compatible if table does not exist yet).
   if (circle_rate !== undefined) {

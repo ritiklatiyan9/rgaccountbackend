@@ -150,23 +150,42 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   if (isNaN(numPlotId)) return res.status(400).json({ message: 'Invalid plot ID' });
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  // Step 1: load commissions (we need the IDs to fetch payments).
+  // Step 1: load commissions for the VIEWED booking (we need the IDs to fetch payments).
   const commissions = await plotCommissionV2Model.findAllCommissionsByPlotId(numPlotId, numSiteId, pool);
-  if (!commissions || commissions.length === 0) {
-    return res.status(404).json({ message: 'No commissions found for this plot' });
+
+  // The viewed booking may legitimately have NO commission rows (e.g. a previous
+  // owner of a resold plot whose agents were removed). We still render the plot
+  // and its full timeline, so fall back to the plots table for plot-level meta
+  // instead of 404-ing — otherwise opening a previous booking would error out.
+  let plotMeta = commissions[0] || null;
+  if (!plotMeta) {
+    const metaRes = await pool.query(
+      `SELECT p.id AS plot_id, p.plot_no, p.plot_size, p.plot_rate, p.buyer_name,
+              p.commission_rate, p.plot_tag, COALESCE(p.plot_commission, 0) AS plot_commission,
+              s.name AS site_name, p.site_id
+         FROM plots p JOIN sites s ON p.site_id = s.id
+        WHERE p.id = $1 AND p.site_id = $2`,
+      [numPlotId, numSiteId]
+    );
+    plotMeta = metaRes.rows[0] || null;
+    if (!plotMeta) return res.status(404).json({ message: 'Plot not found' });
   }
 
   // Step 2: fire payments + site + timeline IN PARALLEL (was serial — 3 RTTs).
-  const commissionIds = commissions.map(c => c.id);
+  const plotNoForPayments = plotMeta.plot_no;
 
+  // Payments across EVERY booking of this plot_no (not just the current
+  // booking) so the timeline can show each previous booking's payments inline.
   const allPaymentsPromise = pool.query(
     `SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name
        FROM plot_commission_payments pcp
+       JOIN plot_commissions_v2 pc ON pcp.plot_commission_id = pc.id
+       JOIN plots p ON pc.plot_id = p.id
        LEFT JOIN users u ON pcp.created_by = u.id
        LEFT JOIN users a ON pcp.approved_by = a.id
-      WHERE pcp.plot_commission_id = ANY($1)
+      WHERE p.plot_no = $1 AND pc.site_id = $2
       ORDER BY pcp.date DESC, pcp.created_at DESC`,
-    [commissionIds]
+    [plotNoForPayments, numSiteId]
   );
 
   const sitePromise = pool.query(
@@ -175,36 +194,40 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   );
 
   // We'll also kick off the timeline query in parallel using the plot_no
-  // we already have on the first commission row.
-  const plotNoForTimeline = commissions[0].plot_no;
+  // we already have on the plot meta.
+  const plotNoForTimeline = plotMeta.plot_no;
   const timelinePromise = pool.query(
     `SELECT
-       p.id AS plot_id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate,
+       p.id AS plot_id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.created_at AS plot_created_at,
        COALESCE(p.plot_commission, 0) AS plot_commission,
        STRING_AGG(DISTINCT m.full_name, ', ' ORDER BY m.full_name) AS agent_names,
        COALESCE(NULLIF(COALESCE(p.plot_commission, 0), 0), MAX(pc.total_commission)) AS total_commission,
        COALESCE(SUM(paid_agg.total_paid), 0) AS total_paid,
        COALESCE(SUM(paid_agg.total_paid_all), 0) AS total_paid_all,
        COALESCE(SUM(paid_agg.payment_count), 0) AS payment_count,
-       MIN(pc.created_at) AS first_created,
+       COALESCE(MIN(pc.created_at), p.created_at) AS first_created,
        MAX(pc.created_at) AS last_created,
        MAX(pc.status) AS latest_status,
-       JSON_AGG(JSON_BUILD_OBJECT(
-         'commission_id', pc.id,
-         'plot_id', p.id,
-         'agent_id', pc.agent_id,
-         'agent_name', m.full_name,
-         'agent_phone', m.phone,
-         'total_commission', pc.total_commission,
-         'status', pc.status,
-         'total_paid', COALESCE(paid_agg.total_paid, 0),
-         'total_paid_all', COALESCE(paid_agg.total_paid_all, 0),
-         'balance', pc.total_commission - COALESCE(paid_agg.total_paid_all, 0),
-         'payment_count', COALESCE(paid_agg.payment_count, 0)
-       ) ORDER BY pc.created_at ASC) AS agents_detail
+       COALESCE(
+         JSON_AGG(JSON_BUILD_OBJECT(
+           'commission_id', pc.id,
+           'plot_id', p.id,
+           'agent_id', pc.agent_id,
+           'agent_name', m.full_name,
+           'agent_phone', m.phone,
+           'total_commission', pc.total_commission,
+           'status', pc.status,
+           'remarks', pc.remarks,
+           'total_paid', COALESCE(paid_agg.total_paid, 0),
+           'total_paid_all', COALESCE(paid_agg.total_paid_all, 0),
+           'balance', pc.total_commission - COALESCE(paid_agg.total_paid_all, 0),
+           'payment_count', COALESCE(paid_agg.payment_count, 0)
+         ) ORDER BY pc.created_at ASC) FILTER (WHERE pc.id IS NOT NULL),
+         '[]'
+       ) AS agents_detail
      FROM plots p
-     JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = $2
-     JOIN members m ON pc.agent_id = m.id
+     LEFT JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = $2
+     LEFT JOIN members m ON pc.agent_id = m.id
      LEFT JOIN (
        SELECT plot_commission_id,
               SUM(amount) FILTER (WHERE status = 'approved') AS total_paid,
@@ -214,9 +237,9 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
        WHERE (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
        GROUP BY plot_commission_id
      ) paid_agg ON paid_agg.plot_commission_id = pc.id
-     WHERE p.plot_no = $1 AND pc.site_id = $2
-     GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.plot_commission
-     ORDER BY MIN(pc.created_at) ASC`,
+     WHERE p.plot_no = $1 AND p.site_id = $2
+     GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.plot_commission, p.created_at
+     ORDER BY p.id ASC`,
     [plotNoForTimeline, numSiteId]
   );
 
@@ -229,20 +252,49 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const allPayments = paymentsResult.rows;
   const siteRow = siteResult.rows[0] || null;
 
+  // ── Shape the timeline rows (one booking of this plot_no per row) FIRST so
+  //    we have an agent name for every commission across every booking, which
+  //    the receipt-token payload and the inline payment ledgers below need. ──
+  const timeline = timelineResult.rows.map(r => ({
+    ...r,
+    total_commission: parseFloat(r.total_commission) || 0,
+    total_paid: parseFloat(r.total_paid) || 0,
+    total_paid_all: parseFloat(r.total_paid_all) || 0,
+    payment_count: parseInt(r.payment_count) || 0,
+    balance: (parseFloat(r.total_commission) || 0) - (parseFloat(r.total_paid_all) || 0),
+    is_current: r.plot_id === numPlotId,
+    agents_detail: (r.agents_detail || []).map(a => ({
+      ...a,
+      total_commission: parseFloat(a.total_commission) || 0,
+      total_paid: parseFloat(a.total_paid) || 0,
+      total_paid_all: parseFloat(a.total_paid_all) || 0,
+      balance: parseFloat(a.balance) || 0,
+      payment_count: parseInt(a.payment_count) || 0,
+      payments: [],
+    })),
+  }));
+
+  // commission_id → agent name across ALL bookings (for receipt token payload).
+  const agentNameByCommission = {};
+  for (const c of commissions) agentNameByCommission[c.id] = c.agent_name;
+  for (const t of timeline) {
+    for (const a of t.agents_detail) {
+      if (a.commission_id != null) agentNameByCommission[a.commission_id] = a.agent_name;
+    }
+  }
+
   // Group payments by commission_id and attach a signed verifyUrl to each.
   const paymentsByCommission = {};
   for (const p of allPayments) {
     if (!paymentsByCommission[p.plot_commission_id]) {
       paymentsByCommission[p.plot_commission_id] = [];
     }
-    // Find the agent name on this commission for the token payload
-    const parentCommission = commissions.find((c) => c.id === p.plot_commission_id);
     const payment = {
       ...p,
       verifyUrl: buildVerifyUrl({
         t: ReceiptType.COMMISSION,
         i: p.id,
-        pn: parentCommission?.agent_name || null,
+        pn: agentNameByCommission[p.plot_commission_id] || null,
         a: p.amount,
         d: p.date,
         pm: p.payment_mode || null,
@@ -255,21 +307,31 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     paymentsByCommission[p.plot_commission_id].push(payment);
   }
 
-  // Plot-level info from first commission (all share the same plot)
+  // Attach each commission's payment ledger to its agent inside every booking
+  // so the timeline can render previous bookings' payments inline (read-only).
+  for (const t of timeline) {
+    for (const a of t.agents_detail) {
+      a.payments = paymentsByCommission[a.commission_id] || [];
+      a.payment_count = a.payments.length;
+    }
+  }
+
+  // Plot-level info from the viewed booking's meta (commission row if present,
+  // else the plots-table fallback resolved above).
   const plotInfo = {
-    plot_id: commissions[0].plot_id,
-    plot_no: commissions[0].plot_no,
-    plot_size: commissions[0].plot_size,
-    plot_rate: commissions[0].plot_rate,
-    buyer_name: commissions[0].buyer_name,
-    commission_rate: commissions[0].commission_rate,
-    plot_tag: commissions[0].plot_tag,
-    plot_commission: parseFloat(commissions[0].plot_commission) || 0,
-    site_name: commissions[0].site_name,
-    site_id: commissions[0].site_id,
+    plot_id: plotMeta.plot_id,
+    plot_no: plotMeta.plot_no,
+    plot_size: plotMeta.plot_size,
+    plot_rate: plotMeta.plot_rate,
+    buyer_name: plotMeta.buyer_name,
+    commission_rate: plotMeta.commission_rate,
+    plot_tag: plotMeta.plot_tag,
+    plot_commission: parseFloat(plotMeta.plot_commission) || 0,
+    site_name: plotMeta.site_name,
+    site_id: plotMeta.site_id,
   };
 
-  // Build agent sections
+  // Build agent sections for the CURRENT booking (full, editable ledgers)
   const agents = commissions.map(c => ({
     commission_id: c.id,
     agent_id: c.agent_id,
@@ -286,40 +348,27 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     payment_count: (paymentsByCommission[c.id] || []).length,
   }));
 
-  // Plot-level totals — use fixed plot commission instead of summing per-agent amounts
-  const fixedCommission = parseFloat(commissions[0].plot_commission) || 0;
-  const totalCommission = fixedCommission > 0 ? fixedCommission : agents.reduce((s, a) => s + parseFloat(a.total_commission), 0);
+  // Plot-level totals for the CURRENT booking. Commission = the single DECIDED
+  // plot commission (NEVER summed across agents). Use MAX so it always agrees
+  // with `grand` below, falling back to the largest agent commission only when
+  // plot_commission is unset.
+  const fixedCommission = Math.max(0, ...commissions.map(c => parseFloat(c.plot_commission) || 0));
+  const totalCommission = fixedCommission > 0
+    ? fixedCommission
+    : Math.max(0, ...agents.map(a => parseFloat(a.total_commission) || 0));
   const totalPaid = agents.reduce((s, a) => s + a.total_paid, 0);
   const totalPaidAll = agents.reduce((s, a) => s + a.total_paid_all, 0);
 
-  // Timeline already fetched in parallel above — just shape the rows here.
-  // Rows are ordered oldest → newest so the UI can render a left-to-right
-  // parcel-style progress tracker.
-  const timeline = timelineResult.rows.map(r => ({
-    ...r,
-    total_commission: parseFloat(r.total_commission) || 0,
-    total_paid: parseFloat(r.total_paid) || 0,
-    total_paid_all: parseFloat(r.total_paid_all) || 0,
-    payment_count: parseInt(r.payment_count) || 0,
-    balance: (parseFloat(r.total_commission) || 0) - (parseFloat(r.total_paid_all) || 0),
-    is_current: r.plot_id === numPlotId,
-    agents_detail: (r.agents_detail || []).map(a => ({
-      ...a,
-      total_commission: parseFloat(a.total_commission) || 0,
-      total_paid: parseFloat(a.total_paid) || 0,
-      total_paid_all: parseFloat(a.total_paid_all) || 0,
-      balance: parseFloat(a.balance) || 0,
-      payment_count: parseInt(a.payment_count) || 0,
-    })),
-  }));
-
   // ── Plot-wide grand totals (across EVERY booking/resale of this plot_no) ──
-  // The summary cards use this so a resold plot reflects the *total* money
-  // committed, given and pending across the previous + new agents — not just
-  // the current booking.
+  // Commission is the single *decided* commission for the plot — NOT the sum
+  // across bookings/agents (a plot decided at ₹1.3L must read ₹1.3L even after
+  // a resale, never ₹2.6L). We take the largest decided commission seen on any
+  // booking of this plot_no. Money given/paid IS summed across every agent and
+  // booking, so the headline answers "of the plot's decided commission, how
+  // much has actually gone out across everyone?".
   const grand = timeline.reduce(
     (acc, t) => ({
-      total_commission: acc.total_commission + t.total_commission,
+      total_commission: Math.max(acc.total_commission, t.total_commission),
       total_paid: acc.total_paid + t.total_paid,
       total_paid_all: acc.total_paid_all + t.total_paid_all,
       booking_count: acc.booking_count + 1,
