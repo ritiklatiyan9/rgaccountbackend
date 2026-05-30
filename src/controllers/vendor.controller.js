@@ -26,6 +26,26 @@ export const getVendorUsers = asyncHandler(async (req, res) => {
   res.json({ vendors: result.rows });
 });
 
+export const createVendorUser = asyncHandler(async (req, res) => {
+  const siteId = getSiteId(req);
+  const fullName = (req.body.full_name || '').trim();
+  const phone = (req.body.phone || '').trim() || null;
+  const businessName = (req.body.business_name || '').trim() || null;
+  const serviceType = (req.body.service_type || '').trim() || null;
+
+  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  if (!fullName) return res.status(400).json({ message: 'Vendor name is required' });
+
+  const result = await pool.query(
+    `INSERT INTO members (site_id, full_name, phone, business_name, service_type, member_type, status, created_by)
+     VALUES ($1, $2, $3, $4, $5, 'VENDOR', 'ACTIVE', $6)
+     RETURNING id, full_name, phone, business_name, service_type`,
+    [siteId, fullName.toUpperCase(), phone, businessName, serviceType, req.user?.id || null]
+  );
+
+  res.status(201).json({ vendor: result.rows[0] });
+});
+
 export const listVendorHeads = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });

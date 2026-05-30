@@ -10,6 +10,7 @@ import {
   getVendorCommitmentDetail,
   getVendorPaymentReceipt,
   getVendorUsers,
+  createVendorUser,
   listAllInventoryItems,
   deleteVendorCommitment,
   listVendorCommitments,
@@ -49,6 +50,7 @@ router.use(authMiddleware);
 router.use(requireRole('admin', 'sub_admin'));
 
 router.get('/users', requirePermission('vendors', 'read'), vendorMetaCache, getVendorUsers);
+router.post('/users', requirePermission('vendors', 'write'), bustVendorMetaCache, createVendorUser);
 router.get('/heads', requirePermission('vendors', 'read'), vendorMetaCache, listVendorHeads);
 // Head writes also have to bust the vendors-meta cache (heads listing).
 router.post('/heads', requirePermission('vendors', 'write'), bustVendorMetaCache, createVendorHead);
