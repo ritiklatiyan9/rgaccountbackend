@@ -160,12 +160,6 @@ const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssigned
   const bookingBy = String(plot.booking_by || '').trim();
   if (!bookingBy) return null;
 
-  // Guard: never auto-create a commission when the booking agent IS the buyer
-  // (booking_by accidentally set to the buyer's own name). A buyer is not their
-  // own commission agent — this previously produced bogus "buyer = agent" rows.
-  const buyerName = String(plot.buyer_name || '').trim();
-  if (buyerName && bookingBy.toUpperCase() === buyerName.toUpperCase()) return null;
-
   // Use plot_commission (Size × Commission Rate) if available, else fall back to old commission_enabled logic
   let totalCommission = parseFloat(plot.plot_commission) || 0;
 
