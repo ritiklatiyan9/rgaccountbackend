@@ -40,4 +40,17 @@ app.use('/', indexRoutes);
 // error middleware
 app.use(errorMiddleware);
 
+// ── Keep-alive: ping the sales backend every 12 minutes so it doesn't sleep ──
+const KEEP_ALIVE_URL = 'https://sales-backend-ponq.onrender.com';
+const KEEP_ALIVE_INTERVAL_MS = 12 * 60 * 1000;
+
+setInterval(async () => {
+  try {
+    const res = await fetch(KEEP_ALIVE_URL, { method: 'GET' });
+    console.log(`[keep-alive] pinged ${KEEP_ALIVE_URL} -> ${res.status}`);
+  } catch (err) {
+    console.error(`[keep-alive] ping failed: ${err.message}`);
+  }
+}, KEEP_ALIVE_INTERVAL_MS);
+
 export default app;

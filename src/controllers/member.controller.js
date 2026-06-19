@@ -18,6 +18,10 @@ const MEMBER_FIELDS = [
   'passport_no', 'driving_license_no', 'gst_no', 'tin_no',
   // Emergency contact
   'emergency_contact_name', 'emergency_contact_phone', 'emergency_contact_relation',
+  // Co-applicant (joint applicant)
+  'co_applicant_name', 'co_applicant_relation', 'co_applicant_dob', 'co_applicant_gender',
+  'co_applicant_phone', 'co_applicant_email', 'co_applicant_aadhar', 'co_applicant_pan',
+  'co_applicant_address', 'permanent_address',
   // Nominee
   'nominee_name', 'nominee_relation', 'nominee_phone',
   // Employee-specific
@@ -46,7 +50,9 @@ const sanitize = (body) => {
         'marital_status', 'qualification', 'passport_no', 'driving_license_no',
         'gst_no', 'tin_no', 'emergency_contact_name', 'emergency_contact_relation',
         'nominee_name', 'nominee_relation', 'designation', 'department',
-        'employment_type', 'team'].includes(f) && val) {
+        'employment_type', 'team',
+        'co_applicant_name', 'co_applicant_relation', 'co_applicant_gender',
+        'co_applicant_aadhar', 'co_applicant_pan'].includes(f) && val) {
         val = val.toUpperCase();
       }
       data[f] = val || null;
