@@ -16,6 +16,11 @@ export async function getPlotsWithTotals(siteId) {
   const query = `
     SELECT
       p.*,
+      -- booking_date is a DATE column → pg hands it back as a JS Date, which the
+      -- GraphQLString field then serializes as epoch-millis (unparseable on the
+      -- client). Emit a stable 'YYYY-MM-DD' string instead. The duplicate column
+      -- name intentionally overrides the one from p.* (last column wins in pg).
+      to_char(p.booking_date, 'YYYY-MM-DD') AS booking_date,
       COALESCE(pp_agg.total_received, 0) + COALESCE(ip_agg.total_received, 0)
         AS total_received,
       COALESCE(pp_agg.received_bank, 0)  + COALESCE(ip_agg.received_bank, 0)
@@ -180,6 +185,8 @@ export async function getPlotPaymentDetail(plotId, siteId) {
 
   const plotQuery = `
     SELECT p.*,
+      -- See getPlotsWithTotals: stable date string so GraphQLString doesn't emit epoch-millis.
+      to_char(p.booking_date, 'YYYY-MM-DD') AS booking_date,
       COALESCE(pp_agg.total_received, 0) + COALESCE(ip_agg.total_received, 0)
         AS total_received,
       COALESCE(pp_agg.received_bank, 0)  + COALESCE(ip_agg.received_bank, 0)

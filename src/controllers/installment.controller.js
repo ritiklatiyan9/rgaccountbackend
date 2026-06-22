@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { installmentModel, installmentPaymentModel } from '../models/Installment.model.js';
 import { plotModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
+import { notifyPlotPaymentRecorded } from '../utils/notify.js';
 
 let hasGracePeriodColumnCache = null;
 const hasGracePeriodColumn = async () => {
@@ -647,11 +648,24 @@ export const recordInstallmentPayment = asyncHandler(async (req, res) => {
   // Refresh statuses after payment
   await installmentModel.refreshStatuses(parseInt(id), pool);
 
+  const applied = parseFloat(amount) - remaining;
   res.status(201).json({
     payments,
-    applied: parseFloat(amount) - remaining,
+    applied,
     unapplied: remaining,
   });
+
+  // Fire-and-forget: WhatsApp the plot owner with the installment payment details.
+  if (applied > 0) {
+    notifyPlotPaymentRecorded({
+      id: payments?.[0]?.id,
+      plot_id: parseInt(id),
+      amount: applied,
+      payment_from: payment_mode || 'INSTALLMENT',
+      date: payment_date || new Date().toISOString().split('T')[0],
+      buyer_name: plot.buyer_name,
+    }).catch((e) => console.error('[notify] error', e?.message || e));
+  }
 });
 
 /** GET /plots/:id/installment-payments — All payments for a plot's installments */

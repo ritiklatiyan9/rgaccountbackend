@@ -58,6 +58,33 @@ class PlotModel extends MasterModel {
     return result.rows;
   }
 
+  /** Lightweight plot-number search for the dashboard quick-search.
+   *  Matches plot_no (case-insensitive, contains) and returns only the
+   *  fields needed to render a result row + navigate to the detail page.
+   *  Ordering: exact match → prefix match → current (non-RESALE) booking →
+   *  natural plot_no → newest row. So a resale plot's CURRENT owner row
+   *  surfaces before the older RESALE-tagged rows that share its number. */
+  async searchByPlotNo(siteId, q, pool, limit = 12) {
+    const term = String(q || '').trim();
+    if (!term) return [];
+    // Escape LIKE wildcards so a stray % / _ in the query can't broaden the match.
+    const escaped = term.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const query = `
+      SELECT id, plot_no, block, buyer_name, booking_by, status
+      FROM plots
+      WHERE site_id = $1 AND plot_no ILIKE $2 ESCAPE '\\'
+      ORDER BY
+        (UPPER(plot_no) = UPPER($3)) DESC,
+        (UPPER(plot_no) LIKE UPPER($3) || '%') DESC,
+        (status = 'RESALE') ASC,
+        plot_no ASC,
+        id DESC
+      LIMIT $4
+    `;
+    const result = await pool.query(query, [siteId, `%${escaped}%`, term, limit]);
+    return result.rows;
+  }
+
   /** Get single plot with aggregates (single LATERAL — was 4 subqueries). */
   async findByIdWithTotals(id, pool) {
     const query = `

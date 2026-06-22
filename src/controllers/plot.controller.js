@@ -3,6 +3,7 @@ import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import { plotRegistryModel } from '../models/PlotRegistry.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
+import { notifyPlotPaymentRecorded } from '../utils/notify.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -442,6 +443,16 @@ export const listPlots = asyncHandler(async (req, res) => {
   res.json({ plots });
 });
 
+/** GET /plots/search?site_id=X&q=A67 — lightweight plot-number lookup for the
+ *  dashboard quick-search. Returns minimal rows (id, plot_no, buyer_name, …)
+ *  so the client can jump straight to /plot-payments/:id. */
+export const searchPlots = asyncHandler(async (req, res) => {
+  const { site_id, q } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const plots = await plotModel.searchByPlotNo(parseInt(site_id), q || '', pool);
+  res.json({ plots });
+});
+
 /** GET /plots/:id — Get single plot with totals */
 export const getPlot = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -657,6 +668,11 @@ export const createPayment = asyncHandler(async (req, res) => {
   const payment = result.rows[0];
   if (!payment) return res.status(404).json({ message: 'Plot not found' });
   res.status(201).json({ payment });
+
+  // Fire-and-forget: WhatsApp the plot owner with the payment details.
+  // Deliberately not awaited — a notification failure must never affect the
+  // recorded payment or the API response.
+  notifyPlotPaymentRecorded(payment).catch((e) => console.error('[notify] error', e?.message || e));
 });
 
 /** GET /plots/payments/list?plot_id=X — List payments for a plot */

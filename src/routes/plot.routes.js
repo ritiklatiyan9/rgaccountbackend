@@ -2,7 +2,7 @@ import express from 'express';
 const router = express.Router();
 
 import {
-  createPlot, listPlots, getPlot, updatePlot, deletePlot,
+  createPlot, listPlots, searchPlots, getPlot, updatePlot, deletePlot,
   createPayment, listPayments, getPayment, updatePayment, deletePayment,
   getAutocomplete,
 } from '../controllers/plot.controller.js';
@@ -29,6 +29,7 @@ const bustPlotCache = invalidateCacheOnSuccess(['plots|', '/daybook']);
 
 // ── Plot endpoints ──
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, listPlots);                                        // ?site_id=X
+router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, searchPlots);                                 // ?site_id=X&q=A67
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotMetaCache, getAutocomplete);                      // ?site_id=X
 router.get('/payment-management', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, paymentManagementList);           // ?site_id=X
 router.get('/payment-reminders', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), plotReadCache, paymentReminders);                  // ?site_id=X&page=1&limit=10
