@@ -26,6 +26,7 @@ export const ReceiptType = {
   EXPENSE: 'EXP',
   DAYBOOK: 'DBK',
   IMPREST: 'IMP',
+  NOC: 'NOC',
 };
 
 /**

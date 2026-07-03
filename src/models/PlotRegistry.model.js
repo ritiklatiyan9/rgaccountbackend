@@ -14,7 +14,8 @@ class PlotRegistryModel extends MasterModel {
     const query = `
       SELECT pr.*,
         COALESCE(agg.total_paid,    0) AS total_paid,
-        COALESCE(agg.payment_count, 0) AS payment_count
+        COALESCE(agg.payment_count, 0) AS payment_count,
+        COALESCE(docs.registry_doc_count, 0) AS registry_doc_count
       FROM plot_registries pr
       LEFT JOIN LATERAL (
         SELECT
@@ -23,6 +24,12 @@ class PlotRegistryModel extends MasterModel {
         FROM plot_registry_payments prp
         WHERE prp.registry_id = pr.id
       ) agg ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS registry_doc_count
+        FROM documents d
+        WHERE d.plot_id = pr.plot_id
+          AND UPPER(COALESCE(d.category, '')) = 'REGISTRY'
+      ) docs ON TRUE
       WHERE pr.site_id = $1
       ORDER BY pr.plot_no ASC
     `;

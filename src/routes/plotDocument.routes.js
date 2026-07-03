@@ -12,16 +12,18 @@ import requirePermission from '../middlewares/permission.middleware.js';
 const router = express.Router();
 
 // In-memory storage so we hand the buffer straight to the shared S3 util (same approach as
-// the booking module). Accept images + pdf, 10 MB cap.
+// the booking module). Accept images + pdf + doc/docx, 25 MB cap (registry deed scans run large;
+// the client compresses PDFs losslessly before upload).
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = /jpg|jpeg|png|webp|pdf/;
-    const okExt = allowed.test(path.extname(file.originalname).toLowerCase());
-    const okMime = allowed.test(file.mimetype) || file.mimetype === 'application/octet-stream';
+    const allowedExt = /\.(jpg|jpeg|png|webp|pdf|doc|docx)$/;
+    const allowedMime = /jpg|jpeg|png|webp|pdf|msword|officedocument\.wordprocessingml/;
+    const okExt = allowedExt.test(path.extname(file.originalname).toLowerCase());
+    const okMime = allowedMime.test(file.mimetype) || file.mimetype === 'application/octet-stream';
     if (okExt && okMime) return cb(null, true);
-    cb(new Error('Invalid file type (allowed: jpg, jpeg, png, webp, pdf)'));
+    cb(new Error('Invalid file type (allowed: jpg, jpeg, png, webp, pdf, doc, docx)'));
   },
 });
 

@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
 import { plotModel } from '../models/Plot.model.js';
+import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import pool from '../config/db.js';
 
 // ══════════════════════════════════════════════════
@@ -306,4 +307,234 @@ export const getRegistryAutocomplete = asyncHandler(async (req, res) => {
 
   const data = await plotRegistryPaymentModel.getAutocomplete(parseInt(site_id), pool);
   res.json(data);
+});
+
+// ══════════════════════════════════════════════════
+//  NOC (NO OBJECTION CERTIFICATE) ENDPOINTS
+// ══════════════════════════════════════════════════
+
+/** Aggregate payload for the NOC workspace + print page in one round trip:
+ *  registry, resolved plot, site, letterhead (booking module's shared
+ *  project_settings, if present), every plot payment with its NOC link
+ *  state, and the NOC-only inline payments. */
+const buildNocPayload = async (registryId) => {
+  const registry = await plotRegistryModel.findByIdWithTotals(registryId, pool);
+  if (!registry) return null;
+
+  const plotPromise = registry.plot_id
+    ? pool.query(`SELECT * FROM plots WHERE id = $1`, [registry.plot_id])
+    : pool.query(
+        `SELECT * FROM plots WHERE site_id = $1 AND UPPER(plot_no) = UPPER($2) ORDER BY id DESC LIMIT 1`,
+        [registry.site_id, registry.plot_no]
+      );
+  const sitePromise = pool.query(
+    `SELECT id, name, code, address, city, state FROM sites WHERE id = $1`,
+    [registry.site_id]
+  );
+  // Letterhead comes from the booking module's project_settings table (same
+  // DB). Optional — swallow errors so a missing table never breaks the NOC.
+  const letterheadPromise = pool
+    .query(
+      `SELECT company_legal_name, company_brand_name, company_address, company_city,
+              company_phone, company_email, company_gstin, company_website, logo_url
+         FROM project_settings WHERE site_id = $1 LIMIT 1`,
+      [registry.site_id]
+    )
+    .catch(() => ({ rows: [] }));
+  const inlinePromise = pool.query(
+    `SELECT prp.*, u.name AS created_by_name
+       FROM plot_registry_payments prp
+       LEFT JOIN users u ON u.id = prp.created_by
+      WHERE prp.registry_id = $1 AND prp.source_plot_payment_id IS NULL
+      ORDER BY prp.payment_date ASC, prp.created_at ASC`,
+    [registryId]
+  );
+
+  const [plotRes, siteRes, letterheadRes, inlineRes] = await Promise.all([
+    plotPromise, sitePromise, letterheadPromise, inlinePromise,
+  ]);
+  const plot = plotRes.rows[0] || null;
+  const site = siteRes.rows[0] || null;
+
+  let plotPayments = [];
+  if (plot) {
+    const payRes = await pool.query(
+      `SELECT pp.id, pp.date, pp.amount, pp.payment_type, pp.payment_from, pp.bank_name,
+              pp.branch, pp.bank_details, pp.narration, pp.received_by, pp.cheque_status,
+              pp.cheque_no, pp.created_at,
+              prp.id AS registry_payment_id,
+              prp.registry_id AS linked_registry_id,
+              (prp.registry_id = $2 AND COALESCE(prp.include_in_noc, FALSE)) AS included
+         FROM plot_payments pp
+         LEFT JOIN plot_registry_payments prp ON prp.source_plot_payment_id = pp.id
+        WHERE pp.plot_id = $1
+        ORDER BY pp.date ASC, pp.created_at ASC`,
+      [plot.id, registryId]
+    );
+    plotPayments = payRes.rows;
+  }
+  const inlinePayments = inlineRes.rows;
+
+  const includedPlot = plotPayments.filter((p) => p.included);
+  const includedInline = inlinePayments.filter((p) => p.include_in_noc);
+  const includedAmount =
+    includedPlot.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0) +
+    includedInline.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+
+  const suggestedNocNo =
+    registry.noc_no ||
+    `NOC/${String(site?.code || 'RG').toUpperCase()}/${new Date().getFullYear()}/${String(registry.id).padStart(4, '0')}`;
+
+  // Signed verify QR target — same HMAC scheme/secret as the payment
+  // receipts, so it validates on the public Defence Garden verify page.
+  const verifyUrl = buildVerifyUrl({
+    t: ReceiptType.NOC,
+    i: registry.id,
+    pn: registry.customer_name || plot?.buyer_name || null,
+    pl: registry.plot_no || null,
+    a: includedAmount,
+    d: registry.noc_date || registry.registry_date || new Date().toISOString().split('T')[0],
+    pm: 'NOC',
+    sn: site?.name || null,
+    sy: site?.city || null,
+    ss: site?.state || null,
+    rf: registry.noc_no || suggestedNocNo,
+  });
+
+  return {
+    registry,
+    plot,
+    site,
+    letterhead: letterheadRes.rows[0] || null,
+    plotPayments,
+    inlinePayments,
+    suggested_noc_no: suggestedNocNo,
+    verifyUrl,
+    totals: {
+      included_count: includedPlot.length + includedInline.length,
+      included_amount: includedAmount,
+    },
+  };
+};
+
+/** GET /registries/:id/noc — one-shot NOC payload */
+export const getRegistryNoc = asyncHandler(async (req, res) => {
+  const payload = await buildNocPayload(parseInt(req.params.id));
+  if (!payload) return res.status(404).json({ message: 'Registry not found' });
+  res.json(payload);
+});
+
+/** PUT /registries/:id/noc — batch-save NOC meta + payment selections.
+ *  Body: { noc_no, noc_date, noc_place, noc_notes,
+ *          included_plot_payment_ids: [plotPaymentId, ...],
+ *          inline_payments: [{ id?, payment_date, amount, payment_mode, notes, cheque_no, include_in_noc }] }
+ *  Toggling a plot payment ON links it to the registry (reusing the
+ *  payment-assign infra); toggling OFF keeps the link but flags it out of
+ *  the NOC, so registry accounting is never silently deleted. */
+export const saveRegistryNoc = asyncHandler(async (req, res) => {
+  const registryId = parseInt(req.params.id);
+  const { noc_no, noc_date, noc_place, noc_notes, included_plot_payment_ids, inline_payments } = req.body;
+
+  const registry = await plotRegistryModel.findById(registryId, pool);
+  if (!registry) return res.status(404).json({ message: 'Registry not found' });
+
+  const includedIds = Array.isArray(included_plot_payment_ids)
+    ? included_plot_payment_ids.map((n) => parseInt(n)).filter(Number.isFinite)
+    : null;
+  const today = new Date().toISOString().split('T')[0];
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // ── NOC meta on the registry ──
+    const sets = [];
+    const vals = [];
+    const push = (col, val) => { vals.push(val); sets.push(`${col} = $${vals.length}`); };
+    if (noc_no !== undefined) push('noc_no', noc_no ? String(noc_no).trim().toUpperCase() : null);
+    if (noc_date !== undefined) push('noc_date', noc_date || null);
+    if (noc_place !== undefined) push('noc_place', noc_place ? String(noc_place).trim().toUpperCase() : null);
+    if (noc_notes !== undefined) push('noc_notes', noc_notes ? String(noc_notes).trim() : null);
+    sets.push('noc_generated_at = NOW()', 'updated_at = NOW()');
+    vals.push(registryId);
+    await client.query(`UPDATE plot_registries SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+
+    // ── Sync plot-payment selections ──
+    if (includedIds) {
+      await client.query(
+        `UPDATE plot_registry_payments SET include_in_noc = TRUE, updated_at = NOW()
+          WHERE registry_id = $1 AND source_plot_payment_id = ANY($2::int[]) AND include_in_noc = FALSE`,
+        [registryId, includedIds]
+      );
+      // Link payments that aren't assigned to any registry yet.
+      await client.query(
+        `INSERT INTO plot_registry_payments (
+           registry_id, site_id, payment_date, amount, payment_mode, tally_date, tally_amount,
+           notes, source_plot_payment_id, include_in_noc, cheque_no, created_by
+         )
+         SELECT $1, pp.site_id, COALESCE(pp.date, CURRENT_DATE), pp.amount,
+                COALESCE(NULLIF(UPPER(TRIM(pp.payment_from)), ''), UPPER(COALESCE(pp.payment_type, ''))),
+                pp.date, pp.amount,
+                COALESCE(NULLIF(UPPER(TRIM(pp.narration)), ''), NULLIF(UPPER(TRIM(pp.bank_details)), ''), 'LINKED FROM PLOT PAYMENT'),
+                pp.id, TRUE, pp.cheque_no, $3
+           FROM plot_payments pp
+          WHERE pp.id = ANY($2::int[])
+            AND pp.site_id = $4
+            AND NOT EXISTS (SELECT 1 FROM plot_registry_payments x WHERE x.source_plot_payment_id = pp.id)`,
+        [registryId, includedIds, req.user.id, registry.site_id]
+      );
+      // Everything else linked to this registry drops off the NOC (link kept).
+      await client.query(
+        `UPDATE plot_registry_payments SET include_in_noc = FALSE, updated_at = NOW()
+          WHERE registry_id = $1 AND source_plot_payment_id IS NOT NULL
+            AND NOT (source_plot_payment_id = ANY($2::int[])) AND include_in_noc = TRUE`,
+        [registryId, includedIds]
+      );
+    }
+
+    // ── Inline (NOC-only) payments — upsert ──
+    if (Array.isArray(inline_payments)) {
+      for (const row of inline_payments) {
+        const amount = parseFloat(row.amount) || 0;
+        const include = row.include_in_noc === undefined ? true : !!row.include_in_noc;
+        const mode = row.payment_mode ? String(row.payment_mode).trim().toUpperCase() : null;
+        if (row.id) {
+          await client.query(
+            `UPDATE plot_registry_payments
+                SET payment_date = $2, amount = $3, payment_mode = $4, notes = $5,
+                    include_in_noc = $6, updated_at = NOW()
+              WHERE id = $1 AND registry_id = $7 AND source_plot_payment_id IS NULL`,
+            [
+              parseInt(row.id), row.payment_date || today, amount, mode,
+              row.notes ? String(row.notes).trim().toUpperCase() : null, include, registryId,
+            ]
+          );
+        } else if (amount > 0) {
+          await client.query(
+            `INSERT INTO plot_registry_payments (
+               registry_id, site_id, payment_date, amount, payment_mode, notes,
+               include_in_noc, cheque_no, cheque_status, created_by
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [
+              registryId, registry.site_id, row.payment_date || today, amount, mode,
+              row.notes ? String(row.notes).trim().toUpperCase() : null, include,
+              row.cheque_no ? String(row.cheque_no).trim() : null,
+              mode === 'CHEQUE' ? 'PENDING' : null,
+              req.user.id,
+            ]
+          );
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const payload = await buildNocPayload(registryId);
+  res.json(payload);
 });

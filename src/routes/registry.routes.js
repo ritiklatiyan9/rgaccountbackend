@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   createRegistry, listRegistries, getRegistry, updateRegistry, deleteRegistry,
   createRegistryPayment, listRegistryPayments, getRegistryPayment, updateRegistryPayment, deleteRegistryPayment,
-  getRegistryAutocomplete,
+  getRegistryAutocomplete, getRegistryNoc, saveRegistryNoc,
 } from '../controllers/registry.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -28,6 +28,10 @@ router.get('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission
 router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'write'), bustRegistryCache, createRegistryPayment);
 router.put('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'update'), bustRegistryCache, updateRegistryPayment);
 router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'delete'), bustRegistryCache, deleteRegistryPayment);
+
+// ── NOC endpoints ──
+router.get('/:id/noc', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), registryReadCache, getRegistryNoc);
+router.put('/:id/noc', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'update'), bustRegistryCache, saveRegistryNoc);
 
 // ── Registry endpoints ──
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), registryReadCache, listRegistries);                                           // ?site_id=X
