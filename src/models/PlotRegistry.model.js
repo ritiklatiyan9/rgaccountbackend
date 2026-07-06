@@ -15,8 +15,10 @@ class PlotRegistryModel extends MasterModel {
       SELECT pr.*,
         COALESCE(agg.total_paid,    0) AS total_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
-        COALESCE(docs.registry_doc_count, 0) AS registry_doc_count
+        COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
+        p.team AS plot_team
       FROM plot_registries pr
+      LEFT JOIN plots p ON pr.plot_id = p.id
       LEFT JOIN LATERAL (
         SELECT
           SUM(prp.amount)::numeric AS total_paid,
