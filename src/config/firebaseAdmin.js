@@ -19,6 +19,7 @@ import { getAuth } from 'firebase-admin/auth';
  */
 let app = null;
 let keySource = null;
+let initError = null;
 
 const readKeyJson = () => {
   if (process.env.FIREBASE_SERVICE_ACCOUNT_B64) {
@@ -56,15 +57,20 @@ try {
   }
 } catch (err) {
   console.error(`[rgaccount-api] Firebase Admin init failed (source ${keySource}):`, err.message);
+  initError = err.message;
   app = null;
 }
 
 export const firebaseEnabled = () => !!app;
 
-/** Non-secret diagnostics for GET /auth/google/status. */
+/** Non-secret diagnostics for GET /auth/google/status — says WHICH step failed:
+ *  env var not set at all, set but unparseable, or everything fine. */
 export const firebaseStatus = () => ({
   configured: !!app,
   source: app ? keySource.split(':')[0] : null,
+  env_b64_present: !!process.env.FIREBASE_SERVICE_ACCOUNT_B64,
+  env_b64_length: (process.env.FIREBASE_SERVICE_ACCOUNT_B64 || '').length,
+  init_error: initError,
 });
 
 /** Verify a Firebase ID token → decoded payload (throws on invalid/expired). */
