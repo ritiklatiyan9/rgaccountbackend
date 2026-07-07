@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   createRegistry, listRegistries, getRegistry, updateRegistry, deleteRegistry,
   createRegistryPayment, listRegistryPayments, getRegistryPayment, updateRegistryPayment, deleteRegistryPayment,
-  getRegistryAutocomplete, getRegistryNoc, saveRegistryNoc,
+  getRegistryAutocomplete, getRegistryNoc, saveRegistryNoc, approveRegistryNoc,
 } from '../controllers/registry.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -32,6 +32,7 @@ router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermiss
 // ── NOC endpoints ──
 router.get('/:id/noc', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), registryReadCache, getRegistryNoc);
 router.put('/:id/noc', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'update'), bustRegistryCache, saveRegistryNoc);
+router.put('/:id/noc/approve', requireRole('admin'), requirePermission('plot_registry', 'update'), bustRegistryCache, approveRegistryNoc);
 
 // ── Registry endpoints ──
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), registryReadCache, listRegistries);                                           // ?site_id=X

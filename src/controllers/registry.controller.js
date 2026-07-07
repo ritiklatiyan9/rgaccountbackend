@@ -42,7 +42,7 @@ export const createRegistry = asyncHandler(async (req, res) => {
      ),
      plot_bump AS (
        UPDATE plots
-          SET status = 'REGISTRY', updated_at = NOW()
+          SET status = 'PENDING NOC', updated_at = NOW()
         WHERE id = $8
           AND UPPER(COALESCE(status, '')) = 'BOOKED'
           AND EXISTS (SELECT 1 FROM ins)
@@ -137,10 +137,12 @@ export const updateRegistry = asyncHandler(async (req, res) => {
   const resolvedPlotId = updateData.plot_id !== undefined ? updateData.plot_id : existing.plot_id;
 
   const updatePromise = plotRegistryModel.update(registryId, updateData, pool);
+  // Plot becomes 'REGISTRY' only via NOC approval (approveRegistryNoc); here we
+  // only move fresh BOOKED plots into the pending stage.
   const plotBumpPromise = resolvedPlotId
     ? pool.query(
-        `UPDATE plots SET status = 'REGISTRY', updated_at = NOW()
-          WHERE id = $1 AND UPPER(COALESCE(status, '')) != 'REGISTRY'
+        `UPDATE plots SET status = 'PENDING NOC', updated_at = NOW()
+          WHERE id = $1 AND UPPER(COALESCE(status, '')) = 'BOOKED'
           RETURNING id`,
         [resolvedPlotId]
       )
@@ -416,6 +418,38 @@ const buildNocPayload = async (registryId) => {
     },
   };
 };
+
+/** PUT /registries/:id/noc/approve — approve a generated NOC.
+ *  This is the ONLY place a plot is promoted to 'REGISTRY' status:
+ *  registry created -> plot 'PENDING NOC' -> NOC generated -> approved here -> 'REGISTRY'. */
+export const approveRegistryNoc = asyncHandler(async (req, res) => {
+  const registryId = parseInt(req.params.id);
+  const registry = await plotRegistryModel.findById(registryId, pool);
+  if (!registry) return res.status(404).json({ message: 'Registry not found' });
+  if (!registry.noc_generated_at) {
+    return res.status(400).json({ message: 'Generate the NOC first — approval comes after generation' });
+  }
+  if (registry.noc_approved_at) {
+    return res.status(409).json({ message: 'NOC is already approved' });
+  }
+
+  await pool.query(
+    `UPDATE plot_registries SET noc_approved_at = NOW(), noc_approved_by = $2, updated_at = NOW() WHERE id = $1`,
+    [registryId, req.user.id]
+  );
+  let plotStatusUpdated = false;
+  if (registry.plot_id) {
+    const { rows } = await pool.query(
+      `UPDATE plots SET status = 'REGISTRY', updated_at = NOW()
+        WHERE id = $1 AND UPPER(COALESCE(status, '')) != 'REGISTRY'
+        RETURNING id`,
+      [registry.plot_id]
+    );
+    plotStatusUpdated = rows.length > 0;
+  }
+  const updated = await plotRegistryModel.findById(registryId, pool);
+  res.json({ registry: updated, plot_status_updated: plotStatusUpdated });
+});
 
 /** GET /registries/:id/noc — one-shot NOC payload */
 export const getRegistryNoc = asyncHandler(async (req, res) => {

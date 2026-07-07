@@ -157,7 +157,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     payment_mode, category, from_entity, to_entity, account_no, branch,
     // Farmer payment fields
     farmer_id, interest_rate, interest_amount, by_note,
-    assigned_admin_id,
+    assigned_admin_id, voucher_url,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -210,6 +210,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       account_no: account_no ? account_no.trim().toUpperCase() : null,
       branch: branch ? branch.trim().toUpperCase() : null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       farmer_payment_id: farmerPayment.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
@@ -243,6 +244,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       by_note: by_note ? by_note.trim() : null,
       remarks: remarks ? remarks.trim() : null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
@@ -264,6 +266,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       account_no: account_no ? account_no.trim().toUpperCase() : null,
       branch: branch ? branch.trim().toUpperCase() : null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       commission_id: commission.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
@@ -340,6 +343,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       credit: cfCredit,
       remarks: remarks ? remarks.trim() : null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
     const cfEntry = await cashFlowEntryModel.create(cfData, pool);
@@ -360,6 +364,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       account_no: account_no ? account_no.trim().toUpperCase() : null,
       branch: branch ? branch.trim().toUpperCase() : null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       cash_flow_entry_id: cfEntry.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
@@ -404,6 +409,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       payment_mode: ['cash', 'bank', 'cheque'].includes(normMode) ? normMode : 'cash',
       cheque_status: normMode === 'cheque' ? 'PENDING' : null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
@@ -428,6 +434,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       cheque_no: req.body.firm_cheque_no ? req.body.firm_cheque_no.trim().toUpperCase() : null,
       cheque_status: null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       firm_transaction_id: firmTxn.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
@@ -473,6 +480,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       cheque_no: req.body.pp_cheque_no ? req.body.pp_cheque_no.trim().toUpperCase() : null,
       cheque_status: ppPaymentFrom === 'CHEQUE' || ppPaymentType === 'CHEQUE' ? 'PENDING' : null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
@@ -497,6 +505,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       cheque_no: req.body.pp_cheque_no ? req.body.pp_cheque_no.trim().toUpperCase() : null,
       cheque_status: null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       plot_payment_id: plotPayment.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
@@ -528,6 +537,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     cheque_no: req.body.cheque_no ? req.body.cheque_no.trim().toUpperCase() : null,
     cheque_status: stdMode === 'CHEQUE' ? 'PENDING' : null,
     created_by: req.user.id,
+    voucher_url: voucher_url || null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
   };
 
@@ -1476,7 +1486,7 @@ export const updateDayBookEntry = asyncHandler(async (req, res) => {
 
   const {
     date, particular, entry_type, debit, credit, remarks,
-    payment_mode, category, from_entity, to_entity, account_no, branch,
+    payment_mode, category, from_entity, to_entity, account_no, branch, voucher_url,
   } = req.body;
 
   const data = {
@@ -1492,6 +1502,7 @@ export const updateDayBookEntry = asyncHandler(async (req, res) => {
     to_entity: to_entity !== undefined ? (to_entity ? to_entity.trim().toUpperCase() : null) : existing.to_entity,
     account_no: account_no !== undefined ? (account_no ? account_no.trim().toUpperCase() : null) : existing.account_no,
     branch: branch !== undefined ? (branch ? branch.trim().toUpperCase() : null) : existing.branch,
+    voucher_url: voucher_url !== undefined ? (voucher_url || null) : existing.voucher_url,
   };
 
   const updated = await dayBookModel.update(parseInt(id), data, pool);
