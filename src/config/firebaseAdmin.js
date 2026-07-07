@@ -12,13 +12,21 @@ import { getAuth } from 'firebase-admin/auth';
  * `secrets/firebase-service-account.json` (override with FIREBASE_SERVICE_ACCOUNT).
  * When the file is absent the app still boots — /auth/google then reports 503.
  */
-const keyPath = path.resolve(
-  process.cwd(),
-  process.env.FIREBASE_SERVICE_ACCOUNT || 'secrets/firebase-service-account.json'
-);
+// Render mounts secret files at /etc/secrets/<name> and at the service root,
+// so try those too when the env var isn't set.
+const candidates = [
+  process.env.FIREBASE_SERVICE_ACCOUNT,
+  'secrets/firebase-service-account.json',
+  '/etc/secrets/firebase-service-account.json',
+  'firebase-service-account.json',
+]
+  .filter(Boolean)
+  .map((p) => path.resolve(process.cwd(), p));
+
+const keyPath = candidates.find((p) => fs.existsSync(p));
 
 let app = null;
-if (fs.existsSync(keyPath)) {
+if (keyPath) {
   try {
     const serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
     app = initializeApp({ credential: cert(serviceAccount) }, 'rgaccount-google-auth');
@@ -26,6 +34,8 @@ if (fs.existsSync(keyPath)) {
   } catch (err) {
     console.error('[rgaccount-api] Firebase Admin init failed:', err.message);
   }
+} else {
+  console.warn('[rgaccount-api] Firebase service-account key not found; tried:', candidates.join(', '));
 }
 
 export const firebaseEnabled = () => !!app;
