@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import asyncHandler from '../utils/asyncHandler.js';
 import { signAccessToken, signRefreshToken, verifyToken, hashPassword, comparePassword, hashRefreshToken } from '../config/jwt.js';
 import { uploadSingle } from '../utils/upload.js';
-import { firebaseEnabled, verifyFirebaseIdToken } from '../config/firebaseAdmin.js';
+import { firebaseEnabled, firebaseStatus, verifyFirebaseIdToken } from '../config/firebaseAdmin.js';
 import { mailerEnabled, sendLoginOtpEmail } from '../utils/mailer.js';
 import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
@@ -159,6 +159,11 @@ export const login = asyncHandler(async (req, res) => {
   if (needsOtp(user)) return startOtpChallenge(user, res);
 
   res.json(await buildLoginPayload(user, req));
+});
+
+/** GET /auth/google/status — non-secret diagnostics for deploy debugging. */
+export const googleStatus = asyncHandler(async (req, res) => {
+  res.json(firebaseStatus());
 });
 
 /**

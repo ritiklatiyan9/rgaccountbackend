@@ -8,37 +8,64 @@ import { getAuth } from 'firebase-admin/auth';
  * Firebase popup (project `defencegardenbooking`, SAME project as the booking app,
  * so one Google account works across both ERPs).
  *
- * The service-account key lives OUTSIDE version control at
- * `secrets/firebase-service-account.json` (override with FIREBASE_SERVICE_ACCOUNT).
- * When the file is absent the app still boots — /auth/google then reports 503.
+ * The key is loaded from the FIRST source that exists:
+ *   1. FIREBASE_SERVICE_ACCOUNT_B64 env var — the key JSON, base64-encoded.
+ *      (One env var, no files: the easiest option on Render/hosted platforms.)
+ *   2. FIREBASE_SERVICE_ACCOUNT_JSON env var — the raw key JSON.
+ *   3. A key file: $FIREBASE_SERVICE_ACCOUNT, secrets/firebase-service-account.json
+ *      (local dev), /etc/secrets/... or repo root (Render secret-file mounts).
+ * When nothing is found the app still boots — /auth/google then reports 503 and
+ * GET /auth/google/status shows configured:false.
  */
-// Render mounts secret files at /etc/secrets/<name> and at the service root,
-// so try those too when the env var isn't set.
-const candidates = [
-  process.env.FIREBASE_SERVICE_ACCOUNT,
-  'secrets/firebase-service-account.json',
-  '/etc/secrets/firebase-service-account.json',
-  'firebase-service-account.json',
-]
-  .filter(Boolean)
-  .map((p) => path.resolve(process.cwd(), p));
-
-const keyPath = candidates.find((p) => fs.existsSync(p));
-
 let app = null;
-if (keyPath) {
-  try {
-    const serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
-    app = initializeApp({ credential: cert(serviceAccount) }, 'rgaccount-google-auth');
-    console.log(`[rgaccount-api] Firebase Admin ready (project ${serviceAccount.project_id})`);
-  } catch (err) {
-    console.error('[rgaccount-api] Firebase Admin init failed:', err.message);
+let keySource = null;
+
+const readKeyJson = () => {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_B64) {
+    keySource = 'env:FIREBASE_SERVICE_ACCOUNT_B64';
+    return Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_B64, 'base64').toString('utf8');
   }
-} else {
-  console.warn('[rgaccount-api] Firebase service-account key not found; tried:', candidates.join(', '));
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    keySource = 'env:FIREBASE_SERVICE_ACCOUNT_JSON';
+    return process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  }
+  // Render mounts secret files at /etc/secrets/<name> and at the service root.
+  const candidates = [
+    process.env.FIREBASE_SERVICE_ACCOUNT,
+    'secrets/firebase-service-account.json',
+    '/etc/secrets/firebase-service-account.json',
+    'firebase-service-account.json',
+  ]
+    .filter(Boolean)
+    .map((p) => path.resolve(process.cwd(), p));
+  const keyPath = candidates.find((p) => fs.existsSync(p));
+  if (keyPath) {
+    keySource = `file:${keyPath}`;
+    return fs.readFileSync(keyPath, 'utf8');
+  }
+  console.warn('[rgaccount-api] Firebase key not found. No FIREBASE_SERVICE_ACCOUNT_B64/_JSON env var; tried files:', candidates.join(', '));
+  return null;
+};
+
+try {
+  const raw = readKeyJson();
+  if (raw) {
+    const serviceAccount = JSON.parse(raw);
+    app = initializeApp({ credential: cert(serviceAccount) }, 'rgaccount-google-auth');
+    console.log(`[rgaccount-api] Firebase Admin ready (project ${serviceAccount.project_id}, source ${keySource})`);
+  }
+} catch (err) {
+  console.error(`[rgaccount-api] Firebase Admin init failed (source ${keySource}):`, err.message);
+  app = null;
 }
 
 export const firebaseEnabled = () => !!app;
+
+/** Non-secret diagnostics for GET /auth/google/status. */
+export const firebaseStatus = () => ({
+  configured: !!app,
+  source: app ? keySource.split(':')[0] : null,
+});
 
 /** Verify a Firebase ID token → decoded payload (throws on invalid/expired). */
 export const verifyFirebaseIdToken = (idToken) => getAuth(app).verifyIdToken(idToken);
