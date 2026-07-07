@@ -18,8 +18,14 @@ const VALID_CATEGORIES = new Set([
 
 /** GET /plot-documents?site_id=  → plots for a site with a per-plot document count. */
 export const listPlotsWithDocs = asyncHandler(async (req, res) => {
-  const { site_id } = req.query;
+  const { site_id, categories } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  // Optional comma-separated category filter (e.g. REGISTRY,NOC) — restricts the
+  // per-plot count to those categories; used by the Registry Documents folder view.
+  const cats = categories
+    ? String(categories).split(',').map((c) => c.trim().toUpperCase()).filter(Boolean)
+    : null;
 
   const { rows } = await pool.query(
     `SELECT p.id, p.plot_no, p.block, p.status, p.buyer_name, p.plot_size,
@@ -28,12 +34,13 @@ export const listPlotsWithDocs = asyncHandler(async (req, res) => {
               SELECT COUNT(*) FROM documents d
                 LEFT JOIN kyc_cases k ON k.id = d.kyc_case_id
                 LEFT JOIN bookings b ON b.id = k.booking_id
-              WHERE d.plot_id = p.id OR b.plot_id = p.id
+              WHERE (d.plot_id = p.id OR b.plot_id = p.id)
+                AND ($2::text[] IS NULL OR upper(d.category) = ANY($2::text[]))
             )::int AS doc_count
        FROM plots p
       WHERE p.site_id = $1
       ORDER BY p.block ASC NULLS LAST, p.plot_no ASC`,
-    [site_id]
+    [site_id, cats]
   );
   res.json({ plots: rows });
 });

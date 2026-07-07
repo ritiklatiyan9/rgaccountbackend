@@ -33,10 +33,11 @@ if (!fs.existsSync(LOCAL_DIR)) fs.mkdirSync(LOCAL_DIR, { recursive: true });
 
 const usingS3 = () => Boolean(s3Client && process.env.AWS_ACCESS_KEY_ID && BUCKET);
 
-/** Upload a plot document buffer. Returns a storage key: an S3 key, or `local::<name>`. */
-export const uploadPlotDoc = async (fileBuffer, originalName, mimetype) => {
+/** Upload a document buffer. Returns a storage key: an S3 key, or `local::<name>`.
+ *  `prefix` picks the S3 folder — kyc_documents by default; document-imprest proofs pass their own. */
+export const uploadPlotDoc = async (fileBuffer, originalName, mimetype, prefix = 'kyc_documents') => {
   const safeName = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${String(originalName || 'file').replace(/[^\w.\-]/g, '_')}`;
-  const key = `kyc_documents/${safeName}`;
+  const key = `${prefix}/${safeName}`;
 
   if (usingS3()) {
     const upload = new Upload({
