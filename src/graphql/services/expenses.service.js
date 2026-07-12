@@ -66,6 +66,9 @@ export async function getExpensesPageData(siteId, { filters = {}, page = 1, limi
 
   const expensesWithVerify = (paginatedData.items || []).map((e) => ({
     ...e,
+    // Plain expenses carry source='expenses' from the unified CTE; the UI
+    // treats any truthy source as "lives in another module", so null it out.
+    source: e.source === 'expenses' ? null : e.source,
     verifyUrl: buildVerifyUrl({
       t: ReceiptType.EXPENSE,
       i: e.id,

@@ -198,7 +198,8 @@ export const updateExpense = asyncHandler(async (req, res) => {
   const {
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
-    assigned_user_id, assigned_admin_id, voucher_url, bill_url
+    assigned_user_id, assigned_admin_id, voucher_url, bill_url,
+    customer_signature_url, authority_signature_url
   } = req.body;
 
   const data = {};
@@ -216,6 +217,8 @@ export const updateExpense = asyncHandler(async (req, res) => {
   if (assigned_admin_id !== undefined) data.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
   if (voucher_url !== undefined) data.voucher_url = voucher_url || null;
   if (bill_url !== undefined) data.bill_url = bill_url || null;
+  if (customer_signature_url !== undefined) data.customer_signature_url = customer_signature_url || null;
+  if (authority_signature_url !== undefined) data.authority_signature_url = authority_signature_url || null;
 
   if (Object.keys(data).length === 0) {
     return res.status(400).json({ message: 'Nothing to update' });

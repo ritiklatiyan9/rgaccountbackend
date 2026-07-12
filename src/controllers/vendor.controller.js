@@ -329,7 +329,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   );
 
   const paymentsPromise = pool.query(
-    `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.status, vp.approved_by, vp.approved_at, vp.created_at, vp.assigned_admin_id,
+    `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.customer_signature_url, vp.authority_signature_url, vp.status, vp.approved_by, vp.approved_at, vp.created_at, vp.assigned_admin_id,
             u.name AS created_by_name
      FROM vendor_payments vp
      LEFT JOIN users u ON u.id = vp.created_by
@@ -438,6 +438,8 @@ export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
       vp.reference_no,
       vp.note,
       vp.voucher_url,
+      vp.customer_signature_url,
+      vp.authority_signature_url,
       vp.status,
       vp.assigned_admin_id,
       vp.approved_by,

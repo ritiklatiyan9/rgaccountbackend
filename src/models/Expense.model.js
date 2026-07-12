@@ -364,7 +364,7 @@ class ExpenseModel extends MasterModel {
           id::text as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
           payment_mode, debit, credit, remark, account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
-          assigned_user_id, assigned_admin_id, voucher_url, bill_url,
+          assigned_user_id, assigned_admin_id, voucher_url, bill_url, customer_signature_url, authority_signature_url,
           'expenses' as source
         FROM expenses
         WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
@@ -378,7 +378,7 @@ class ExpenseModel extends MasterModel {
           UPPER(f.name) || ' - FARMER PAYMENT' || CASE WHEN fp.remarks IS NOT NULL AND fp.remarks != '' THEN ' - ' || fp.remarks ELSE '' END as remark,
           fp.bank_account_no as account_no, fp.bank_ifsc as branch, 'FARMER PAYMENT' as category,
           fp.status, fp.approved_by, fp.approved_at, fp.created_by, fp.created_at, fp.updated_at,
-          NULL::int as assigned_user_id, fp.assigned_admin_id, fp.voucher_url, NULL as bill_url,
+          NULL::int as assigned_user_id, fp.assigned_admin_id, fp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           'farmer_payment' as source
         FROM farmer_payments fp
         JOIN farmers f ON f.id = fp.farmer_id
@@ -393,7 +393,7 @@ class ExpenseModel extends MasterModel {
           UPPER(ag.full_name) || COALESCE(' (Plot: ' || p.plot_no || ')', '') || ' - COMMISSION' || CASE WHEN pcp.remarks IS NOT NULL AND pcp.remarks != '' THEN ' - ' || pcp.remarks ELSE '' END as remark,
           NULL as account_no, NULL as branch, 'COMMISSION' as category,
           pcp.status, pcp.approved_by, pcp.approved_at, pcp.created_by, pcp.created_at, pcp.updated_at,
-          NULL::int as assigned_user_id, pcp.assigned_admin_id, pcp.voucher_url, NULL as bill_url,
+          NULL::int as assigned_user_id, pcp.assigned_admin_id, pcp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           'commission' as source
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
@@ -410,7 +410,7 @@ class ExpenseModel extends MasterModel {
           UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' || CASE WHEN vp.note IS NOT NULL AND vp.note != '' THEN ' - ' || vp.note ELSE '' END as remark,
           NULL as account_no, NULL as branch, 'VENDOR PAYMENT' as category,
           vp.status, vp.approved_by, vp.approved_at, vp.created_by, vp.created_at, vp.created_at as updated_at,
-          NULL::int as assigned_user_id, vp.assigned_admin_id, vp.voucher_url, NULL as bill_url,
+          NULL::int as assigned_user_id, vp.assigned_admin_id, vp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           'vendor_payment' as source
         FROM vendor_payments vp
         JOIN vendor_commitments vc ON vp.commitment_id = vc.id
@@ -425,7 +425,7 @@ class ExpenseModel extends MasterModel {
           COALESCE(cfe.particular, '') || CASE WHEN cfe.remarks IS NOT NULL AND cfe.remarks != '' THEN ' - ' || cfe.remarks ELSE '' END as remark,
           NULL as account_no, NULL as branch, 'PERSONAL LEDGER' as category,
           'approved' as status, NULL::int as approved_by, NULL::timestamptz as approved_at, cfe.created_by, cfe.created_at, cfe.updated_at,
-          NULL::int as assigned_user_id, NULL::int as assigned_admin_id, cfe.voucher_url, NULL as bill_url,
+          NULL::int as assigned_user_id, NULL::int as assigned_admin_id, cfe.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           'personal_ledger' as source
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
@@ -442,7 +442,7 @@ class ExpenseModel extends MasterModel {
           d.particular || CASE WHEN d.remarks IS NOT NULL AND d.remarks != '' THEN ' - ' || d.remarks ELSE '' END as remark,
           d.account_no, d.branch, d.category,
           d.status, d.approved_by, d.approved_at, d.created_by, d.created_at, d.updated_at,
-          d.assigned_user_id, d.assigned_admin_id, d.voucher_url, NULL as bill_url,
+          d.assigned_user_id, d.assigned_admin_id, d.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           'daybook' as source
         FROM day_book d
         WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'

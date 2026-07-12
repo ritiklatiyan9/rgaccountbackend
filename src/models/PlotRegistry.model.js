@@ -16,7 +16,8 @@ class PlotRegistryModel extends MasterModel {
         COALESCE(agg.total_paid,    0) AS total_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
-        p.team AS plot_team
+        p.team AS plot_team,
+        p.booking_by AS agent_name
       FROM plot_registries pr
       LEFT JOIN plots p ON pr.plot_id = p.id
       LEFT JOIN LATERAL (

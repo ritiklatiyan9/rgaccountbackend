@@ -296,7 +296,14 @@ export const resendLoginOtp = asyncHandler(async (req, res) => {
 });
 
 /**
- * POST /auth/refresh
+ * POST /auth/refresh — MULTI-SESSION SAFE (kept in sync with the booking backend).
+ *
+ * Any validly-signed, unexpired refresh token with the current token_version works.
+ * Deliberately NO single-slot hash comparison and NO rotation: both apps share one
+ * users row, so the old one-hash-per-user scheme made a second session's refresh
+ * look like token theft — the handler then bumped token_version and logged the user
+ * out of BOTH apps mid-click. Revocation still works: bump users.token_version to
+ * kill every session at once; tokens self-expire in 24h (config/jwt.js).
  */
 export const refresh = asyncHandler(async (req, res) => {
   const { refreshToken } = req.body;
@@ -312,22 +319,13 @@ export const refresh = asyncHandler(async (req, res) => {
   }
 
   const user = await userModel.findById(decoded.id, pool);
-
-  if (!user || user.token_version !== decoded.version) {
-    if (user) await userModel.update(user.id, { token_version: user.token_version + 1, refresh_token: null }, pool);
-    return res.status(401).json({ message: 'Invalid refresh token' });
-  }
-
-  if (!user.refresh_token || !(await comparePassword(refreshToken, user.refresh_token))) {
-    await userModel.update(user.id, { token_version: user.token_version + 1, refresh_token: null }, pool);
+  if (!user || user.is_active === false || user.token_version !== decoded.version) {
     return res.status(401).json({ message: 'Invalid refresh token' });
   }
 
   const version = user.token_version;
   const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version });
   const newRefreshToken = signRefreshToken({ id: user.id, version });
-  const hashedRefresh = await hashRefreshToken(newRefreshToken);
-  await userModel.update(user.id, { refresh_token: hashedRefresh }, pool);
 
   res.json({ accessToken, refreshToken: newRefreshToken });
 });
