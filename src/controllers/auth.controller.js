@@ -303,7 +303,7 @@ export const resendLoginOtp = asyncHandler(async (req, res) => {
  * users row, so the old one-hash-per-user scheme made a second session's refresh
  * look like token theft — the handler then bumped token_version and logged the user
  * out of BOTH apps mid-click. Revocation still works: bump users.token_version to
- * kill every session at once; tokens self-expire in 24h (config/jwt.js).
+ * kill every session at once; tokens self-expire in 49d / 7 weeks (config/jwt.js).
  */
 export const refresh = asyncHandler(async (req, res) => {
   const { refreshToken } = req.body;
