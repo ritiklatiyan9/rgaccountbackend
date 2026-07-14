@@ -1,9 +1,29 @@
 import MasterModel from './MasterModel.js';
 
+// Memoized existence check for the handover table (migration 068) so the list
+// endpoint keeps working on databases where the migration hasn't run yet —
+// same pattern as the source_plot_payment_id column check below.
+let _hasHandoverTable = null;
+const _resolveHandoverTableOnce = async (pool) => {
+  if (_hasHandoverTable !== null) return _hasHandoverTable;
+  try {
+    const r = await pool.query(`SELECT to_regclass('registry_document_handovers') IS NOT NULL AS exists`);
+    _hasHandoverTable = !!r.rows?.[0]?.exists;
+  } catch {
+    _hasHandoverTable = false;
+  }
+  return _hasHandoverTable;
+};
+
 // ── Plot Registry Model ──
 class PlotRegistryModel extends MasterModel {
   constructor() {
     super('plot_registries');
+  }
+
+  /** Has the registry_document_handovers table? Cached after first check. */
+  async hasHandoverTable(pool) {
+    return _resolveHandoverTableOnce(pool);
   }
 
   /** All registries for a site with payment aggregates.
@@ -11,11 +31,25 @@ class PlotRegistryModel extends MasterModel {
    *  LATERAL aggregation that scans plot_registry_payments once per registry
    *  and computes both numbers in one go. */
   async findBySiteId(siteId, pool) {
+    const hasHandovers = await _resolveHandoverTableOnce(pool);
+    const handoverSelect = hasHandovers
+      ? `COALESCE(ho.handover_count, 0) AS handover_count,
+        ho.last_handover_at,`
+      : `0 AS handover_count,
+        NULL::timestamp AS last_handover_at,`;
+    const handoverJoin = hasHandovers
+      ? `LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS handover_count, MAX(h.given_at) AS last_handover_at
+        FROM registry_document_handovers h
+        WHERE h.registry_id = pr.id
+      ) ho ON TRUE`
+      : '';
     const query = `
       SELECT pr.*,
         COALESCE(agg.total_paid,    0) AS total_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
+        ${handoverSelect}
         p.team AS plot_team,
         p.booking_by AS agent_name
       FROM plot_registries pr
@@ -33,6 +67,7 @@ class PlotRegistryModel extends MasterModel {
         WHERE d.plot_id = pr.plot_id
           AND UPPER(COALESCE(d.category, '')) = 'REGISTRY'
       ) docs ON TRUE
+      ${handoverJoin}
       WHERE pr.site_id = $1
       ORDER BY pr.plot_no ASC
     `;

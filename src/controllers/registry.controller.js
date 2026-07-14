@@ -8,11 +8,18 @@ import pool from '../config/db.js';
 //  REGISTRY ENDPOINTS
 // ══════════════════════════════════════════════════
 
-/** POST /registries — Create a new registry */
+/** POST /registries — Create a new registry.
+ *  Business rule: a registry can only be created with money mapped to it —
+ *  the payload must carry `payments`, an array of either
+ *    { source_plot_payment_id }                              (link a bank/cheque plot payment)
+ *    { payment_date, amount, payment_mode, tally_date, tally_amount, notes, cheque_no }  (manual)
+ *  totalling > 0. Registry + payments are created in ONE transaction, so a
+ *  registry can never exist without its money. */
 export const createRegistry = asyncHandler(async (req, res) => {
   const {
     site_id, plot_no, customer_name, size_meter, size_sqyard, registry_date, farmer_name,
     registry_payment, notes, plot_id, circle_rate, firm_name, seller_name, created_entry_date, bank_amount,
+    payments,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -22,60 +29,151 @@ export const createRegistry = asyncHandler(async (req, res) => {
   const siteIdInt = parseInt(site_id);
   const plotIdInt = plot_id ? parseInt(plot_id) : null;
 
-  // Single CTE: dup-check + INSERT + plot-status auto-bump in ONE round-trip.
-  // Was: dup SELECT + INSERT + plot SELECT + plot UPDATE = 4 RTTs.
-  const result = await pool.query(
-    `WITH dup AS (
-       SELECT 1 FROM plot_registries
-        WHERE site_id = $1 AND UPPER(plot_no) = $2
-        LIMIT 1
-     ),
-     ins AS (
-       INSERT INTO plot_registries (
-         site_id, plot_no, customer_name, size_meter, size_sqyard, registry_date,
-         farmer_name, plot_id, circle_rate, firm_name, seller_name, created_entry_date,
-         bank_amount, registry_payment, notes, assigned_admin_id, created_by
-       )
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
-       WHERE NOT EXISTS (SELECT 1 FROM dup)
-       RETURNING *
-     ),
-     plot_bump AS (
-       UPDATE plots
-          SET status = 'PENDING NOC', updated_at = NOW()
-        WHERE id = $8
-          AND UPPER(COALESCE(status, '')) = 'BOOKED'
-          AND EXISTS (SELECT 1 FROM ins)
-        RETURNING id
-     )
-     SELECT
-       (SELECT row_to_json(ins) FROM ins) AS registry,
-       EXISTS (SELECT 1 FROM dup) AS is_dup,
-       EXISTS (SELECT 1 FROM plot_bump) AS plot_status_updated`,
-    [
-      siteIdInt,                                                              // $1
-      trimmed,                                                                // $2
-      customer_name ? customer_name.trim().toUpperCase() : null,              // $3
-      parseFloat(size_meter) || null,                                         // $4
-      parseFloat(size_sqyard) || null,                                        // $5
-      registry_date || null,                                                  // $6
-      farmer_name ? farmer_name.trim().toUpperCase() : null,                  // $7
-      plotIdInt,                                                              // $8
-      circle_rate !== undefined && circle_rate !== '' ? (parseFloat(circle_rate) || 0) : null, // $9
-      firm_name ? firm_name.trim().toUpperCase() : null,                      // $10
-      seller_name ? seller_name.trim().toUpperCase() : null,                  // $11
-      created_entry_date || new Date().toISOString().split('T')[0],           // $12
-      bank_amount !== undefined && bank_amount !== '' ? (parseFloat(bank_amount) || 0) : null, // $13
-      parseFloat(registry_payment) || 0,                                      // $14
-      notes ? notes.trim() : null,                                            // $15
-      req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null, // $16
-      req.user.id,                                                            // $17
-    ]
-  );
+  // ── Money-mapped gate ──
+  const paymentRows = Array.isArray(payments) ? payments : [];
+  const linkedIds = paymentRows
+    .filter((p) => p && p.source_plot_payment_id)
+    .map((p) => parseInt(p.source_plot_payment_id))
+    .filter(Number.isFinite);
+  const manualRows = paymentRows.filter((p) => p && !p.source_plot_payment_id && (parseFloat(p.amount) || 0) > 0);
 
-  const row = result.rows[0];
-  if (row.is_dup) return res.status(409).json({ message: `Registry for plot "${trimmed}" already exists` });
-  res.status(201).json({ registry: row.registry, plot_status_updated: row.plot_status_updated });
+  let linkedTotal = 0;
+  let linkable = [];
+  if (linkedIds.length) {
+    // Only same-site plot payments not already linked to another registry count.
+    const { rows } = await pool.query(
+      `SELECT pp.id, pp.site_id, pp.date, pp.amount, pp.payment_from, pp.payment_type,
+              pp.bank_details, pp.narration, pp.cheque_no
+         FROM plot_payments pp
+        WHERE pp.id = ANY($1::int[])
+          AND pp.site_id = $2
+          AND NOT EXISTS (SELECT 1 FROM plot_registry_payments x WHERE x.source_plot_payment_id = pp.id)`,
+      [linkedIds, siteIdInt]
+    );
+    linkable = rows;
+    linkedTotal = rows.reduce((n, r) => n + (parseFloat(r.amount) || 0), 0);
+  }
+  const manualTotal = manualRows.reduce((n, r) => n + (parseFloat(r.amount) || 0), 0);
+  if (linkable.length + manualRows.length === 0 || linkedTotal + manualTotal <= 0) {
+    return res.status(400).json({
+      message: 'Map at least one payment before creating a registry — a registry cannot be created without money mapped to it',
+    });
+  }
+
+  const today = new Date().toISOString().split('T')[0];
+  const client = await pool.connect();
+  let row;
+  try {
+    await client.query('BEGIN');
+
+    // Single CTE: dup-check + INSERT + plot-status auto-bump in ONE round-trip.
+    const result = await client.query(
+      `WITH dup AS (
+         SELECT 1 FROM plot_registries
+          WHERE site_id = $1 AND UPPER(plot_no) = $2
+          LIMIT 1
+       ),
+       ins AS (
+         INSERT INTO plot_registries (
+           site_id, plot_no, customer_name, size_meter, size_sqyard, registry_date,
+           farmer_name, plot_id, circle_rate, firm_name, seller_name, created_entry_date,
+           bank_amount, registry_payment, notes, assigned_admin_id, created_by
+         )
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+         WHERE NOT EXISTS (SELECT 1 FROM dup)
+         RETURNING *
+       ),
+       plot_bump AS (
+         UPDATE plots
+            SET status = 'PENDING NOC', updated_at = NOW()
+          WHERE id = $8
+            AND UPPER(COALESCE(status, '')) = 'BOOKED'
+            AND EXISTS (SELECT 1 FROM ins)
+          RETURNING id
+       )
+       SELECT
+         (SELECT row_to_json(ins) FROM ins) AS registry,
+         EXISTS (SELECT 1 FROM dup) AS is_dup,
+         EXISTS (SELECT 1 FROM plot_bump) AS plot_status_updated`,
+      [
+        siteIdInt,                                                              // $1
+        trimmed,                                                                // $2
+        customer_name ? customer_name.trim().toUpperCase() : null,              // $3
+        parseFloat(size_meter) || null,                                         // $4
+        parseFloat(size_sqyard) || null,                                        // $5
+        registry_date || null,                                                  // $6
+        farmer_name ? farmer_name.trim().toUpperCase() : null,                  // $7
+        plotIdInt,                                                              // $8
+        circle_rate !== undefined && circle_rate !== '' ? (parseFloat(circle_rate) || 0) : null, // $9
+        firm_name ? firm_name.trim().toUpperCase() : null,                      // $10
+        seller_name ? seller_name.trim().toUpperCase() : null,                  // $11
+        created_entry_date || today,                                            // $12
+        bank_amount !== undefined && bank_amount !== '' ? (parseFloat(bank_amount) || 0) : null, // $13
+        parseFloat(registry_payment) || 0,                                      // $14
+        notes ? notes.trim() : null,                                            // $15
+        req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null, // $16
+        req.user.id,                                                            // $17
+      ]
+    );
+
+    row = result.rows[0];
+    if (row.is_dup) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: `Registry for plot "${trimmed}" already exists` });
+    }
+    const registryId = row.registry.id;
+
+    // ── Linked bank/cheque plot payments (same shape saveRegistryNoc uses) ──
+    for (const pp of linkable) {
+      await client.query(
+        `INSERT INTO plot_registry_payments (
+           registry_id, site_id, payment_date, amount, payment_mode, tally_date, tally_amount,
+           notes, source_plot_payment_id, cheque_no, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          registryId, siteIdInt, pp.date || today, parseFloat(pp.amount) || 0,
+          (pp.payment_from || pp.payment_type || '').trim().toUpperCase() || null,
+          pp.date || null, parseFloat(pp.amount) || 0,
+          (pp.narration || pp.bank_details || 'LINKED FROM PLOT PAYMENT').trim().toUpperCase(),
+          pp.id, pp.cheque_no || null, req.user.id,
+        ]
+      );
+    }
+
+    // ── Manual payments ──
+    for (const m of manualRows) {
+      const mode = m.payment_mode ? String(m.payment_mode).trim().toUpperCase() : null;
+      await client.query(
+        `INSERT INTO plot_registry_payments (
+           registry_id, site_id, payment_date, amount, payment_mode, tally_date, tally_amount,
+           notes, cheque_no, cheque_status, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          registryId, siteIdInt, m.payment_date || today, parseFloat(m.amount) || 0, mode,
+          m.tally_date || null,
+          m.tally_amount !== undefined && m.tally_amount !== '' ? parseFloat(m.tally_amount) : null,
+          m.notes ? String(m.notes).trim().toUpperCase() : null,
+          m.cheque_no ? String(m.cheque_no).trim() : null,
+          mode === 'CHEQUE' ? 'PENDING' : null,
+          req.user.id,
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  res.status(201).json({
+    registry: row.registry,
+    plot_status_updated: row.plot_status_updated,
+    payments_created: linkable.length + manualRows.length,
+    payments_skipped: linkedIds.length - linkable.length,
+  });
 });
 
 /** GET /registries?site_id=X — List all registries for a site */
@@ -424,13 +522,20 @@ const buildNocPayload = async (registryId) => {
  *  registry created -> plot 'PENDING NOC' -> NOC generated -> approved here -> 'REGISTRY'. */
 export const approveRegistryNoc = asyncHandler(async (req, res) => {
   const registryId = parseInt(req.params.id);
-  const registry = await plotRegistryModel.findById(registryId, pool);
+  const registry = await plotRegistryModel.findByIdWithTotals(registryId, pool);
   if (!registry) return res.status(404).json({ message: 'Registry not found' });
   if (!registry.noc_generated_at) {
     return res.status(400).json({ message: 'Generate the NOC first — approval comes after generation' });
   }
   if (registry.noc_approved_at) {
     return res.status(409).json({ message: 'NOC is already approved' });
+  }
+  // Payment-clear gate (defense in depth — generation is gated the same way).
+  const approveDue = (parseFloat(registry.registry_payment) || 0) - (parseFloat(registry.total_paid) || 0);
+  if (approveDue > 0.005) {
+    return res.status(400).json({
+      message: `NOC can only be approved after full payment — ₹${approveDue.toLocaleString('en-IN')} is still due`,
+    });
   }
 
   await pool.query(
@@ -561,6 +666,24 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
       }
     }
 
+    // ── Payment-clear gate: the NOC may only be generated once the registry is
+    // fully paid. Evaluated INSIDE the transaction, after the payment syncs
+    // above, so payments added in this very save count toward the total. ──
+    const totalRes = await client.query(
+      `SELECT COALESCE(SUM(amount), 0)::numeric AS total_paid
+         FROM plot_registry_payments WHERE registry_id = $1`,
+      [registryId]
+    );
+    const totalPaid = parseFloat(totalRes.rows[0]?.total_paid) || 0;
+    const due = (parseFloat(registry.registry_payment) || 0) - totalPaid;
+    if (due > 0.005) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        message: `NOC can only be generated after full payment — ₹${due.toLocaleString('en-IN')} is still due against this registry`,
+        due,
+      });
+    }
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -571,4 +694,67 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
 
   const payload = await buildNocPayload(registryId);
   res.json(payload);
+});
+
+// ══════════════════════════════════════════════════
+//  DOCUMENT HANDOVER ENDPOINTS
+// ══════════════════════════════════════════════════
+
+/** GET /registries/:id/handovers — handover timeline (newest first) */
+export const listRegistryHandovers = asyncHandler(async (req, res) => {
+  const registryId = parseInt(req.params.id);
+  const { rows } = await pool.query(
+    `SELECT h.*, COALESCE(u.name, u.email) AS given_by_name
+       FROM registry_document_handovers h
+       LEFT JOIN users u ON u.id = h.given_by
+      WHERE h.registry_id = $1
+      ORDER BY h.given_at DESC, h.id DESC`,
+    [registryId]
+  );
+  res.json({ handovers: rows });
+});
+
+/** POST /registries/:id/handovers — record an (offline) handover of the
+ *  registry documents to the customer. Gated: the registry document must be
+ *  uploaded first. Body: { given_to, notes, photo_url, given_at } —
+ *  photo_url comes from the client-side /upload/single?provider=s3 flow. */
+export const createRegistryHandover = asyncHandler(async (req, res) => {
+  const registryId = parseInt(req.params.id);
+  const { given_to, notes, photo_url, given_at } = req.body;
+
+  if (!given_to || !String(given_to).trim()) {
+    return res.status(400).json({ message: 'Recipient name is required' });
+  }
+
+  const registry = await plotRegistryModel.findById(registryId, pool);
+  if (!registry) return res.status(404).json({ message: 'Registry not found' });
+
+  const docRes = registry.plot_id
+    ? await pool.query(
+        `SELECT 1 FROM documents d
+          WHERE d.plot_id = $1 AND UPPER(COALESCE(d.category, '')) = 'REGISTRY'
+          LIMIT 1`,
+        [registry.plot_id]
+      )
+    : { rows: [] };
+  if (!docRes.rows.length) {
+    return res.status(400).json({ message: 'Upload the registry document before recording a handover' });
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO registry_document_handovers (registry_id, site_id, given_to, notes, photo_url, given_by, given_at)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamp, NOW()))
+     RETURNING *`,
+    [
+      registryId, registry.site_id,
+      String(given_to).trim().toUpperCase(),
+      notes ? String(notes).trim() : null,
+      photo_url ? String(photo_url).trim() : null,
+      req.user.id,
+      given_at || null,
+    ]
+  );
+  const handover = rows[0];
+  handover.given_by_name = req.user.name || req.user.email || null;
+  res.status(201).json({ handover });
 });
