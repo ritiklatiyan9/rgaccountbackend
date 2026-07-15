@@ -126,12 +126,14 @@ export const getMonth = asyncHandler(async (req, res) => {
  */
 export const updateMonth = asyncHandler(async (req, res) => {
   const monthId = parseInt(req.params.id);
-  const { opening_balance, notes, is_locked } = req.body;
+  const { opening_balance, notes, is_locked, ledger_name } = req.body;
 
   const updateData = {};
   if (opening_balance !== undefined) updateData.opening_balance = parseFloat(opening_balance) || 0;
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
   if (is_locked !== undefined) updateData.is_locked = Boolean(is_locked);
+  // Rename a person ledger. Never blank the name — ignore empty values.
+  if (ledger_name !== undefined && ledger_name.trim()) updateData.ledger_name = ledger_name.trim().toUpperCase();
 
   if (Object.keys(updateData).length === 0) {
     return res.status(400).json({ message: 'Nothing to update' });
