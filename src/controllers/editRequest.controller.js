@@ -9,10 +9,44 @@ import { cashFlowEntryModel } from '../models/CashFlow.model.js';
 import { firmTransactionModel } from '../models/Firm.model.js';
 import { uploadToCloudinary } from '../utils/cloudinary.js';
 import { cleanupFile } from '../middlewares/multer.middleware.js';
+import { createRegistryRecord } from './registry.controller.js';
 import pool from '../config/db.js';
 
 // Map module name to { model, fetchOriginal }
 const MODULE_MAP = {
+  // Create-type request: a sub-admin wants a registry while the plot's bank
+  // payments are not yet clear. record_id = plot_id (dedupes to one pending
+  // request per plot); proposed_data = the full POST /registries payload.
+  // Approval runs the real create, attributed to the original requester.
+  plot_registry_create: {
+    model: plotModel,
+    fetchOriginal: async (id) => plotModel.findById(parseInt(id), pool),
+    // Reject guaranteed-to-fail requests up-front instead of parking them in
+    // the admin queue. Returns an error message or null.
+    validateCreate: async (data, user) => {
+      if (user.role !== 'admin' && user.role !== 'super_admin' && user.role !== 'sub_admin') {
+        return 'Not allowed to request a registry';
+      }
+      const total = (Array.isArray(data?.payments) ? data.payments : [])
+        .reduce((n, p) => n + (parseFloat(p?.amount) || (p?.source_plot_payment_id ? 1 : 0)), 0);
+      if (total <= 0) {
+        return 'Map at least one payment before requesting a registry — a registry cannot be created without money mapped to it';
+      }
+      if (data?.site_id && data?.plot_no) {
+        const { rows } = await pool.query(
+          `SELECT 1 FROM plot_registries WHERE site_id = $1 AND UPPER(plot_no) = UPPER($2) LIMIT 1`,
+          [parseInt(data.site_id), String(data.plot_no).trim()]
+        );
+        if (rows.length) return `Registry for plot "${data.plot_no}" already exists`;
+      }
+      return null;
+    },
+    applyUpdate: async (id, data, editReq) => {
+      const out = await createRegistryRecord(data, editReq?.requested_by || null);
+      if (out.status >= 400) throw new Error(out.body?.message || 'Failed to create registry');
+      return out.body;
+    },
+  },
   farmer: {
     model: farmerModel,
     fetchOriginal: async (id) => farmerModel.findById(parseInt(id), pool),
@@ -330,6 +364,13 @@ export const createEditRequest = asyncHandler(async (req, res) => {
     }
   }
 
+  // Module-specific up-front validation (create-type requests) — don't park
+  // requests in the admin queue that approval is guaranteed to reject.
+  if (handler.validateCreate) {
+    const invalid = await handler.validateCreate(parsedProposed, req.user);
+    if (invalid) return res.status(400).json({ message: invalid });
+  }
+
   const editRequest = await editRequestModel.create({
     requested_by: req.user.id,
     site_id: site_id ? parseInt(site_id) : null,
@@ -425,7 +466,17 @@ export const approveEditRequest = asyncHandler(async (req, res) => {
   delete proposedData.updated_at;
   delete proposedData.created_by;
 
-  await handler.applyUpdate(editReq.record_id, proposedData);
+  // Apply — a failure here (e.g. registry payments claimed elsewhere since
+  // submission) must surface to the admin as a 400 with the real reason, and
+  // the request stays pending so it can be fixed/rejected explicitly.
+  let applied;
+  try {
+    applied = await handler.applyUpdate(editReq.record_id, proposedData, editReq);
+  } catch (err) {
+    return res.status(400).json({
+      message: `Could not apply this request: ${err.message}`,
+    });
+  }
 
   // Mark the edit request as approved
   const updatePayload = {
@@ -438,7 +489,11 @@ export const approveEditRequest = asyncHandler(async (req, res) => {
 
   const updated = await editRequestModel.update(parseInt(id), updatePayload, pool);
 
-  res.json({ editRequest: updated, message: 'Edit request approved and changes applied' });
+  let message = 'Edit request approved and changes applied';
+  if (applied?.payments_skipped > 0) {
+    message += ` — note: ${applied.payments_skipped} linked payment(s) were no longer available and were skipped`;
+  }
+  res.json({ editRequest: updated, applied: applied ?? null, message });
 });
 
 // ══════════════════════════════════════════════════

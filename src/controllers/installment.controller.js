@@ -707,8 +707,14 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
 
   const plotResult = await pool.query(plotQuery, plotParams);
 
+  const EMPTY_SUMMARY = {
+    total_count: 0, paid_count: 0, pending_count: 0, partial_count: 0, overdue_count: 0,
+    outstanding_amount: 0, overdue_amount: 0, due_this_month_amount: 0, due_this_month_count: 0,
+    interest_due: 0, collected_this_month: 0,
+    aging: { d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 },
+  };
   if (plotResult.rows.length === 0) {
-    return res.json({ plots: [], summary: { total_count: 0, paid_count: 0, pending_count: 0, partial_count: 0, overdue_count: 0 } });
+    return res.json({ plots: [], summary: EMPTY_SUMMARY, collections: [] });
   }
 
   const plotIds = plotResult.rows.map(r => r.id);
@@ -722,16 +728,40 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
     [plotIds]
   );
 
-  // ── Fetch total received per plot from plot_payments (single source of truth) ──
+  // ── Total received per plot — plot_payments UNION plot_installment_payments,
+  // same dual-source rule as payment-analytics (either alone undercounts). ──
   const payResult = await pool.query(
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
-     FROM plot_payments
-     WHERE plot_id = ANY($1) AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     FROM (
+       SELECT pp.plot_id, pp.amount FROM plot_payments pp
+        WHERE pp.plot_id = ANY($1) AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       UNION ALL
+       SELECT pip.plot_id, pip.amount FROM plot_installment_payments pip
+        WHERE pip.plot_id = ANY($1) AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     ) u
      GROUP BY plot_id`,
     [plotIds]
   );
   const receivedMap = {};
   for (const r of payResult.rows) receivedMap[r.plot_id] = parseFloat(r.total_received) || 0;
+
+  // ── Collections trend: last 6 calendar months, both payment tables ──
+  const collectionsResult = await pool.query(
+    `SELECT to_char(date_trunc('month', d), 'YYYY-MM') AS month, COALESCE(SUM(amount), 0)::numeric AS amount
+     FROM (
+       SELECT pp.date AS d, pp.amount FROM plot_payments pp
+        WHERE pp.site_id = $1 AND pp.date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
+          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       UNION ALL
+       SELECT pip.payment_date AS d, pip.amount FROM plot_installment_payments pip
+        JOIN plots p ON p.id = pip.plot_id
+        WHERE p.site_id = $1 AND pip.payment_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
+          AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     ) u
+     GROUP BY 1 ORDER BY 1`,
+    [parseInt(site_id)]
+  );
+  const collections = collectionsResult.rows.map((r) => ({ month: r.month, amount: parseFloat(r.amount) || 0 }));
 
   // ── Group installments by plot and compute dynamic paid/status ──
   const instByPlot = {};
@@ -854,9 +884,16 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
     return 0;
   });
 
-  // ── Summary: compute from all plots (unfiltered) for the summary cards ──
-  // Re-run quickly over all plots
+  // ── Summary: compute from all plots (unfiltered) for the summary cards.
+  // Alongside counts, accumulate the ₹ figures the tracker header shows:
+  // outstanding, overdue (with 30/60/90 aging), due-this-month, interest. ──
   let sumTotal = 0, sumPaid = 0, sumPending = 0, sumPartial = 0, sumOverdue = 0;
+  let amtOutstanding = 0, amtOverdue = 0, amtDueThisMonth = 0, dueThisMonthCount = 0, amtInterest = 0;
+  const aging = { d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 };
+  const todayDate = new Date(today);
+  const monthStart = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
+  const monthEnd = new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0);
+
   for (const plot of plotResult.rows) {
     const installments = instByPlot[plot.id] || [];
     const sp = parseFloat(plot.sale_price) || 0;
@@ -867,20 +904,44 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
         const ia = parseFloat(inst.amount) || 0;
         const ca = Math.min(rp, ia);
         rp -= ca;
-        tr += Math.max(ia - ca, 0);
+        const remaining = Math.max(ia - ca, 0);
+        tr += remaining;
         tp += ca;
-        if (ca < ia && ca === 0 && new Date(inst.due_date) < new Date(today)) oc++;
+        if (ca < ia && ca === 0 && new Date(inst.due_date) < todayDate) oc++;
+
+        if (remaining > 0) {
+          const due = new Date(inst.due_date);
+          if (due < todayDate) {
+            amtOverdue += remaining;
+            const days = Math.floor((todayDate - due) / 86400000);
+            if (days <= 30) aging.d1_30 += remaining;
+            else if (days <= 60) aging.d31_60 += remaining;
+            else if (days <= 90) aging.d61_90 += remaining;
+            else aging.d90_plus += remaining;
+            if (plot.interest_enabled) {
+              amtInterest += calculateInterest(remaining, parseFloat(plot.interest_rate), plot.interest_type, inst.due_date, today);
+            }
+          }
+          if (due >= monthStart && due <= monthEnd) {
+            amtDueThisMonth += remaining;
+            dueThisMonthCount++;
+          }
+        }
       }
     } else {
       tp = rp;
       tr = Math.max(sp - tp, 0);
     }
+    amtOutstanding += tr;
     sumTotal++;
     if (sp > 0 && tr <= 0) sumPaid++;
     else if (oc > 0) sumOverdue++;
     else if (tp > 0) sumPartial++;
     else sumPending++;
   }
+
+  const thisMonthKey = `${todayDate.getFullYear()}-${String(todayDate.getMonth() + 1).padStart(2, '0')}`;
+  const collectedThisMonth = collections.find((c) => c.month === thisMonthKey)?.amount || 0;
 
   res.json({
     plots,
@@ -890,7 +951,15 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
       pending_count: sumPending,
       partial_count: sumPartial,
       overdue_count: sumOverdue,
+      outstanding_amount: amtOutstanding,
+      overdue_amount: amtOverdue,
+      due_this_month_amount: amtDueThisMonth,
+      due_this_month_count: dueThisMonthCount,
+      interest_due: amtInterest,
+      collected_this_month: collectedThisMonth,
+      aging,
     },
+    collections,
   });
 });
 

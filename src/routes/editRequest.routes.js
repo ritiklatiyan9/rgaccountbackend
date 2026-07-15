@@ -15,7 +15,14 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 const router = express.Router();
 
 const editRequestReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'edit-requests' });
-const bustEditRequestCache = invalidateCacheOnSuccess(['/edit-requests']);
+// Cache keys are `<namespace>|u:<id>|<path>|<query>` — prefixes must be the
+// namespace, not the URL path.
+const bustEditRequestCache = invalidateCacheOnSuccess(['edit-requests|']);
+// Approval applies the change to the target module's records (e.g.
+// plot_registry_create creates a registry) — bust those read caches too.
+const bustApprovalCaches = invalidateCacheOnSuccess([
+  'edit-requests|', 'registries|', 'registries-meta|',
+]);
 
 // All routes require authentication
 router.use(authMiddleware);
@@ -29,7 +36,7 @@ router.get('/my-requests', editRequestReadCache, listMyEditRequests);
 // Admin endpoints
 router.get('/', requireRole('admin'), editRequestReadCache, listEditRequests);
 router.get('/counts', requireRole('admin'), editRequestReadCache, getEditRequestCounts);
-router.put('/:id/approve', requireRole('admin'), upload.single('review_photo'), bustEditRequestCache, approveEditRequest);
+router.put('/:id/approve', requireRole('admin'), upload.single('review_photo'), bustApprovalCaches, approveEditRequest);
 router.put('/:id/reject', requireRole('admin'), bustEditRequestCache, rejectEditRequest);
 
 export default router;

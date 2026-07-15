@@ -8,22 +8,106 @@ import pool from '../config/db.js';
 //  REGISTRY ENDPOINTS
 // ══════════════════════════════════════════════════
 
+const isAdminRole = (role) => role === 'admin' || role === 'super_admin';
+
+/** Bank-clearance snapshot for a plot: what the plot expects in bank
+ *  (plots.to_receive_bank) vs what has actually landed — bank/cheque plot
+ *  payments + bank-mode installment payments, bounced/returned excluded.
+ *  Same maths as plotPayments.service getPlotsWithTotals. */
+export async function getPlotBankClearance(plotId) {
+  const { rows } = await pool.query(
+    `SELECT p.id, p.plot_no, COALESCE(p.to_receive_bank, 0)::numeric AS to_receive_bank,
+            COALESCE((
+              SELECT SUM(pp.amount) FROM plot_payments pp
+               WHERE pp.plot_id = p.id
+                 AND pp.payment_type IN ('BANK', 'CHEQUE')
+                 AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            ), 0)::numeric
+          + COALESCE((
+              SELECT SUM(pip.amount) FROM plot_installment_payments pip
+               WHERE pip.plot_id = p.id
+                 AND UPPER(COALESCE(pip.payment_mode, '')) IN ('BANK', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER')
+                 AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            ), 0)::numeric AS received_bank
+       FROM plots p WHERE p.id = $1`,
+    [plotId]
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const toReceive = parseFloat(row.to_receive_bank) || 0;
+  const received = parseFloat(row.received_bank) || 0;
+  return {
+    plot_id: row.id,
+    plot_no: row.plot_no,
+    to_receive_bank: toReceive,
+    received_bank: received,
+    pending_bank: Math.max(0, toReceive - received),
+    clear: toReceive - received <= 0.005,
+  };
+}
+
+/** GET /registries/plot-clearance?plot_id= — payments-clear check used by the
+ *  create-registry form to decide direct-create vs admin-approval path. */
+export const getRegistryPlotClearance = asyncHandler(async (req, res) => {
+  const plotId = parseInt(req.query.plot_id);
+  if (!Number.isFinite(plotId)) return res.status(400).json({ message: 'plot_id is required' });
+  const clearance = await getPlotBankClearance(plotId);
+  if (!clearance) return res.status(404).json({ message: 'Plot not found' });
+  res.json({ clearance });
+});
+
 /** POST /registries — Create a new registry.
- *  Business rule: a registry can only be created with money mapped to it —
- *  the payload must carry `payments`, an array of either
+ *  Business rules:
+ *  1. Money-mapped: the payload must carry `payments` totalling > 0 (see
+ *     createRegistryRecord).
+ *  2. Payments-clear: the linked plot's bank money must be fully received
+ *     (up to plots.to_receive_bank). Admins may create anyway; sub-admins
+ *     are routed to the admin-approval flow (POST /edit-requests, module
+ *     'plot_registry_create') and blocked here. */
+export const createRegistry = asyncHandler(async (req, res) => {
+  if (!isAdminRole(req.user.role)) {
+    // Resolve the gate plot by FK or (site, plot_no) fallback — omitting
+    // plot_id must not skip the clearance check.
+    let gatePlotId = parseInt(req.body.plot_id);
+    if (!Number.isFinite(gatePlotId) && req.body.site_id && req.body.plot_no) {
+      const { rows } = await pool.query(
+        `SELECT id FROM plots WHERE site_id = $1 AND UPPER(plot_no) = UPPER($2) ORDER BY id DESC LIMIT 1`,
+        [parseInt(req.body.site_id), String(req.body.plot_no).trim()]
+      );
+      gatePlotId = rows[0]?.id;
+    }
+    if (gatePlotId) {
+      const clearance = await getPlotBankClearance(gatePlotId);
+      if (clearance && !clearance.clear) {
+        return res.status(403).json({
+          code: 'PAYMENTS_NOT_CLEAR',
+          clearance,
+          message: `Payments are not clear — ₹${clearance.pending_bank.toLocaleString('en-IN')} is still to be received in bank. Submit the registry for admin approval.`,
+        });
+      }
+    }
+  }
+  const out = await createRegistryRecord(req.body, req.user.id);
+  res.status(out.status).json(out.body);
+});
+
+/** Core create logic, callable outside the HTTP handler (admin-approval flow
+ *  applies an approved 'plot_registry_create' edit request through this).
+ *  A registry can only be created with money mapped to it — `payments` is an
+ *  array of either
  *    { source_plot_payment_id }                              (link a bank/cheque plot payment)
  *    { payment_date, amount, payment_mode, tally_date, tally_amount, notes, cheque_no }  (manual)
  *  totalling > 0. Registry + payments are created in ONE transaction, so a
- *  registry can never exist without its money. */
-export const createRegistry = asyncHandler(async (req, res) => {
+ *  registry can never exist without its money. Returns { status, body }. */
+export async function createRegistryRecord(body, userId) {
   const {
     site_id, plot_no, customer_name, size_meter, size_sqyard, registry_date, farmer_name,
     registry_payment, notes, plot_id, circle_rate, firm_name, seller_name, created_entry_date, bank_amount,
     payments,
-  } = req.body;
+  } = body;
 
-  if (!site_id) return res.status(400).json({ message: 'Site is required' });
-  if (!plot_no || !plot_no.trim()) return res.status(400).json({ message: 'Plot number is required' });
+  if (!site_id) return { status: 400, body: { message: 'Site is required' } };
+  if (!plot_no || !plot_no.trim()) return { status: 400, body: { message: 'Plot number is required' } };
 
   const trimmed = plot_no.trim().toUpperCase();
   const siteIdInt = parseInt(site_id);
@@ -55,9 +139,9 @@ export const createRegistry = asyncHandler(async (req, res) => {
   }
   const manualTotal = manualRows.reduce((n, r) => n + (parseFloat(r.amount) || 0), 0);
   if (linkable.length + manualRows.length === 0 || linkedTotal + manualTotal <= 0) {
-    return res.status(400).json({
+    return { status: 400, body: {
       message: 'Map at least one payment before creating a registry — a registry cannot be created without money mapped to it',
-    });
+    } };
   }
 
   const today = new Date().toISOString().split('T')[0];
@@ -111,15 +195,15 @@ export const createRegistry = asyncHandler(async (req, res) => {
         bank_amount !== undefined && bank_amount !== '' ? (parseFloat(bank_amount) || 0) : null, // $13
         parseFloat(registry_payment) || 0,                                      // $14
         notes ? notes.trim() : null,                                            // $15
-        req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null, // $16
-        req.user.id,                                                            // $17
+        body.assigned_admin_id ? parseInt(body.assigned_admin_id) : null,       // $16
+        userId,                                                                 // $17
       ]
     );
 
     row = result.rows[0];
     if (row.is_dup) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ message: `Registry for plot "${trimmed}" already exists` });
+      return { status: 409, body: { message: `Registry for plot "${trimmed}" already exists` } };
     }
     const registryId = row.registry.id;
 
@@ -135,7 +219,7 @@ export const createRegistry = asyncHandler(async (req, res) => {
           (pp.payment_from || pp.payment_type || '').trim().toUpperCase() || null,
           pp.date || null, parseFloat(pp.amount) || 0,
           (pp.narration || pp.bank_details || 'LINKED FROM PLOT PAYMENT').trim().toUpperCase(),
-          pp.id, pp.cheque_no || null, req.user.id,
+          pp.id, pp.cheque_no || null, userId,
         ]
       );
     }
@@ -155,7 +239,7 @@ export const createRegistry = asyncHandler(async (req, res) => {
           m.notes ? String(m.notes).trim().toUpperCase() : null,
           m.cheque_no ? String(m.cheque_no).trim() : null,
           mode === 'CHEQUE' ? 'PENDING' : null,
-          req.user.id,
+          userId,
         ]
       );
     }
@@ -168,13 +252,13 @@ export const createRegistry = asyncHandler(async (req, res) => {
     client.release();
   }
 
-  res.status(201).json({
+  return { status: 201, body: {
     registry: row.registry,
     plot_status_updated: row.plot_status_updated,
     payments_created: linkable.length + manualRows.length,
     payments_skipped: linkedIds.length - linkable.length,
-  });
-});
+  } };
+}
 
 /** GET /registries?site_id=X — List all registries for a site */
 export const listRegistries = asyncHandler(async (req, res) => {
@@ -729,14 +813,16 @@ export const createRegistryHandover = asyncHandler(async (req, res) => {
   const registry = await plotRegistryModel.findById(registryId, pool);
   if (!registry) return res.status(404).json({ message: 'Registry not found' });
 
-  const docRes = registry.plot_id
-    ? await pool.query(
-        `SELECT 1 FROM documents d
-          WHERE d.plot_id = $1 AND UPPER(COALESCE(d.category, '')) = 'REGISTRY'
-          LIMIT 1`,
-        [registry.plot_id]
-      )
-    : { rows: [] };
+  // Match by FK or (site, plot_no) fallback — same resolution as the
+  // REGISTRY doc-upload gate, so null-plot_id registries aren't blocked.
+  const docRes = await pool.query(
+    `SELECT 1 FROM documents d
+       JOIN plots p ON p.id = d.plot_id
+      WHERE UPPER(COALESCE(d.category, '')) = 'REGISTRY'
+        AND (p.id = $1 OR (p.site_id = $2 AND UPPER(p.plot_no) = UPPER($3)))
+      LIMIT 1`,
+    [registry.plot_id, registry.site_id, registry.plot_no]
+  );
   if (!docRes.rows.length) {
     return res.status(400).json({ message: 'Upload the registry document before recording a handover' });
   }

@@ -108,6 +108,30 @@ export const uploadPlotDocument = asyncHandler(async (req, res) => {
   const category = VALID_CATEGORIES.has(rawCat) ? rawCat : 'OTHER';
   const title = req.body.title ? String(req.body.title).trim() : null;
 
+  // ── NOC-first flow: the registry document (deed) can only be uploaded once
+  // this plot's registry exists AND its NOC has been generated.
+  // Order enforced: registry entry → NOC → registry document → handover.
+  // ponytail: gate on noc_generated_at; switch to noc_approved_at if admin
+  // sign-off must precede the deed. ──
+  if (category === 'REGISTRY') {
+    // Match by FK first, else by (site, plot_no) — registries created without
+    // a plot link are found the same way the frontend resolves them.
+    const { rows: regRows } = await pool.query(
+      `SELECT r.noc_generated_at FROM plot_registries r
+        WHERE r.plot_id = $1
+           OR (r.site_id = (SELECT site_id FROM plots WHERE id = $1)
+               AND UPPER(r.plot_no) = (SELECT UPPER(plot_no) FROM plots WHERE id = $1))
+        ORDER BY r.id DESC LIMIT 1`,
+      [plotId]
+    );
+    if (!regRows.length) {
+      return res.status(400).json({ message: 'Create the plot registry entry first — the flow is NOC, then registry document' });
+    }
+    if (!regRows[0].noc_generated_at) {
+      return res.status(400).json({ message: 'Generate the NOC first — the registry document can only be uploaded after the NOC is created' });
+    }
+  }
+
   // If a live booking exists for this plot, link the doc to its KYC case so the booking app
   // shows it too. Pick the most recent non-cancelled booking.
   let kycCaseId = null;

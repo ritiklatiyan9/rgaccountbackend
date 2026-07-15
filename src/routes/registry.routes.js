@@ -5,6 +5,7 @@ import {
   createRegistry, listRegistries, getRegistry, updateRegistry, deleteRegistry,
   createRegistryPayment, listRegistryPayments, getRegistryPayment, updateRegistryPayment, deleteRegistryPayment,
   getRegistryAutocomplete, getRegistryNoc, saveRegistryNoc, approveRegistryNoc,
+  getRegistryPlotClearance, listRegistryHandovers, createRegistryHandover,
 } from '../controllers/registry.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -28,6 +29,13 @@ router.get('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission
 router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'write'), bustRegistryCache, createRegistryPayment);
 router.put('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'update'), bustRegistryCache, updateRegistryPayment);
 router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'delete'), bustRegistryCache, deleteRegistryPayment);
+
+// ── Payments-clear check (create-registry form) — BEFORE /:id ──
+router.get('/plot-clearance', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), getRegistryPlotClearance);
+
+// ── Document handover timeline ──
+router.get('/:id/handovers', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), registryReadCache, listRegistryHandovers);
+router.post('/:id/handovers', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'write'), bustRegistryCache, createRegistryHandover);
 
 // ── NOC endpoints ──
 router.get('/:id/noc', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), registryReadCache, getRegistryNoc);
