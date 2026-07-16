@@ -4,13 +4,16 @@ import pool from '../config/db.js';
 /**
  * Predictive Cash-Flow Forecast.
  *
- * Projects the next N months of company cash movement from the forward-dated schedules in the schema:
- *   INFLOW  = pending plot installments (plot_installments.due_date). "Pending" is recomputed with the
- *             SAME waterfall the rest of the app uses (plot_installments.status/paid_amount are stale):
- *             earmarked installment payments claim their own installment first, then the generic pool
- *             (plot_payments + un-earmarked installment payments, excluding bounced cheques) waterfalls
- *             earliest-first. Only ACTIVE agreements (plots.status filter).
- *   OUTFLOW = open vendor_commitments remaining balance (contract − paid), bucketed by due_date.
+ * PREDICTIVE model — each future month = a run-rate baseline, raised in any month with a larger KNOWN
+ * scheduled due (max, never sum, so the recurring run-rate isn't double-counted):
+ *   RUN-RATE  = average monthly ACTUAL cash movement over the last `lookback` months, computed from the
+ *               exact same revenue/expense unions the Day Book uses (plot_payments+installment receipts
+ *               for inflow; farmer/vendor/commission payments + expenses + day_book EXPENSE for outflow),
+ *               so the projection matches the app's own historical numbers.
+ *   SCHEDULED = known forward-dated dues that raise a specific month above the baseline:
+ *               INFLOW  → pending plot installments (plot_installments.due_date), pending recomputed via
+ *                         the app's earmark-aware waterfall (status/paid_amount are stale). Active plots only.
+ *               OUTFLOW → open vendor_commitments remaining balance (contract − paid) by due_date.
  *
  * Context figures that have NO reliable due date are reported separately (never fake-bucketed):
  * overdue receivables, overdue / undated vendor commitment balances, and the farmer/land-owner
@@ -139,19 +142,63 @@ const FARMER_SQL = `
   ) pd ON pd.farmer_id = f.id
   WHERE f.site_id = $1 AND f.status = 'active'`;
 
-/** GET /forecast?site_id=&months=6 */
+// ── Run-rate (predictive baseline) ────────────────────────────────────────────
+// Actual cash movement over the last $2 COMPLETE months (mirrors daybook getProfitSummary's
+// revenue/expense unions exactly, so the projection matches the app's own historical numbers).
+const WINDOW = `date_trunc('month', CURRENT_DATE) - make_interval(months => $2::int)
+                  AND %COL% < date_trunc('month', CURRENT_DATE)`;
+
+const RUN_RATE_INFLOW_SQL = `
+  SELECT COALESCE(SUM(amount), 0)::float8 AS total FROM (
+    SELECT pp.amount FROM plot_payments pp
+     WHERE pp.site_id = $1 AND pp.date >= ${WINDOW.replace('%COL%', 'pp.date')}
+       AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+    UNION ALL
+    SELECT pip.amount FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id
+     WHERE p.site_id = $1 AND pip.payment_date >= ${WINDOW.replace('%COL%', 'pip.payment_date')}
+       AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+  ) u`;
+
+const RUN_RATE_OUTFLOW_SQL = `
+  SELECT COALESCE(SUM(debit), 0)::float8 AS total FROM (
+    SELECT fp.amount AS debit FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
+     WHERE f.site_id = $1 AND fp.date >= ${WINDOW.replace('%COL%', 'fp.date')}
+       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED','RETURNED')) AND fp.status != 'rejected'
+    UNION ALL
+    SELECT debit FROM expenses
+     WHERE site_id = $1 AND date >= ${WINDOW.replace('%COL%', 'date')}
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status != 'rejected'
+    UNION ALL
+    SELECT amount AS debit FROM plot_commission_payments
+     WHERE site_id = $1 AND date >= ${WINDOW.replace('%COL%', 'date')}
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status != 'rejected'
+    UNION ALL
+    SELECT amount AS debit FROM vendor_payments
+     WHERE site_id = $1 AND payment_date >= ${WINDOW.replace('%COL%', 'payment_date')}
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status != 'rejected'
+    UNION ALL
+    SELECT debit FROM day_book
+     WHERE site_id = $1 AND date >= ${WINDOW.replace('%COL%', 'date')}
+       AND entry_type = 'EXPENSE' AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status != 'rejected'
+  ) u`;
+
+/** GET /forecast?site_id=&months=6&lookback=6 */
 export const getCashflowForecast = asyncHandler(async (req, res) => {
   const siteId = parseInt(req.query.site_id, 10);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   const months = Math.min(Math.max(parseInt(req.query.months, 10) || 6, 1), 12);
+  const lookback = Math.min(Math.max(parseInt(req.query.lookback, 10) || 6, 1), 24);
 
-  const [clockRes, inflowRes, vendorRes, vendorUnschedRes, vendorOverdueRes, farmerRes] = await Promise.all([
+  const [clockRes, inflowRes, vendorRes, vendorUnschedRes, vendorOverdueRes, farmerRes, runInflowRes, runOutflowRes] = await Promise.all([
     pool.query(`SELECT to_char(date_trunc('month', CURRENT_DATE), 'YYYY-MM') AS m`),
     pool.query(INFLOW_SQL, [siteId, months]),
     pool.query(VENDOR_SQL, [siteId, months]),
     pool.query(VENDOR_UNSCHEDULED_SQL, [siteId]),
     pool.query(VENDOR_OVERDUE_SQL, [siteId]),
     pool.query(FARMER_SQL, [siteId]),
+    pool.query(RUN_RATE_INFLOW_SQL, [siteId, lookback]),
+    pool.query(RUN_RATE_OUTFLOW_SQL, [siteId, lookback]),
   ]);
 
   // Anchor the horizon to the DB clock so its month keys match the SQL date_trunc buckets exactly.
@@ -166,10 +213,20 @@ export const getCashflowForecast = asyncHandler(async (req, res) => {
 
   const vendorByMonth = Object.fromEntries(vendorRes.rows.map((r) => [r.month, r.amount]));
 
+  // Predictive baseline: average monthly actual cash movement over the last `lookback` months.
+  // Clamp to >= 0 — a net-refund window can make the raw average negative, which is nonsensical as a
+  // projected inflow/outflow rate.
+  const runInflow = round2(Math.max(0, (runInflowRes.rows[0]?.total || 0) / lookback));
+  const runOutflow = round2(Math.max(0, (runOutflowRes.rows[0]?.total || 0) / lookback));
+
+  // Each month = the run-rate baseline, bumped up in any month whose KNOWN scheduled due is larger
+  // (max, not sum, so the recurring run-rate — which already includes typical dues — is never double-counted).
   const monthsOut = horizon.map((h) => {
-    const inflow = round2(inflowByMonth[h.key] || 0);
-    const outflow = round2(vendorByMonth[h.key] || 0);
-    return { key: h.key, label: h.label, inflow, outflow, net: round2(inflow - outflow) };
+    const scheduledInflow = round2(inflowByMonth[h.key] || 0);
+    const scheduledOutflow = round2(vendorByMonth[h.key] || 0);
+    const inflow = round2(Math.max(runInflow, scheduledInflow));
+    const outflow = round2(Math.max(runOutflow, scheduledOutflow));
+    return { key: h.key, label: h.label, inflow, outflow, net: round2(inflow - outflow), scheduledInflow, scheduledOutflow };
   });
 
   const totals = monthsOut.reduce(
@@ -179,6 +236,7 @@ export const getCashflowForecast = asyncHandler(async (req, res) => {
 
   res.json({
     months: monthsOut,
+    runRate: { lookbackMonths: lookback, inflowPerMonth: runInflow, outflowPerMonth: runOutflow },
     context: {
       overdueReceivables: round2(overdueReceivables),
       vendorOverdue: round2(vendorOverdueRes.rows[0]?.amount || 0),
