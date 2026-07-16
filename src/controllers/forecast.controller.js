@@ -4,23 +4,20 @@ import pool from '../config/db.js';
 /**
  * Predictive Cash-Flow Forecast.
  *
- * Projects the next N months of company cash movement from the ONLY forward-dated schedules that
- * exist in the schema, plus the investor payout schedule this module adds (migration 070):
- *
- *   INFLOW  = pending plot installments (plot_installments.due_date). "Pending" is recomputed with
- *             the SAME waterfall the rest of the app uses — plot_installments.status/paid_amount are
- *             stale, so we sum all real money received (plot_payments + plot_installment_payments,
- *             excluding bounced/returned cheques) and subtract it from the cumulative installment
- *             schedule, earliest-first. Only ACTIVE agreements (plots.status filter).
- *   OUTFLOW = open vendor_commitments remaining balance (by due_date) + investor_payouts (by due_date,
- *             expanded across the horizon for monthly/quarterly frequency).
+ * Projects the next N months of company cash movement from the forward-dated schedules in the schema:
+ *   INFLOW  = pending plot installments (plot_installments.due_date). "Pending" is recomputed with the
+ *             SAME waterfall the rest of the app uses (plot_installments.status/paid_amount are stale):
+ *             earmarked installment payments claim their own installment first, then the generic pool
+ *             (plot_payments + un-earmarked installment payments, excluding bounced cheques) waterfalls
+ *             earliest-first. Only ACTIVE agreements (plots.status filter).
+ *   OUTFLOW = open vendor_commitments remaining balance (contract − paid), bucketed by due_date.
  *
  * Context figures that have NO reliable due date are reported separately (never fake-bucketed):
- * overdue receivables, undated vendor commitment balances, and the farmer/land-owner outstanding
- * liability. See migrations 010 (installments), 018 (vendor commitments), 046 (farmers), 070 (investors).
+ * overdue receivables, overdue / undated vendor commitment balances, and the farmer/land-owner
+ * outstanding liability. See migrations 010 (installments), 018 (vendor commitments), 046 (farmers).
  */
 
-// ── Pure, testable month/frequency helpers ───────────────────────────────────
+// ── Pure, testable month helpers ─────────────────────────────────────────────
 const MONTHS_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export const keyToIdx = (key) => { const [y, m] = String(key).split('-').map(Number); return y * 12 + (m - 1); };
@@ -40,37 +37,6 @@ export function buildHorizon(n, start) {
   for (let i = 0; i < n; i++) {
     const idx = startIdx + i;
     out.push({ key: idxToKey(idx), label: `${MONTHS_ABBR[idx % 12]} ${String(Math.floor(idx / 12) % 100).padStart(2, '0')}` });
-  }
-  return out;
-}
-
-/**
- * Expand one investor payout into per-month contributions across the horizon.
- * - once: on its due month; if overdue (due before the horizon) it folds into the first month.
- * - monthly/quarterly: recurs from due_date; if it started in the past, it aligns to the due month
- *   (quarterly hits months where (idx - dueIdx) % 3 === 0). Returns { 'YYYY-MM': amount }.
- */
-export function expandPayout(payout, horizonKeys) {
-  const out = {};
-  const amt = Number(payout.amount) || 0;
-  if (!amt || !payout.due_month || !horizonKeys.length) return out;
-  const dueIdx = keyToIdx(payout.due_month);
-  const firstIdx = keyToIdx(horizonKeys[0]);
-  const lastIdx = keyToIdx(horizonKeys[horizonKeys.length - 1]);
-  const bump = (idx) => { const k = idxToKey(idx); out[k] = round2((out[k] || 0) + amt); };
-
-  if (payout.frequency === 'once') {
-    const idx = dueIdx < firstIdx ? firstIdx : dueIdx; // overdue → current month
-    if (idx >= firstIdx && idx <= lastIdx) bump(idx);
-  } else {
-    const step = payout.frequency === 'quarterly' ? 3 : 1;
-    // A past-due occurrence that doesn't land on the cadence still folds into the first month
-    // (mirrors the 'once' overdue behavior — a still-owed liability must surface near-term).
-    if (dueIdx < firstIdx && (firstIdx - dueIdx) % step !== 0) bump(firstIdx);
-    for (let idx = firstIdx; idx <= lastIdx; idx++) {
-      const diff = idx - dueIdx;
-      if (diff >= 0 && diff % step === 0) bump(idx);
-    }
   }
   return out;
 }
@@ -173,29 +139,23 @@ const FARMER_SQL = `
   ) pd ON pd.farmer_id = f.id
   WHERE f.site_id = $1 AND f.status = 'active'`;
 
-const INVESTOR_SCHED_SQL = `
-  SELECT amount::float8 AS amount, to_char(due_date, 'YYYY-MM') AS due_month, frequency
-  FROM investor_payouts WHERE site_id = $1 AND status = 'scheduled'`;
-
 /** GET /forecast?site_id=&months=6 */
 export const getCashflowForecast = asyncHandler(async (req, res) => {
   const siteId = parseInt(req.query.site_id, 10);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   const months = Math.min(Math.max(parseInt(req.query.months, 10) || 6, 1), 12);
 
-  const [clockRes, inflowRes, vendorRes, vendorUnschedRes, vendorOverdueRes, farmerRes, investorRes] = await Promise.all([
+  const [clockRes, inflowRes, vendorRes, vendorUnschedRes, vendorOverdueRes, farmerRes] = await Promise.all([
     pool.query(`SELECT to_char(date_trunc('month', CURRENT_DATE), 'YYYY-MM') AS m`),
     pool.query(INFLOW_SQL, [siteId, months]),
     pool.query(VENDOR_SQL, [siteId, months]),
     pool.query(VENDOR_UNSCHEDULED_SQL, [siteId]),
     pool.query(VENDOR_OVERDUE_SQL, [siteId]),
     pool.query(FARMER_SQL, [siteId]),
-    pool.query(INVESTOR_SCHED_SQL, [siteId]),
   ]);
 
   // Anchor the horizon to the DB clock so its month keys match the SQL date_trunc buckets exactly.
   const horizon = buildHorizon(months, clockRes.rows[0].m);
-  const horizonKeys = horizon.map((h) => h.key);
 
   const inflowByMonth = {};
   let overdueReceivables = 0;
@@ -206,18 +166,10 @@ export const getCashflowForecast = asyncHandler(async (req, res) => {
 
   const vendorByMonth = Object.fromEntries(vendorRes.rows.map((r) => [r.month, r.amount]));
 
-  const investorByMonth = {};
-  for (const p of investorRes.rows) {
-    const contrib = expandPayout(p, horizonKeys);
-    for (const [k, v] of Object.entries(contrib)) investorByMonth[k] = (investorByMonth[k] || 0) + v;
-  }
-
   const monthsOut = horizon.map((h) => {
     const inflow = round2(inflowByMonth[h.key] || 0);
-    const outflowVendors = round2(vendorByMonth[h.key] || 0);
-    const outflowInvestors = round2(investorByMonth[h.key] || 0);
-    const outflow = round2(outflowVendors + outflowInvestors);
-    return { key: h.key, label: h.label, inflow, outflowVendors, outflowInvestors, outflow, net: round2(inflow - outflow) };
+    const outflow = round2(vendorByMonth[h.key] || 0);
+    return { key: h.key, label: h.label, inflow, outflow, net: round2(inflow - outflow) };
   });
 
   const totals = monthsOut.reduce(
@@ -237,103 +189,4 @@ export const getCashflowForecast = asyncHandler(async (req, res) => {
     horizonMonths: months,
     generatedAt: new Date().toISOString(),
   });
-});
-
-// ── Investor payout CRUD (feeds the outflow side of the forecast) ─────────────
-const FREQ = new Set(['once', 'monthly', 'quarterly']);
-const PTYPE = new Set(['interest', 'profit_share', 'principal', 'other']);
-
-/** GET /forecast/investor-payouts?site_id= */
-export const listInvestorPayouts = asyncHandler(async (req, res) => {
-  const siteId = parseInt(req.query.site_id, 10);
-  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
-  const { rows } = await pool.query(
-    `SELECT ip.id, ip.investor_name, ip.member_id, ip.note, ip.amount::float8 AS amount,
-            to_char(ip.due_date, 'YYYY-MM-DD') AS due_date, ip.frequency, ip.payout_type, ip.status, ip.created_at,
-            COALESCE(m.full_name, ip.investor_name) AS display_name
-       FROM investor_payouts ip
-       LEFT JOIN members m ON m.id = ip.member_id
-      WHERE ip.site_id = $1
-      ORDER BY ip.status = 'scheduled' DESC, ip.due_date ASC`,
-    [siteId]
-  );
-  res.json({ payouts: rows });
-});
-
-/** POST /forecast/investor-payouts */
-export const createInvestorPayout = asyncHandler(async (req, res) => {
-  const siteId = parseInt(req.body.site_id, 10);
-  const amount = Number(req.body.amount);
-  const dueDate = req.body.due_date;
-  const frequency = String(req.body.frequency || 'once');
-  const payoutType = String(req.body.payout_type || 'interest');
-
-  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
-  if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: 'A valid amount is required' });
-  if (!dueDate || Number.isNaN(Date.parse(dueDate))) return res.status(400).json({ message: 'A valid due_date is required' });
-  if (!FREQ.has(frequency)) return res.status(400).json({ message: 'frequency must be once, monthly or quarterly' });
-  if (!PTYPE.has(payoutType)) return res.status(400).json({ message: 'invalid payout_type' });
-  const investorName = (req.body.investor_name || '').trim();
-  const memberId = req.body.member_id ? parseInt(req.body.member_id, 10) : null;
-  if (!investorName && !memberId) return res.status(400).json({ message: 'investor_name or member_id is required' });
-
-  const { rows } = await pool.query(
-    `INSERT INTO investor_payouts (site_id, member_id, investor_name, note, amount, due_date, frequency, payout_type, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-     RETURNING id, investor_name, member_id, note, amount::float8 AS amount,
-               to_char(due_date, 'YYYY-MM-DD') AS due_date, frequency, payout_type, status, created_at`,
-    [siteId, memberId, investorName || null, req.body.note || null, amount, dueDate, frequency, payoutType, req.user?.id || null]
-  );
-  res.status(201).json(rows[0]);
-});
-
-/** PATCH /forecast/investor-payouts/:id */
-export const updateInvestorPayout = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const params = [];
-  const add = (v) => { params.push(v); return `$${params.length}`; };
-  const sets = [];
-
-  if (req.body.investor_name !== undefined) sets.push(`investor_name = ${add(String(req.body.investor_name).trim() || null)}`);
-  if (req.body.member_id !== undefined) sets.push(`member_id = ${add(req.body.member_id ? parseInt(req.body.member_id, 10) : null)}`);
-  if (req.body.note !== undefined) sets.push(`note = ${add(req.body.note || null)}`);
-  if (req.body.amount !== undefined) {
-    if (!Number.isFinite(Number(req.body.amount)) || Number(req.body.amount) <= 0) return res.status(400).json({ message: 'invalid amount' });
-    sets.push(`amount = ${add(Number(req.body.amount))}`);
-  }
-  if (req.body.due_date !== undefined) {
-    if (!req.body.due_date || Number.isNaN(Date.parse(req.body.due_date))) return res.status(400).json({ message: 'invalid due_date' });
-    sets.push(`due_date = ${add(req.body.due_date)}::date`);
-  }
-  if (req.body.frequency !== undefined) {
-    if (!FREQ.has(String(req.body.frequency))) return res.status(400).json({ message: 'invalid frequency' });
-    sets.push(`frequency = ${add(req.body.frequency)}`);
-  }
-  if (req.body.payout_type !== undefined) {
-    if (!PTYPE.has(String(req.body.payout_type))) return res.status(400).json({ message: 'invalid payout_type' });
-    sets.push(`payout_type = ${add(req.body.payout_type)}`);
-  }
-  if (req.body.status !== undefined) {
-    if (!['scheduled', 'paid', 'cancelled'].includes(String(req.body.status))) return res.status(400).json({ message: 'invalid status' });
-    sets.push(`status = ${add(req.body.status)}`);
-    sets.push(`paid_at = ${req.body.status === 'paid' ? 'now()' : 'NULL'}`);
-  }
-  if (!sets.length) return res.status(400).json({ message: 'Nothing to update' });
-  sets.push('updated_at = now()');
-
-  const { rows } = await pool.query(
-    `UPDATE investor_payouts SET ${sets.join(', ')} WHERE id = ${add(id)}
-     RETURNING id, investor_name, member_id, note, amount::float8 AS amount,
-               to_char(due_date, 'YYYY-MM-DD') AS due_date, frequency, payout_type, status`,
-    params
-  );
-  if (!rows[0]) return res.status(404).json({ message: 'Payout not found' });
-  res.json(rows[0]);
-});
-
-/** DELETE /forecast/investor-payouts/:id */
-export const deleteInvestorPayout = asyncHandler(async (req, res) => {
-  const { rowCount } = await pool.query('DELETE FROM investor_payouts WHERE id = $1', [req.params.id]);
-  if (!rowCount) return res.status(404).json({ message: 'Payout not found' });
-  res.json({ message: 'Payout deleted', id: Number(req.params.id) });
 });
