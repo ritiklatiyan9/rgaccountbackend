@@ -2,9 +2,10 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { memberModel } from '../models/Member.model.js';
 import { uploadSingle } from '../utils/upload.js';
 import pool from '../config/db.js';
+import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 
 // ── MEMBER FIELDS (whitelist) ──
-const MEMBER_FIELDS = [
+export const MEMBER_FIELDS = [
   'member_type', 'full_name', 'father_name', 'gender', 'date_of_birth', 'blood_group',
   'phone', 'alt_phone', 'email', 'whatsapp',
   'address', 'city', 'state', 'pincode',
@@ -62,7 +63,7 @@ const sanitize = (body) => {
 };
 
 // Document field names that map to file upload keys
-const DOC_FIELDS = [
+export const DOC_FIELDS = [
   'photo', 'aadhar_front_url', 'aadhar_back_url', 'pan_card_url',
   'voter_id_url', 'passport_url', 'driving_license_url', 'cheque_url', 'other_kyc_url',
   'resume_url', 'marksheet_10th_url', 'marksheet_12th_url',
@@ -122,6 +123,151 @@ export const createMember = asyncHandler(async (req, res) => {
 
   const member = await memberModel.create(data, pool);
   res.status(201).json({ member });
+});
+
+/** POST /members/kyc/extract — OCR a document and return reviewable member fields. */
+export const extractKycDocument = asyncHandler(async (req, res) => {
+  if (!req.file) return res.status(400).json({ message: 'Select a KYC image or PDF' });
+  const allowedTypes = new Set(['AADHAAR', 'PAN', 'VOTER_ID', 'PASSPORT', 'DL', 'CHEQUE', 'KYC_FORM', 'OTHER']);
+  const requestedType = String(req.body.document_type || 'OTHER').toUpperCase();
+  const documentType = allowedTypes.has(requestedType) ? requestedType : 'OTHER';
+  try {
+    const result = await extractMemberKyc(req.file.buffer, req.file.mimetype, documentType);
+    const reviewable = { ...result };
+    delete reviewable.rawText;
+    res.json({ ...reviewable, document_type: documentType });
+  } catch (error) {
+    console.error('Member KYC OCR failed:', error?.message || error);
+    if (String(error?.message || '').includes('API_KEY is not set')) {
+      return res.status(503).json({ message: 'KYC OCR is not configured on this server' });
+    }
+    if (error?.name === 'AbortError') {
+      return res.status(504).json({ message: 'KYC reading took too long. Please retry with a clearer or smaller document.' });
+    }
+    return res.status(422).json({ message: 'We could not confidently read this document. Try a clearer image or enter the details manually.' });
+  }
+});
+
+/**
+ * POST /members/:id/register-sites — copy an existing member profile into one
+ * or more sites. Existing rows are never changed; matching site registrations
+ * are reported and skipped.
+ */
+export const registerMemberInSites = asyncHandler(async (req, res) => {
+  const memberId = Number.parseInt(req.params.id, 10);
+  const requestedSiteIds = Array.isArray(req.body.site_ids)
+    ? [...new Set(req.body.site_ids.map((id) => Number.parseInt(id, 10)).filter(Number.isInteger))]
+    : [];
+  if (!Number.isInteger(memberId)) return res.status(400).json({ message: 'Invalid member id' });
+  if (requestedSiteIds.length === 0) return res.status(400).json({ message: 'Select at least one site' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [source] } = await client.query('SELECT * FROM members WHERE id = $1 FOR SHARE', [memberId]);
+    if (!source) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Member not found' });
+    }
+
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+    if (!isAdmin) {
+      const { rows: sourceAccess } = await client.query(
+        'SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1',
+        [req.user.id, source.site_id]
+      );
+      if (!sourceAccess[0]) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ message: 'This member is outside your assigned sites' });
+      }
+    }
+    const accessResult = isAdmin
+      ? await client.query('SELECT id, name FROM sites WHERE id = ANY($1::int[])', [requestedSiteIds])
+      : await client.query(
+          `SELECT s.id, s.name FROM sites s
+             JOIN user_sites us ON us.site_id = s.id
+            WHERE us.user_id = $1 AND s.id = ANY($2::int[])`,
+          [req.user.id, requestedSiteIds]
+        );
+    if (accessResult.rows.length !== requestedSiteIds.length) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'One or more selected sites are unavailable to your account' });
+    }
+
+    const siteNames = new Map(accessResult.rows.map((site) => [site.id, site.name]));
+    const created = [];
+    const existing = [];
+
+    for (const targetSiteId of requestedSiteIds) {
+      if (targetSiteId === source.site_id) {
+        existing.push({ site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: source.id });
+        continue;
+      }
+
+      const matchConditions = [];
+      const matchParams = [targetSiteId];
+      const addMatch = (column, value, normaliser = 'alphanumeric') => {
+        if (!value) return;
+        matchParams.push(String(value).trim());
+        const parameter = `$${matchParams.length}`;
+        if (normaliser === 'phone') {
+          matchConditions.push(`RIGHT(REGEXP_REPLACE(COALESCE(${column}, ''), '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(${parameter}, '\\D', '', 'g'), 10)`);
+        } else if (normaliser === 'aadhaar') {
+          matchConditions.push(`RIGHT(REGEXP_REPLACE(COALESCE(${column}, ''), '\\D', '', 'g'), 12) = RIGHT(REGEXP_REPLACE(${parameter}, '\\D', '', 'g'), 12)`);
+        } else {
+          matchConditions.push(`UPPER(REGEXP_REPLACE(COALESCE(${column}, ''), '[^A-Za-z0-9]', '', 'g')) = UPPER(REGEXP_REPLACE(${parameter}, '[^A-Za-z0-9]', '', 'g'))`);
+        }
+      };
+      addMatch('phone', source.phone, 'phone');
+      addMatch('aadhar_no', source.aadhar_no, 'aadhaar');
+      addMatch('pan_no', source.pan_no);
+      if (matchConditions.length === 0) {
+        matchParams.push(source.full_name);
+        let fallback = `UPPER(full_name) = UPPER($${matchParams.length})`;
+        if (source.father_name) {
+          matchParams.push(source.father_name);
+          fallback += ` AND UPPER(COALESCE(father_name, '')) = UPPER($${matchParams.length})`;
+        }
+        if (source.date_of_birth) {
+          matchParams.push(source.date_of_birth);
+          fallback += ` AND date_of_birth = $${matchParams.length}`;
+        }
+        matchConditions.push(`(${fallback})`);
+      }
+      const { rows: [matched] } = await client.query(
+        `SELECT id, full_name FROM members WHERE site_id = $1 AND (${matchConditions.join(' OR ')}) LIMIT 1`,
+        matchParams
+      );
+      if (matched) {
+        existing.push({ site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: matched.id });
+        continue;
+      }
+
+      const copy = { site_id: targetSiteId, created_by: req.user.id };
+      [...MEMBER_FIELDS, ...DOC_FIELDS].forEach((field) => {
+        if (source[field] !== undefined) copy[field] = source[field];
+      });
+      const cloned = await memberModel.create(copy, client);
+      created.push({ site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: cloned.id });
+    }
+
+    await client.query('COMMIT');
+    res.status(created.length ? 201 : 200).json({
+      message: created.length
+        ? `Registered ${source.full_name} in ${created.length} site${created.length === 1 ? '' : 's'}`
+        : 'This member is already registered in the selected sites',
+      created,
+      existing,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error?.code === '23505') {
+      return res.status(409).json({ message: 'A matching member is already registered in one of the selected sites' });
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 /** GET /members?site_id=X&type=CLIENT */
@@ -219,6 +365,18 @@ export const deleteMember = asyncHandler(async (req, res) => {
   res.json({ message: 'Member deleted' });
 });
 
+/**
+ * POST /members/bulk-delete
+ * Body: { ids: number[] }
+ */
+export const bulkDeleteMembers = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+
+  const result = await pool.query(`DELETE FROM members WHERE id = ANY($1::int[]) RETURNING id`, [ids]);
+  res.json({ message: `${result.rows.length} client(s) deleted`, deleted: result.rows.map((r) => r.id) });
+});
+
 /** GET /members/:id/transactions?site_id=X */
 export const getMemberTransactions = asyncHandler(async (req, res) => {
   const memberId = parseInt(req.params.id);
@@ -246,7 +404,7 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
   // Fetch daybook entries linked by assigned_user_id OR by name match
   const daybookQuery = `
     SELECT d.id, d.date, d.from_entity, d.to_entity, d.payment_mode,
-           d.debit, d.credit, d.remark, d.category, d.account_no, d.branch,
+           d.debit, d.credit, d.remarks AS remark, d.category, d.account_no, d.branch,
            d.entry_type, d.status, d.created_at,
            'DAYBOOK' as source
     FROM day_book d

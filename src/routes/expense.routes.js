@@ -3,7 +3,7 @@ const router = express.Router();
 
 import {
   createExpense, listExpenses, getExpense,
-  updateExpense, deleteExpense, getAutocomplete,
+  updateExpense, deleteExpense, bulkDeleteExpenses, getAutocomplete,
   listPendingExpenses, getStatusCounts,
   approveExpense, rejectExpense, bulkApproveExpenses,
 } from '../controllers/expense.controller.js';
@@ -31,6 +31,7 @@ router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('expense
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'write'), bustExpenseCache, createExpense);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), bustExpenseCache, updateExpense);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), bustExpenseCache, deleteExpense);
+router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), bustExpenseCache, bulkDeleteExpenses);
 
 // Approval routes (admin or sub-admin with expense_approval permission)
 router.put('/:id/approve', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'write'), bustExpenseCache, approveExpense);

@@ -636,3 +636,21 @@ export const deletePlotCommissionPayment = asyncHandler(async (req, res) => {
 
   res.json({ message: 'Payment deleted successfully' });
 });
+
+/**
+ * POST /plot-commission/payment/bulk-delete
+ * Body: { ids: number[] }
+ */
+export const bulkDeletePlotCommissionPayments = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+
+  const deleted = await pool.query(
+    `DELETE FROM plot_commission_payments WHERE id = ANY($1::int[]) RETURNING plot_commission_id`,
+    [ids]
+  );
+  const commissionIds = [...new Set(deleted.rows.map((r) => r.plot_commission_id))];
+  commissionIds.forEach((cid) => autoUpdateCommissionStatus(cid, pool).catch(() => {}));
+
+  res.json({ message: `${deleted.rows.length} payment(s) deleted successfully`, deleted: deleted.rows.length });
+});

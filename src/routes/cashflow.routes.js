@@ -3,7 +3,7 @@ const router = express.Router();
 
 import {
   createMonth, listMonths, getMonth, updateMonth, deleteMonth,
-  createEntry, listEntries, getAutocomplete, getEntry, updateEntry, deleteEntry, listFirmsForCashFlow,
+  createEntry, listEntries, getAutocomplete, getEntry, updateEntry, deleteEntry, bulkDeleteEntries, listFirmsForCashFlow,
 } from '../controllers/cashflow.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -33,6 +33,7 @@ router.get('/entries/:id', requireRole('admin', 'sub_admin'), requirePermission(
 router.post('/entries', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'write'), bustCashflowCache, createEntry);
 router.put('/entries/:id', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'update'), bustCashflowCache, updateEntry);
 router.delete('/entries/:id', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'delete'), bustCashflowCache, deleteEntry);
+router.post('/entries/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'delete'), bustCashflowCache, bulkDeleteEntries);
 
 // ── Autocomplete (long-TTL meta cache, NOT busted by writes) ──
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), cashflowMetaCache, getAutocomplete);                     // ?site_id=X

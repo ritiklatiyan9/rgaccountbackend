@@ -10,6 +10,7 @@ import {
   createPlotCommissionPayment,
   updatePlotCommissionPayment,
   deletePlotCommissionPayment,
+  bulkDeletePlotCommissionPayments,
   getPlotCommissionAnalytics,
   updatePlotCommission,
   deletePlotCommission
@@ -39,6 +40,7 @@ router.get('/list', requireRole('admin', 'sub_admin'), requirePermission('commis
 router.post('/payment', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustPlotCommissionCache, createPlotCommissionPayment);
 router.put('/payment/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'update'), bustPlotCommissionCache, updatePlotCommissionPayment);
 router.delete('/payment/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'delete'), bustPlotCommissionCache, deletePlotCommissionPayment);
+router.post('/payment/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'delete'), bustPlotCommissionCache, bulkDeletePlotCommissionPayments);
 
 // Analytics route (more specific, must come before /:id routes)
 router.get('/analytics/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getPlotCommissionAnalytics);

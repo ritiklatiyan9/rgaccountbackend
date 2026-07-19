@@ -4,6 +4,7 @@ import {
     listFolders,
     createFolder,
     renameFolder,
+    moveFolder,
     deleteFolder,
 } from '../controllers/folder.controller.js';
 
@@ -14,6 +15,7 @@ router.use(authMiddleware);
 router.get('/', listFolders);
 router.post('/', createFolder);
 router.put('/:id/rename', renameFolder);
+router.put('/:id/move', moveFolder);
 router.delete('/:id', deleteFolder);
 
 export default router;

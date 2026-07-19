@@ -192,13 +192,16 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const { where, params } = buildWhere('fp', 'f', [], visFp.scoped ? req.user.id : null);
     const q = `
                   SELECT fp.*, f.name AS farmer_name, f.site_id,
+                    f.name AS entity_name, 'Farmer / land owner'::text AS entity_type,
+                    f.phone AS entity_phone, f.address AS entity_address,
+                    NULL::text AS entity_plot_no,
                     s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
              'farmer_payment' AS source
       FROM farmer_payments fp
       JOIN farmers f ON fp.farmer_id = f.id
       JOIN sites s ON f.site_id = s.id
-      LEFT JOIN users u ON f.created_by = u.id
+      LEFT JOIN users u ON fp.created_by = u.id
             LEFT JOIN users aa ON fp.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY fp.date DESC, fp.id DESC
@@ -216,7 +219,10 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if ((!module || module === 'plot_commission') && visPc.include) {
     const { where, params } = buildWhere('pc', 'pc', [], visPc.scoped ? req.user.id : null);
     const q = `
-                  SELECT pc.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                  SELECT pc.*, pc.particular AS entity_name,
+                    'Commission recipient'::text AS entity_type,
+                    pc.plot_no AS entity_plot_no, pc.father_name AS entity_secondary,
+                    s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
              'plot_commission' AS source
       FROM plot_commissions pc
@@ -242,6 +248,8 @@ export const listAllPending = asyncHandler(async (req, res) => {
                   SELECT pcp.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
              p.plot_no, p.buyer_name, ag.full_name AS agent_name,
+             ag.full_name AS entity_name, 'Commission agent'::text AS entity_type,
+             p.plot_no AS entity_plot_no, p.buyer_name AS entity_secondary,
              'plot_commission_payment' AS source
       FROM plot_commission_payments pcp
       JOIN sites s ON pcp.site_id = s.id
@@ -268,11 +276,24 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const q = `
                   SELECT cfe.*, cfe.site_id, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
-             cfm.ledger_name, cfm.month, cfm.year,
+             cfm.ledger_name, cfm.month, cfm.year, cfm.linked_user_id,
+             lu.name AS linked_user_name, lu.email AS linked_user_email,
+             COALESCE(lu.name, tf.name, cfe.to_name, ff.name, NULLIF(TRIM(cfm.ledger_name), ''), u.name, u.email, cfe.particular) AS entity_name,
+             CASE
+               WHEN lu.id IS NOT NULL THEN 'Mapped ledger user'
+               WHEN tf.id IS NOT NULL OR ff.id IS NOT NULL THEN 'Firm / account'
+               WHEN cfe.to_name IS NOT NULL THEN 'Ledger party'
+               ELSE 'Personal ledger'
+             END AS entity_type,
+             COALESCE(lu.email, cfe.to_name, tf.name, ff.name) AS entity_secondary,
+             NULL::text AS entity_plot_no,
              'cash_flow_entry' AS source
       FROM cash_flow_entries cfe
       JOIN sites s ON cfe.site_id = s.id
       JOIN cash_flow_months cfm ON cfe.cash_flow_month_id = cfm.id
+      LEFT JOIN users lu ON lu.id = cfm.linked_user_id
+      LEFT JOIN firms ff ON ff.id = cfe.from_firm_id
+      LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
       LEFT JOIN users u ON cfe.created_by = u.id
             LEFT JOIN users aa ON cfe.assigned_admin_id = aa.id
       WHERE ${where}
@@ -297,6 +318,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
              fi.name AS firm_name,
              ts.name AS transfer_to_site_name,
              tf.name AS transfer_to_firm_name,
+             COALESCE(ft.name, tf.name, fi.name) AS entity_name,
+             CASE WHEN ft.is_firm_to_firm_transfer THEN 'Firm transfer' ELSE 'Firm transaction party' END AS entity_type,
+             fi.name AS entity_secondary, NULL::text AS entity_plot_no,
              'firm_transaction' AS source
       FROM firm_transactions ft
       JOIN sites s ON ft.site_id = s.id
@@ -325,7 +349,10 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const q = `
                   SELECT pp.*, pp.payment_type AS payment_mode, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
-             p.plot_no, p.buyer_name,
+             p.plot_no, COALESCE(pp.buyer_name, p.buyer_name) AS buyer_name,
+             COALESCE(pp.buyer_name, p.buyer_name, pp.payment_from, u.name, u.email, 'Plot ' || p.plot_no) AS entity_name,
+             'Plot buyer / payer'::text AS entity_type,
+             p.plot_no AS entity_plot_no, pp.payment_from AS entity_secondary,
              'plot_payment' AS source
       FROM plot_payments pp
       JOIN sites s ON pp.site_id = s.id
@@ -350,10 +377,19 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const q = `
                   SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
+             COALESCE(em.full_name, e.to_entity, e.from_entity, u.name, u.email) AS entity_name,
+             CASE
+               WHEN em.id IS NOT NULL THEN COALESCE(em.member_type, 'Member')
+               WHEN e.to_entity IS NOT NULL OR e.from_entity IS NOT NULL THEN 'Expense party'
+               ELSE 'Request creator (party not recorded)'
+             END AS entity_type,
+             COALESCE(e.category, e.from_entity) AS entity_secondary,
+             NULL::text AS entity_plot_no,
              'expense' AS source
       FROM expenses e
       JOIN sites s ON e.site_id = s.id
       LEFT JOIN users u ON e.created_by = u.id
+      LEFT JOIN members em ON em.id = e.assigned_user_id
             LEFT JOIN users aa ON e.assigned_admin_id = aa.id
       WHERE ${where}
       ORDER BY e.date DESC, e.id DESC
@@ -394,12 +430,45 @@ export const listAllPending = asyncHandler(async (req, res) => {
       const q = `
             SELECT d.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
               COALESCE(aa.name, aa.email) AS assigned_admin_name,
+              COALESCE(
+                dm.full_name, df.name, dpc.particular, dlu.name,
+                dpp.buyer_name, dp.buyer_name, dft.name, dfi.name,
+                d.to_entity, d.from_entity, dcfm.ledger_name,
+                u.name, u.email, d.particular
+              ) AS entity_name,
+              CASE
+                WHEN dm.id IS NOT NULL THEN COALESCE(dm.member_type, 'Member')
+                WHEN df.id IS NOT NULL THEN 'Farmer / land owner'
+                WHEN dpc.id IS NOT NULL THEN 'Commission recipient'
+                WHEN dlu.id IS NOT NULL THEN 'Mapped ledger user'
+                WHEN dpp.id IS NOT NULL THEN 'Plot buyer / payer'
+                WHEN dft.id IS NOT NULL THEN 'Firm transaction party'
+                WHEN d.cash_flow_entry_id IS NOT NULL THEN 'Personal ledger'
+                ELSE 'Day Book entity'
+              END AS entity_type,
+              COALESCE(dlu.email, dcfm.ledger_name, d.category) AS entity_secondary,
+              COALESCE(dpc.plot_no, dp.plot_no)::text AS entity_plot_no,
                'daybook' AS source
         FROM day_book d
         JOIN sites s ON d.site_id = s.id
         LEFT JOIN users u ON d.created_by = u.id
-         LEFT JOIN users aa ON d.assigned_admin_id = aa.id
+        LEFT JOIN users aa ON d.assigned_admin_id = aa.id
+        LEFT JOIN members dm ON dm.id = d.assigned_user_id
+        LEFT JOIN farmer_payments dfp ON dfp.id = d.farmer_payment_id
+        LEFT JOIN farmers df ON df.id = dfp.farmer_id
+        LEFT JOIN plot_commissions dpc ON dpc.id = d.commission_id
+        LEFT JOIN cash_flow_entries dcfe ON dcfe.id = d.cash_flow_entry_id
+        LEFT JOIN cash_flow_months dcfm ON dcfm.id = dcfe.cash_flow_month_id
+        LEFT JOIN users dlu ON dlu.id = dcfm.linked_user_id
+        LEFT JOIN firm_transactions dft ON dft.id = d.firm_transaction_id
+        LEFT JOIN firms dfi ON dfi.id = dft.firm_id
+        LEFT JOIN plot_payments dpp ON dpp.id = d.plot_payment_id
+        LEFT JOIN plots dp ON dp.id = dpp.plot_id
+        -- Farmer Payments create matching Day Book entries for accounting.  The
+        -- farmer payment itself is the approval request, so do not show that
+        -- linked accounting mirror as a second request.
         WHERE ${where} AND ${entryTypeFilter}
+          AND (d.entry_type <> 'FARMER PAYMENT' OR d.farmer_payment_id IS NULL)
         ORDER BY d.date DESC, d.id DESC
       `;
       const r = await pool.query(q, params);
@@ -454,7 +523,9 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     pool.query(`SELECT COUNT(*)::int AS count FROM firm_transactions ft WHERE ft.status = 'pending' ${site_id ? 'AND ft.site_id = $1' : ''}${scopeClauseFor('ft', 'firm_transaction')}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM plot_payments pp WHERE pp.status = 'pending' ${site_id ? 'AND pp.site_id = $1' : ''}${scopeClauseFor('pp', 'plot_payment')}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM expenses e WHERE e.status = 'pending' ${site_id ? 'AND e.site_id = $1' : ''}${scopeClauseFor('e', 'expense')}`, params),
-    pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book d WHERE d.status = 'pending' AND d.entry_type NOT IN ('CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT', 'VENDOR PAYMENT') ${site_id ? 'AND d.site_id = $1' : ''}${scopeClauseFor('d', 'daybook')} GROUP BY entry_type`, params),
+    // Linked farmer-payment Day Book rows are accounting mirrors, not separate
+    // approval requests. Keep the count consistent with /approvals/pending.
+    pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book d WHERE d.status = 'pending' AND d.entry_type NOT IN ('CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT', 'VENDOR PAYMENT') AND (d.entry_type <> 'FARMER PAYMENT' OR d.farmer_payment_id IS NULL) ${site_id ? 'AND d.site_id = $1' : ''}${scopeClauseFor('d', 'daybook')} GROUP BY entry_type`, params),
   ];
 
   const [fp, pc, pcp, cf, ft, pp, ex, db] = await Promise.all(queries);

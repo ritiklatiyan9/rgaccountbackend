@@ -3,7 +3,7 @@ const router = express.Router();
 
 import {
   createFirm, listFirms, getFirm, updateFirm, deleteFirm,
-  createTransaction, createFirmToFirmTransfer, listTransactions, getTransaction, updateTransaction, deleteTransaction,
+  createTransaction, createFirmToFirmTransfer, listTransactions, getTransaction, updateTransaction, deleteTransaction, bulkDeleteTransactions,
   bulkCreateTransactions, getAutocomplete, listCashFlowLedgersForFirm, getFirmHistoryAnalytics,
 } from '../controllers/firm.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
@@ -42,5 +42,6 @@ router.post('/transactions', requireRole('admin', 'sub_admin'), requirePermissio
 router.post('/transactions/bulk', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, bulkCreateTransactions);     // Bulk import
 router.put('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'update'), bustFirmCache, updateTransaction);
 router.delete('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'delete'), bustFirmCache, deleteTransaction);
+router.post('/transactions/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'delete'), bustFirmCache, bulkDeleteTransactions);
 
 export default router;

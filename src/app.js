@@ -44,9 +44,9 @@ app.use(errorMiddleware);
 
 // ── Keep-alive: ping backends every 12 minutes so they don't sleep ──
 const KEEP_ALIVE_URLS = [
-  'https://sales-backend-ponq.onrender.com',
   'https://cropland-crm-backend.onrender.com',
   'https://diwan-city-backend.onrender.com',
+  'https://prithivi-backend.onrender.com'
 ];
 const KEEP_ALIVE_INTERVAL_MS = 12 * 60 * 1000;
 

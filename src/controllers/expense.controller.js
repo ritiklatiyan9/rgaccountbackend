@@ -242,6 +242,21 @@ export const deleteExpense = asyncHandler(async (req, res) => {
   res.json({ message: 'Expense deleted' });
 });
 
+/**
+ * POST /expenses/bulk-delete
+ * Body: { ids: number[] }. Only deletes native `expenses` rows — rows the
+ * page aggregates in from other tables (farmer_payment/commission/daybook/
+ * vendor_payment/personal_ledger) never reach here since they have no id
+ * in this table; the frontend already excludes them from selection.
+ */
+export const bulkDeleteExpenses = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+
+  const result = await pool.query(`DELETE FROM expenses WHERE id = ANY($1::int[]) RETURNING id`, [ids]);
+  res.json({ message: `${result.rows.length} expense(s) deleted`, deleted: result.rows.map((r) => r.id) });
+});
+
 // ══════════════════════════════════════════════════
 //  EXPENSE APPROVAL ENDPOINTS (Admin only)
 // ══════════════════════════════════════════════════

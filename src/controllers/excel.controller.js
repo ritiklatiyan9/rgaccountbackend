@@ -138,6 +138,20 @@ export const renameFile = asyncHandler(async (req, res) => {
 });
 
 /**
+ * PUT /excel/:id/move
+ * Move a file into a folder (body.folderId) or to root (folderId null).
+ */
+export const moveFile = asyncHandler(async (req, res) => {
+    const { folderId } = req.body;
+    const existing = await excelModel.findById(parseInt(req.params.id), pool);
+    if (!existing) return res.status(404).json({ message: 'File not found' });
+
+    const file = await excelModel.moveToFolder(parseInt(req.params.id), folderId ?? null, pool);
+    if (!file) return res.status(400).json({ message: 'Invalid destination folder' });
+    res.json({ file });
+});
+
+/**
  * POST /excel/:id/duplicate
  * Duplicate a file
  */

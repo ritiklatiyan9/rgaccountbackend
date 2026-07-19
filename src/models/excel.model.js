@@ -82,7 +82,28 @@ class ExcelModel extends MasterModel {
   }
 
   /**
-   * Duplicate a file (Note: For S3, duplicating the DB record means both records point to the same S3 object 
+   * Move a file into a folder (or to root when folderId is null).
+   * Only succeeds when the target folder belongs to the same site as the
+   * file — the WHERE guard makes a cross-site or non-existent target a
+   * no-op (returns undefined) rather than silently reparenting.
+   */
+  async moveToFolder(id, folderId, pool) {
+    const query = `
+      UPDATE excel_files ef
+      SET folder_id = $2, updated_at = NOW()
+      WHERE ef.id = $1
+        AND (
+          $2::int IS NULL
+          OR EXISTS (SELECT 1 FROM file_folders ff WHERE ff.id = $2 AND ff.site_id = ef.site_id)
+        )
+      RETURNING id, name, folder_id, site_id, file_type, updated_at
+    `;
+    const result = await pool.query(query, [id, folderId]);
+    return result.rows[0];
+  }
+
+  /**
+   * Duplicate a file (Note: For S3, duplicating the DB record means both records point to the same S3 object
    * until one is edited. If edits create new objects, this is fine. If not, S3 object needs to be cloned).
    * For now, we will just copy the reference.
    */

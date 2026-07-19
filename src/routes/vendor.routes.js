@@ -13,6 +13,8 @@ import {
   createVendorUser,
   listAllInventoryItems,
   deleteVendorCommitment,
+  bulkDeleteVendorCommitments,
+  bulkDeleteVendorPayments,
   listVendorCommitments,
   listVendorHeads,
   updateVendorCommitment,
@@ -64,11 +66,13 @@ router.get('/payments/:paymentId/receipt', requirePermission('vendors', 'read'),
 router.post('/commitments', requirePermission('vendors', 'write'), bustVendorCache, createVendorCommitment);
 router.put('/commitments/:id', requirePermission('vendors', 'update'), bustVendorCache, updateVendorCommitment);
 router.delete('/commitments/:id', requirePermission('vendors', 'delete'), bustVendorCache, deleteVendorCommitment);
+router.post('/commitments/bulk-delete', requirePermission('vendors', 'delete'), bustVendorCache, bulkDeleteVendorCommitments);
 router.put('/commitments/:id/status', requirePermission('vendors', 'update'), bustVendorCache, updateVendorCommitmentStatus);
 router.post('/commitments/:id/payments', requirePermission('vendors', 'write'), bustVendorCache, addVendorPayment);
 router.post('/commitments/:id/distribute-payment', requirePermission('vendors', 'write'), bustVendorCache, distributePaymentToItems);
 router.put('/payments/:paymentId', requirePermission('vendors', 'update'), bustVendorCache, updateVendorPayment);
 router.delete('/payments/:paymentId', requirePermission('vendors', 'delete'), bustVendorCache, deleteVendorPayment);
+router.post('/payments/bulk-delete', requirePermission('vendors', 'delete'), bustVendorCache, bulkDeleteVendorPayments);
 
 // ── Inventory ──────────────────────────────────────────────────────────────
 router.get('/inventory/categories', requirePermission('vendors', 'read'), vendorMetaCache, listInventoryCategories);

@@ -7,10 +7,12 @@ import {
   getFarmer,
   updateFarmer,
   deleteFarmer,
+  bulkDeleteFarmers,
   createPayment,
   listPayments,
   updatePayment,
   deletePayment,
+  bulkDeletePayments,
   listFarmerMembers,
   verifyFarmerReceipt,
 } from '../controllers/farmer.controller.js';
@@ -42,11 +44,13 @@ router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), bustFarmerCache, createFarmer);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), bustFarmerCache, updateFarmer);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, deleteFarmer);
+router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, bulkDeleteFarmers);
 
 // Farmer Payments (installments)
 router.get('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), farmerReadCache, listPayments);
 router.post('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), bustFarmerCache, createPayment);
 router.put('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), bustFarmerCache, updatePayment);
 router.delete('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, deletePayment);
+router.post('/:farmerId/payments/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, bulkDeletePayments);
 
 export default router;

@@ -9,6 +9,7 @@ import {
     getFile,
     updateFile,
     renameFile,
+    moveFile,
     duplicateFile,
     deleteFile,
 } from '../controllers/excel.controller.js';
@@ -43,6 +44,7 @@ router.get('/recent', requirePermission('excel', 'read'), getRecentFiles);
 router.get('/:id', requirePermission('excel', 'read'), getFile);
 router.put('/:id', requirePermission('excel', 'update'), upload.single('file'), updateFile);
 router.put('/:id/rename', requirePermission('excel', 'update'), renameFile);
+router.put('/:id/move', requirePermission('excel', 'update'), moveFile);
 router.post('/:id/duplicate', requirePermission('excel', 'write'), duplicateFile);
 router.delete('/:id', requirePermission('excel', 'delete'), deleteFile);
 

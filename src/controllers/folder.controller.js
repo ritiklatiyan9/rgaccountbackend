@@ -44,6 +44,20 @@ export const renameFolder = asyncHandler(async (req, res) => {
 });
 
 /**
+ * PUT /folders/:id/move
+ * Move a folder under a new parent (body.parentId), or to root (parentId null).
+ */
+export const moveFolder = asyncHandler(async (req, res) => {
+    const { parentId } = req.body;
+    const { folder, error } = await folderModel.moveFolder(parseInt(req.params.id), parentId ?? null, pool);
+    if (error) {
+        const status = error === 'Folder not found' || error === 'Target folder not found' ? 404 : 400;
+        return res.status(status).json({ message: error });
+    }
+    res.json({ folder });
+});
+
+/**
  * DELETE /folders/:id
  * Delete a folder and all contents
  */

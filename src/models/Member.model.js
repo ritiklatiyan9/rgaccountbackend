@@ -20,18 +20,31 @@ class MemberModel extends MasterModel {
 
   /** Lightweight list – only columns needed for the table view */
   async findBySiteIdList(siteId, pool, memberType = null) {
-    let query = `SELECT id, member_type, full_name, father_name, phone, email, city, state, status, photo,
-      alt_phone, whatsapp, address, pincode,
-      aadhar_no, pan_no, voter_id, passport_no, driving_license_no,
-      aadhar_front_url, aadhar_back_url, pan_card_url, voter_id_url, passport_url, driving_license_url, cheque_url, other_kyc_url,
-      team
-      FROM members WHERE site_id = $1`;
+    let query = `SELECT m.id, m.member_type, m.full_name, m.father_name, m.phone, m.email,
+      m.city, m.state, m.status, m.photo, m.alt_phone, m.whatsapp, m.address, m.pincode,
+      m.aadhar_no, m.pan_no, m.voter_id, m.passport_no, m.driving_license_no,
+      m.aadhar_front_url, m.aadhar_back_url, m.pan_card_url, m.voter_id_url,
+      m.passport_url, m.driving_license_url, m.cheque_url, m.other_kyc_url, m.team,
+      shared_kyc.id AS shared_kyc_case_id,
+      shared_kyc.status AS shared_kyc_status,
+      shared_kyc.document_count AS shared_kyc_document_count
+      FROM members m
+      LEFT JOIN LATERAL (
+        SELECT k.id, k.status,
+               (SELECT COUNT(*)::int FROM documents d WHERE d.kyc_case_id = k.id) AS document_count
+          FROM kyc_cases k
+         WHERE k.client_member_id = m.id
+         ORDER BY CASE k.status WHEN 'VERIFIED' THEN 4 WHEN 'OCR_DONE' THEN 3 WHEN 'OCR_PENDING' THEN 2 ELSE 1 END DESC,
+                  k.updated_at DESC NULLS LAST, k.id DESC
+         LIMIT 1
+      ) shared_kyc ON true
+      WHERE m.site_id = $1`;
     const params = [siteId];
     if (memberType && memberType !== 'ALL') {
-      query += ` AND member_type = $2`;
+      query += ` AND m.member_type = $2`;
       params.push(memberType);
     }
-    query += ` ORDER BY full_name ASC`;
+    query += ` ORDER BY m.full_name ASC`;
     const result = await pool.query(query, params);
     return result.rows;
   }

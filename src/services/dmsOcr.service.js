@@ -75,7 +75,7 @@ const runGroq = async (buffer, mime) => {
       signal,
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b',
         temperature: 0,
         max_tokens: 4000,
         messages: [{

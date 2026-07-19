@@ -55,7 +55,11 @@ export const invalidateCacheOnSuccess = (prefixes = []) => {
   return (_req, res, next) => {
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
-        clearCacheByPrefixes(prefixes).catch(() => {});
+        // Every successful financial mutation can change the consolidated
+        // Balance Sheet. Keeping this namespace here prevents individual
+        // transaction modules from accidentally serving a stale statement.
+        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|'])];
+        clearCacheByPrefixes(effectivePrefixes).catch(() => {});
       }
     });
     next();

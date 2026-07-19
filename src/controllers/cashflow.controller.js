@@ -5,6 +5,36 @@ import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 
+const findEligibleLedgerUser = async (userId, siteId) => {
+  if (!Number.isInteger(userId)) return null;
+  const { rows } = await pool.query(
+    `SELECT u.id, u.name, u.email, u.phone, u.role
+       FROM users u
+      WHERE u.id = $1
+        AND u.is_active = true
+        AND (
+          u.role IN ('admin', 'super_admin')
+          OR EXISTS (
+            SELECT 1 FROM user_sites us
+             WHERE us.user_id = u.id AND us.site_id = $2
+          )
+        )`,
+    [userId, siteId]
+  );
+  return rows[0] || null;
+};
+
+const findEligibleLedgerMember = async (memberId, siteId) => {
+  if (!Number.isInteger(memberId)) return null;
+  const { rows } = await pool.query(
+    `SELECT id, full_name, father_name, phone, email, member_type, status
+       FROM members
+      WHERE id = $1 AND site_id = $2 AND COALESCE(status, 'ACTIVE') = 'ACTIVE'`,
+    [memberId, siteId]
+  );
+  return rows[0] || null;
+};
+
 // ══════════════════════════════════════════════════
 //  CASH FLOW MONTH ENDPOINTS
 // ══════════════════════════════════════════════════
@@ -14,20 +44,36 @@ import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
  * Create a new cash-flow month for a site
  */
 export const createMonth = asyncHandler(async (req, res) => {
-  const { site_id, month, year, opening_balance, notes, ledger_name, ledger_type } = req.body;
+  const { site_id, month, year, opening_balance, notes, ledger_name, ledger_type, linked_user_id, linked_member_id } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   if (!month || !year) return res.status(400).json({ message: 'Month and year are required' });
   if (month < 1 || month > 12) return res.status(400).json({ message: 'Month must be 1-12' });
 
+  const siteIdInt = parseInt(site_id);
   const type = ledger_type || 'site';
+  const linkedUserId = linked_user_id ? parseInt(linked_user_id) : null;
+  const linkedMemberId = linked_member_id ? parseInt(linked_member_id) : null;
+  let linkedUser = null;
+  let linkedMember = null;
+  if (type === 'person') {
+    if (Number.isInteger(linkedUserId) === Number.isInteger(linkedMemberId)) {
+      return res.status(400).json({ message: 'Select exactly one User Management account or client for this Personal Ledger' });
+    }
+    if (Number.isInteger(linkedUserId)) {
+      linkedUser = await findEligibleLedgerUser(linkedUserId, siteIdInt);
+      if (!linkedUser) return res.status(400).json({ message: 'Selected user is inactive or does not have access to this site' });
+    } else {
+      linkedMember = await findEligibleLedgerMember(linkedMemberId, siteIdInt);
+      if (!linkedMember) return res.status(400).json({ message: 'Selected client is inactive or belongs to another site' });
+    }
+  }
   const name = type === 'person'
-    ? (ledger_name ? ledger_name.trim().toUpperCase() : null)
+    ? (ledger_name ? ledger_name.trim().toUpperCase() : (linkedUser?.name || linkedMember?.full_name || '').trim().toUpperCase())
     : (ledger_name ? ledger_name.trim().toUpperCase() : 'SITE');
 
-  if (type === 'person' && !name) return res.status(400).json({ message: 'Person name is required' });
+  if (type === 'person' && !name) return res.status(400).json({ message: 'Ledger display name is required' });
 
-  const siteIdInt = parseInt(site_id);
   const mInt = parseInt(month);
   const yInt = parseInt(year);
   const prevMonth = mInt === 1 ? 12 : mInt - 1;
@@ -45,7 +91,10 @@ export const createMonth = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `WITH dup AS (
        SELECT 1 FROM cash_flow_months
-        WHERE site_id = $1 AND month = $2 AND year = $3 AND ledger_name = $4
+        WHERE site_id = $1 AND month = $2 AND year = $3
+          AND (ledger_name = $4
+            OR ($11::int IS NOT NULL AND linked_user_id = $11)
+            OR ($12::int IS NOT NULL AND linked_member_id = $12))
         LIMIT 1
      ),
      prev_close AS (
@@ -62,11 +111,11 @@ export const createMonth = asyncHandler(async (req, res) => {
      ),
      ins AS (
        INSERT INTO cash_flow_months (
-         site_id, month, year, opening_balance, ledger_name, ledger_type, notes, created_by
+         site_id, month, year, opening_balance, ledger_name, ledger_type, notes, created_by, linked_user_id, linked_member_id
        )
        SELECT $1, $2, $3,
               COALESCE($5::numeric, (SELECT closing_balance FROM prev_close), 0),
-              $4, $6, $7, $8
+              $4, $6, $7, $8, $11, $12
        WHERE NOT EXISTS (SELECT 1 FROM dup)
        RETURNING *
      )
@@ -84,6 +133,8 @@ export const createMonth = asyncHandler(async (req, res) => {
       req.user.id,                     // $8
       prevMonth,                       // $9
       prevYear,                        // $10
+      linkedUserId,                    // $11
+      linkedMemberId,                  // $12
     ]
   );
 
@@ -91,7 +142,17 @@ export const createMonth = asyncHandler(async (req, res) => {
   if (row.is_dup) {
     return res.status(409).json({ message: `Cash flow for "${name}" in this month already exists` });
   }
-  res.status(201).json({ month: row.month });
+  res.status(201).json({
+    month: row.month ? {
+      ...row.month,
+      linked_user_name: linkedUser?.name || null,
+      linked_user_email: linkedUser?.email || null,
+      linked_user_role: linkedUser?.role || null,
+      linked_member_name: linkedMember?.full_name || null,
+      linked_member_phone: linkedMember?.phone || null,
+      linked_member_type: linkedMember?.member_type || null,
+    } : row.month,
+  });
 });
 
 /**
@@ -126,7 +187,7 @@ export const getMonth = asyncHandler(async (req, res) => {
  */
 export const updateMonth = asyncHandler(async (req, res) => {
   const monthId = parseInt(req.params.id);
-  const { opening_balance, notes, is_locked, ledger_name } = req.body;
+  const { opening_balance, notes, is_locked, ledger_name, linked_user_id, linked_member_id } = req.body;
 
   const updateData = {};
   if (opening_balance !== undefined) updateData.opening_balance = parseFloat(opening_balance) || 0;
@@ -134,6 +195,40 @@ export const updateMonth = asyncHandler(async (req, res) => {
   if (is_locked !== undefined) updateData.is_locked = Boolean(is_locked);
   // Rename a person ledger. Never blank the name — ignore empty values.
   if (ledger_name !== undefined && ledger_name.trim()) updateData.ledger_name = ledger_name.trim().toUpperCase();
+  if (linked_user_id !== undefined || linked_member_id !== undefined) {
+    const existingMonth = await cashFlowMonthModel.findById(monthId, pool);
+    if (!existingMonth) return res.status(404).json({ message: 'Cash flow month not found' });
+
+    const nextUserId = linked_user_id === undefined
+      ? existingMonth.linked_user_id
+      : (linked_user_id ? parseInt(linked_user_id) : null);
+    const nextMemberId = linked_member_id === undefined
+      ? existingMonth.linked_member_id
+      : (linked_member_id ? parseInt(linked_member_id) : null);
+    if (Number.isInteger(nextUserId) === Number.isInteger(nextMemberId)) {
+      return res.status(400).json({ message: 'Select exactly one User Management account or client for this Personal Ledger' });
+    }
+
+    if (Number.isInteger(nextUserId)) {
+      const linkedUser = await findEligibleLedgerUser(nextUserId, existingMonth.site_id);
+      if (!linkedUser) return res.status(400).json({ message: 'Selected user is inactive or does not have access to this site' });
+    } else {
+      const linkedMember = await findEligibleLedgerMember(nextMemberId, existingMonth.site_id);
+      if (!linkedMember) return res.status(400).json({ message: 'Selected client is inactive or belongs to another site' });
+    }
+    const duplicate = await pool.query(
+      `SELECT id FROM cash_flow_months
+        WHERE site_id = $1 AND month = $2 AND year = $3 AND id <> $6
+          AND (linked_user_id = $4 OR linked_member_id = $5)
+        LIMIT 1`,
+      [existingMonth.site_id, existingMonth.month, existingMonth.year, nextUserId, nextMemberId, monthId]
+    );
+    if (duplicate.rows[0]) {
+      return res.status(409).json({ message: 'A Personal Ledger for this user or client already exists in the selected period' });
+    }
+    updateData.linked_user_id = nextUserId;
+    updateData.linked_member_id = nextMemberId;
+  }
 
   if (Object.keys(updateData).length === 0) {
     return res.status(400).json({ message: 'Nothing to update' });
@@ -142,7 +237,8 @@ export const updateMonth = asyncHandler(async (req, res) => {
   // Atomic UPDATE — saves a SELECT round-trip.
   const updated = await cashFlowMonthModel.update(monthId, updateData, pool);
   if (!updated) return res.status(404).json({ message: 'Cash flow month not found' });
-  res.json({ month: updated });
+  const enriched = await cashFlowMonthModel.findByIdWithTotals(monthId, pool);
+  res.json({ month: enriched || updated });
 });
 
 /**
@@ -489,4 +585,32 @@ export const deleteEntry = asyncHandler(async (req, res) => {
   }
   clearCacheByPrefixes(['dashboard:']).catch(() => {});
   res.json({ message: 'Entry deleted' });
+});
+
+/**
+ * POST /cashflow/entries/bulk-delete
+ * Body: { ids: number[] }. Same lock rule as deleteEntry — rows in a locked
+ * month are silently skipped rather than failing the whole batch.
+ */
+export const bulkDeleteEntries = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+
+  const result = await pool.query(
+    `DELETE FROM cash_flow_entries cfe
+       USING cash_flow_months cfm
+      WHERE cfe.id = ANY($1::int[])
+        AND cfe.cash_flow_month_id = cfm.id
+        AND cfm.is_locked = FALSE
+      RETURNING cfe.id`,
+    [ids]
+  );
+  const deleted = result.rows.map((r) => r.id);
+  const skipped = ids.filter((id) => !deleted.includes(id));
+  clearCacheByPrefixes(['dashboard:']).catch(() => {});
+  res.json({
+    message: `${deleted.length} entr${deleted.length === 1 ? 'y' : 'ies'} deleted${skipped.length ? `, ${skipped.length} skipped (locked month or not found)` : ''}`,
+    deleted,
+    skipped,
+  });
 });

@@ -56,6 +56,7 @@ export const uploadPlotDoc = async (fileBuffer, originalName, mimetype, prefix =
 /** A browser-usable URL for a stored doc (signed for S3, static path for local). */
 export const getPlotDocUrl = async (storageKey) => {
   if (!storageKey) return null;
+  if (/^https?:\/\//i.test(storageKey)) return storageKey;
   if (storageKey.startsWith('local::')) {
     const name = storageKey.replace('local::', '');
     return `http://localhost:${process.env.PORT || 8000}/uploads/kyc_documents/${name}`;
@@ -65,6 +66,37 @@ export const getPlotDocUrl = async (storageKey) => {
     return await getSignedUrl(s3Client, cmd, { expiresIn: 3600 });
   }
   return null;
+};
+
+/** Durable URL for member profile document columns. Mirrors the Booking service's
+ * public KYC URL strategy; case viewers continue to use short-lived signed URLs. */
+export const getPlotDocPublicUrl = (storageKey) => {
+  if (!storageKey) return null;
+  if (/^https?:\/\//i.test(storageKey)) return storageKey;
+  if (storageKey.startsWith('local::')) {
+    const name = storageKey.replace('local::', '');
+    return `http://localhost:${process.env.PORT || 3000}/uploads/kyc_documents/${name}`;
+  }
+  if (!BUCKET) return null;
+  const region = process.env.AWS_REGION || 'ap-south-1';
+  return `https://${BUCKET}.s3.${region}.amazonaws.com/${storageKey}`;
+};
+
+/** Read a stored document back into memory for OCR retry. */
+export const getPlotDocBytes = async (storageKey) => {
+  if (!storageKey) throw new Error('Document storage key is missing');
+  if (storageKey.startsWith('local::')) {
+    const name = storageKey.replace('local::', '');
+    return fs.readFileSync(path.join(LOCAL_DIR, name));
+  }
+  if (/^https?:\/\//i.test(storageKey)) {
+    const response = await fetch(storageKey);
+    if (!response.ok) throw new Error(`Stored document download failed (${response.status})`);
+    return Buffer.from(await response.arrayBuffer());
+  }
+  if (!usingS3()) throw new Error('S3 document storage is not configured');
+  const response = await s3Client.send(new GetObjectCommand({ Bucket: BUCKET, Key: storageKey }));
+  return Buffer.from(await response.Body.transformToByteArray());
 };
 
 /** Delete a stored doc from S3 or local disk (best-effort). */

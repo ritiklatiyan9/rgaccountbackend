@@ -782,6 +782,30 @@ export const deleteVendorPayment = asyncHandler(async (req, res) => {
   res.json({ message: 'Vendor payment deleted' });
 });
 
+/**
+ * POST /vendors/payments/bulk-delete
+ * Body: { ids: number[], site_id }
+ */
+export const bulkDeleteVendorPayments = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => asInt(id)).filter(Number.isInteger) : [];
+  const siteId = getSiteId(req);
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+
+  const result = await pool.query(
+    `DELETE FROM vendor_payments WHERE id = ANY($1::int[]) AND site_id = $2 RETURNING id, commitment_id`,
+    [ids, siteId]
+  );
+  const commitmentIds = [...new Set(result.rows.map((r) => r.commitment_id))];
+  if (commitmentIds.length > 0) {
+    pool.query(
+      `UPDATE vendor_commitments SET updated_at = CURRENT_TIMESTAMP WHERE id = ANY($1::int[])`,
+      [commitmentIds]
+    ).catch((err) => console.error('Touch commitment failed:', err.message));
+  }
+  res.json({ message: `${result.rows.length} payment(s) deleted`, deleted: result.rows.map((r) => r.id) });
+});
+
 // Distribute a commitment payment proportionally or manually to inventory items
 export const distributePaymentToItems = asyncHandler(async (req, res) => {
   const commitmentId = asInt(req.params.id);
@@ -959,6 +983,23 @@ export const deleteVendorCommitment = asyncHandler(async (req, res) => {
 
   await pool.query('DELETE FROM vendor_commitments WHERE id = $1 AND site_id = $2', [id, siteId]);
   res.json({ message: 'Commitment deleted' });
+});
+
+/**
+ * POST /vendors/commitments/bulk-delete
+ * Body: { ids: number[], site_id }
+ */
+export const bulkDeleteVendorCommitments = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => asInt(id)).filter(Number.isInteger) : [];
+  const siteId = getSiteId(req);
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+
+  const result = await pool.query(
+    `DELETE FROM vendor_commitments WHERE id = ANY($1::int[]) AND site_id = $2 RETURNING id`,
+    [ids, siteId]
+  );
+  res.json({ message: `${result.rows.length} commitment(s) deleted`, deleted: result.rows.map((r) => r.id) });
 });
 
 export const updateVendorCommitmentStatus = asyncHandler(async (req, res) => {

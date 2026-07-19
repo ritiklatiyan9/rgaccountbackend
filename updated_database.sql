@@ -698,6 +698,8 @@ CREATE TABLE IF NOT EXISTS cash_flow_months (
   year            INTEGER NOT NULL,
   ledger_name     VARCHAR(255) NOT NULL DEFAULT '',
   ledger_type     VARCHAR(20) NOT NULL DEFAULT 'site',
+  linked_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  linked_member_id INTEGER REFERENCES members(id) ON DELETE SET NULL,
   opening_balance NUMERIC(15,2) NOT NULL DEFAULT 0,
   notes           TEXT,
   is_locked       BOOLEAN DEFAULT FALSE,
@@ -708,6 +710,10 @@ CREATE TABLE IF NOT EXISTS cash_flow_months (
 );
 CREATE INDEX IF NOT EXISTS idx_cfm_site   ON cash_flow_months(site_id);
 CREATE INDEX IF NOT EXISTS idx_cfm_period ON cash_flow_months(year, month);
+CREATE INDEX IF NOT EXISTS idx_cfm_linked_user_id ON cash_flow_months(linked_user_id)
+  WHERE linked_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cfm_linked_member_id ON cash_flow_months(linked_member_id)
+  WHERE linked_member_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cfm_site_ledger_period
   ON cash_flow_months(site_id, ledger_name, year DESC, month DESC);
 

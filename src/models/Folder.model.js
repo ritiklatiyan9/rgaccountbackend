@@ -78,19 +78,60 @@ class FolderModel extends MasterModel {
     }
 
     /**
+     * Move a folder under a new parent (or to root when newParentId is null).
+     * Guards against the three ways a move can corrupt the tree:
+     *   - moving a folder into itself
+     *   - moving a folder into one of its own descendants (would orphan a cycle)
+     *   - moving across sites
+     * Returns { folder } on success or { error } with a human-readable reason.
+     */
+    async moveFolder(id, newParentId, pool) {
+        id = parseInt(id);
+        newParentId = newParentId ? parseInt(newParentId) : null;
+
+        if (newParentId === id) return { error: 'Cannot move a folder into itself' };
+
+        const self = await pool.query('SELECT id, site_id FROM file_folders WHERE id = $1', [id]);
+        if (!self.rows[0]) return { error: 'Folder not found' };
+
+        if (newParentId !== null) {
+            const target = await pool.query('SELECT id, site_id FROM file_folders WHERE id = $1', [newParentId]);
+            if (!target.rows[0]) return { error: 'Target folder not found' };
+            if (target.rows[0].site_id !== self.rows[0].site_id) return { error: 'Cannot move across sites' };
+
+            // Reject if the target is inside this folder's own subtree.
+            const cycle = await pool.query(`
+                WITH RECURSIVE subtree AS (
+                    SELECT id FROM file_folders WHERE id = $1
+                    UNION ALL
+                    SELECT ff.id FROM file_folders ff JOIN subtree s ON ff.parent_id = s.id
+                )
+                SELECT 1 FROM subtree WHERE id = $2 LIMIT 1
+            `, [id, newParentId]);
+            if (cycle.rows.length > 0) return { error: 'Cannot move a folder into one of its own subfolders' };
+        }
+
+        const result = await pool.query(
+            'UPDATE file_folders SET parent_id = $2, updated_at = NOW() WHERE id = $1 RETURNING *',
+            [id, newParentId]
+        );
+        return { folder: result.rows[0] };
+    }
+
+    /**
      * Get breadcrumb path for a folder
      */
     async getBreadcrumb(folderId, pool) {
         if (!folderId) return [];
         const query = `
             WITH RECURSIVE path AS (
-                SELECT id, name, parent_id FROM file_folders WHERE id = $1
+                SELECT id, name, parent_id, 0 AS depth FROM file_folders WHERE id = $1
                 UNION ALL
-                SELECT ff.id, ff.name, ff.parent_id
+                SELECT ff.id, ff.name, ff.parent_id, p.depth + 1
                 FROM file_folders ff
                 JOIN path p ON ff.id = p.parent_id
             )
-            SELECT id, name, parent_id FROM path ORDER BY id ASC
+            SELECT id, name, parent_id FROM path ORDER BY depth DESC
         `;
         const result = await pool.query(query, [folderId]);
         return result.rows;

@@ -860,6 +860,45 @@ export const deleteTransaction = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /firms/transactions/bulk-delete
+ * Body: { ids: number[] }. Same lock rule as deleteTransaction — rows whose
+ * linked cash-flow month is locked are skipped, not fatal to the batch.
+ */
+export const bulkDeleteTransactions = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+
+  const ctxRes = await pool.query(
+    `SELECT ft.id, ft.cash_flow_entry_id, cfm.is_locked AS cf_is_locked
+       FROM firm_transactions ft
+       LEFT JOIN cash_flow_entries cfe ON cfe.id = ft.cash_flow_entry_id
+       LEFT JOIN cash_flow_months cfm  ON cfm.id = cfe.cash_flow_month_id
+      WHERE ft.id = ANY($1::int[])`,
+    [ids]
+  );
+  const deletable = ctxRes.rows.filter((r) => !(r.cash_flow_entry_id && r.cf_is_locked));
+  const deletableIds = deletable.map((r) => r.id);
+  const skipped = ids.filter((id) => !deletableIds.includes(id));
+
+  if (deletableIds.length > 0) {
+    const cfEntryIds = deletable.map((r) => r.cash_flow_entry_id).filter(Boolean);
+    await pool.query(
+      `WITH del_cf AS (
+         DELETE FROM cash_flow_entries WHERE id = ANY($2::int[])
+       )
+       DELETE FROM firm_transactions WHERE id = ANY($1::int[])`,
+      [deletableIds, cfEntryIds]
+    );
+  }
+
+  res.json({
+    message: `${deletableIds.length} transaction(s) deleted${skipped.length ? `, ${skipped.length} skipped (locked month or not found)` : ''}`,
+    deleted: deletableIds,
+    skipped,
+  });
+});
+
+/**
  * GET /firms/autocomplete?site_id=X
  * Get unique names, purposes, remarks for autocomplete
  */

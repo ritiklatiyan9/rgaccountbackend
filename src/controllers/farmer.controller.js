@@ -151,6 +151,20 @@ export const deleteFarmer = asyncHandler(async (req, res) => {
   res.json({ message: 'Farmer deleted' });
 });
 
+/**
+ * POST /farmers/bulk-delete
+ * Body: { ids: number[] }. Same as deleteFarmer — a farmer with existing
+ * payments fails on the DB's FK constraint exactly as the single-delete
+ * route already does; no new validation is invented here.
+ */
+export const bulkDeleteFarmers = asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+
+  const result = await pool.query(`DELETE FROM farmers WHERE id = ANY($1::int[]) RETURNING id`, [ids]);
+  res.json({ message: `${result.rows.length} farmer(s) deleted`, deleted: result.rows.map((r) => r.id) });
+});
+
 
 // ──────────────────────────────────────────────────────────────
 // FARMER PAYMENTS (INSTALLMENTS) CRUD
@@ -447,6 +461,27 @@ export const deletePayment = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Payment not found' });
   }
   res.json({ message: 'Payment deleted' });
+});
+
+/**
+ * POST /farmers/:farmerId/payments/bulk-delete
+ * Body: { ids: number[] }
+ */
+export const bulkDeletePayments = asyncHandler(async (req, res) => {
+  const farmerId = parseInt(req.params.farmerId);
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+
+  const result = await pool.query(
+    `WITH del_daybook AS (
+       DELETE FROM day_book WHERE farmer_payment_id = ANY($1::int[])
+     )
+     DELETE FROM farmer_payments
+      WHERE id = ANY($1::int[]) AND farmer_id = $2
+      RETURNING id`,
+    [ids, farmerId]
+  );
+  res.json({ message: `${result.rows.length} payment(s) deleted`, deleted: result.rows.map((r) => r.id) });
 });
 
 // ──────────────────────────────────────────────────────────────
