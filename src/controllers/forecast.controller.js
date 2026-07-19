@@ -185,8 +185,22 @@ const RUN_RATE_OUTFLOW_SQL = `
 
 /** GET /forecast?site_id=&months=6&lookback=6 */
 export const getCashflowForecast = asyncHandler(async (req, res) => {
-  const siteId = parseInt(req.query.site_id, 10);
-  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  const siteId = Number(req.query.site_id);
+  if (!Number.isInteger(siteId) || siteId <= 0) {
+    return res.status(400).json({ message: 'A valid site_id is required' });
+  }
+
+  const { rows: siteRows } = await pool.query('SELECT id FROM sites WHERE id = $1 LIMIT 1', [siteId]);
+  if (!siteRows[0]) return res.status(404).json({ message: 'Site not found' });
+
+  if (req.user.role === 'sub_admin') {
+    const { rows: accessRows } = await pool.query(
+      'SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1',
+      [req.user.id, siteId]
+    );
+    if (!accessRows[0]) return res.status(403).json({ message: 'Access denied to this site' });
+  }
+
   const months = Math.min(Math.max(parseInt(req.query.months, 10) || 6, 1), 12);
   const lookback = Math.min(Math.max(parseInt(req.query.lookback, 10) || 6, 1), 24);
 

@@ -1,14 +1,32 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
-import { plotModel } from '../models/Plot.model.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import pool from '../config/db.js';
+import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 
 // ══════════════════════════════════════════════════
 //  REGISTRY ENDPOINTS
 // ══════════════════════════════════════════════════
 
 const isAdminRole = (role) => role === 'admin' || role === 'super_admin';
+const isRegistryWorkflowUnlocked = (siteId) => applicationSettingModel.isFeatureEnabled(
+  siteId,
+  FEATURE_KEYS.PLOT_REGISTRY_WORKFLOW_UNLOCKED
+);
+const readRegistryWorkflowUnlocked = async (db, siteId) => {
+  const { rows } = await db.query(
+    `SELECT setting_value
+       FROM application_settings
+      WHERE site_id = $1 AND setting_key = $2
+      LIMIT 1`,
+    [siteId, FEATURE_KEYS.PLOT_REGISTRY_WORKFLOW_UNLOCKED]
+  );
+  const value = rows[0]?.setting_value;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.toLowerCase() === 'true';
+  if (value && typeof value === 'object' && 'enabled' in value) return Boolean(value.enabled);
+  return false;
+};
 
 /** Bank-clearance snapshot for a plot: what the plot expects in bank
  *  (plots.to_receive_bank) vs what has actually landed — bank/cheque plot
@@ -65,6 +83,16 @@ export const getRegistryPlotClearance = asyncHandler(async (req, res) => {
  *     are routed to the admin-approval flow (POST /edit-requests, module
  *     'plot_registry_create') and blocked here. */
 export const createRegistry = asyncHandler(async (req, res) => {
+  const requestedSiteId = parseInt(req.body.site_id);
+  const requestedPlotId = parseInt(req.body.plot_id);
+  if (Number.isFinite(requestedPlotId)) {
+    const { rows } = await pool.query('SELECT site_id FROM plots WHERE id = $1 LIMIT 1', [requestedPlotId]);
+    if (!rows[0]) return res.status(404).json({ message: 'Plot not found' });
+    if (Number.isFinite(requestedSiteId) && parseInt(rows[0].site_id) !== requestedSiteId) {
+      return res.status(400).json({ message: 'Selected plot does not belong to the registry site' });
+    }
+  }
+
   if (!isAdminRole(req.user.role)) {
     // Resolve the gate plot by FK or (site, plot_no) fallback — omitting
     // plot_id must not skip the clearance check.
@@ -98,8 +126,10 @@ export const createRegistry = asyncHandler(async (req, res) => {
  *    { source_plot_payment_id }                              (link a bank/cheque plot payment)
  *    { payment_date, amount, payment_mode, tally_date, tally_amount, notes, cheque_no }  (manual)
  *  totalling > 0. Registry + payments are created in ONE transaction, so a
- *  registry can never exist without its money. Returns { status, body }. */
-export async function createRegistryRecord(body, userId) {
+ *  registry can never exist without its money. An optional transaction client
+ *  lets the edit-request approval commit the registry and approval state as one
+ *  unit. Returns { status, body }. */
+export async function createRegistryRecord(body, userId, transactionClient = null) {
   const {
     site_id, plot_no, customer_name, size_meter, size_sqyard, registry_date, farmer_name,
     registry_payment, notes, plot_id, circle_rate, firm_name, seller_name, created_entry_date, bank_amount,
@@ -107,11 +137,32 @@ export async function createRegistryRecord(body, userId) {
   } = body;
 
   if (!site_id) return { status: 400, body: { message: 'Site is required' } };
-  if (!plot_no || !plot_no.trim()) return { status: 400, body: { message: 'Plot number is required' } };
+  if (!plot_id) return { status: 400, body: { message: 'A valid plot is required' } };
+  if (!String(plot_no || '').trim()) {
+    return { status: 400, body: { message: 'Plot number is required' } };
+  }
 
-  const trimmed = plot_no.trim().toUpperCase();
+  const trimmed = String(plot_no).trim().toUpperCase();
   const siteIdInt = parseInt(site_id);
-  const plotIdInt = plot_id ? parseInt(plot_id) : null;
+  const plotIdInt = parseInt(plot_id);
+  const db = transactionClient || pool;
+  if (!Number.isInteger(siteIdInt) || siteIdInt <= 0) {
+    return { status: 400, body: { message: 'A valid site is required' } };
+  }
+  if (!Number.isInteger(plotIdInt) || plotIdInt <= 0) {
+    return { status: 400, body: { message: 'A valid plot is required' } };
+  }
+  const { rows: plotRows } = await db.query(
+    'SELECT site_id, plot_no FROM plots WHERE id = $1 LIMIT 1',
+    [plotIdInt]
+  );
+  if (!plotRows[0]) return { status: 404, body: { message: 'Plot not found' } };
+  if (parseInt(plotRows[0].site_id) !== siteIdInt) {
+    return { status: 400, body: { message: 'Selected plot does not belong to the registry site' } };
+  }
+  if (String(plotRows[0].plot_no || '').trim().toUpperCase() !== trimmed) {
+    return { status: 400, body: { message: 'Registry plot number does not match the selected plot' } };
+  }
 
   // ── Money-mapped gate ──
   const paymentRows = Array.isArray(payments) ? payments : [];
@@ -124,15 +175,18 @@ export async function createRegistryRecord(body, userId) {
   let linkedTotal = 0;
   let linkable = [];
   if (linkedIds.length) {
-    // Only same-site plot payments not already linked to another registry count.
-    const { rows } = await pool.query(
+    // A source payment belongs to one exact plot. Site equality alone is not
+    // sufficient: otherwise receipts from another plot could satisfy this
+    // registry's NOC payment gate.
+    const { rows } = await db.query(
       `SELECT pp.id, pp.site_id, pp.date, pp.amount, pp.payment_from, pp.payment_type,
               pp.bank_details, pp.narration, pp.cheque_no
          FROM plot_payments pp
         WHERE pp.id = ANY($1::int[])
           AND pp.site_id = $2
+          AND pp.plot_id = $3
           AND NOT EXISTS (SELECT 1 FROM plot_registry_payments x WHERE x.source_plot_payment_id = pp.id)`,
-      [linkedIds, siteIdInt]
+      [linkedIds, siteIdInt, plotIdInt]
     );
     linkable = rows;
     linkedTotal = rows.reduce((n, r) => n + (parseFloat(r.amount) || 0), 0);
@@ -145,10 +199,11 @@ export async function createRegistryRecord(body, userId) {
   }
 
   const today = new Date().toISOString().split('T')[0];
-  const client = await pool.connect();
+  const ownsTransaction = !transactionClient;
+  const client = transactionClient || await pool.connect();
   let row;
   try {
-    await client.query('BEGIN');
+    if (ownsTransaction) await client.query('BEGIN');
 
     // Single CTE: dup-check + INSERT + plot-status auto-bump in ONE round-trip.
     const result = await client.query(
@@ -202,7 +257,7 @@ export async function createRegistryRecord(body, userId) {
 
     row = result.rows[0];
     if (row.is_dup) {
-      await client.query('ROLLBACK');
+      if (ownsTransaction) await client.query('ROLLBACK');
       return { status: 409, body: { message: `Registry for plot "${trimmed}" already exists` } };
     }
     const registryId = row.registry.id;
@@ -244,12 +299,12 @@ export async function createRegistryRecord(body, userId) {
       );
     }
 
-    await client.query('COMMIT');
+    if (ownsTransaction) await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (ownsTransaction) await client.query('ROLLBACK');
     throw err;
   } finally {
-    client.release();
+    if (ownsTransaction) client.release();
   }
 
   return { status: 201, body: {
@@ -290,7 +345,8 @@ export const updateRegistry = asyncHandler(async (req, res) => {
 
   const updateData = {};
   if (plot_no !== undefined) {
-    const trimmed = plot_no.trim().toUpperCase();
+    const trimmed = String(plot_no || '').trim().toUpperCase();
+    if (!trimmed) return res.status(400).json({ message: 'Plot number is required' });
     if (trimmed !== existing.plot_no) {
       const dup = await plotRegistryModel.findByPlotNo(existing.site_id, trimmed, pool);
       if (dup) return res.status(409).json({ message: `Registry for plot "${trimmed}" already exists` });
@@ -302,7 +358,13 @@ export const updateRegistry = asyncHandler(async (req, res) => {
   if (size_sqyard !== undefined) updateData.size_sqyard = parseFloat(size_sqyard) || null;
   if (registry_date !== undefined) updateData.registry_date = registry_date || null;
   if (farmer_name !== undefined) updateData.farmer_name = farmer_name ? farmer_name.trim().toUpperCase() : null;
-  if (plot_id !== undefined) updateData.plot_id = plot_id ? parseInt(plot_id) : null;
+  if (plot_id !== undefined) {
+    const parsedPlotId = parseInt(plot_id);
+    if (!Number.isInteger(parsedPlotId) || parsedPlotId <= 0) {
+      return res.status(400).json({ message: 'A valid plot is required' });
+    }
+    updateData.plot_id = parsedPlotId;
+  }
   if (circle_rate !== undefined) updateData.circle_rate = circle_rate === '' ? null : (parseFloat(circle_rate) || 0);
   if (firm_name !== undefined) updateData.firm_name = firm_name ? firm_name.trim().toUpperCase() : null;
   if (seller_name !== undefined) updateData.seller_name = seller_name ? seller_name.trim().toUpperCase() : null;
@@ -314,34 +376,139 @@ export const updateRegistry = asyncHandler(async (req, res) => {
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
-  // ── Run main UPDATE + plot-status auto-bump IN PARALLEL. ──
-  // Was 4 serial RTTs (UPDATE + plot SELECT + plot UPDATE).
-  const resolvedPlotId = updateData.plot_id !== undefined ? updateData.plot_id : existing.plot_id;
+  const prospectivePlotId = updateData.plot_id !== undefined ? updateData.plot_id : existing.plot_id;
+  const prospectivePlotNo = updateData.plot_no !== undefined ? updateData.plot_no : existing.plot_no;
+  const normalizedProspectivePlotId = Number.isInteger(parseInt(prospectivePlotId)) ? parseInt(prospectivePlotId) : null;
+  const normalizedExistingPlotId = Number.isInteger(parseInt(existing.plot_id)) ? parseInt(existing.plot_id) : null;
+  const plotIdentityChanging = normalizedProspectivePlotId !== normalizedExistingPlotId
+    || String(prospectivePlotNo || '').trim().toUpperCase()
+       !== String(existing.plot_no || '').trim().toUpperCase();
+  if (plotIdentityChanging && (existing.noc_generated_at || existing.noc_approved_at)) {
+    return res.status(409).json({
+      message: 'The registry plot cannot be changed after its NOC has been generated.',
+    });
+  }
+  if (prospectivePlotId) {
+    const { rows } = await pool.query('SELECT site_id, plot_no FROM plots WHERE id = $1 LIMIT 1', [prospectivePlotId]);
+    if (!rows[0]) return res.status(404).json({ message: 'Plot not found' });
+    if (parseInt(rows[0].site_id) !== parseInt(existing.site_id)) {
+      return res.status(400).json({ message: 'Selected plot does not belong to the registry site' });
+    }
+    if (String(rows[0].plot_no || '').trim().toUpperCase() !== String(prospectivePlotNo || '').trim().toUpperCase()) {
+      return res.status(400).json({ message: 'Registry plot number does not match the selected plot' });
+    }
+  }
 
-  const updatePromise = plotRegistryModel.update(registryId, updateData, pool);
-  // Plot becomes 'REGISTRY' only via NOC approval (approveRegistryNoc); here we
-  // only move fresh BOOKED plots into the pending stage.
-  const plotBumpPromise = resolvedPlotId
-    ? pool.query(
+  if (updateData.plot_id !== undefined && parseInt(existing.plot_id) !== prospectivePlotId) {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS count
+         FROM plot_registry_payments
+        WHERE registry_id = $1 AND source_plot_payment_id IS NOT NULL`,
+      [registryId]
+    );
+    if ((rows[0]?.count || 0) > 0) {
+      return res.status(409).json({
+        message: 'Remove linked plot payments before changing the registry plot',
+      });
+    }
+  }
+
+  // Keep the registry edit and its plot status transition atomic. Running
+  // these against separate pool connections could leave a plot in PENDING NOC
+  // even when the registry update failed a constraint or concurrency check.
+  const resolvedPlotId = updateData.plot_id !== undefined ? updateData.plot_id : existing.plot_id;
+  const client = await pool.connect();
+  let updated;
+  let plotBumpRes = { rows: [] };
+  try {
+    await client.query('BEGIN');
+    updated = await plotRegistryModel.update(registryId, updateData, client);
+    // Plot becomes 'REGISTRY' only via NOC approval (approveRegistryNoc); here
+    // we only move a fresh BOOKED plot into the pending stage.
+    if (resolvedPlotId) {
+      plotBumpRes = await client.query(
         `UPDATE plots SET status = 'PENDING NOC', updated_at = NOW()
           WHERE id = $1 AND UPPER(COALESCE(status, '')) = 'BOOKED'
           RETURNING id`,
         [resolvedPlotId]
-      )
-    : Promise.resolve({ rows: [] });
-
-  const [updated, plotBumpRes] = await Promise.all([updatePromise, plotBumpPromise]);
+      );
+    }
+    if (plotIdentityChanging && existing.plot_id) {
+      await client.query(
+        `UPDATE plots p
+            SET status = 'BOOKED', updated_at = NOW()
+          WHERE p.id = $1
+            AND UPPER(COALESCE(p.status, '')) = 'PENDING NOC'
+            AND NOT EXISTS (
+              SELECT 1 FROM plot_registries pr WHERE pr.plot_id = p.id
+            )`,
+        [existing.plot_id]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
   res.json({ registry: updated, plot_status_updated: (plotBumpRes.rows?.length || 0) > 0 });
 });
 
 /** DELETE /registries/:id */
 export const deleteRegistry = asyncHandler(async (req, res) => {
-  // Atomic DELETE — saves a SELECT round-trip.
-  const result = await pool.query(
-    `DELETE FROM plot_registries WHERE id = $1 RETURNING id`,
-    [parseInt(req.params.id)]
-  );
-  if (!result.rows[0]) return res.status(404).json({ message: 'Registry not found' });
+  const registryId = parseInt(req.params.id);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, plot_id, site_id, plot_no, noc_approved_at
+         FROM plot_registries
+        WHERE id = $1
+        FOR UPDATE`,
+      [registryId]
+    );
+    const registry = rows[0];
+    if (!registry) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Registry not found' });
+    }
+    if (registry.noc_approved_at) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        message: 'An approved registry cannot be deleted. Keep the audit record and use the relevant cancellation workflow.',
+      });
+    }
+
+    await client.query('DELETE FROM plot_registries WHERE id = $1', [registryId]);
+    // A deleted draft must not leave its plot stranded in PENDING NOC. Legacy
+    // registries without plot_id use the same site + plot-number resolution as
+    // the rest of this module.
+    await client.query(
+      `UPDATE plots p
+          SET status = 'BOOKED', updated_at = NOW()
+        WHERE (
+          ($1::integer IS NOT NULL AND p.id = $1)
+          OR ($1::integer IS NULL AND p.site_id = $2 AND UPPER(p.plot_no) = UPPER($3))
+        )
+          AND UPPER(COALESCE(p.status, '')) = 'PENDING NOC'
+          AND NOT EXISTS (
+            SELECT 1
+              FROM plot_registries remaining
+             WHERE remaining.plot_id = p.id
+                OR (remaining.plot_id IS NULL
+                    AND remaining.site_id = p.site_id
+                    AND UPPER(remaining.plot_no) = UPPER(p.plot_no))
+          )`,
+      [registry.plot_id, registry.site_id, registry.plot_no]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
   res.json({ message: 'Registry deleted' });
 });
 
@@ -361,15 +528,25 @@ export const createRegistryPayment = asyncHandler(async (req, res) => {
 
   if (source_plot_payment_id && hasSourcePlotPaymentCol) {
     const sourceId = parseInt(source_plot_payment_id);
+    if (!Number.isInteger(sourceId) || sourceId <= 0) {
+      return res.status(400).json({ message: 'A valid source plot payment is required' });
+    }
 
     // Run all 3 lookups (registry, dup mapping, source payment) IN PARALLEL.
     // Was 4 serial RTTs (registry SELECT + col check + dup SELECT + source SELECT).
     const [registryRes, dupRes, sourceRes] = await Promise.all([
-      pool.query(`SELECT id, site_id FROM plot_registries WHERE id = $1`, [registryIdInt]),
+      pool.query(
+        `SELECT id, site_id, plot_id, plot_no FROM plot_registries WHERE id = $1`,
+        [registryIdInt]
+      ),
       pool.query(`SELECT id FROM plot_registry_payments WHERE source_plot_payment_id = $1 LIMIT 1`, [sourceId]),
       pool.query(
-        `SELECT id, site_id, date, amount, payment_from, payment_type, bank_details, narration
-           FROM plot_payments WHERE id = $1 LIMIT 1`,
+        `SELECT pp.id, pp.site_id, pp.plot_id, p.plot_no, pp.date, pp.amount,
+                pp.payment_from, pp.payment_type, pp.bank_details, pp.narration
+           FROM plot_payments pp
+           LEFT JOIN plots p ON p.id = pp.plot_id
+          WHERE pp.id = $1
+          LIMIT 1`,
         [sourceId]
       ),
     ]);
@@ -383,6 +560,13 @@ export const createRegistryPayment = asyncHandler(async (req, res) => {
     if (!sourcePayment) return res.status(404).json({ message: 'Selected plot payment not found' });
     if (parseInt(sourcePayment.site_id) !== parseInt(registry.site_id)) {
       return res.status(400).json({ message: 'Selected plot payment does not belong to same site' });
+    }
+    const sourceMatchesPlot = registry.plot_id
+      ? parseInt(sourcePayment.plot_id) === parseInt(registry.plot_id)
+      : String(sourcePayment.plot_no || '').trim().toUpperCase()
+        === String(registry.plot_no || '').trim().toUpperCase();
+    if (!sourceMatchesPlot) {
+      return res.status(400).json({ message: 'Selected payment belongs to a different plot' });
     }
 
     const linkedData = {
@@ -533,9 +717,10 @@ const buildNocPayload = async (registryId) => {
       ORDER BY prp.payment_date ASC, prp.created_at ASC`,
     [registryId]
   );
+  const workflowOverridePromise = isRegistryWorkflowUnlocked(registry.site_id);
 
-  const [plotRes, siteRes, letterheadRes, inlineRes] = await Promise.all([
-    plotPromise, sitePromise, letterheadPromise, inlinePromise,
+  const [plotRes, siteRes, letterheadRes, inlineRes, workflowUnlocked] = await Promise.all([
+    plotPromise, sitePromise, letterheadPromise, inlinePromise, workflowOverridePromise,
   ]);
   const plot = plotRes.rows[0] || null;
   const site = siteRes.rows[0] || null;
@@ -592,6 +777,7 @@ const buildNocPayload = async (registryId) => {
     letterhead: letterheadRes.rows[0] || null,
     plotPayments,
     inlinePayments,
+    workflow_unlocked: workflowUnlocked,
     suggested_noc_no: suggestedNocNo,
     verifyUrl,
     totals: {
@@ -606,38 +792,106 @@ const buildNocPayload = async (registryId) => {
  *  registry created -> plot 'PENDING NOC' -> NOC generated -> approved here -> 'REGISTRY'. */
 export const approveRegistryNoc = asyncHandler(async (req, res) => {
   const registryId = parseInt(req.params.id);
-  const registry = await plotRegistryModel.findByIdWithTotals(registryId, pool);
-  if (!registry) return res.status(404).json({ message: 'Registry not found' });
-  if (!registry.noc_generated_at) {
-    return res.status(400).json({ message: 'Generate the NOC first — approval comes after generation' });
-  }
-  if (registry.noc_approved_at) {
-    return res.status(409).json({ message: 'NOC is already approved' });
-  }
-  // Payment-clear gate (defense in depth — generation is gated the same way).
-  const approveDue = (parseFloat(registry.registry_payment) || 0) - (parseFloat(registry.total_paid) || 0);
-  if (approveDue > 0.005) {
-    return res.status(400).json({
-      message: `NOC can only be approved after full payment — ₹${approveDue.toLocaleString('en-IN')} is still due`,
-    });
+  const client = await pool.connect();
+  let updated;
+  let plotStatusUpdated = false;
+  let workflowUnlocked = false;
+
+  try {
+    await client.query('BEGIN');
+
+    // Lock the registry row so two approval requests cannot both pass the
+    // preconditions. Registry approval and plot promotion then commit or roll
+    // back together.
+    const { rows } = await client.query(
+      `SELECT pr.*,
+              COALESCE((
+                SELECT SUM(prp.amount)
+                  FROM plot_registry_payments prp
+                  LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
+                 WHERE prp.registry_id = pr.id
+                   AND (
+                     prp.source_plot_payment_id IS NULL
+                     OR (pr.plot_id IS NOT NULL AND pp.plot_id = pr.plot_id)
+                     OR (
+                       pr.plot_id IS NULL
+                       AND EXISTS (
+                         SELECT 1 FROM plots target
+                          WHERE target.id = pp.plot_id
+                            AND target.site_id = pr.site_id
+                            AND UPPER(target.plot_no) = UPPER(pr.plot_no)
+                       )
+                     )
+                   )
+              ), 0)::numeric AS total_paid
+         FROM plot_registries pr
+        WHERE pr.id = $1
+        FOR UPDATE OF pr`,
+      [registryId]
+    );
+    const registry = rows[0];
+    if (!registry) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Registry not found' });
+    }
+    if (!registry.noc_generated_at) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Generate the NOC first — approval comes after generation' });
+    }
+    if (registry.noc_approved_at) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'NOC is already approved' });
+    }
+
+    workflowUnlocked = await readRegistryWorkflowUnlocked(client, registry.site_id);
+    // Payment-clear gate (defense in depth — generation is gated the same way).
+    const approveDue = (parseFloat(registry.registry_payment) || 0) - (parseFloat(registry.total_paid) || 0);
+    if (!workflowUnlocked && approveDue > 0.005) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        message: `NOC can only be approved after full payment — ₹${approveDue.toLocaleString('en-IN')} is still due`,
+      });
+    }
+
+    const approvalResult = await client.query(
+      `UPDATE plot_registries
+          SET noc_approved_at = NOW(), noc_approved_by = $2, updated_at = NOW()
+        WHERE id = $1
+        RETURNING *`,
+      [registryId, req.user.id]
+    );
+    updated = approvalResult.rows[0];
+
+    // Older registries may not carry plot_id. Resolve those records by their
+    // immutable site + plot number pair and promote only the newest match.
+    const plotResult = await client.query(
+      `WITH target_plot AS (
+         SELECT id
+           FROM plots
+          WHERE ($1::integer IS NOT NULL AND id = $1)
+             OR ($1::integer IS NULL AND site_id = $2 AND UPPER(plot_no) = UPPER($3))
+          ORDER BY id DESC
+          LIMIT 1
+       )
+       UPDATE plots p
+          SET status = 'REGISTRY', updated_at = NOW()
+         FROM target_plot target
+        WHERE p.id = target.id
+          AND UPPER(COALESCE(p.status, '')) != 'REGISTRY'
+        RETURNING p.id`,
+      [registry.plot_id, registry.site_id, registry.plot_no]
+    );
+    plotStatusUpdated = plotResult.rows.length > 0;
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 
-  await pool.query(
-    `UPDATE plot_registries SET noc_approved_at = NOW(), noc_approved_by = $2, updated_at = NOW() WHERE id = $1`,
-    [registryId, req.user.id]
-  );
-  let plotStatusUpdated = false;
-  if (registry.plot_id) {
-    const { rows } = await pool.query(
-      `UPDATE plots SET status = 'REGISTRY', updated_at = NOW()
-        WHERE id = $1 AND UPPER(COALESCE(status, '')) != 'REGISTRY'
-        RETURNING id`,
-      [registry.plot_id]
-    );
-    plotStatusUpdated = rows.length > 0;
-  }
-  const updated = await plotRegistryModel.findById(registryId, pool);
-  res.json({ registry: updated, plot_status_updated: plotStatusUpdated });
+  res.json({ registry: updated, plot_status_updated: plotStatusUpdated, workflow_unlocked: workflowUnlocked });
 });
 
 /** GET /registries/:id/noc — one-shot NOC payload */
@@ -660,6 +914,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
 
   const registry = await plotRegistryModel.findById(registryId, pool);
   if (!registry) return res.status(404).json({ message: 'Registry not found' });
+  const workflowUnlocked = await isRegistryWorkflowUnlocked(registry.site_id);
 
   const includedIds = Array.isArray(included_plot_payment_ids)
     ? included_plot_payment_ids.map((n) => parseInt(n)).filter(Number.isFinite)
@@ -684,10 +939,36 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
 
     // ── Sync plot-payment selections ──
     if (includedIds) {
+      // Reset source-linked selections first. Only receipts belonging to this
+      // registry's plot are allowed to be switched back on below.
       await client.query(
-        `UPDATE plot_registry_payments SET include_in_noc = TRUE, updated_at = NOW()
-          WHERE registry_id = $1 AND source_plot_payment_id = ANY($2::int[]) AND include_in_noc = FALSE`,
-        [registryId, includedIds]
+        `UPDATE plot_registry_payments
+            SET include_in_noc = FALSE, updated_at = NOW()
+          WHERE registry_id = $1
+            AND source_plot_payment_id IS NOT NULL
+            AND include_in_noc = TRUE`,
+        [registryId]
+      );
+      await client.query(
+        `UPDATE plot_registry_payments prp
+            SET include_in_noc = TRUE, updated_at = NOW()
+           FROM plot_payments pp
+          WHERE prp.registry_id = $1
+            AND prp.source_plot_payment_id = pp.id
+            AND prp.source_plot_payment_id = ANY($2::int[])
+            AND (
+              ($3::integer IS NOT NULL AND pp.plot_id = $3)
+              OR (
+                $3::integer IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM plots target
+                   WHERE target.id = pp.plot_id
+                     AND target.site_id = $4
+                     AND UPPER(target.plot_no) = UPPER($5)
+                )
+              )
+            )`,
+        [registryId, includedIds, registry.plot_id || null, registry.site_id, registry.plot_no]
       );
       // Link payments that aren't assigned to any registry yet.
       await client.query(
@@ -703,15 +984,27 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
            FROM plot_payments pp
           WHERE pp.id = ANY($2::int[])
             AND pp.site_id = $4
+            AND (
+              ($5::integer IS NOT NULL AND pp.plot_id = $5)
+              OR (
+                $5::integer IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM plots target
+                   WHERE target.id = pp.plot_id
+                     AND target.site_id = $4
+                     AND UPPER(target.plot_no) = UPPER($6)
+                )
+              )
+            )
             AND NOT EXISTS (SELECT 1 FROM plot_registry_payments x WHERE x.source_plot_payment_id = pp.id)`,
-        [registryId, includedIds, req.user.id, registry.site_id]
-      );
-      // Everything else linked to this registry drops off the NOC (link kept).
-      await client.query(
-        `UPDATE plot_registry_payments SET include_in_noc = FALSE, updated_at = NOW()
-          WHERE registry_id = $1 AND source_plot_payment_id IS NOT NULL
-            AND NOT (source_plot_payment_id = ANY($2::int[])) AND include_in_noc = TRUE`,
-        [registryId, includedIds]
+        [
+          registryId,
+          includedIds,
+          req.user.id,
+          registry.site_id,
+          registry.plot_id || null,
+          registry.plot_no,
+        ]
       );
     }
 
@@ -754,13 +1047,28 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
     // fully paid. Evaluated INSIDE the transaction, after the payment syncs
     // above, so payments added in this very save count toward the total. ──
     const totalRes = await client.query(
-      `SELECT COALESCE(SUM(amount), 0)::numeric AS total_paid
-         FROM plot_registry_payments WHERE registry_id = $1`,
-      [registryId]
+      `SELECT COALESCE(SUM(prp.amount), 0)::numeric AS total_paid
+         FROM plot_registry_payments prp
+         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
+        WHERE prp.registry_id = $1
+          AND (
+            prp.source_plot_payment_id IS NULL
+            OR ($2::integer IS NOT NULL AND pp.plot_id = $2)
+            OR (
+              $2::integer IS NULL
+              AND EXISTS (
+                SELECT 1 FROM plots target
+                 WHERE target.id = pp.plot_id
+                   AND target.site_id = $3
+                   AND UPPER(target.plot_no) = UPPER($4)
+              )
+            )
+          )`,
+      [registryId, registry.plot_id || null, registry.site_id, registry.plot_no]
     );
     const totalPaid = parseFloat(totalRes.rows[0]?.total_paid) || 0;
     const due = (parseFloat(registry.registry_payment) || 0) - totalPaid;
-    if (due > 0.005) {
+    if (!workflowUnlocked && due > 0.005) {
       await client.query('ROLLBACK');
       return res.status(400).json({
         message: `NOC can only be generated after full payment — ₹${due.toLocaleString('en-IN')} is still due against this registry`,
@@ -812,19 +1120,26 @@ export const createRegistryHandover = asyncHandler(async (req, res) => {
 
   const registry = await plotRegistryModel.findById(registryId, pool);
   if (!registry) return res.status(404).json({ message: 'Registry not found' });
+  const workflowUnlocked = await isRegistryWorkflowUnlocked(registry.site_id);
 
   // Match by FK or (site, plot_no) fallback — same resolution as the
   // REGISTRY doc-upload gate, so null-plot_id registries aren't blocked.
-  const docRes = await pool.query(
-    `SELECT 1 FROM documents d
-       JOIN plots p ON p.id = d.plot_id
-      WHERE UPPER(COALESCE(d.category, '')) = 'REGISTRY'
-        AND (p.id = $1 OR (p.site_id = $2 AND UPPER(p.plot_no) = UPPER($3)))
-      LIMIT 1`,
-    [registry.plot_id, registry.site_id, registry.plot_no]
-  );
-  if (!docRes.rows.length) {
-    return res.status(400).json({ message: 'Upload the registry document before recording a handover' });
+  if (!workflowUnlocked) {
+    const docRes = await pool.query(
+      `SELECT 1 FROM documents d
+         JOIN plots p ON p.id = d.plot_id
+        WHERE UPPER(COALESCE(d.category, '')) = 'REGISTRY'
+          AND COALESCE(d.uploaded_source, 'BOOKING') <> 'DMS'
+          AND (p.id = $1 OR (p.site_id = $2 AND UPPER(p.plot_no) = UPPER($3)))
+        LIMIT 1`,
+      [registry.plot_id, registry.site_id, registry.plot_no]
+    );
+    if (!docRes.rows.length) {
+      return res.status(409).json({
+        code: 'REGISTRY_DOCUMENT_REQUIRED',
+        message: 'Upload the registry deed before recording a handover, or enable the workflow override in Settings',
+      });
+    }
   }
 
   const { rows } = await pool.query(
@@ -842,5 +1157,5 @@ export const createRegistryHandover = asyncHandler(async (req, res) => {
   );
   const handover = rows[0];
   handover.given_by_name = req.user.name || req.user.email || null;
-  res.status(201).json({ handover });
+  res.status(201).json({ handover, workflow_unlocked: workflowUnlocked });
 });

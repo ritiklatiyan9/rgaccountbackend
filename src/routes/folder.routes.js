@@ -7,15 +7,16 @@ import {
     moveFolder,
     deleteFolder,
 } from '../controllers/folder.controller.js';
+import requirePermission from '../middlewares/permission.middleware.js';
 
 const router = express.Router();
 
 router.use(authMiddleware);
 
-router.get('/', listFolders);
-router.post('/', createFolder);
-router.put('/:id/rename', renameFolder);
-router.put('/:id/move', moveFolder);
-router.delete('/:id', deleteFolder);
+router.get('/', requirePermission('excel', 'read'), listFolders);
+router.post('/', requirePermission('excel', 'write'), createFolder);
+router.put('/:id/rename', requirePermission('excel', 'update'), renameFolder);
+router.put('/:id/move', requirePermission('excel', 'update'), moveFolder);
+router.delete('/:id', requirePermission('excel', 'delete'), deleteFolder);
 
 export default router;

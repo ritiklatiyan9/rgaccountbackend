@@ -7,6 +7,7 @@ import {
 } from '../models/Imprest.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import { expenseModel } from '../models/Expense.model.js';
+import { findEligibleImprestParticipant } from '../middlewares/imprestSiteAccess.middleware.js';
 import pool from '../config/db.js';
 
 // ══════════════════════════════════════════════════
@@ -30,7 +31,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
   if (parseInt(sub_admin_id) === req.user.id) return res.status(400).json({ message: 'Cannot send imprest to yourself' });
 
   const giverIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
-  const parsedSiteId = parseInt(site_id);
+  const parsedSiteId = req.imprestSiteId || parseInt(site_id);
   const allocationAmount = parseFloat(amount);
 
   const client = await pool.connect();
@@ -117,7 +118,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
  */
 export const listAllocations = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
-  const parsedSiteId = site_id ? parseInt(site_id) : null;
+  const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
   const callerIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
 
   if (callerIsAdmin) {
@@ -221,7 +222,8 @@ export const cancelAllocation = asyncHandler(async (req, res) => {
  */
 export const getPendingReceipts = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
-  const allocations = await imprestAllocationModel.findPendingBySubAdminId(req.user.id, site_id ? parseInt(site_id) : null, pool);
+  const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
+  const allocations = await imprestAllocationModel.findPendingBySubAdminId(req.user.id, parsedSiteId, pool);
   res.json({ allocations });
 });
 
@@ -307,7 +309,8 @@ export const getBalance = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: 'Insufficient permissions' });
   }
 
-  const balance = await imprestLedgerModel.getBalance(userId, req.query.site_id ? parseInt(req.query.site_id) : null, pool);
+  const siteId = req.imprestSiteId || (req.query.site_id ? parseInt(req.query.site_id) : null);
+  const balance = await imprestLedgerModel.getBalance(userId, siteId, pool);
   res.json({ balance, user_id: userId });
 });
 
@@ -318,7 +321,7 @@ export const getBalance = asyncHandler(async (req, res) => {
 export const getLedger = asyncHandler(async (req, res) => {
   const userId = req.query.user_id ? parseInt(req.query.user_id) : req.user.id;
   const { date_from, date_to, page = 1, limit = 20, site_id } = req.query;
-  const parsedSiteId = site_id ? parseInt(site_id) : null;
+  const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
 
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && userId !== req.user.id) {
     return res.status(403).json({ message: 'Insufficient permissions' });
@@ -359,14 +362,29 @@ export const getLedger = asyncHandler(async (req, res) => {
  * Allows a sub-admin to pick another user for a peer transfer.
  */
 export const listTransferPeers = asyncHandler(async (req, res) => {
+  const siteId = req.imprestSiteId || null;
   const { rows } = await pool.query(
-    `SELECT id, name, email, role
-     FROM users
-     WHERE is_active = true
-       AND id != $1
-       AND role IN ('admin', 'sub_admin', 'super_admin')
-     ORDER BY role ASC, name ASC`,
-    [req.user.id]
+    `SELECT u.id, u.name, u.email, u.role
+       FROM users u
+      WHERE u.is_active = true
+        AND u.id != $1
+        AND (
+          u.role IN ('admin', 'super_admin')
+          OR (
+            $2::integer IS NOT NULL
+            AND u.role = 'sub_admin'
+            AND EXISTS (
+              SELECT 1
+                FROM user_sites us
+               WHERE us.user_id = u.id
+                 AND us.site_id = $2
+            )
+          )
+        )
+      ORDER BY CASE u.role WHEN 'super_admin' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+               u.name ASC,
+               u.email ASC`,
+    [req.user.id, siteId]
   );
   res.json({ peers: rows });
 });
@@ -377,7 +395,8 @@ export const listTransferPeers = asyncHandler(async (req, res) => {
  */
 export const getAllBalances = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
-  const balances = await imprestLedgerModel.getAllBalances(site_id ? parseInt(site_id) : null, pool);
+  const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
+  const balances = await imprestLedgerModel.getAllBalances(parsedSiteId, pool);
   res.json({ balances });
 });
 
@@ -405,7 +424,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
     await client.query('BEGIN');
 
     // 1. Check imprest balance
-    const parsedSiteId = parseInt(site_id);
+    const parsedSiteId = req.imprestSiteId || parseInt(site_id);
     const currentBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, client);
 
     if (currentBalance <= 0) {
@@ -430,7 +449,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
 
     // 2. Create expense record
     const expenseData = {
-      site_id: parseInt(site_id),
+      site_id: parsedSiteId,
       date: expenseDate,
       from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
       to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
@@ -461,7 +480,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
 
     // 4. Create Day Book entry (DEBIT from imprest)
     const dayBookData = {
-      site_id: parseInt(site_id),
+      site_id: parsedSiteId,
       date: expenseDate,
       particular: `EXPENSE FROM IMPREST: ${remark || to_entity || 'GENERAL'}`.toUpperCase(),
       entry_type: 'EXPENSE',
@@ -515,6 +534,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
+  const parsedSiteId = req.imprestSiteId || parseInt(site_id);
   const requestAmount = parseFloat(amount || debit) || 0;
   if (requestAmount <= 0) return res.status(400).json({ message: 'Amount must be positive' });
 
@@ -525,7 +545,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
     : hasExpenseFields ? 'EXPENSE' : 'IMPREST';
 
   const expenseData = {
-    site_id: parseInt(site_id),
+    site_id: parsedSiteId,
     date: date || new Date().toISOString().split('T')[0],
     from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
     to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
@@ -541,7 +561,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
 
   const request = await imprestExpenseRequestModel.create({
     sub_admin_id: req.user.id,
-    site_id: parseInt(site_id),
+    site_id: parsedSiteId,
     amount: requestAmount,
     expense_data: JSON.stringify(expenseData),
     reason: reason ? reason.trim() : null,
@@ -565,7 +585,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
 export const listExpenseRequests = asyncHandler(async (req, res) => {
   const { site_id, status } = req.query;
 
-  const parsedSiteId = site_id ? parseInt(site_id) : null;
+  const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
 
   let requests;
   if (req.user.role === 'admin' || req.user.role === 'super_admin') {
@@ -604,6 +624,19 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     if (!request) {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Request not found or already processed' });
+    }
+
+    // Re-check at approval time: a requester may have been deactivated or
+    // removed from the site after submitting the request. Do not create a new
+    // allocation/expense ledger entry for an ineligible site participant.
+    const eligibleRequester = await findEligibleImprestParticipant(
+      request.sub_admin_id,
+      request.site_id,
+      client
+    );
+    if (!eligibleRequester) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'The requester is no longer active or assigned to this site' });
     }
 
     const requestType = request.request_type || 'EXPENSE';
@@ -645,9 +678,12 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     }
 
     // ── EXPENSE type: overdraft expense flow (original behavior) ──
-    const expenseData = typeof request.expense_data === 'string'
+    const storedExpenseData = typeof request.expense_data === 'string'
       ? JSON.parse(request.expense_data)
       : request.expense_data;
+    // The request row owns the authoritative site. Never trust a stale or
+    // legacy JSON payload to direct the approved expense into another site.
+    const expenseData = { ...storedExpenseData, site_id: request.site_id };
     const expenseAmount = parseFloat(expenseData.debit) || requestAmount;
 
     // 2b. Create the expense
@@ -666,12 +702,12 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       amount: -expenseAmount,
       remarks: `OVERDRAFT EXPENSE #${expense.id} (Admin approved): ${expenseData.remark || ''}`.trim(),
       created_by: req.user.id,
-      site_id: request.site_id ? parseInt(request.site_id) : null,
+      site_id: parseInt(request.site_id),
     }, client);
 
     // 4b. Create Day Book entry
     const dayBookData = {
-      site_id: parseInt(expenseData.site_id),
+      site_id: parseInt(request.site_id),
       date: expenseData.date || new Date().toISOString().split('T')[0],
       particular: `OVERDRAFT EXPENSE: ${expenseData.remark || expenseData.to_entity || 'ADMIN APPROVED'}`.toUpperCase(),
       entry_type: 'EXPENSE',
@@ -740,6 +776,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
 
   if (!user_id) return res.status(400).json({ message: 'User ID is required' });
   if (amount === undefined || amount === null) return res.status(400).json({ message: 'Amount is required' });
+  const parsedSiteId = req.imprestSiteId || parseInt(site_id);
 
   const client = await pool.connect();
   try {
@@ -753,7 +790,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
       amount: parseFloat(amount),
       remarks: remarks ? remarks.trim().toUpperCase() : 'ADMIN ADJUSTMENT',
       created_by: req.user.id,
-      site_id: site_id ? parseInt(site_id) : null,
+      site_id: parsedSiteId,
     }, client);
 
     // Day Book entry for audit trail
@@ -761,7 +798,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
     const userName = userResult.rows[0]?.name || 'Sub-Admin';
 
     const dayBookData = {
-      site_id: site_id ? parseInt(site_id) : 1,
+      site_id: parsedSiteId,
       date: new Date().toISOString().split('T')[0],
       particular: `IMPREST ADJUSTMENT FOR ${userName.toUpperCase()}`,
       entry_type: 'IMPREST',
@@ -777,7 +814,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
-    const balance = await imprestLedgerModel.getBalance(parseInt(user_id), site_id ? parseInt(site_id) : null, pool);
+    const balance = await imprestLedgerModel.getBalance(parseInt(user_id), parsedSiteId, pool);
 
     res.json({ entry, balance, message: 'Balance adjusted successfully' });
   } catch (err) {
@@ -805,7 +842,7 @@ export const createReturn = asyncHandler(async (req, res) => {
   }
 
   // Validate balance — can't return more than available
-  const parsedSiteId = site_id ? parseInt(site_id) : null;
+  const parsedSiteId = req.imprestSiteId || parseInt(site_id);
   const currentBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, pool);
   if (currentBalance < returnAmount) {
     return res.status(400).json({
@@ -819,7 +856,7 @@ export const createReturn = asyncHandler(async (req, res) => {
     amount: returnAmount,
     reason: reason ? reason.trim() : null,
     payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : 'CASH',
-    site_id: site_id ? parseInt(site_id) : null,
+    site_id: parsedSiteId,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'PENDING',
   }, pool);
@@ -836,7 +873,7 @@ export const createReturn = asyncHandler(async (req, res) => {
  */
 export const listReturns = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
-  const parsedSiteId = site_id ? parseInt(site_id) : null;
+  const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
 
   let returns;
   if (req.user.role === 'admin' || req.user.role === 'super_admin') {
@@ -853,7 +890,8 @@ export const listReturns = asyncHandler(async (req, res) => {
  */
 export const getPendingReturns = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
-  const returns = await imprestReturnModel.findPending(site_id ? parseInt(site_id) : null, pool);
+  const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
+  const returns = await imprestReturnModel.findPending(parsedSiteId, pool);
   res.json({ returns });
 });
 

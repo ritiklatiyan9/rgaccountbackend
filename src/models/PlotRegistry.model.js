@@ -59,13 +59,28 @@ class PlotRegistryModel extends MasterModel {
           SUM(prp.amount)::numeric AS total_paid,
           COUNT(*)::int            AS payment_count
         FROM plot_registry_payments prp
+        LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = pr.id
+          AND (
+            prp.source_plot_payment_id IS NULL
+            OR (pr.plot_id IS NOT NULL AND pp.plot_id = pr.plot_id)
+            OR (
+              pr.plot_id IS NULL
+              AND EXISTS (
+                SELECT 1 FROM plots target
+                 WHERE target.id = pp.plot_id
+                   AND target.site_id = pr.site_id
+                   AND UPPER(target.plot_no) = UPPER(pr.plot_no)
+              )
+            )
+          )
       ) agg ON TRUE
       LEFT JOIN LATERAL (
         SELECT COUNT(*)::int AS registry_doc_count
         FROM documents d
         WHERE d.plot_id = pr.plot_id
           AND UPPER(COALESCE(d.category, '')) = 'REGISTRY'
+          AND COALESCE(d.uploaded_source, 'BOOKING') <> 'DMS'
       ) docs ON TRUE
       ${handoverJoin}
       WHERE pr.site_id = $1
@@ -94,7 +109,21 @@ class PlotRegistryModel extends MasterModel {
           SUM(prp.amount)::numeric AS total_paid,
           COUNT(*)::int            AS payment_count
         FROM plot_registry_payments prp
+        LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = pr.id
+          AND (
+            prp.source_plot_payment_id IS NULL
+            OR (pr.plot_id IS NOT NULL AND pp.plot_id = pr.plot_id)
+            OR (
+              pr.plot_id IS NULL
+              AND EXISTS (
+                SELECT 1 FROM plots target
+                 WHERE target.id = pp.plot_id
+                   AND target.site_id = pr.site_id
+                   AND UPPER(target.plot_no) = UPPER(pr.plot_no)
+              )
+            )
+          )
       ) agg ON TRUE
       WHERE pr.id = $1
     `;
@@ -139,8 +168,20 @@ class PlotRegistryPaymentModel extends MasterModel {
   /** All payments for a registry, ordered by date ASC */
   async findByRegistryId(registryId, pool) {
     const query = `
-      SELECT prp.*, u.name AS created_by_name
+      SELECT prp.*, u.name AS created_by_name,
+             CASE
+               WHEN prp.source_plot_payment_id IS NULL THEN TRUE
+               WHEN pr.plot_id IS NOT NULL THEN pp.plot_id = pr.plot_id
+               ELSE EXISTS (
+                 SELECT 1 FROM plots target
+                  WHERE target.id = pp.plot_id
+                    AND target.site_id = pr.site_id
+                    AND UPPER(target.plot_no) = UPPER(pr.plot_no)
+               )
+             END AS plot_matches_registry
       FROM plot_registry_payments prp
+      JOIN plot_registries pr ON pr.id = prp.registry_id
+      LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
       LEFT JOIN users u ON u.id = prp.created_by
       WHERE prp.registry_id = $1
       ORDER BY prp.payment_date ASC, prp.created_at ASC

@@ -5,14 +5,49 @@
 import {
   GraphQLSchema, GraphQLObjectType, GraphQLString, GraphQLFloat,
   GraphQLBoolean, GraphQLList, GraphQLNonNull, GraphQLInputObjectType,
-  GraphQLEnumType, GraphQLInt, GraphQLID,
+  GraphQLEnumType, GraphQLInt, GraphQLID, GraphQLError,
 } from 'graphql';
 import { getAllKpis } from './services/kpi.service.js';
-import { verifyFinancialIntegrity, getQueryDescriptions } from './services/consistency.service.js';
+import { verifyFinancialIntegrity } from './services/consistency.service.js';
 import { getRevenueVsExpense, getProfitTrend, getExpenseByCategory } from './services/charts.service.js';
 import { getExpensesPageData, getExpensesBreakdown } from './services/expenses.service.js';
 import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
 import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes } from '../config/cache.js';
+
+const PRIVILEGED_ROLES = new Set(['admin', 'super_admin']);
+
+function requireModuleRead(ctx, module, rawSiteId) {
+  if (!ctx?.user) {
+    throw new GraphQLError('Authentication required', { extensions: { code: 'UNAUTHENTICATED' } });
+  }
+
+  const siteId = Number(rawSiteId);
+  if (!Number.isInteger(siteId) || siteId <= 0) {
+    throw new GraphQLError('A valid siteId is required', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+
+  if (PRIVILEGED_ROLES.has(ctx.user.role)) return siteId;
+  if (ctx.user.role !== 'sub_admin') {
+    throw new GraphQLError('Insufficient permissions', { extensions: { code: 'FORBIDDEN' } });
+  }
+
+  if (ctx.permissions?.get(module)?.can_read !== true) {
+    throw new GraphQLError(`Read access to ${module} is required`, { extensions: { code: 'FORBIDDEN' } });
+  }
+  if (!ctx.siteIds?.has(siteId)) {
+    throw new GraphQLError('Access denied to this site', { extensions: { code: 'FORBIDDEN' } });
+  }
+
+  return siteId;
+}
+
+function requirePositiveId(rawValue, name) {
+  const value = Number(rawValue);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new GraphQLError(`A valid ${name} is required`, { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return value;
+}
 
 // ── Input types ──
 
@@ -503,8 +538,7 @@ const QueryType = new GraphQLObjectType({
         excludeOldPlots: { type: GraphQLBoolean },
       },
       async resolve(_, { siteId, range, excludeOldPlots = false }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        const id = parseInt(siteId);
+        const id = requireModuleRead(ctx, 'dashboard', siteId);
 
         // Redis cache — was completely UNCACHED before despite running 9
         // heavy parallel queries on every Dashboard load. This is the
@@ -541,11 +575,8 @@ const QueryType = new GraphQLObjectType({
         range:  { type: new GraphQLNonNull(DateRangeInput) },
       },
       async resolve(_, { siteId, range }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        if (ctx.user.role !== 'admin' && ctx.user.role !== 'super_admin' && ctx.user.role !== 'sub_admin') {
-          throw new Error('Access required for verification');
-        }
-        const result = await verifyFinancialIntegrity(parseInt(siteId), range.start, range.end);
+        const id = requireModuleRead(ctx, 'dashboard', siteId);
+        const result = await verifyFinancialIntegrity(id, range.start, range.end);
         return {
           ...result,
           queriesUsed: JSON.stringify(result.queriesUsed),
@@ -562,8 +593,7 @@ const QueryType = new GraphQLObjectType({
         excludeOldPlots: { type: GraphQLBoolean },
       },
       async resolve(_, { siteId, range, resolution = 'MONTH', excludeOldPlots = false }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        const id = parseInt(siteId);
+        const id = requireModuleRead(ctx, 'dashboard', siteId);
         const key = cacheKey(`chart-rve-${resolution}${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
@@ -586,8 +616,7 @@ const QueryType = new GraphQLObjectType({
         excludeOldPlots: { type: GraphQLBoolean },
       },
       async resolve(_, { siteId, range, resolution = 'MONTH', excludeOldPlots = false }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        const id = parseInt(siteId);
+        const id = requireModuleRead(ctx, 'dashboard', siteId);
         const key = cacheKey(`chart-profit-${resolution}${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
@@ -609,8 +638,8 @@ const QueryType = new GraphQLObjectType({
         top:    { type: GraphQLInt },
       },
       async resolve(_, { siteId, range, top = 8 }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        const data = await getExpenseByCategory(parseInt(siteId), range.start, range.end, top);
+        const id = requireModuleRead(ctx, 'dashboard', siteId);
+        const data = await getExpenseByCategory(id, range.start, range.end, top);
         return data;
       },
     },
@@ -625,9 +654,7 @@ const QueryType = new GraphQLObjectType({
         includeBreakdowns: { type: GraphQLBoolean },
       },
       async resolve(_, { siteId, page = 1, limit = 20, filters = {}, includeBreakdowns = false }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-
-        const id = parseInt(siteId);
+        const id = requireModuleRead(ctx, 'expenses', siteId);
         const safePage = Number.isFinite(page) ? Math.max(1, page) : 1;
         const safeLimit = Number.isFinite(limit) ? Math.max(0, limit) : 20;
         const normalizedFilters = {
@@ -678,9 +705,7 @@ const QueryType = new GraphQLObjectType({
         filters:{ type: ExpensesPageFiltersInput },
       },
       async resolve(_, { siteId, filters = {} }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-
-        const id = parseInt(siteId);
+        const id = requireModuleRead(ctx, 'expenses', siteId);
         const normalizedFilters = {
           search: filters.search || undefined,
           mode: filters.mode || undefined,
@@ -718,8 +743,7 @@ const QueryType = new GraphQLObjectType({
         siteId: { type: new GraphQLNonNull(GraphQLID) },
       },
       async resolve(_, { siteId }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        const id = parseInt(siteId);
+        const id = requireModuleRead(ctx, 'plot_payments', siteId);
         const key = `plots:pageData:${id}`;
 
         if (cacheEnabled()) {
@@ -741,8 +765,8 @@ const QueryType = new GraphQLObjectType({
         siteId: { type: new GraphQLNonNull(GraphQLID) },
       },
       async resolve(_, { plotId, siteId }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        const data = await getPlotPaymentDetail(parseInt(plotId), parseInt(siteId));
+        const id = requireModuleRead(ctx, 'plot_payments', siteId);
+        const data = await getPlotPaymentDetail(requirePositiveId(plotId, 'plotId'), id);
         return data;
       },
     },
@@ -753,8 +777,8 @@ const QueryType = new GraphQLObjectType({
         siteId: { type: new GraphQLNonNull(GraphQLID) },
       },
       async resolve(_, { siteId }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        return getRegistryBankChequePayments(parseInt(siteId));
+        const id = requireModuleRead(ctx, 'plot_registry', siteId);
+        return getRegistryBankChequePayments(id);
       },
     },
   },
@@ -770,8 +794,8 @@ const MutationType = new GraphQLObjectType({
         siteId: { type: new GraphQLNonNull(GraphQLID) },
       },
       async resolve(_, { siteId }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        await clearCacheByPrefixes([`dashboard:*:${siteId}:`]);
+        const id = requireModuleRead(ctx, 'dashboard', siteId);
+        await clearCacheByPrefixes([`dashboard:*:${id}:`]);
         return true;
       },
     },
@@ -782,8 +806,8 @@ const MutationType = new GraphQLObjectType({
         siteId: { type: new GraphQLNonNull(GraphQLID) },
       },
       async resolve(_, { siteId }, ctx) {
-        if (!ctx.user) throw new Error('Authentication required');
-        await clearCacheByPrefixes([`plots:pageData:${siteId}`]);
+        const id = requireModuleRead(ctx, 'plot_payments', siteId);
+        await clearCacheByPrefixes([`plots:pageData:${id}`]);
         return true;
       },
     },

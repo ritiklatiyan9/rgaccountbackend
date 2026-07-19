@@ -66,7 +66,10 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'date_from cannot be after date_to' });
   }
 
-  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 2500, 1), 12000);
+  // Statements are also used by Day Book's Overall print and Excel exports.
+  // Keep a generous safety ceiling while allowing those exports to include all
+  // normal accounting history rather than a truncated on-screen subset.
+  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 2500, 1), 100000);
   const rangeDays = dateFrom && dateTo
     ? Math.ceil((new Date(`${dateTo}T00:00:00`) - new Date(`${dateFrom}T00:00:00`)) / 86400000) + 1
     : null;

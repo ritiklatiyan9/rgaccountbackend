@@ -7,7 +7,7 @@ import requireRole from '../middlewares/role.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const permissionReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'permissions' });
-const bustPermissionCache = invalidateCacheOnSuccess(['/permissions']);
+const bustPermissionCache = invalidateCacheOnSuccess(['permissions|']);
 
 // All permission routes require authentication + admin role
 router.use(authMiddleware, requireRole('admin'));

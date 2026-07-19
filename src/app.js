@@ -4,7 +4,8 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import { createHandler } from 'graphql-http/lib/use/express';
 import { schema as graphqlSchema } from './graphql/schema.js';
-import { verifyToken } from './config/jwt.js';
+import pool from './config/db.js';
+import authMiddleware from './middlewares/auth.middleware.js';
 import errorMiddleware from './middlewares/error.middleware.js';
 
 const app = express();
@@ -22,18 +23,37 @@ app.use('/uploads/excel', express.static(path.join(process.cwd(), 'uploads', 'ex
 app.use('/uploads/kyc_documents', express.static(path.join(process.cwd(), 'uploads', 'kyc_documents')));
 
 // ── GraphQL endpoint (dashboard BFF) ──
-app.all('/graphql', createHandler({
-  schema: graphqlSchema,
-  context: (req) => {
-    // Extract JWT from Authorization header for GraphQL context
-    const token = req.raw.headers.authorization?.replace('Bearer ', '');
-    let user = null;
-    if (token) {
-      try { user = verifyToken(token); } catch { /* unauthenticated */ }
-    }
-    return { user };
-  },
-}));
+app.all(
+  '/graphql',
+  // Reuse the REST authentication boundary so active-user, token-version and
+  // session revocation checks cannot drift between the two APIs.
+  authMiddleware,
+  createHandler({
+    schema: graphqlSchema,
+    context: async (req) => {
+      const user = req.raw.user;
+      if (user.role !== 'sub_admin') {
+        return { user, permissions: new Map(), siteIds: new Set() };
+      }
+
+      const [permissionResult, siteResult] = await Promise.all([
+        pool.query(
+          `SELECT module, can_read, can_write, can_update, can_delete
+             FROM user_permissions
+            WHERE user_id = $1`,
+          [user.id]
+        ),
+        pool.query('SELECT site_id FROM user_sites WHERE user_id = $1', [user.id]),
+      ]);
+
+      return {
+        user,
+        permissions: new Map(permissionResult.rows.map((row) => [row.module, row])),
+        siteIds: new Set(siteResult.rows.map((row) => Number(row.site_id))),
+      };
+    },
+  })
+);
 
 // routes
 import indexRoutes from './routes/index.js';

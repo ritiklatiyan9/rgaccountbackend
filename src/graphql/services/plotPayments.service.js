@@ -178,6 +178,9 @@ export async function getPlotPaymentDetail(plotId, siteId) {
   const paymentsQuery = `
     SELECT pp.*, 'payment' AS source, u.name AS created_by_name
     FROM plot_payments pp
+    JOIN plots authorized_plot
+      ON authorized_plot.id = pp.plot_id
+     AND authorized_plot.site_id = $2
     LEFT JOIN users u ON u.id = pp.created_by
     WHERE pp.plot_id = $1
     ORDER BY pp.date ASC, pp.created_at ASC
@@ -221,27 +224,36 @@ export async function getPlotPaymentDetail(plotId, siteId) {
       WHERE pip.plot_id = p.id
     ) ip_agg ON true
     WHERE p.id = $1
+      AND p.site_id = $2
   `;
 
   const fromBreakdownQuery = `
     SELECT
-      COALESCE(NULLIF(payment_from, ''), 'OTHER') AS payment_from,
+      COALESCE(NULLIF(pp.payment_from, ''), 'OTHER') AS payment_from,
       COUNT(*)::int AS entries,
-      COALESCE(SUM(amount), 0) AS total_amount
-    FROM plot_payments
-    WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-    GROUP BY COALESCE(NULLIF(payment_from, ''), 'OTHER')
+      COALESCE(SUM(pp.amount), 0) AS total_amount
+    FROM plot_payments pp
+    JOIN plots authorized_plot
+      ON authorized_plot.id = pp.plot_id
+     AND authorized_plot.site_id = $2
+    WHERE pp.plot_id = $1
+      AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+    GROUP BY COALESCE(NULLIF(pp.payment_from, ''), 'OTHER')
     ORDER BY total_amount DESC
   `;
 
   const receivedByBreakdownQuery = `
     SELECT
-      COALESCE(NULLIF(received_by, ''), 'UNKNOWN') AS received_by,
+      COALESCE(NULLIF(pp.received_by, ''), 'UNKNOWN') AS received_by,
       COUNT(*)::int AS entries,
-      COALESCE(SUM(amount), 0) AS total_amount
-    FROM plot_payments
-    WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-    GROUP BY COALESCE(NULLIF(received_by, ''), 'UNKNOWN')
+      COALESCE(SUM(pp.amount), 0) AS total_amount
+    FROM plot_payments pp
+    JOIN plots authorized_plot
+      ON authorized_plot.id = pp.plot_id
+     AND authorized_plot.site_id = $2
+    WHERE pp.plot_id = $1
+      AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+    GROUP BY COALESCE(NULLIF(pp.received_by, ''), 'UNKNOWN')
     ORDER BY total_amount DESC
   `;
 
@@ -252,16 +264,19 @@ export async function getPlotPaymentDetail(plotId, siteId) {
         0
       ) AS paid_amount
     FROM plot_installments pi
+    JOIN plots authorized_plot
+      ON authorized_plot.id = pi.plot_id
+     AND authorized_plot.site_id = $2
     WHERE pi.plot_id = $1
     ORDER BY pi.sort_order ASC, pi.due_date ASC
   `;
 
   const [paymentsRes, plotRes, fromRes, recByRes, instRes] = await Promise.all([
-    pool.query(paymentsQuery, [plotId]),
-    pool.query(plotQuery, [plotId]),
-    pool.query(fromBreakdownQuery, [plotId]),
-    pool.query(receivedByBreakdownQuery, [plotId]),
-    pool.query(installmentsQuery, [plotId]),
+    pool.query(paymentsQuery, [plotId, siteId]),
+    pool.query(plotQuery, [plotId, siteId]),
+    pool.query(fromBreakdownQuery, [plotId, siteId]),
+    pool.query(receivedByBreakdownQuery, [plotId, siteId]),
+    pool.query(installmentsQuery, [plotId, siteId]),
   ]);
 
   return {

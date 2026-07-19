@@ -25,7 +25,9 @@ const requirePermission = (module, action) => {
                 }
 
                 const fieldName = `can_${action}`;
-                if (permission[fieldName] === false) {
+                // Fail closed for malformed/legacy rows as well as explicit
+                // false values. Only a stored boolean true grants access.
+                if (permission[fieldName] !== true) {
                     return res.status(403).json({ message: `You do not have permission to ${action} in this module` });
                 }
 

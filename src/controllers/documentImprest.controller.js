@@ -7,12 +7,58 @@ import { uploadPlotDoc, getPlotDocUrl, deletePlotDoc } from '../utils/plotDocSto
  *
  * Every issue is recorded with a camera photo taken at the moment of handover
  * (the proof), optionally an expected-return deadline, and later the return
- * with its own optional proof photo. Rows are the permanent history — there is
- * deliberately no delete endpoint. All authenticated users can read the full
- * register and record handovers/returns; each action stamps who did it.
+ * with its own optional proof photo. Rows are the permanent history, scoped
+ * to one site. Admins can work across sites; sub-admins can only access
+ * records for sites assigned to them in user_sites. Each action stamps who did it.
  */
 
 const S3_PREFIX = 'document_imprest';
+
+const isAdminRole = (role) => role === 'admin' || role === 'super_admin';
+
+const ensureSiteAccess = async (req, res, siteId) => {
+  if (isAdminRole(req.user.role)) return true;
+
+  const { rows } = await pool.query(
+    'SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1',
+    [req.user.id, siteId]
+  );
+  if (rows[0]) return true;
+
+  res.status(403).json({ message: 'Access denied to this site' });
+  return false;
+};
+
+/** Resolve the record's authoritative site before exposing proof keys or mutating it. */
+const getAccessibleRecord = async (req, res, id) => {
+  const { rows } = await pool.query('SELECT * FROM document_imprest WHERE id = $1', [id]);
+  const record = rows[0];
+  if (!record) {
+    res.status(404).json({ message: 'Record not found' });
+    return null;
+  }
+  if (!await ensureSiteAccess(req, res, record.site_id)) return null;
+  return record;
+};
+
+const getSiteReceiver = async (receiverUserId, siteId) => {
+  const { rows } = await pool.query(
+    `SELECT u.id
+       FROM users u
+      WHERE u.id = $1
+        AND u.is_active = true
+        AND (
+          u.role IN ('admin', 'super_admin')
+          OR EXISTS (
+            SELECT 1 FROM user_sites us
+             WHERE us.user_id = u.id AND us.site_id = $2
+          )
+        )
+      LIMIT 1`,
+    [receiverUserId, siteId]
+  );
+  return rows[0] || null;
+};
 
 const RECORD_SELECT = `
   SELECT di.*,
@@ -43,7 +89,8 @@ const withPhotoUrls = async (row) => {
 export const listDocumentImprest = asyncHandler(async (req, res) => {
   const { status, q, site_id } = req.query;
   const siteId = parseInt(site_id, 10);
-  if (Number.isNaN(siteId)) return res.status(400).json({ message: 'site_id is required' });
+  if (!Number.isInteger(siteId) || siteId <= 0) return res.status(400).json({ message: 'A valid site_id is required' });
+  if (!await ensureSiteAccess(req, res, siteId)) return;
 
   const where = [];
   const params = [siteId];
@@ -97,16 +144,18 @@ export const createDocumentImprest = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'A handover photo is required as proof' });
   }
   const siteId = parseInt(site_id, 10);
-  if (Number.isNaN(siteId)) return res.status(400).json({ message: 'site_id is required' });
+  if (!Number.isInteger(siteId) || siteId <= 0) return res.status(400).json({ message: 'A valid site_id is required' });
   const { rows: siteRows } = await pool.query('SELECT id FROM sites WHERE id = $1', [siteId]);
   if (!siteRows[0]) return res.status(400).json({ message: 'Site not found' });
+  if (!await ensureSiteAccess(req, res, siteId)) return;
 
   let receiverUserId = null;
   if (receiver_user_id) {
     receiverUserId = parseInt(receiver_user_id, 10);
     if (Number.isNaN(receiverUserId)) return res.status(400).json({ message: 'Invalid receiver_user_id' });
-    const { rows } = await pool.query('SELECT id FROM users WHERE id = $1', [receiverUserId]);
-    if (!rows[0]) return res.status(400).json({ message: 'Receiver user not found' });
+    if (!await getSiteReceiver(receiverUserId, siteId)) {
+      return res.status(400).json({ message: 'Receiver is not available for this site' });
+    }
   }
   const receiverName = receiver_name && String(receiver_name).trim() ? String(receiver_name).trim() : null;
   if (!receiverUserId && !receiverName) {
@@ -119,18 +168,26 @@ export const createDocumentImprest = asyncHandler(async (req, res) => {
     if (Number.isNaN(expectedReturnAt.getTime())) return res.status(400).json({ message: 'Invalid expected return time' });
   }
 
-  const photoKey = await uploadPlotDoc(req.file.buffer, req.file.originalname || 'handover.jpg', req.file.mimetype, S3_PREFIX);
+  let photoKey = null;
+  let photoPersisted = false;
+  try {
+    photoKey = await uploadPlotDoc(req.file.buffer, req.file.originalname || 'handover.jpg', req.file.mimetype, S3_PREFIX);
 
-  const { rows: [created] } = await pool.query(
-    `INSERT INTO document_imprest
-       (document_name, description, receiver_user_id, receiver_name, issued_by, photo_key, expected_return_at, remarks, site_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING id`,
-    [String(document_name).trim(), description || null, receiverUserId, receiverName, req.user.id, photoKey, expectedReturnAt, remarks || null, siteId]
-  );
+    const { rows: [created] } = await pool.query(
+      `INSERT INTO document_imprest
+         (document_name, description, receiver_user_id, receiver_name, issued_by, photo_key, expected_return_at, remarks, site_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [String(document_name).trim(), description || null, receiverUserId, receiverName, req.user.id, photoKey, expectedReturnAt, remarks || null, siteId]
+    );
+    photoPersisted = true;
 
-  const { rows } = await pool.query(`${RECORD_SELECT} WHERE di.id = $1`, [created.id]);
-  res.status(201).json({ record: await withPhotoUrls(rows[0]) });
+    const { rows } = await pool.query(`${RECORD_SELECT} WHERE di.id = $1`, [created.id]);
+    res.status(201).json({ record: await withPhotoUrls(rows[0]) });
+  } catch (error) {
+    if (photoKey && !photoPersisted) await deletePlotDoc(photoKey).catch(() => {});
+    throw error;
+  }
 });
 
 /**
@@ -143,8 +200,8 @@ export const updateDocumentImprest = asyncHandler(async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ message: 'Invalid id' });
 
-  const { rows: existing } = await pool.query('SELECT id FROM document_imprest WHERE id = $1', [id]);
-  if (!existing[0]) return res.status(404).json({ message: 'Record not found' });
+  const existing = await getAccessibleRecord(req, res, id);
+  if (!existing) return;
 
   const { document_name, description, receiver_user_id, receiver_name, expected_return_at, remarks } = req.body;
 
@@ -156,8 +213,9 @@ export const updateDocumentImprest = asyncHandler(async (req, res) => {
   if (receiver_user_id) {
     receiverUserId = parseInt(receiver_user_id, 10);
     if (Number.isNaN(receiverUserId)) return res.status(400).json({ message: 'Invalid receiver_user_id' });
-    const { rows } = await pool.query('SELECT id FROM users WHERE id = $1', [receiverUserId]);
-    if (!rows[0]) return res.status(400).json({ message: 'Receiver user not found' });
+    if (!await getSiteReceiver(receiverUserId, existing.site_id)) {
+      return res.status(400).json({ message: 'Receiver is not available for this site' });
+    }
   }
   const receiverName = receiver_name && String(receiver_name).trim() ? String(receiver_name).trim() : null;
   if (!receiverUserId && !receiverName) {
@@ -192,12 +250,12 @@ export const deleteDocumentImprest = asyncHandler(async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ message: 'Invalid id' });
 
-  const { rows } = await pool.query('SELECT photo_key, return_photo_key FROM document_imprest WHERE id = $1', [id]);
-  if (!rows[0]) return res.status(404).json({ message: 'Record not found' });
+  const record = await getAccessibleRecord(req, res, id);
+  if (!record) return;
 
   await pool.query('DELETE FROM document_imprest WHERE id = $1', [id]);
-  try { await deletePlotDoc(rows[0].photo_key); } catch { /* best-effort */ }
-  try { await deletePlotDoc(rows[0].return_photo_key); } catch { /* best-effort */ }
+  try { await deletePlotDoc(record.photo_key); } catch { /* best-effort */ }
+  try { await deletePlotDoc(record.return_photo_key); } catch { /* best-effort */ }
 
   res.json({ message: 'Record deleted' });
 });
@@ -211,23 +269,47 @@ export const returnDocumentImprest = asyncHandler(async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (Number.isNaN(id)) return res.status(400).json({ message: 'Invalid id' });
 
-  const { rows: existing } = await pool.query('SELECT id, status FROM document_imprest WHERE id = $1', [id]);
-  if (!existing[0]) return res.status(404).json({ message: 'Record not found' });
-  if (existing[0].status === 'RETURNED') return res.status(409).json({ message: 'Document is already marked returned' });
+  const existing = await getAccessibleRecord(req, res, id);
+  if (!existing) return;
+  if (existing.status === 'RETURNED') return res.status(409).json({ message: 'Document is already marked returned' });
 
   let returnPhotoKey = null;
-  if (req.file) {
-    returnPhotoKey = await uploadPlotDoc(req.file.buffer, req.file.originalname || 'return.jpg', req.file.mimetype, S3_PREFIX);
+  let returnPhotoPersisted = false;
+  try {
+    if (req.file) {
+      returnPhotoKey = await uploadPlotDoc(req.file.buffer, req.file.originalname || 'return.jpg', req.file.mimetype, S3_PREFIX);
+    }
+
+    const { rows: transitionedRows } = await pool.query(
+      `UPDATE document_imprest
+          SET status = 'RETURNED', returned_at = now(),
+              return_photo_key = $2, return_received_by = $3, return_remarks = $4
+        WHERE id = $1
+          AND status = 'ISSUED'
+        RETURNING id`,
+      [id, returnPhotoKey, req.user.id, req.body.return_remarks || null]
+    );
+
+    // Another authorized request may have returned the document after our
+    // initial access check but before this write. Never overwrite that audit
+    // event, and remove any proof object uploaded by the losing request.
+    if (!transitionedRows[0]) {
+      if (returnPhotoKey) {
+        try {
+          await deletePlotDoc(returnPhotoKey);
+        } catch (cleanupError) {
+          console.error(`Document imprest ${id} losing return proof cleanup failed:`, cleanupError.message);
+        }
+        returnPhotoKey = null;
+      }
+      return res.status(409).json({ message: 'Document is already marked returned' });
+    }
+    returnPhotoPersisted = true;
+
+    const { rows } = await pool.query(`${RECORD_SELECT} WHERE di.id = $1`, [id]);
+    res.json({ record: await withPhotoUrls(rows[0]) });
+  } catch (error) {
+    if (returnPhotoKey && !returnPhotoPersisted) await deletePlotDoc(returnPhotoKey).catch(() => {});
+    throw error;
   }
-
-  await pool.query(
-    `UPDATE document_imprest
-        SET status = 'RETURNED', returned_at = now(),
-            return_photo_key = $2, return_received_by = $3, return_remarks = $4
-      WHERE id = $1`,
-    [id, returnPhotoKey, req.user.id, req.body.return_remarks || null]
-  );
-
-  const { rows } = await pool.query(`${RECORD_SELECT} WHERE di.id = $1`, [id]);
-  res.json({ record: await withPhotoUrls(rows[0]) });
 });

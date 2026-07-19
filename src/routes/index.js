@@ -35,6 +35,7 @@ import dashboardPermissionRoutes from './dashboardPermission.routes.js';
 import upiRoutes from './upi.routes.js';
 import signatureRoutes from './signature.routes.js';
 import balanceSheetRoutes from './balanceSheet.routes.js';
+import applicationSettingRoutes from './applicationSetting.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -70,4 +71,5 @@ router.use('/dashboard-permissions', dashboardPermissionRoutes);
 router.use('/upi', upiRoutes);
 router.use('/signatures', signatureRoutes);
 router.use('/balance-sheet', balanceSheetRoutes);
+router.use('/settings', applicationSettingRoutes);
 export default router;

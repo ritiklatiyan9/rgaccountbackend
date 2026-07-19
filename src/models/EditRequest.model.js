@@ -85,6 +85,36 @@ class EditRequestModelClass extends MasterModel {
     return result.rows[0] || null;
   }
 
+  /** Lock one request inside an existing transaction before a state change. */
+  async findByIdForUpdate(id, db) {
+    const result = await db.query(
+      'SELECT * FROM edit_requests WHERE id = $1 FOR UPDATE',
+      [parseInt(id)]
+    );
+    return result.rows[0] || null;
+  }
+
+  /**
+   * Transition only a still-pending request. PostgreSQL re-checks the WHERE
+   * predicate after waiting on a concurrent row lock, so approve/reject cannot
+   * overwrite one another.
+   */
+  async transitionPending(id, data, db) {
+    const keys = Object.keys(data);
+    if (keys.length === 0) return null;
+    const values = Object.values(data);
+    const setClause = keys.map((key, index) => `${key} = $${index + 1}`).join(', ');
+    values.push(parseInt(id));
+    const result = await db.query(
+      `UPDATE edit_requests
+          SET ${setClause}
+        WHERE id = $${values.length} AND status = 'pending'
+        RETURNING *`,
+      values
+    );
+    return result.rows[0] || null;
+  }
+
   /**
    * Get status counts
    */
