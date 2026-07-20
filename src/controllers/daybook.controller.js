@@ -158,10 +158,14 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     // Farmer payment fields
     farmer_id, interest_rate, interest_amount, by_note,
     assigned_admin_id, voucher_url,
+    mapped_member_id, mapped_user_id,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
   if (!particular) return res.status(400).json({ message: 'Particular is required' });
+  if (mapped_member_id && mapped_user_id) {
+    return res.status(400).json({ message: 'Map this entry to either a client or a user, not both' });
+  }
 
   const normalizedType = entry_type ? entry_type.trim().toUpperCase() : 'GENERAL';
 
@@ -539,6 +543,8 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     created_by: req.user.id,
     voucher_url: voucher_url || null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+    mapped_member_id: mapped_member_id ? parseInt(mapped_member_id) : null,
+    mapped_user_id: mapped_user_id ? parseInt(mapped_user_id) : null,
   };
 
   const dayBookEntry = await dayBookModel.create(data, pool);

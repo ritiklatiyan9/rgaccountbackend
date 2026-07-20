@@ -66,7 +66,8 @@ app.use(errorMiddleware);
 const KEEP_ALIVE_URLS = [
   'https://cropland-crm-backend.onrender.com',
   'https://diwan-city-backend.onrender.com',
-  'https://prithivi-backend.onrender.com'
+  'https://prithivi-backend.onrender.com',
+  'https://makeandman.onrender.com',
 ];
 const KEEP_ALIVE_INTERVAL_MS = 12 * 60 * 1000;
 

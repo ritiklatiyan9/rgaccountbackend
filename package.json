@@ -4,15 +4,16 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && node src/server.js",
-    "predev": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants",
+    "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && node src/server.js",
+    "predev": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping",
     "dev": "nodemon src/server.js",
     "migrate:plot-documents": "node src/migrations/059_plot_documents.js",
     "migrate:dms": "node src/migrations/069_dms_documents.js",
     "migrate:member-kyc-document-field": "node src/migrations/072_member_kyc_document_field.js",
     "migrate:balance-sheet": "node src/migrations/073_balance_sheet_performance.js",
     "migrate:application-settings": "node src/migrations/074_application_settings.js",
-    "migrate:registry-payment-invariants": "node src/migrations/075_registry_payment_plot_invariants.js"
+    "migrate:registry-payment-invariants": "node src/migrations/075_registry_payment_plot_invariants.js",
+    "migrate:transaction-person-mapping": "node src/migrations/076_transaction_person_mapping.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.700.0",

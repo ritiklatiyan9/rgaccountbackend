@@ -77,10 +77,14 @@ export const createExpense = asyncHandler(async (req, res) => {
   const {
     site_id, date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
-    assigned_user_id, assigned_admin_id, voucher_url, bill_url
+    assigned_user_id, assigned_admin_id, voucher_url, bill_url,
+    mapped_member_id, mapped_user_id,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
+  if (mapped_member_id && mapped_user_id) {
+    return res.status(400).json({ message: 'Map this entry to either a client or a user, not both' });
+  }
 
   const data = {
     site_id: parseInt(site_id),
@@ -102,6 +106,8 @@ export const createExpense = asyncHandler(async (req, res) => {
     created_by: req.user.id,
     cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
     cheque_status: (payment_mode || '').trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
+    mapped_member_id: mapped_member_id ? parseInt(mapped_member_id) : null,
+    mapped_user_id: mapped_user_id ? parseInt(mapped_user_id) : null,
   };
 
   const expense = await expenseModel.create(data, pool);

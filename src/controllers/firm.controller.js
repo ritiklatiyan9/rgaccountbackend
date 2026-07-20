@@ -187,10 +187,14 @@ export const deleteFirm = asyncHandler(async (req, res) => {
  */
 export const createTransaction = asyncHandler(async (req, res) => {
   const { firm_id, date, description, debit, credit, name, purpose, remark, remark2, cheque_no, transaction_no,
-          cash_flow_month_id, ledger_name, ledger_type, voucher_url, payment_mode, assigned_admin_id } = req.body;
+          cash_flow_month_id, ledger_name, ledger_type, voucher_url, payment_mode, assigned_admin_id,
+          mapped_member_id, mapped_user_id } = req.body;
 
   if (!firm_id) return res.status(400).json({ message: 'Firm is required' });
   if (!description || !description.trim()) return res.status(400).json({ message: 'Description is required' });
+  if (mapped_member_id && mapped_user_id) {
+    return res.status(400).json({ message: 'Map this entry to either a client or a user, not both' });
+  }
 
   const firmIdInt = parseInt(firm_id);
   const firm = await firmModel.findById(firmIdInt, pool);
@@ -318,6 +322,8 @@ export const createTransaction = asyncHandler(async (req, res) => {
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
     cheque_status: txnPaymentMode === 'cheque' ? 'PENDING' : null,
+    mapped_member_id: mapped_member_id ? parseInt(mapped_member_id) : null,
+    mapped_user_id: mapped_user_id ? parseInt(mapped_user_id) : null,
     ...(cfEntryId && { cash_flow_entry_id: cfEntryId }),
   };
 

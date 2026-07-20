@@ -639,12 +639,17 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
     note,
     voucher_url,
     assigned_admin_id,
+    mapped_member_id,
+    mapped_user_id,
   } = req.body;
 
   const paymentAmount = parseFloat(amount);
   if (!payment_date) return res.status(400).json({ message: 'Payment date is required' });
   if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
     return res.status(400).json({ message: 'Payment amount must be greater than 0' });
+  }
+  if (mapped_member_id && mapped_user_id) {
+    return res.status(400).json({ message: 'Map this payment to either a client or a user, not both' });
   }
 
   // Verify the commitment belongs to this site without taking a row-lock —
@@ -661,8 +666,8 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
 
   const vendorPayMode = (payment_mode || 'cash').toLowerCase();
   const paymentResult = await pool.query(
-    `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status, mapped_member_id, mapped_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      RETURNING *`,
     [
       commitmentId,
@@ -678,6 +683,8 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
       assigned_admin_id ? parseInt(assigned_admin_id) : null,
       req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
       vendorPayMode === 'cheque' ? 'PENDING' : null,
+      mapped_member_id ? parseInt(mapped_member_id) : null,
+      mapped_user_id ? parseInt(mapped_user_id) : null,
     ]
   );
 

@@ -179,11 +179,14 @@ export const createPayment = asyncHandler(async (req, res) => {
   const {
     date, particular, amount, by_note, remarks,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
-    voucher_url, assigned_admin_id,
+    voucher_url, assigned_admin_id, mapped_member_id, mapped_user_id,
   } = req.body;
 
   if (!particular) {
     return res.status(400).json({ message: 'Particular (payment method) is required' });
+  }
+  if (mapped_member_id && mapped_user_id) {
+    return res.status(400).json({ message: 'Map this payment to either a client or a user, not both' });
   }
 
   const farmerIdInt = parseInt(farmerId);
@@ -215,9 +218,9 @@ export const createPayment = asyncHandler(async (req, res) => {
          farmer_id, date, particular, amount, by_note, remarks,
          payment_mode, cash_amount, bank_amount, bank_name, bank_account_no,
          bank_reference, bank_ifsc, voucher_url, assigned_admin_id, status,
-         cheque_no, cheque_status, created_by
+         cheque_no, cheque_status, created_by, mapped_member_id, mapped_user_id
        )
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, $17, $18
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, $17, $18, $25, $26
        FROM f
        RETURNING *
      ),
@@ -289,6 +292,8 @@ export const createPayment = asyncHandler(async (req, res) => {
       bankRemarks,                  // $22 (bank remarks)
       particularUpper,              // $23 (bank payment_mode)
       bankNameUpper,                // $24 (bank from_entity)
+      mapped_member_id ? parseInt(mapped_member_id) : null,  // $25
+      mapped_user_id ? parseInt(mapped_user_id) : null,      // $26
     ]
   );
 
