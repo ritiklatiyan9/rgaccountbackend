@@ -146,6 +146,18 @@ const REPORT_QUERY = `${SCOPED}
         SELECT COUNT(*)::int FROM cash_flow_entries
         WHERE site_id = $1 AND UPPER(COALESCE(cheque_status, '')) IN ('BOUNCED', 'RETURNED')
       ),
+      -- Entries dated after today. Money that has not moved yet, so no
+      -- "balance through <date>" card can show it and every period ending
+      -- today excludes it. Counted here so a post-dated (or mistyped) row is
+      -- visible rather than only appearing in an unbounded total.
+      'post_dated_entries', (
+        SELECT COUNT(*)::int FROM ledger_entries
+        WHERE site_id = $1 AND entry_date > CURRENT_DATE
+      ),
+      'post_dated_amount', (
+        SELECT COALESCE(SUM(debit + credit), 0)::numeric FROM ledger_entries
+        WHERE site_id = $1 AND entry_date > CURRENT_DATE
+      ),
       'is_truncated', summary.total_entries > $9::int
     )
   ) AS report
