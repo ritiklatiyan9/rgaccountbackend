@@ -30,6 +30,8 @@ import {
   verifyData,
   getDailyBalance,
   getModeBalance,
+  updateModuleEntryFromDayBook,
+  deleteModuleEntryFromDayBook,
 } from '../controllers/daybook.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -43,7 +45,7 @@ router.use(authMiddleware);
 
 const daybookReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'daybook' });
 // Daybook mutations affect expenses, farmers, cashflow, plots, firms — bust all related caches
-const bustDaybookCache = invalidateCacheOnSuccess(['/daybook', '/expenses', '/farmers', '/cashflow', '/plots', '/firms']);
+const bustDaybookCache = invalidateCacheOnSuccess(['/daybook', '/expenses', '/farmers', '/cashflow', '/plots', '/firms', '/vendors', '/plot-commission']);
 
 // Recent transactions (Dashboard) — must be before /:id route
 router.get('/recent', requireRole('admin', 'sub_admin'), daybookReadCache, listRecentTransactions);
@@ -101,6 +103,11 @@ router.delete('/firm-transaction/:id', requireRole('admin', 'sub_admin'), requir
 router.get('/plots', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, listPlotsForDayBook);
 router.put('/plot-payment/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updatePlotPaymentFromDayBook);
 router.delete('/plot-payment/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), bustDaybookCache, deletePlotPaymentFromDayBook);
+
+// Installment / vendor / commission-payout rows the Day Book displays on
+// behalf of their owning module. Source table is whitelisted in the controller.
+router.put('/module-entry/:source/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateModuleEntryFromDayBook);
+router.delete('/module-entry/:source/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), bustDaybookCache, deleteModuleEntryFromDayBook);
 
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, getDayBookEntry);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateDayBookEntry);

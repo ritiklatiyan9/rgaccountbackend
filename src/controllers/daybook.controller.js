@@ -8,6 +8,7 @@ import { memberModel } from '../models/Member.model.js';
 import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model.js';
 import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
+import { installmentModel } from '../models/Installment.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { classifyPaymentMode, emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
@@ -568,7 +569,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   console.log(`[daybook] listEntries site_id=${siteId} date=${queryDate}`);
 
   // Fetch ONLY the requested date from all tables — fast indexed queries
-  const [dayBookEntriesRaw, expenseEntries, farmerPaymentEntries, commissionEntries, cashFlowEntries, firmTxnEntries, plotPaymentEntries] = await Promise.all([
+  const [dayBookEntriesRaw, expenseEntries, farmerPaymentEntries, commissionEntries, cashFlowEntries, firmTxnEntries, plotPaymentEntries, moduleLedgerEntries] = await Promise.all([
     dayBookModel.findBySiteAndDate(siteId, queryDate, pool),
     expenseModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] expense query error:', err.message); return []; }),
     farmerPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] farmer_payment query error:', err.message); return []; }),
@@ -576,6 +577,23 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     cashFlowEntryModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] cashflow query error:', err.message); return []; }),
     firmTransactionModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] firm_transaction query error:', err.message); return []; }),
     plotPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] plot_payment query error:', err.message); return []; }),
+    // Plot installments, vendor payments and v2 commission payouts are counted
+    // by getModeBalance and the Balance Sheet but had no rows here, so the
+    // list totals drifted from the Remaining cards on days they occurred.
+    // Their trigger-synced ledger copies are already normalized (site/date/
+    // amounts/cash_type, bounced amounts zeroed) — read those instead of
+    // three more raw tables. Mirrors mode-balance filters: skip bounced and
+    // rejected, keep pending.
+    pool.query(
+      `SELECT cfe.*, u.name AS assigned_admin_name
+         FROM cash_flow_entries cfe
+         LEFT JOIN users u ON u.id = cfe.assigned_admin_id
+        WHERE cfe.site_id = $1 AND cfe.date = $2
+          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'plot_commission_payments')
+          AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
+          AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'`,
+      [siteId, queryDate]
+    ).then(r => r.rows).catch(err => { console.error('[daybook] module ledger query error:', err.message); return []; }),
   ]);
 
   // Exclude IMPREST entries from daybook — they are managed in the Imprest module
@@ -765,7 +783,14 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       debit: c.amount,
       credit: 0,
       remarks: c.remarks,
-      payment_mode: null,
+      // Mirror the trg_sync_cfe by_note heuristic so Cash/Bank Day Book
+      // buckets commissions the same way the Balance Sheet ledger does.
+      payment_mode: (() => {
+        const bn = String(c.by_note || '').toUpperCase();
+        if (bn.includes('CHEQUE')) return 'CHEQUE';
+        if (bn.includes('BANK') || bn.includes('ONLINE')) return 'BANK';
+        return 'CASH';
+      })(),
       category: 'COMMISSION',
       from_entity: null,
       to_entity: c.particular,
@@ -916,25 +941,64 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       source: 'plot_payment',
     }));
 
+  // Trigger-synced ledger rows for modules with no raw fetch above.
+  // read_only: these are managed in their own module pages — Day Book only
+  // displays them so its totals tie to the Remaining cards + Balance Sheet.
+  const MODULE_LEDGER_META = {
+    plot_installment_payments: { prefix: 'pip', entry_type: 'PLOT INSTALLMENT', source: 'plot_installment', category: 'PLOT PAYMENT' },
+    vendor_payments:           { prefix: 'vp',  entry_type: 'VENDOR PAYMENT',   source: 'vendor_payment',   category: 'VENDOR' },
+    plot_commission_payments:  { prefix: 'pcp', entry_type: 'PLOT COMMISSION PAYMENT', source: 'commission_payment', category: 'COMMISSION' },
+  };
+  const linkedVpIds = new Set(
+    dayBookEntries
+      .filter(e => e.vendor_payment_id)
+      .map(e => e.vendor_payment_id)
+  );
+  const transformedModuleLedger = moduleLedgerEntries
+    .filter(m => !(m.source_module === 'vendor_payments' && linkedVpIds.has(m.source_id)))
+    .map(m => {
+      const meta = MODULE_LEDGER_META[m.source_module];
+      return {
+        id: `${meta.prefix}_${m.source_id}`,
+        site_id: m.site_id,
+        date: m.date,
+        particular: m.particular,
+        entry_type: meta.entry_type,
+        debit: m.debit,
+        credit: m.credit,
+        remarks: m.remarks,
+        payment_mode: (m.cash_type || 'BANK').toUpperCase(),
+        category: meta.category,
+        from_entity: null,
+        to_entity: null,
+        account_no: null,
+        branch: null,
+        cheque_status: m.cheque_status,
+        cheque_no: m.cheque_no,
+        voucher_url: m.voucher_url,
+        status: m.status,
+        created_by: m.created_by,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        assigned_admin_id: m.assigned_admin_id,
+        assigned_admin_name: m.assigned_admin_name,
+        source: meta.source,
+        read_only: true,
+      };
+    });
+
   // Merge and sort ASC by id
-  console.log(`[daybook] counts: daybook=${enrichedDayBookEntries.length} expenses=${transformedExpenses.length} fp=${transformedFarmerPayments.length} comm=${transformedCommissions.length} cf=${transformedCashFlow.length} ft=${transformedFirmTxns.length} pp=${transformedPlotPayments.length}`);
-  const allEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments].sort((a, b) => {
-    const idA = typeof a.id === 'string' && a.id.startsWith('expense_') ? parseInt(a.id.split('_')[1]) + 100000
-              : typeof a.id === 'string' && a.id.startsWith('fp_') ? parseInt(a.id.split('_')[1]) + 200000
-              : typeof a.id === 'string' && a.id.startsWith('comm_') ? parseInt(a.id.split('_')[1]) + 300000
-              : typeof a.id === 'string' && a.id.startsWith('cf_') ? parseInt(a.id.split('_')[1]) + 400000
-              : typeof a.id === 'string' && a.id.startsWith('ft_') ? parseInt(a.id.split('_')[1]) + 500000
-              : typeof a.id === 'string' && a.id.startsWith('pp_') ? parseInt(a.id.split('_')[1]) + 600000
-              : a.id;
-    const idB = typeof b.id === 'string' && b.id.startsWith('expense_') ? parseInt(b.id.split('_')[1]) + 100000
-              : typeof b.id === 'string' && b.id.startsWith('fp_') ? parseInt(b.id.split('_')[1]) + 200000
-              : typeof b.id === 'string' && b.id.startsWith('comm_') ? parseInt(b.id.split('_')[1]) + 300000
-              : typeof b.id === 'string' && b.id.startsWith('cf_') ? parseInt(b.id.split('_')[1]) + 400000
-              : typeof b.id === 'string' && b.id.startsWith('ft_') ? parseInt(b.id.split('_')[1]) + 500000
-              : typeof b.id === 'string' && b.id.startsWith('pp_') ? parseInt(b.id.split('_')[1]) + 600000
-              : b.id;
-    return idA - idB;
-  });
+  console.log(`[daybook] counts: daybook=${enrichedDayBookEntries.length} expenses=${transformedExpenses.length} fp=${transformedFarmerPayments.length} comm=${transformedCommissions.length} cf=${transformedCashFlow.length} ft=${transformedFirmTxns.length} pp=${transformedPlotPayments.length} modules=${transformedModuleLedger.length}`);
+  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000 };
+  const sortId = (x) => {
+    if (typeof x.id === 'string') {
+      const [prefix, n] = x.id.split('_');
+      if (ID_OFFSET[prefix]) return parseInt(n) + ID_OFFSET[prefix];
+    }
+    return x.id;
+  };
+  const allEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments, ...transformedModuleLedger]
+    .sort((a, b) => sortId(a) - sortId(b));
 
   // Compute summary
   let total_debit = 0, total_credit = 0;
@@ -1567,6 +1631,189 @@ export const deleteExpenseFromDayBook = asyncHandler(async (req, res) => {
   if (!existing) return res.status(404).json({ message: 'Expense not found' });
   await expenseModel.delete(parseInt(req.params.id), pool);
   res.json({ message: 'Expense deleted' });
+});
+
+// ══════════════════════════════════════════════════
+//  MODULE-OWNED ROW ENDPOINTS (from Day Book)
+//
+//  Installment / vendor / commission-payout rows are displayed by the Day
+//  Book but owned by their own modules. Rather than three near-identical
+//  proxies, one pair of handlers writes only the four columns the Day Book
+//  form can actually edit — date, amount, mode, remarks. Every other column
+//  (reference_no, voucher_url, balance_after_payment…) is left untouched,
+//  which is why this does not simply call the modules' own PUT endpoints:
+//  those do full-field updates and would null out fields the Day Book never
+//  sends. cash_flow_entries re-syncs itself via trg_sync_cfe_<table>.
+// ══════════════════════════════════════════════════
+
+const MODULE_TABLES = Object.freeze({
+  plot_installment_payments: {
+    date: 'payment_date', amount: 'amount', mode: 'payment_mode', remarks: 'notes',
+    modeCase: 'upper', direction: 'credit',
+  },
+  vendor_payments: {
+    date: 'payment_date', amount: 'amount', mode: 'payment_mode', remarks: 'note',
+    // CHECK constraint allows only the lowercase set.
+    modeCase: 'lower', direction: 'debit',
+    modeValues: ['cash', 'bank', 'upi', 'cheque', 'neft', 'rtgs', 'imps', 'other'],
+  },
+  plot_commission_payments: {
+    date: 'date', amount: 'amount', mode: 'payment_mode', remarks: 'remarks',
+    modeCase: 'upper', direction: 'debit',
+  },
+  plot_registry_payments: {
+    date: 'payment_date', amount: 'amount', mode: 'payment_mode', remarks: 'notes',
+    modeCase: 'upper', direction: 'debit',
+  },
+});
+
+const loadModuleRow = async (source, id, client) => {
+  const cfg = MODULE_TABLES[source];
+  if (!cfg) return null;
+  const { rows } = await client.query(`SELECT * FROM ${source} WHERE id = $1`, [id]);
+  return rows[0] ? { cfg, row: rows[0] } : null;
+};
+
+// The Day Book reaches into another module's table here, so re-check the site
+// boundary rather than inheriting the caller's daybook permission alone.
+// plot_installment_payments has no site_id of its own — it hangs off the plot.
+const moduleRowSiteId = async (source, row, client) => {
+  if (source !== 'plot_installment_payments') return row.site_id ?? null;
+  const { rows } = await client.query('SELECT site_id FROM plots WHERE id = $1', [row.plot_id]);
+  return rows[0]?.site_id ?? null;
+};
+
+const canTouchSite = async (user, siteId, client) => {
+  if (user?.role === 'admin' || user?.role === 'super_admin') return true;
+  if (!siteId) return false;
+  const { rows } = await client.query(
+    'SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1',
+    [user.id, siteId]
+  );
+  return !!rows[0];
+};
+
+// Installment payments carry an invariant the other two don't: the parent
+// plot_installments.paid_amount must track the sum of its payments.
+const shiftInstallmentPaid = async (row, delta, client) => {
+  const inst = await installmentModel.findById(row.installment_id, client);
+  if (!inst) return null;
+  const nextPaid = parseFloat(inst.paid_amount) + delta;
+  if (nextPaid > parseFloat(inst.amount) + 0.001) {
+    return `Amount exceeds this installment by ${(nextPaid - parseFloat(inst.amount)).toFixed(2)}`;
+  }
+  await installmentModel.update(inst.id, { paid_amount: Math.max(0, nextPaid) }, client);
+  await installmentModel.refreshStatuses(row.plot_id, client);
+  return null;
+};
+
+/** PUT /daybook/module-entry/:source/:id */
+export const updateModuleEntryFromDayBook = asyncHandler(async (req, res) => {
+  const { source } = req.params;
+  const id = parseInt(req.params.id, 10);
+  if (!MODULE_TABLES[source]) return res.status(400).json({ message: 'Unsupported module source' });
+  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await loadModuleRow(source, id, client);
+    if (!found) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Entry not found' }); }
+    const { cfg, row } = found;
+
+    if (!(await canTouchSite(req.user, await moduleRowSiteId(source, row, client), client))) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied to this site' });
+    }
+
+    const { date, amount, payment_mode, remarks } = req.body;
+
+    let nextAmount = parseFloat(row[cfg.amount]);
+    if (amount !== undefined) {
+      nextAmount = parseFloat(amount);
+      if (!Number.isFinite(nextAmount) || nextAmount <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: 'Amount must be greater than 0' });
+      }
+    }
+
+    // An empty mode means "leave as is" rather than NULL — vendor_payments
+    // declares payment_mode NOT NULL, so clearing it would just error.
+    let nextMode = row[cfg.mode];
+    if (payment_mode) {
+      nextMode = cfg.modeCase === 'lower'
+        ? String(payment_mode).trim().toLowerCase()
+        : String(payment_mode).trim().toUpperCase();
+      if (cfg.modeValues && !cfg.modeValues.includes(nextMode)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: `Payment mode must be one of: ${cfg.modeValues.join(', ')}` });
+      }
+    }
+
+    if (source === 'plot_installment_payments') {
+      const delta = nextAmount - parseFloat(row[cfg.amount]);
+      if (delta !== 0) {
+        const err = await shiftInstallmentPaid(row, delta, client);
+        if (err) { await client.query('ROLLBACK'); return res.status(400).json({ message: err }); }
+      }
+    }
+
+    const { rows } = await client.query(
+      `UPDATE ${source}
+          SET ${cfg.date} = $1, ${cfg.amount} = $2, ${cfg.mode} = $3, ${cfg.remarks} = $4
+        WHERE id = $5
+        RETURNING *`,
+      [
+        date || row[cfg.date],
+        nextAmount,
+        nextMode,
+        remarks !== undefined ? (remarks || null) : row[cfg.remarks],
+        id,
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.json({ entry: rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+});
+
+/** DELETE /daybook/module-entry/:source/:id */
+export const deleteModuleEntryFromDayBook = asyncHandler(async (req, res) => {
+  const { source } = req.params;
+  const id = parseInt(req.params.id, 10);
+  if (!MODULE_TABLES[source]) return res.status(400).json({ message: 'Unsupported module source' });
+  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await loadModuleRow(source, id, client);
+    if (!found) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Entry not found' }); }
+    const { cfg, row } = found;
+
+    if (!(await canTouchSite(req.user, await moduleRowSiteId(source, row, client), client))) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied to this site' });
+    }
+
+    if (source === 'plot_installment_payments') {
+      await shiftInstallmentPaid(row, -parseFloat(row[cfg.amount]), client);
+    }
+    await client.query(`DELETE FROM ${source} WHERE id = $1`, [id]);
+
+    await client.query('COMMIT');
+    res.json({ message: 'Entry deleted' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 // ══════════════════════════════════════════════════

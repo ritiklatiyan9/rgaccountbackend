@@ -17,36 +17,27 @@ class InstallmentModel extends MasterModel {
     return result.rows;
   }
 
-  /** Refresh statuses based on current date and payments */
+  /**
+   * Recompute statuses from current date + paid_amount.
+   *
+   * Derives every row's status from scratch rather than only ratcheting it
+   * forward. The old version was three ratcheting UPDATEs that could never
+   * downgrade a row, so once paid_amount could fall — a payment edited down
+   * or deleted — the installment stayed 'paid' forever. Precedence is
+   * unchanged: paid > overdue > partially_paid > pending.
+   */
   async refreshStatuses(plotId, pool) {
     const today = new Date().toISOString().split('T')[0];
-    // Mark overdue: past due_date, not fully paid
     await pool.query(`
       UPDATE plot_installments
-      SET status = 'overdue'
+      SET status = CASE
+        WHEN paid_amount >= amount THEN 'paid'
+        WHEN due_date < $2          THEN 'overdue'
+        WHEN paid_amount > 0        THEN 'partially_paid'
+        ELSE 'pending'
+      END
       WHERE plot_id = $1
-        AND due_date < $2
-        AND paid_amount < amount
-        AND status != 'paid'
     `, [plotId, today]);
-
-    // Mark partially_paid: has some payment but not full
-    await pool.query(`
-      UPDATE plot_installments
-      SET status = 'partially_paid'
-      WHERE plot_id = $1
-        AND paid_amount > 0
-        AND paid_amount < amount
-        AND status NOT IN ('paid', 'overdue')
-    `, [plotId]);
-
-    // Mark paid: fully paid
-    await pool.query(`
-      UPDATE plot_installments
-      SET status = 'paid'
-      WHERE plot_id = $1
-        AND paid_amount >= amount
-    `, [plotId]);
   }
 }
 
