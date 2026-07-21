@@ -4,6 +4,8 @@ import requireRole from '../middlewares/role.middleware.js';
 import {
   getFeatures,
   updatePlotRegistryWorkflow,
+  getSmsReminderSettings,
+  updateSmsReminderSettings,
 } from '../controllers/applicationSetting.controller.js';
 import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
@@ -20,5 +22,9 @@ router.put(
   bustRegistryCache,
   updatePlotRegistryWorkflow
 );
+
+// Payment-reminder SMS config — admin only, per site.
+router.get('/sms-reminders', authMiddleware, requireRole('admin'), getSmsReminderSettings);
+router.put('/sms-reminders', authMiddleware, requireRole('admin'), updateSmsReminderSettings);
 
 export default router;

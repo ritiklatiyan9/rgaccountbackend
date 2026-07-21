@@ -20,7 +20,7 @@ export function isWhatsAppConfigured() {
 }
 
 /** Normalise to MSG91's `<countrycode><number>` form (e.g. 919812345678). */
-function normalisePhone(raw) {
+export function normalisePhone(raw) {
   if (!raw) return null;
   let d = String(raw).replace(/\D/g, '');
   if (d.length === 11 && d.startsWith('0')) d = d.slice(1); // drop trunk 0

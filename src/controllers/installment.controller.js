@@ -47,11 +47,12 @@ function calculateInterest(remainingAmount, rate, type, fromDate, toDate) {
 //  PAYMENT REMINDERS
 // ══════════════════════════════════════════════════
 
-/** GET /plots/payment-reminders?site_id=X&page=1&limit=10 */
-export const paymentReminders = asyncHandler(async (req, res) => {
-  const { site_id, page = 1, limit = 10 } = req.query;
-  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
-
+/**
+ * Build the full, deduplicated reminder list for a site (no pagination).
+ * Single source of truth — used by the reminders API and by the SMS reminder
+ * job, so both agree on who is overdue/due and by how much.
+ */
+export const buildPaymentReminders = async (site_id) => {
   const todayStr = new Date().toISOString().split('T')[0];
   const todayMs = new Date(todayStr).getTime();
   const DAY = 86400000;
@@ -67,9 +68,7 @@ export const paymentReminders = asyncHandler(async (req, res) => {
      ORDER BY p.plot_no ASC`,
     [parseInt(site_id)]
   );
-  if (plotRes.rows.length === 0) {
-    return res.json({ reminders: [], pagination: { totalItems: 0, totalPages: 0, currentPage: 1, itemsPerPage: parseInt(limit) }, summary: { total: 0, overdue: 0, inactive: 0, upcoming: 0 } });
-  }
+  if (plotRes.rows.length === 0) return [];
 
   const plotIds = plotRes.rows.map(r => r.id);
 
@@ -352,6 +351,16 @@ export const paymentReminders = asyncHandler(async (req, res) => {
   // Also remove irregular if plot has slow_payer (more specific)
   const slowIds = new Set(deduped.filter(r => r.type === 'slow_payer').map(r => r.plot_id));
   deduped = deduped.filter(r => !(r.type === 'irregular' && slowIds.has(r.plot_id)));
+
+  return deduped;
+};
+
+/** GET /plots/payment-reminders?site_id=X&page=1&limit=10 */
+export const paymentReminders = asyncHandler(async (req, res) => {
+  const { site_id, page = 1, limit = 10 } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+
+  const deduped = await buildPaymentReminders(site_id);
 
   // Summary
   const summary = {
@@ -1301,4 +1310,45 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
       overdue_persons: overduePersons,
     },
   });
+});
+
+// ══════════════════════════════════════════════════
+//  PAYMENT REMINDER SMS (queued via AWS SQS)
+// ══════════════════════════════════════════════════
+
+/** POST /plots/payment-reminders/sms — manual "send now" for the due set. */
+export const sendPaymentReminderSms = asyncHandler(async (req, res) => {
+  const siteId = parseInt(req.body.site_id, 10);
+  if (!Number.isInteger(siteId)) return res.status(400).json({ message: 'site_id is required' });
+
+  const { queueRemindersForSite } = await import('../services/smsReminder.service.js');
+  try {
+    const result = await queueRemindersForSite(siteId, { source: 'manual', userId: req.user.id });
+    res.json({
+      ...result,
+      message: result.total === 0
+        ? 'Nothing due for the configured reminder days right now'
+        : `${result.queued} SMS queued${result.no_phone ? `, ${result.no_phone} skipped (no phone on file)` : ''}${result.failed ? `, ${result.failed} failed` : ''}`,
+    });
+  } catch (err) {
+    res.status(503).json({ message: err.message });
+  }
+});
+
+/** GET /plots/payment-reminders/sms-log?site_id=X — recent queued/sent SMS. */
+export const paymentReminderSmsLog = asyncHandler(async (req, res) => {
+  const siteId = parseInt(req.query.site_id, 10);
+  if (!Number.isInteger(siteId)) return res.status(400).json({ message: 'site_id is required' });
+  const { rows } = await pool.query(
+    `SELECT l.id, l.plot_id, l.phone, l.reminder_type, l.message, l.source, l.status, l.error, l.created_at,
+            p.plot_no, u.name AS queued_by_name
+       FROM sms_reminder_log l
+       LEFT JOIN plots p ON p.id = l.plot_id
+       LEFT JOIN users u ON u.id = l.queued_by
+      WHERE l.site_id = $1
+      ORDER BY l.created_at DESC, l.id DESC
+      LIMIT 50`,
+    [siteId]
+  );
+  res.json({ log: rows });
 });

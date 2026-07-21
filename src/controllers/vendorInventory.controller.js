@@ -19,6 +19,13 @@ const ORDER_VALUE_SQL = `ROUND(o.qty_ordered * o.rate
       ELSE o.discount_amount
     END, 0), 2)`;
 
+// Qty already pulled into the inventory ledger against this order (the
+// procurement → stock link). Receipts are tagged ref_type = 'VENDOR_ORDER'.
+const RECEIVED_QTY_SQL = `COALESCE((
+  SELECT SUM(mv.qty) FROM inventory_movements mv
+   WHERE mv.ref_type = 'VENDOR_ORDER' AND mv.ref_id = o.id AND mv.movement_type = 'RECEIPT'
+), 0)`;
+
 export const listInventoryOrders = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
@@ -73,6 +80,8 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        o.total_paid, o.commitment_id,
        ${ORDER_VALUE_SQL} AS order_value,
        (${ORDER_VALUE_SQL} - o.total_paid) AS outstanding,
+       ${RECEIVED_QTY_SQL} AS received_qty,
+       (o.qty_ordered - ${RECEIVED_QTY_SQL}) AS pending_qty,
        o.order_date, o.expected_date, o.note, o.status, o.created_at,
        m.full_name AS vendor_member_name,
        vc.head_name, vc.work_title
@@ -125,6 +134,8 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
     `SELECT o.*,
        ${ORDER_VALUE_SQL} AS order_value,
        (${ORDER_VALUE_SQL} - o.total_paid) AS outstanding,
+       ${RECEIVED_QTY_SQL} AS received_qty,
+       (o.qty_ordered - ${RECEIVED_QTY_SQL}) AS pending_qty,
        m.full_name AS vendor_member_name,
        vc.head_name, vc.work_title
      FROM vendor_inventory_orders o

@@ -13,6 +13,8 @@ import { getRevenueVsExpense, getProfitTrend, getExpenseByCategory } from './ser
 import { getExpensesPageData, getExpensesBreakdown } from './services/expenses.service.js';
 import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
 import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes } from '../config/cache.js';
+import pool from '../config/db.js';
+import { inventoryModel } from '../models/Inventory.model.js';
 
 const PRIVILEGED_ROLES = new Set(['admin', 'super_admin']);
 
@@ -527,9 +529,74 @@ function expensesCacheKey(userId, siteId, page, limit, filters) {
 
 // ── Root Query ──
 
+// ── Construction + Inventory dashboard cards ──
+const ConstructionDashboardType = new GraphQLObjectType({
+  name: 'ConstructionDashboard',
+  fields: {
+    activeProjects:          { type: GraphQLInt },
+    delayedProjects:         { type: GraphQLInt },
+    avgProgress:             { type: GraphQLInt },
+    pendingMaterialRequests: { type: GraphQLInt },
+    totalBudget:             { type: GraphQLFloat },
+    totalActualCost:         { type: GraphQLFloat },
+  },
+});
+const InventoryDashboardType = new GraphQLObjectType({
+  name: 'InventoryDashboard',
+  fields: {
+    materialCount:           { type: GraphQLInt },
+    totalValue:              { type: GraphQLFloat },
+    lowStockCount:           { type: GraphQLInt },
+    pendingVendorDeliveries: { type: GraphQLInt },
+  },
+});
+
 const QueryType = new GraphQLObjectType({
   name: 'Query',
   fields: {
+    constructionDashboard: {
+      type: ConstructionDashboardType,
+      args: { siteId: { type: new GraphQLNonNull(GraphQLID) } },
+      async resolve(_, { siteId }, ctx) {
+        const id = requireModuleRead(ctx, 'construction', siteId);
+        const [agg, req, cost] = await Promise.all([
+          pool.query(
+            `SELECT
+               COUNT(*) FILTER (WHERE status = 'ACTIVE')::int AS active_projects,
+               COUNT(*) FILTER (WHERE status = 'DELAYED' OR (target_end_date IS NOT NULL AND target_end_date < CURRENT_DATE AND status <> 'COMPLETED'))::int AS delayed_projects,
+               COALESCE(ROUND(AVG(progress_pct) FILTER (WHERE status IN ('ACTIVE','DELAYED'))), 0)::int AS avg_progress,
+               COALESCE(SUM(budget), 0) AS total_budget
+             FROM construction_projects WHERE site_id = $1`, [id]),
+          pool.query(`SELECT COUNT(*)::int AS c FROM construction_material_requests WHERE site_id = $1 AND status IN ('REQUESTED','PARTIALLY_FULFILLED')`, [id]),
+          pool.query(`SELECT COALESCE(SUM(qty*rate),0) AS c FROM inventory_movements WHERE movement_type='CONSUMPTION' AND site_id = $1`, [id]),
+        ]);
+        return {
+          activeProjects: agg.rows[0].active_projects,
+          delayedProjects: agg.rows[0].delayed_projects,
+          avgProgress: agg.rows[0].avg_progress,
+          pendingMaterialRequests: req.rows[0].c,
+          totalBudget: parseFloat(agg.rows[0].total_budget) || 0,
+          totalActualCost: parseFloat(cost.rows[0].c) || 0,
+        };
+      },
+    },
+    inventoryDashboard: {
+      type: InventoryDashboardType,
+      args: { siteId: { type: new GraphQLNonNull(GraphQLID) } },
+      async resolve(_, { siteId }, ctx) {
+        const id = requireModuleRead(ctx, 'inventory', siteId);
+        const [s, deliv] = await Promise.all([
+          inventoryModel.summary(id),
+          pool.query(`SELECT COUNT(*)::int AS c FROM vendor_inventory_orders WHERE site_id = $1 AND status IN ('open','partial')`, [id]),
+        ]);
+        return {
+          materialCount: s.material_count,
+          totalValue: parseFloat(s.total_value) || 0,
+          lowStockCount: s.low_stock_count,
+          pendingVendorDeliveries: deliv.rows[0].c,
+        };
+      },
+    },
     kpiCards: {
       type: KpiCardsType,
       args: {

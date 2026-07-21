@@ -36,6 +36,9 @@ import upiRoutes from './upi.routes.js';
 import signatureRoutes from './signature.routes.js';
 import balanceSheetRoutes from './balanceSheet.routes.js';
 import applicationSettingRoutes from './applicationSetting.routes.js';
+import constructionRoutes from './construction.routes.js';
+import inventoryRoutes from './inventory.routes.js';
+import reportRoutes from './report.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -72,4 +75,7 @@ router.use('/upi', upiRoutes);
 router.use('/signatures', signatureRoutes);
 router.use('/balance-sheet', balanceSheetRoutes);
 router.use('/settings', applicationSettingRoutes);
+router.use('/construction', constructionRoutes);
+router.use('/inventory', inventoryRoutes);
+router.use('/reports', reportRoutes);
 export default router;

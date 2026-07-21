@@ -11,6 +11,7 @@ import {
   updateInstallment, deleteInstallment,
   recordInstallmentPayment, listInstallmentPayments,
   paymentManagementList, paymentReminders, paymentAnalytics,
+  sendPaymentReminderSms, paymentReminderSmsLog,
 } from '../controllers/installment.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -43,6 +44,9 @@ router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission
 router.get('/payment-management', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentManagementList);           // ?site_id=X
 router.get('/payment-reminders', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentReminders);                  // ?site_id=X&page=1&limit=10
 router.get('/payment-analytics', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentAnalytics);                   // ?site_id=X&mode=...
+// SMS reminders — must stay above '/:id' so they aren't swallowed by the param route.
+router.get('/payment-reminders/sms-log', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, paymentReminderSmsLog);                     // ?site_id=X
+router.post('/payment-reminders/sms', requireRole('admin'), requirePermission('plot_payments', 'write'), accessByBodySite, sendPaymentReminderSms);                                    // manual send
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, plotReadCache, getPlot);
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByBodySite, bustPlotCache, createPlot);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, updatePlot);

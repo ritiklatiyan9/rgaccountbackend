@@ -21,6 +21,8 @@ export const ALL_MODULES = Object.freeze([
     'imprest',
     'document_imprest',
     'upi_collect',
+    'construction',
+    'inventory',
     'chat',
     'excel',
     'reports',
@@ -36,6 +38,10 @@ const RESTRICTED_MODULES = new Set([
     'document_search',
     'document_imprest',
     'upi_collect',
+    // New money-touching modules (budgets, inventory valuation) — stay
+    // fail-closed for existing sub-admins; an admin opts users in.
+    'construction',
+    'inventory',
 ]);
 
 const getDefaultPermissions = (module) => {
