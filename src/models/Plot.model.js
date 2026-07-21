@@ -1,5 +1,16 @@
 import MasterModel from './MasterModel.js';
 
+// A plot_payments row counts toward "Received" under the same three guards
+// ledger_entries applies (migration 079): approved, not bounced/returned, and
+// a sane date. Shared so every LATERAL aggregate below stays in lockstep with
+// the Dashboard and Day Book instead of drifting the way `total_received`
+// used to (it summed the raw table with none of these).
+const PP_COUNTABLE = `
+  LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+  AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+  AND pp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
+`;
+
 // ── Plot Model ──
 class PlotModel extends MasterModel {
   constructor() {
@@ -22,19 +33,21 @@ class PlotModel extends MasterModel {
         COALESCE(agg.payment_booked_bys,  '') AS payment_booked_bys
       FROM plots p
       LEFT JOIN LATERAL (
+        -- Same three guards ledger_entries applies (migration 079): approved
+        -- only, no bounced/returned cheques, sane date. Without them this
+        -- page's "Received" ran ahead of the Dashboard by every pending
+        -- payment plus any row with a typo'd year — e.g. site 10 read
+        -- ₹24,52,26,843 here vs ₹24,37,28,843 on the Dashboard, a ₹14.98L gap
+        -- that was two rows dated year 0021/0022 instead of 2021/2022.
         SELECT
+          SUM(pp.amount) FILTER (WHERE ${PP_COUNTABLE}) AS total_received,
           SUM(pp.amount) FILTER (
-            WHERE pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')
-          ) AS total_received,
-          SUM(pp.amount) FILTER (
-            WHERE pp.payment_type IN ('BANK', 'CHEQUE')
-              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            WHERE pp.payment_type IN ('BANK', 'CHEQUE') AND ${PP_COUNTABLE}
           ) AS received_bank,
           SUM(pp.amount) FILTER (
-            WHERE pp.payment_type = 'CASH'
-              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            WHERE pp.payment_type = 'CASH' AND ${PP_COUNTABLE}
           ) AS received_cash,
-          COUNT(*)::int AS payment_count,
+          COUNT(*) FILTER (WHERE ${PP_COUNTABLE})::int AS payment_count,
           STRING_AGG(DISTINCT pp.buyer_name, ', ') FILTER (
             WHERE pp.buyer_name IS NOT NULL AND pp.buyer_name != ''
           ) AS payment_buyer_names,
@@ -96,18 +109,14 @@ class PlotModel extends MasterModel {
       FROM plots p
       LEFT JOIN LATERAL (
         SELECT
+          SUM(pp.amount) FILTER (WHERE ${PP_COUNTABLE}) AS total_received,
           SUM(pp.amount) FILTER (
-            WHERE pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')
-          ) AS total_received,
-          SUM(pp.amount) FILTER (
-            WHERE pp.payment_type IN ('BANK', 'CHEQUE')
-              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            WHERE pp.payment_type IN ('BANK', 'CHEQUE') AND ${PP_COUNTABLE}
           ) AS received_bank,
           SUM(pp.amount) FILTER (
-            WHERE pp.payment_type = 'CASH'
-              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            WHERE pp.payment_type = 'CASH' AND ${PP_COUNTABLE}
           ) AS received_cash,
-          COUNT(*)::int AS payment_count
+          COUNT(*) FILTER (WHERE ${PP_COUNTABLE})::int AS payment_count
         FROM plot_payments pp
         WHERE pp.plot_id = p.id
       ) agg ON TRUE
@@ -206,3 +215,4 @@ class PlotPaymentModel extends MasterModel {
 
 export const plotModel = new PlotModel();
 export const plotPaymentModel = new PlotPaymentModel();
+export { PP_COUNTABLE };

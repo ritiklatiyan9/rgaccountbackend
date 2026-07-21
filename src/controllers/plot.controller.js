@@ -1,5 +1,5 @@
 import asyncHandler from '../utils/asyncHandler.js';
-import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
+import { plotModel, plotPaymentModel, PP_COUNTABLE } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { notifyPlotPaymentRecorded } from '../utils/notify.js';
@@ -667,18 +667,14 @@ export const listPayments = asyncHandler(async (req, res) => {
        LEFT JOIN sites s ON s.id = p.site_id
        LEFT JOIN LATERAL (
          SELECT
+           SUM(pp.amount) FILTER (WHERE ${PP_COUNTABLE}) AS total_received,
            SUM(pp.amount) FILTER (
-             WHERE pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')
-           ) AS total_received,
-           SUM(pp.amount) FILTER (
-             WHERE pp.payment_type IN ('BANK', 'CHEQUE')
-               AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+             WHERE pp.payment_type IN ('BANK', 'CHEQUE') AND ${PP_COUNTABLE}
            ) AS received_bank,
            SUM(pp.amount) FILTER (
-             WHERE pp.payment_type = 'CASH'
-               AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+             WHERE pp.payment_type = 'CASH' AND ${PP_COUNTABLE}
            ) AS received_cash,
-           COUNT(*)::int AS payment_count
+           COUNT(*) FILTER (WHERE ${PP_COUNTABLE})::int AS payment_count
          FROM plot_payments pp
          WHERE pp.plot_id = p.id
        ) agg ON TRUE
