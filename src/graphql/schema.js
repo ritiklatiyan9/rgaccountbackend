@@ -200,6 +200,10 @@ const ImprestPairType = new GraphQLObjectType({
 const KpiCardsType = new GraphQLObjectType({
   name: 'KpiCards',
   fields: {
+    // Authoritative Site Balance — ledger net minus imprest float. Same value
+    // the Day Book and Balance Sheet show; the dashboard renders this instead
+    // of re-deriving it from revenue/expense/outstanding components.
+    siteBalance:           { type: new GraphQLNonNull(GraphQLFloat) },
     totalRevenue:          { type: new GraphQLNonNull(GraphQLFloat) },
     totalExpense:          { type: new GraphQLNonNull(GraphQLFloat) },
     netProfit:             { type: new GraphQLNonNull(GraphQLFloat) },

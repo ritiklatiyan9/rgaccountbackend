@@ -1,159 +1,23 @@
 import pool from '../config/db.js';
 
-const NORMALIZED_LEDGER_CTE = `
-  WITH source_rows AS (
-    SELECT
-      cfe.id,
-      cfe.site_id,
-      cfe.date::date AS entry_date,
-      cfe.particular,
-      cfe.remarks,
-      COALESCE(cfe.debit, 0)::numeric AS debit,
-      COALESCE(cfe.credit, 0)::numeric AS credit,
-      LOWER(COALESCE(cfe.cash_type, 'bank')) AS raw_mode,
-      CASE WHEN LOWER(COALESCE(cfe.cash_type, 'bank')) = 'cash' THEN 'cash' ELSE 'bank' END AS bucket,
-      COALESCE(cfe.source_module, 'personal_ledger') AS source_key,
-      cfe.source_id,
-      cfe.status,
-      cfe.cheque_status,
-      cfe.cheque_no,
-      COALESCE(
-        cfe.voucher_url,
-        fp.voucher_url,
-        pp.voucher_url,
-        vp.voucher_url,
-        ex.voucher_url,
-        db.voucher_url
-      ) AS voucher_url,
-      COALESCE(
-        f.name,
-        pp.buyer_name,
-        vc.vendor_name,
-        NULLIF(cfm.ledger_name, ''),
-        NULLIF(db.to_entity, ''),
-        NULLIF(db.from_entity, ''),
-        NULLIF(cfe.to_name, ''),
-        cfe.particular
-      ) AS entity_name,
-      COALESCE(
-        CASE WHEN p.plot_no IS NOT NULL THEN CONCAT('Plot ', p.plot_no, CASE WHEN p.block IS NOT NULL THEN CONCAT(' · Block ', p.block) ELSE '' END) END,
-        CASE WHEN NULLIF(cfm.ledger_name, '') IS NOT NULL THEN CONCAT(INITCAP(COALESCE(cfm.ledger_type, 'site')), ' ledger · ', cfm.ledger_name) END,
-        NULLIF(CONCAT_WS(' → ', NULLIF(db.from_entity, ''), NULLIF(db.to_entity, '')), ''),
-        NULLIF(cfe.remarks, '')
-      ) AS linked_detail,
-      COALESCE(u.name, 'System') AS created_by_name,
-      cfe.created_at,
-      (cfe.source_module = 'farmer_payments'
-        AND UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
-        AND (COALESCE(fp.cash_amount, 0) + COALESCE(fp.bank_amount, 0)) > 0) AS is_split,
-      COALESCE(fp.cash_amount, 0)::numeric AS split_cash,
-      COALESCE(fp.bank_amount, 0)::numeric AS split_bank,
-      UPPER(COALESCE(db.entry_type, '')) AS daybook_entry_type
-    FROM cash_flow_entries cfe
-    LEFT JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-    LEFT JOIN users u ON u.id = cfe.created_by
-    LEFT JOIN farmer_payments fp
-      ON cfe.source_module = 'farmer_payments' AND fp.id = cfe.source_id
-    LEFT JOIN farmers f ON f.id = fp.farmer_id
-    LEFT JOIN plot_payments pp
-      ON cfe.source_module = 'plot_payments' AND pp.id = cfe.source_id
-    LEFT JOIN plots p ON p.id = pp.plot_id
-    LEFT JOIN vendor_payments vp
-      ON cfe.source_module = 'vendor_payments' AND vp.id = cfe.source_id
-    LEFT JOIN vendor_commitments vc ON vc.id = vp.commitment_id
-    LEFT JOIN expenses ex
-      ON cfe.source_module = 'expenses' AND ex.id = cfe.source_id
-    LEFT JOIN day_book db
-      ON cfe.source_module = 'day_book' AND db.id = cfe.source_id
-    WHERE cfe.site_id = $1
-      AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
-      AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
-      AND COALESCE(cfe.source_module, '') NOT IN ('imprest', 'imprest_requests', 'document_imprest', 'document_imprest_requests')
-      AND NOT (cfe.source_module = 'day_book' AND UPPER(COALESCE(db.entry_type, '')) = 'IMPREST')
-  ),
-  normalized_entries AS (
-    SELECT
-      id::text AS id,
-      site_id,
-      entry_date,
-      particular,
-      remarks,
-      debit,
-      credit,
-      raw_mode,
-      bucket,
-      source_key,
-      source_id,
-      status,
-      cheque_status,
-      cheque_no,
-      voucher_url,
-      entity_name,
-      linked_detail,
-      created_by_name,
-      created_at
-    FROM source_rows
-    WHERE NOT is_split
-
-    UNION ALL
-
-    SELECT
-      CONCAT(id, ':cash') AS id,
-      site_id,
-      entry_date,
-      particular,
-      remarks,
-      split_cash AS debit,
-      0::numeric AS credit,
-      'cash' AS raw_mode,
-      'cash' AS bucket,
-      source_key,
-      source_id,
-      status,
-      cheque_status,
-      cheque_no,
-      voucher_url,
-      entity_name,
-      CONCAT_WS(' · ', linked_detail, 'Cash part of split payment') AS linked_detail,
-      created_by_name,
-      created_at
-    FROM source_rows
-    WHERE is_split AND split_cash > 0
-
-    UNION ALL
-
-    SELECT
-      CONCAT(id, ':bank') AS id,
-      site_id,
-      entry_date,
-      particular,
-      remarks,
-      split_bank AS debit,
-      0::numeric AS credit,
-      'bank' AS raw_mode,
-      'bank' AS bucket,
-      source_key,
-      source_id,
-      status,
-      cheque_status,
-      cheque_no,
-      voucher_url,
-      entity_name,
-      CONCAT_WS(' · ', linked_detail, 'Bank part of split payment') AS linked_detail,
-      created_by_name,
-      created_at
-    FROM source_rows
-    WHERE is_split AND split_bank > 0
-  ),
-  valid_entries AS (
+/**
+ * Balance Sheet reads `ledger_entries` — the canonical money view created in
+ * migration 079. Every filter that used to live here (approved-only, bounced
+ * cheques, sane dates, imprest exclusion, split explosion, bucketing) is now
+ * defined once in that view and shared with the Day Book and dashboard KPIs,
+ * so the three pages can no longer drift apart.
+ *
+ * `scope` is the Day Book's Cash/Bank split: 'cash' is the cash bucket,
+ * 'bank' is everything that is not cash (bank + cheque), matching the Bank
+ * Day Book's own bucket list.
+ */
+const SCOPED = `
+  WITH scoped_entries AS (
     SELECT *
-    FROM normalized_entries
-    WHERE entry_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-  ),
-  scoped_entries AS (
-    SELECT *
-    FROM valid_entries
-    WHERE ($4::text = 'all' OR bucket = $4::text)
+    FROM ledger_entries
+    WHERE site_id = $1
+      AND ($4::text = 'all' OR ($4::text = 'cash' AND bucket = 'cash')
+                            OR ($4::text = 'bank' AND bucket <> 'cash'))
       AND ($5::text = 'all' OR source_key = $5::text)
       AND ($6::text = 'all' OR raw_mode = $6::text)
       AND (
@@ -187,10 +51,27 @@ const NORMALIZED_LEDGER_CTE = `
       COALESCE(SUM(credit - debit), 0)::numeric AS net_movement,
       COUNT(*)::int AS total_entries
     FROM period_entries
+  ),
+  -- Cash handed to sub-admins is still the site's money but is no longer in
+  -- the site's hands, so it is reported as a balance adjustment rather than a
+  -- transaction. Same float the Day Book's Site Balance subtracts.
+  imprest AS (
+    SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS float_amount
+    FROM (
+      SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
+      FROM imprest_ledger
+      WHERE site_id IS NOT NULL AND site_id = $1
+        AND ($3::date IS NULL OR created_at::date <= $3::date)
+      GROUP BY user_id
+    ) u
+  ),
+  quarantine AS (
+    SELECT COUNT(*)::int AS n, COALESCE(SUM(debit + credit), 0)::numeric AS amount
+    FROM ledger_quarantine WHERE site_id = $1
   )
 `;
 
-const REPORT_QUERY = `${NORMALIZED_LEDGER_CTE}
+const REPORT_QUERY = `${SCOPED}
   SELECT jsonb_build_object(
     'summary', jsonb_build_object(
       'opening_balance', opening.amount,
@@ -198,6 +79,8 @@ const REPORT_QUERY = `${NORMALIZED_LEDGER_CTE}
       'total_credit', summary.total_credit,
       'net_movement', summary.net_movement,
       'closing_balance', opening.amount + summary.net_movement,
+      'imprest_float', imprest.float_amount,
+      'balance_in_hand', opening.amount + summary.net_movement - imprest.float_amount,
       'total_entries', summary.total_entries
     ),
     'transactions', COALESCE((
@@ -206,22 +89,10 @@ const REPORT_QUERY = `${NORMALIZED_LEDGER_CTE}
         SELECT
           id,
           TO_CHAR(entry_date, 'YYYY-MM-DD') AS entry_date,
-          particular,
-          remarks,
-          debit,
-          credit,
+          particular, remarks, debit, credit,
           raw_mode AS payment_mode,
-          bucket,
-          source_key,
-          source_id,
-          status,
-          cheque_status,
-          cheque_no,
-          voucher_url,
-          entity_name,
-          linked_detail,
-          created_by_name,
-          created_at
+          bucket, source_key, source_id, status, cheque_status, cheque_no,
+          voucher_url, entity_name, linked_detail, created_by_name, created_at
         FROM period_entries
         ORDER BY entry_date DESC, created_at DESC, id DESC
         LIMIT $9::int
@@ -260,10 +131,11 @@ const REPORT_QUERY = `${NORMALIZED_LEDGER_CTE}
       ) t
     ), '[]'::jsonb),
     'quality', jsonb_build_object(
-      'invalid_date_entries', (
-        SELECT COUNT(*)::int FROM source_rows
-        WHERE entry_date < DATE '1900-01-01' OR entry_date > DATE '2100-12-31'
-      ),
+      -- Entries whose date is a typo (year 0025, 20222, …). They are excluded
+      -- from every balance until corrected — surfaced so they get fixed rather
+      -- than silently swallowed.
+      'invalid_date_entries', quarantine.n,
+      'invalid_date_amount', quarantine.amount,
       'excluded_unapproved', (
         SELECT COUNT(*)::int FROM cash_flow_entries
         WHERE site_id = $1 AND LOWER(COALESCE(status, 'approved')) <> 'approved'
@@ -275,7 +147,7 @@ const REPORT_QUERY = `${NORMALIZED_LEDGER_CTE}
       'is_truncated', summary.total_entries > $9::int
     )
   ) AS report
-  FROM summary CROSS JOIN opening
+  FROM summary CROSS JOIN opening CROSS JOIN imprest CROSS JOIN quarantine
 `;
 
 class BalanceSheetModel {
@@ -292,16 +164,7 @@ class BalanceSheetModel {
     grain = 'day',
   }) {
     const result = await pool.query(REPORT_QUERY, [
-      siteId,
-      dateFrom,
-      dateTo,
-      scope,
-      source,
-      paymentMode,
-      direction,
-      search,
-      limit,
-      grain,
+      siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain,
     ]);
     return result.rows[0]?.report || null;
   }

@@ -21,78 +21,39 @@ import pool from '../../config/db.js';
 const dateFilter = (col, paramStart) =>
   `AND ${col} >= $${paramStart} AND ${col} < $${paramStart + 1}`;
 
-// ── Revenue: plot_payments + plot_installment_payments ──
+// ── Revenue: money in, from the shared ledger ──
+// `ledger_entries` (migration 079) is the same view the Day Book and the
+// Balance Sheet read, so these KPIs can no longer drift from those pages.
+// It already applies approved-only, bounced-cheque, sane-date and registry
+// de-duplication policy — this used to be a third private copy of all of it.
 export async function getRevenue(siteId, start, end, excludeOldPlots = false) {
-  const oldFilter = excludeOldPlots ? `AND (plt.plot_tag IS NULL OR plt.plot_tag != 'OLD')` : '';
   const { rows } = await pool.query(
-    `SELECT COALESCE(SUM(amount), 0)::numeric AS total
-     FROM (
-       SELECT pp.amount FROM plot_payments pp
-       JOIN plots plt ON plt.id = pp.plot_id
-       WHERE pp.site_id = $1 ${dateFilter('pp.date', 2)}
-         AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
-         ${oldFilter}
-       UNION ALL
-       SELECT pip.amount FROM plot_installment_payments pip
-       JOIN plots p ON p.id = pip.plot_id
-       WHERE p.site_id = $1 ${dateFilter('pip.payment_date', 2)}
-         AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
-         ${oldFilter.replace(/plt\./g, 'p.')}
-     ) u`,
-    [siteId, start, end]
+    `SELECT COALESCE(SUM(credit), 0)::numeric AS total
+       FROM ledger_entries
+      WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
+        AND source_key IN ('plot_payments', 'plot_installment_payments')
+        AND ($4::bool = false OR plot_tag <> 'OLD')`,
+    [siteId, start, end, excludeOldPlots]
   );
   return parseFloat(rows[0].total) || 0;
 }
 
 // ── Expense breakdown by module ──
-// Total Expenses = farmer_payments + expenses + commissions + commission_payments
-//                  + vendor_payments + orphan daybook EXPENSE
-// NOTE: plot_registry_payments are EXCLUDED — they are just mapped plot payments.
-// NOTE: personal_ledger_debit (cfe.debit on person ledger) is intentionally
-// EXCLUDED here because `outstanding = given − returned` already reflects it
-// in the Site Balance formula (adjustedIncoming = revenue − outstanding).
-// Counting it again as expense double-deducted loans-given from Site Balance
-// and made the Day Book module breakdown show 2× the real loan amount.
+// Every debit in the ledger except the person-ledger legs, which are already
+// reflected via `outstanding = given − returned` feeding
+// adjustedIncoming = revenue − outstanding. Counting them here too would
+// double-deduct loans given, which was a long-standing bug.
 export async function getExpenseBreakdown(siteId, start, end) {
   const { rows } = await pool.query(
-    `SELECT source_type,
+    `SELECT source_key AS source_type,
             COALESCE(SUM(debit), 0)::numeric AS total_debit,
             COUNT(*)::int AS txn_count
-     FROM (
-       SELECT fp.amount AS debit, 'farmer_payments' AS source_type
-       FROM farmer_payments fp
-       JOIN farmers f ON f.id = fp.farmer_id
-       WHERE f.site_id = $1 ${dateFilter('fp.date', 2)}
-         AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED','RETURNED'))
-         AND fp.status != 'rejected'
-       UNION ALL
-       SELECT debit, 'expenses' AS source_type
-       FROM expenses
-       WHERE site_id = $1 ${dateFilter('date', 2)}
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         AND status != 'rejected'
-       UNION ALL
-       SELECT amount AS debit, 'commission_payments' AS source_type
-       FROM plot_commission_payments
-       WHERE site_id = $1 ${dateFilter('date', 2)}
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         AND status != 'rejected'
-       UNION ALL
-       SELECT amount AS debit, 'vendor_payments' AS source_type
-       FROM vendor_payments
-       WHERE site_id = $1 ${dateFilter('payment_date', 2)}
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         AND status != 'rejected'
-       UNION ALL
-       SELECT debit, 'daybook_expense' AS source_type
-       FROM day_book
-       WHERE site_id = $1 ${dateFilter('date', 2)}
-         AND entry_type = 'EXPENSE'
-         AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         AND status != 'rejected'
-     ) u
-     GROUP BY source_type`,
+       FROM ledger_entries
+      WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
+        AND debit > 0
+        AND source_key NOT IN ('personal_ledger', 'plot_payments', 'plot_installment_payments')
+        AND ledger_type <> 'person'
+      GROUP BY source_key`,
     [siteId, start, end]
   );
 
@@ -104,6 +65,31 @@ export async function getExpenseBreakdown(siteId, start, end) {
     total += val;
   }
   return { total, breakdown };
+}
+
+// ── Site Balance: the one number every page must agree on ──
+// Net of the ledger minus the imprest float (cash sitting with sub-admins).
+// Identical to daybook's siteBalanceAsOf and the Balance Sheet's
+// balance_in_hand — computed here so the dashboard stops re-deriving it from
+// revenue/expense/outstanding components that each rounded differently.
+export async function getSiteBalance(siteId, end) {
+  const { rows } = await pool.query(
+    `SELECT
+       (SELECT COALESCE(SUM(credit - debit), 0)::numeric
+          FROM ledger_entries
+         WHERE site_id = $1 AND entry_date < $2::date)
+       -
+       (SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric
+          FROM (
+            SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
+            FROM imprest_ledger
+            WHERE site_id IS NOT NULL AND site_id = $1 AND created_at < $2
+            GROUP BY user_id
+          ) u)
+       AS balance`,
+    [siteId, end]
+  );
+  return parseFloat(rows[0].balance) || 0;
 }
 
 // ── Site Cashflow: credit − debit from site-type ledgers ──
@@ -310,7 +296,7 @@ export async function getImprestDistribution(siteId, start, end) {
 
 // ── Combined KPI fetch (single round-trip where possible) ──
 export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
-  const [revenue, expData, cashflow, outstanding, personalLedgerCredit, imprestGiven, imprestDistribution, registryPayments, imprestPairs] = await Promise.all([
+  const [revenue, expData, cashflow, outstanding, personalLedgerCredit, imprestGiven, imprestDistribution, registryPayments, imprestPairs, siteBalance] = await Promise.all([
     getRevenue(siteId, start, end, excludeOldPlots),
     getExpenseBreakdown(siteId, start, end),
     getSiteCashflow(siteId, start, end),
@@ -320,6 +306,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     getImprestDistribution(siteId, start, end),
     getRegistryPayments(siteId, start, end),
     getImprestPairs(siteId, start, end),
+    getSiteBalance(siteId, end),
   ]);
 
   // Total Incoming = Plot Payments only
@@ -329,6 +316,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
   const profitMargin = revenue > 0 ? (netProfit / revenue) * 100 : 0;
 
   return {
+    siteBalance,
     totalRevenue: revenue,
     totalExpense: expData.total,
     netProfit,

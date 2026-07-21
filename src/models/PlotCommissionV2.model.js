@@ -88,10 +88,11 @@ class PlotCommissionV2Model extends MasterModel {
           m.full_name AS agent_name,
           m.phone AS agent_phone,
           COALESCE(SUM(pcp.amount), 0) AS total_paid,
-          -- Cash vs bank split using the same classifier the Day Book / Farmers
-          -- page apply: CASH-mode → cash_paid; everything else → bank_paid.
-          COALESCE(SUM(CASE WHEN UPPER(COALESCE(pcp.payment_mode,'CASH')) = 'CASH' THEN pcp.amount ELSE 0 END), 0) AS cash_paid,
-          COALESCE(SUM(CASE WHEN UPPER(COALESCE(pcp.payment_mode,'CASH')) <> 'CASH' THEN pcp.amount ELSE 0 END), 0) AS bank_paid,
+          -- Cash vs bank split via ledger_bucket() — the single mode→book rule
+          -- the Day Book and Balance Sheet also use, so "Cash paid to agents"
+          -- here equals the Day Book's Plot Commissions figure.
+          COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) = 'cash' THEN pcp.amount ELSE 0 END), 0) AS cash_paid,
+          COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) <> 'cash' THEN pcp.amount ELSE 0 END), 0) AS bank_paid,
           (pc.total_commission - COALESCE(SUM(pcp.amount), 0)) AS balance,
           ROW_NUMBER() OVER (PARTITION BY pc.plot_id ORDER BY pc.created_at DESC) AS rn
         FROM plot_commissions_v2 pc
@@ -101,6 +102,10 @@ class PlotCommissionV2Model extends MasterModel {
           ON pc.id = pcp.plot_commission_id
           AND pcp.status = 'approved'
           AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          -- Same sanity window the ledger applies. A typo'd year (e.g. 20222)
+          -- used to be counted here but nowhere else, which is what made this
+          -- page read ₹89,05,458 while the Day Book read ₹88,49,858.
+          AND pcp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
         WHERE pc.site_id = $1
         GROUP BY pc.id, p.id, m.id
       ),
