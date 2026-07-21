@@ -19,9 +19,10 @@ import pool from '../config/db.js';
  *   - approved only — pending and rejected never move a balance
  *   - bounced/returned cheques excluded
  *   - dates must be sane (1900–2100); typo'd years are quarantined, not summed
- *   - registry payments linked to a plot payment are the SAME money re-mapped,
- *     so they are dropped (they were double-counted as expense, ~₹43.5 cr).
- *     Standalone registry payments are real outflows and stay.
+ *   - registry payments are a MAPPING of plot payments, never an expense, so
+ *     the whole module is excluded (~₹43.5 cr had been double-counted as
+ *     outgoing). Ones not linked to a plot payment show up in
+ *     unmapped_registry_payments so they can be linked instead of vanishing.
  *   - imprest is NOT here: cash handed to a sub-admin is a balance adjustment
  *     (the outstanding float), not a transaction. Callers subtract the float.
  *   - legacy `plot_commissions` (v1, dead module) excluded; only v2
@@ -38,16 +39,17 @@ const migrate = async () => {
     console.log('Creating ledger_bucket() and ledger_entries view...');
 
     // One definition of "which book does this belong in".
-    // cash | bank | cheque — matches the Day Book's Cash view (cash) vs Bank
-    // view (everything else). Blank/unknown falls to cash, which is what the
-    // sync trigger and the commission page already assumed.
+    // Owner mandate 2026-07-21: CASH is cash, everything else — cheque, UPI,
+    // IMPS, NEFT, RTGS, transfer — settles through a bank account and is
+    // therefore Bank. Blank/unknown falls to cash, which is what the sync
+    // trigger and the commission page already assumed.
+    // Mirrored in JS by classifyPaymentMode() in both repos' utils/paymentMode.
     await pool.query(`
-      CREATE OR REPLACE FUNCTION ledger_bucket(raw text)
+      DROP FUNCTION IF EXISTS ledger_bucket(text) CASCADE;
+      CREATE FUNCTION ledger_bucket(raw text)
       RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
-        SELECT CASE UPPER(COALESCE(NULLIF(TRIM(raw), ''), 'CASH'))
-          WHEN 'CHEQUE' THEN 'cheque'
-          WHEN 'CHQ'    THEN 'cheque'
-          WHEN 'CASH'   THEN 'cash'
+        SELECT CASE
+          WHEN UPPER(COALESCE(NULLIF(TRIM(raw), ''), 'CASH')) = 'CASH' THEN 'cash'
           ELSE 'bank'
         END
       $fn$;
@@ -126,12 +128,15 @@ const migrate = async () => {
           AND cfe.date::date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
           AND COALESCE(cfe.source_module, '') NOT IN
               ('imprest', 'imprest_requests', 'document_imprest',
-               'document_imprest_requests', 'plot_commissions')
+               'document_imprest_requests', 'plot_commissions',
+               -- Registry payments are a MAPPING of plot payments, never an
+               -- expense (owner rule 2026-07-21). The trigger records them as
+               -- a debit, so counting them turned income into outgoing —
+               -- ~₹43.5 cr of it. Unmapped ones are surfaced by the
+               -- unmapped_registry_payments view so they get linked to the
+               -- plot payment they belong to rather than silently vanishing.
+               'plot_registry_payments')
           AND NOT (cfe.source_module = 'day_book' AND UPPER(COALESCE(db.entry_type, '')) = 'IMPREST')
-          -- Registry payment mapped from a plot payment = the same rupees
-          -- already counted as revenue. Counting it again as a debit turned
-          -- income into expense.
-          AND prp.source_plot_payment_id IS NULL
       )
       SELECT id::text AS id, site_id, entry_date, particular, remarks, debit, credit,
              ledger_bucket(raw_mode) AS bucket, LOWER(COALESCE(raw_mode, 'cash')) AS raw_mode,
@@ -155,6 +160,20 @@ const migrate = async () => {
              entity_name, CONCAT_WS(' · ', linked_detail, 'Bank part of split payment'),
              ledger_type, created_by_name, created_at, cash_flow_month_id, assigned_admin_id, plot_tag
       FROM base WHERE is_split AND split_bank > 0;
+    `);
+
+    // Registry payments that are not linked to a plot payment. They are real
+    // buyer collections but are excluded from every balance (registry payments
+    // are a mapping, never an expense), so they must be linked to the plot
+    // payment they belong to — or entered as one — to show up as income.
+    await pool.query(`
+      CREATE OR REPLACE VIEW unmapped_registry_payments AS
+      SELECT prp.id, prp.site_id, prp.registry_id, prp.payment_date, prp.amount,
+             prp.payment_mode, p.plot_no, p.buyer_name
+      FROM plot_registry_payments prp
+      LEFT JOIN plot_registries pr ON pr.id = prp.registry_id
+      LEFT JOIN plots p ON p.id = pr.plot_id
+      WHERE prp.source_plot_payment_id IS NULL;
     `);
 
     // Rows the view quarantines because their date is a typo (e.g. year 20222).

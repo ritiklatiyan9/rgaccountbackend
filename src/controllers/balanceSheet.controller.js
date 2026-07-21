@@ -5,7 +5,11 @@ import pool from '../config/db.js';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const VALID_SCOPES = new Set(['all', 'cash', 'bank']);
 const VALID_DIRECTIONS = new Set(['all', 'credit', 'debit']);
-const VALID_MODES = new Set(['all', 'cash', 'bank', 'cheque']);
+// Buckets are cash/bank, but `raw_mode` keeps the mode the user actually
+// picked (CHEQUE, UPI, IMPS, NEFT, RTGS…). The model matches either, so any
+// of them is a legal filter value — don't whitelist to the two buckets or
+// filtering by IMPS silently falls back to "all".
+const MODE_RE = /^[a-z ]{2,20}$/;
 
 const isoDate = (date) => {
   const y = date.getFullYear();
@@ -44,7 +48,8 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
 
   const scope = VALID_SCOPES.has(req.query.scope) ? req.query.scope : 'all';
   const direction = VALID_DIRECTIONS.has(req.query.direction) ? req.query.direction : 'all';
-  const paymentMode = VALID_MODES.has(req.query.payment_mode) ? req.query.payment_mode : 'all';
+  const rawMode = String(req.query.payment_mode || 'all').trim().toLowerCase();
+  const paymentMode = rawMode === 'all' || MODE_RE.test(rawMode) ? rawMode : 'all';
   const source = String(req.query.source || 'all').trim().slice(0, 80) || 'all';
   const search = String(req.query.q || '').trim().slice(0, 120);
   const preset = String(req.query.preset || 'overall').toLowerCase();

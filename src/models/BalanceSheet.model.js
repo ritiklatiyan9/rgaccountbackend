@@ -19,7 +19,9 @@ const SCOPED = `
       AND ($4::text = 'all' OR ($4::text = 'cash' AND bucket = 'cash')
                             OR ($4::text = 'bank' AND bucket <> 'cash'))
       AND ($5::text = 'all' OR source_key = $5::text)
-      AND ($6::text = 'all' OR raw_mode = $6::text)
+      -- 'cash'/'bank' select the whole bucket; any other value (cheque, upi,
+      -- imps, rtgs…) matches the exact mode the user recorded.
+      AND ($6::text = 'all' OR bucket = $6::text OR raw_mode = $6::text)
       AND (
         $7::text = 'all'
         OR ($7::text = 'credit' AND credit > 0)

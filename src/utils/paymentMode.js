@@ -1,22 +1,19 @@
 // Canonical payment-mode bucketing used by Day Book aggregates.
-// Keeps classification consistent across backend (getModeBalance,
-// listDayBookEntries) and mirrors what the frontend filter expects.
+// Must mirror rgaccount/src/utils/paymentMode.js and the SQL ledger_bucket()
+// function (migration 079) — all three implement the same rule.
+//
+// Two buckets only, by owner mandate (2026-07-21): CASH is cash; every other
+// mode — cheque, UPI, IMPS, NEFT, RTGS, transfer — settles through a bank
+// account and is therefore Bank. Blank/unknown falls to cash, matching how
+// the modules that leave the field empty actually record their entries.
 
-const BUCKETS = ['cash', 'bank', 'cheque', 'upi', 'other'];
+const BUCKETS = ['cash', 'bank'];
 
 // Normalise an arbitrary mode string to a canonical bucket key.
-// Returns one of: 'cash' | 'bank' | 'cheque' | 'upi' | 'other'.
+// Returns 'cash' | 'bank'.
 export function classifyPaymentMode(raw) {
-  if (raw === null || raw === undefined) return 'other';
-  const s = String(raw).trim().toUpperCase();
-  if (!s) return 'other';
-  if (s === 'CASH') return 'cash';
-  if (s === 'CHEQUE' || s === 'CHQ') return 'cheque';
-  if (s === 'UPI' || s === 'GPAY' || s === 'PHONEPE' || s === 'PAYTM') return 'upi';
-  if (s === 'BANK' || s === 'NEFT' || s === 'RTGS' || s === 'IMPS' || s === 'ONLINE' || s === 'TRANSFER' || s === 'NET BANKING' || s === 'NETBANKING') return 'bank';
-  // Default: any unrecognised non-empty mode is treated as "other" so it
-  // does not silently get pooled into Bank.
-  return 'other';
+  const s = String(raw ?? '').trim().toUpperCase();
+  return !s || s === 'CASH' ? 'cash' : 'bank';
 }
 
 export function emptyBucketMap() {

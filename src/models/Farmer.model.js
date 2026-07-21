@@ -7,10 +7,11 @@ class FarmerModel extends MasterModel {
 
   /** All farmers for a specific site.
    *  `total_paid` = sum of every approved, non-returned/bounced farmer_payment.
-   *  `cash_paid` / `bank_paid` split that same total by payment mode so the
-   *  Farmers page can show a cash-vs-bank flow card. SPLIT rows are broken
-   *  into their cash_amount / bank_amount legs (the same way the Day Book's
-   *  mode-balance SQL handles them) so Cash+Bank always equals Total Paid.
+   *  `cash_paid` / `bank_paid` split that same total via ledger_bucket() — the
+   *  single mode→book rule the Day Book, Balance Sheet and dashboard also use,
+   *  so this page's cash figure equals the Day Book's Farmer Payments figure.
+   *  SPLIT rows are broken into their cash_amount / bank_amount legs, exactly
+   *  as `ledger_entries` does, so Cash + Bank always equals Total Paid.
    */
   async findBySiteId(siteId, pool) {
     const query = `
@@ -20,8 +21,7 @@ class FarmerModel extends MasterModel {
           CASE
             WHEN UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
               THEN COALESCE(fp.cash_amount, 0)
-            WHEN UPPER(COALESCE(fp.payment_mode, 'CASH')) IN ('CASH', 'CASH PLOT PAYMENT', 'CASH REFUND PLOT PAYMENT', 'PAY ADVANCE')
-              THEN fp.amount
+            WHEN ledger_bucket(fp.payment_mode) = 'cash' THEN fp.amount
             ELSE 0
           END
         ), 0) AS cash_paid,
@@ -29,8 +29,7 @@ class FarmerModel extends MasterModel {
           CASE
             WHEN UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
               THEN COALESCE(fp.bank_amount, 0)
-            WHEN UPPER(COALESCE(fp.payment_mode, 'CASH')) IN ('CASH', 'CASH PLOT PAYMENT', 'CASH REFUND PLOT PAYMENT', 'PAY ADVANCE')
-              THEN 0
+            WHEN ledger_bucket(fp.payment_mode) = 'cash' THEN 0
             ELSE fp.amount
           END
         ), 0) AS bank_paid,
@@ -38,6 +37,10 @@ class FarmerModel extends MasterModel {
       FROM farmers f
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
         AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND LOWER(COALESCE(fp.status, 'approved')) = 'approved'
+        -- Same sanity window the ledger applies, so a typo'd year cannot make
+        -- this page disagree with the Day Book.
+        AND fp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
       WHERE f.site_id = $1
       GROUP BY f.id
       ORDER BY f.created_at DESC
