@@ -603,6 +603,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       updated_at: fp.updated_at,
       assigned_admin_id: fp.assigned_admin_id,
       assigned_admin_name: fp.assigned_admin_name,
+      status: fp.status,
       source: 'farmer_payment',
     }));
 
@@ -739,6 +740,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       updated_at: c.updated_at,
       assigned_admin_id: c.assigned_admin_id,
       assigned_admin_name: c.assigned_admin_name,
+      status: c.status,
       source: 'commission',
     }));
 
@@ -780,6 +782,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       updated_at: cf.updated_at,
       assigned_admin_id: cf.assigned_admin_id,
       assigned_admin_name: cf.assigned_admin_name,
+      status: cf.status,
       source: 'cashflow',
     }));
 
@@ -823,6 +826,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       updated_at: ft.updated_at,
       assigned_admin_id: ft.assigned_admin_id,
       assigned_admin_name: ft.assigned_admin_name,
+      status: ft.status,
       source: 'firm_transaction',
     }));
 
@@ -871,6 +875,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       updated_at: pp.updated_at,
       assigned_admin_id: pp.assigned_admin_id,
       assigned_admin_name: pp.assigned_admin_name,
+      status: pp.status,
       source: 'plot_payment',
     }));
 
@@ -938,9 +943,12 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   const typeMap = {}, modeMap = {}, catMap = {};
 
   for (const e of allEntries) {
-    // Skip bounced/returned cheques from summary totals
+    // Only approved, non-bounced rows move a total — same rule as the
+    // `ledger_entries` view and the client's movesMoney(). Pending rows are
+    // still returned and rendered, they just don't count.
     const cs = e.cheque_status ? String(e.cheque_status).toUpperCase() : null;
     if (cs === 'BOUNCED' || cs === 'RETURNED') continue;
+    if (String(e.status || 'approved').toLowerCase() !== 'approved') continue;
 
     const dr = parseFloat(e.debit) || 0;
     const cr = parseFloat(e.credit) || 0;
