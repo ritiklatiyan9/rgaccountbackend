@@ -12,6 +12,7 @@ import { verifyFinancialIntegrity } from './services/consistency.service.js';
 import { getRevenueVsExpense, getProfitTrend, getExpenseByCategory } from './services/charts.service.js';
 import { getExpensesPageData, getExpensesBreakdown } from './services/expenses.service.js';
 import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
+import { getFinanceForecast } from './services/forecast.service.js';
 import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes } from '../config/cache.js';
 import pool from '../config/db.js';
 import { inventoryModel } from '../models/Inventory.model.js';
@@ -555,9 +556,203 @@ const InventoryDashboardType = new GraphQLObjectType({
   },
 });
 
+// ── Finance Forecast module ──
+const ForecastHistoricalType = new GraphQLObjectType({
+  name: 'ForecastHistoricalMonth',
+  fields: {
+    key:          { type: GraphQLString },
+    label:        { type: GraphQLString },
+    inflow:       { type: GraphQLFloat },
+    outflow:      { type: GraphQLFloat },
+    net:          { type: GraphQLFloat },
+    transactions: { type: GraphQLInt },
+    isCurrent:    { type: GraphQLBoolean },
+  },
+});
+
+const ForecastMonthType = new GraphQLObjectType({
+  name: 'ForecastMonth',
+  fields: {
+    key:                        { type: GraphQLString },
+    label:                      { type: GraphQLString },
+    predictedInflow:            { type: GraphQLFloat },
+    predictedOutflow:           { type: GraphQLFloat },
+    scheduledInflow:            { type: GraphQLFloat },
+    scheduledOutflow:           { type: GraphQLFloat },
+    inflow:                      { type: GraphQLFloat },
+    outflow:                     { type: GraphQLFloat },
+    net:                         { type: GraphQLFloat },
+    conservativeInflow:          { type: GraphQLFloat },
+    conservativeOutflow:         { type: GraphQLFloat },
+    conservativeNet:             { type: GraphQLFloat },
+    optimisticInflow:            { type: GraphQLFloat },
+    optimisticOutflow:           { type: GraphQLFloat },
+    optimisticNet:               { type: GraphQLFloat },
+    lowerNet:                    { type: GraphQLFloat },
+    upperNet:                    { type: GraphQLFloat },
+    baseClosingBalance:          { type: GraphQLFloat },
+    conservativeClosingBalance:  { type: GraphQLFloat },
+    optimisticClosingBalance:    { type: GraphQLFloat },
+  },
+});
+
+const ForecastTotalsType = new GraphQLObjectType({
+  name: 'ForecastTotals',
+  fields: {
+    inflow:  { type: GraphQLFloat },
+    outflow: { type: GraphQLFloat },
+    net:     { type: GraphQLFloat },
+  },
+});
+
+const ForecastScenarioTotalsType = new GraphQLObjectType({
+  name: 'ForecastScenarioTotals',
+  fields: {
+    base:         { type: ForecastTotalsType },
+    conservative: { type: ForecastTotalsType },
+    optimistic:   { type: ForecastTotalsType },
+  },
+});
+
+const ForecastRunRateType = new GraphQLObjectType({
+  name: 'ForecastRunRate',
+  fields: {
+    lookbackMonths:   { type: GraphQLInt },
+    inflowPerMonth:   { type: GraphQLFloat },
+    outflowPerMonth:  { type: GraphQLFloat },
+  },
+});
+
+const ForecastAnalyticsType = new GraphQLObjectType({
+  name: 'ForecastAnalytics',
+  fields: {
+    method:                { type: GraphQLString },
+    version:               { type: GraphQLString },
+    confidenceScore:       { type: GraphQLInt },
+    confidenceLevel:       { type: GraphQLString },
+    historicalMonths:      { type: GraphQLInt },
+    activeMonths:          { type: GraphQLInt },
+    transactionCount:      { type: GraphQLInt },
+    inflowTrendPercent:    { type: GraphQLFloat },
+    outflowTrendPercent:   { type: GraphQLFloat },
+    inflowTrend:           { type: GraphQLString },
+    outflowTrend:          { type: GraphQLString },
+    inflowVolatility:      { type: GraphQLFloat },
+    outflowVolatility:     { type: GraphQLFloat },
+  },
+});
+
+const ForecastContextType = new GraphQLObjectType({
+  name: 'ForecastContext',
+  fields: {
+    overdueReceivables: { type: GraphQLFloat },
+    vendorOverdue:      { type: GraphQLFloat },
+    vendorUnscheduled:  { type: GraphQLFloat },
+    farmerOutstanding:  { type: GraphQLFloat },
+  },
+});
+
+const ForecastRiskType = new GraphQLObjectType({
+  name: 'ForecastRisk',
+  fields: {
+    level:                     { type: GraphQLString },
+    summary:                   { type: GraphQLString },
+    lowestBalance:             { type: GraphQLFloat },
+    lowestConservativeBalance: { type: GraphQLFloat },
+    deficitMonths:             { type: GraphQLInt },
+    firstDeficitMonth:         { type: GraphQLString },
+  },
+});
+
+const ForecastWeekdayType = new GraphQLObjectType({
+  name: 'ForecastWeekdayPattern',
+  fields: {
+    weekday:      { type: GraphQLInt },
+    label:        { type: GraphQLString },
+    inflow:       { type: GraphQLFloat },
+    outflow:      { type: GraphQLFloat },
+    transactions: { type: GraphQLInt },
+  },
+});
+
+const ForecastSourceType = new GraphQLObjectType({
+  name: 'ForecastSourcePattern',
+  fields: {
+    source:       { type: GraphQLString },
+    label:        { type: GraphQLString },
+    inflow:       { type: GraphQLFloat },
+    outflow:      { type: GraphQLFloat },
+    transactions: { type: GraphQLInt },
+  },
+});
+
+const ForecastDueItemType = new GraphQLObjectType({
+  name: 'ForecastDueItem',
+  fields: {
+    id:          { type: GraphQLID },
+    type:        { type: GraphQLString },
+    source:      { type: GraphQLString },
+    entity:      { type: GraphQLString },
+    description: { type: GraphQLString },
+    dueDate:     { type: GraphQLString },
+    amount:      { type: GraphQLFloat },
+    status:      { type: GraphQLString },
+  },
+});
+
+const FinanceForecastType = new GraphQLObjectType({
+  name: 'FinanceForecast',
+  fields: {
+    currentBalance:      { type: GraphQLFloat },
+    historical:          { type: new GraphQLList(ForecastHistoricalType) },
+    forecast:            { type: new GraphQLList(ForecastMonthType) },
+    totals:              { type: ForecastScenarioTotalsType },
+    runRate:             { type: ForecastRunRateType },
+    analytics:           { type: ForecastAnalyticsType },
+    context:             { type: ForecastContextType },
+    risk:                { type: ForecastRiskType },
+    weekdayPattern:      { type: new GraphQLList(ForecastWeekdayType) },
+    sourcePattern:       { type: new GraphQLList(ForecastSourceType) },
+    dueItems:            { type: new GraphQLList(ForecastDueItemType) },
+    horizonMonths:       { type: GraphQLInt },
+    generatedAt:         { type: GraphQLString },
+    refreshAfterSeconds: { type: GraphQLInt },
+  },
+});
+
 const QueryType = new GraphQLObjectType({
   name: 'Query',
   fields: {
+    financeForecast: {
+      type: FinanceForecastType,
+      args: {
+        siteId:         { type: new GraphQLNonNull(GraphQLID) },
+        horizonMonths:  { type: GraphQLInt },
+        lookbackMonths: { type: GraphQLInt },
+        forceRefresh:   { type: GraphQLBoolean },
+      },
+      async resolve(_, { siteId, horizonMonths = 6, lookbackMonths = 12, forceRefresh = false }, ctx) {
+        const id = requireModuleRead(ctx, 'finance_forecast', siteId);
+        const horizon = Math.min(Math.max(Number(horizonMonths) || 6, 1), 18);
+        const lookback = Math.min(Math.max(Number(lookbackMonths) || 12, 3), 24);
+        const key = `finance-forecast:${id}:${horizon}:${lookback}`;
+
+        if (!forceRefresh && cacheEnabled()) {
+          const cached = await cacheGet(key);
+          if (cached) return cached;
+        }
+
+        const result = await getFinanceForecast(id, {
+          horizonMonths: horizon,
+          lookbackMonths: lookback,
+        });
+        // A 55-second server cache keeps minute polling fast while ensuring
+        // every scheduled poll can observe a fresh financial snapshot.
+        if (cacheEnabled()) await cacheSet(key, result, 55);
+        return result;
+      },
+    },
+
     constructionDashboard: {
       type: ConstructionDashboardType,
       args: { siteId: { type: new GraphQLNonNull(GraphQLID) } },

@@ -5,6 +5,7 @@ import pool from '../config/db.js';
 // for every existing sub-admin without overwriting their current choices.
 export const ALL_MODULES = Object.freeze([
     'dashboard',
+    'finance_forecast',
     'clients',
     'vendors',
     'farmers',
@@ -29,7 +30,7 @@ export const ALL_MODULES = Object.freeze([
     'settings',
 ]);
 
-const READ_ONLY_MODULES = new Set(['dashboard', 'balance_sheet', 'reports', 'settings']);
+const READ_ONLY_MODULES = new Set(['dashboard', 'finance_forecast', 'balance_sheet', 'reports', 'settings']);
 // Modules introduced after the original permission rollout stay fail-closed for
 // existing sub-admins. An administrator must opt users into these sensitive
 // document/payment surfaces from the permission matrix.

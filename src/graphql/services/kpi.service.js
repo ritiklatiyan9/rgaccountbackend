@@ -4,7 +4,7 @@
  *
  * Total Incoming = plot_payments + plot_installment_payments
  * Total Expenses = farmer_payments + expenses + plot_commission_payments
- *                  + vendor_payments + orphan day_book EXPENSE
+ *                  + vendor_payments
  * Plot Registry  = mapping of plot_payments only, NOT counted as new incoming/outgoing
  * Cashflow       = site-type cash_flow_entries (credit − debit)
  * Outstanding    = person-ledger pending (given − returned)
@@ -43,6 +43,11 @@ export async function getRevenue(siteId, start, end, excludeOldPlots = false) {
 // reflected via `outstanding = given − returned` feeding
 // adjustedIncoming = revenue − outstanding. Counting them here too would
 // double-deduct loans given, which was a long-standing bug.
+// `day_book` is excluded too: manual Day Book entries for a plot commission
+// (or any other module payment) are re-entries of a transaction already
+// counted under that module's own source_key — e.g. OM Associates had 3
+// "…COMMISSION" Day Book rows for plots already fully paid off in
+// plot_commission_payments, double-counting ₹4,53,570 as expense.
 export async function getExpenseBreakdown(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT source_key AS source_type,
@@ -51,7 +56,7 @@ export async function getExpenseBreakdown(siteId, start, end) {
        FROM ledger_entries
       WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
         AND debit > 0
-        AND source_key NOT IN ('personal_ledger', 'plot_payments', 'plot_installment_payments')
+        AND source_key NOT IN ('personal_ledger', 'plot_payments', 'plot_installment_payments', 'day_book')
         AND ledger_type <> 'person'
       GROUP BY source_key`,
     [siteId, start, end]
@@ -310,7 +315,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
   ]);
 
   // Total Incoming = Plot Payments only
-  // Total Expenses = farmer + expenses + commissions + vendors + orphan daybook
+  // Total Expenses = farmer + expenses + commissions + vendors
   // Profit = Total Incoming - Total Expenses
   const netProfit = revenue - expData.total;
   const profitMargin = revenue > 0 ? (netProfit / revenue) * 100 : 0;
