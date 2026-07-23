@@ -40,6 +40,7 @@ import constructionRoutes from './construction.routes.js';
 import inventoryRoutes from './inventory.routes.js';
 import reportRoutes from './report.routes.js';
 import pendingLookoutRoutes from './pendingLookout.routes.js';
+import dashboardAssistantRoutes from './dashboardAssistant.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -80,4 +81,5 @@ router.use('/construction', constructionRoutes);
 router.use('/inventory', inventoryRoutes);
 router.use('/reports', reportRoutes);
 router.use('/pending-lookout', pendingLookoutRoutes);
+router.use('/dashboard-ai', dashboardAssistantRoutes);
 export default router;
