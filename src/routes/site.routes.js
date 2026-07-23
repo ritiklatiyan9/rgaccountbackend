@@ -2,6 +2,11 @@ import express from 'express';
 const router = express.Router();
 
 import { createSite, listSites, getSite, updateSite, deleteSite } from '../controllers/site.controller.js';
+import {
+  getDirectorOverview,
+  getDirectorPerson,
+  streamDirectorAssistant,
+} from '../controllers/siteDirector.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
@@ -11,6 +16,11 @@ const bustSiteCache = invalidateCacheOnSuccess(['/sites']);
 
 // All site routes require auth
 router.use(authMiddleware);
+
+// Portfolio-wide finance intelligence. Keep these named routes above /:id.
+router.get('/director/overview', requireRole('admin'), getDirectorOverview);
+router.get('/director/person', requireRole('admin'), getDirectorPerson);
+router.post('/director/assistant', requireRole('admin'), streamDirectorAssistant);
 
 router.get('/', siteReadCache, listSites);                              // admin + sub_admin
 router.get('/:id', siteReadCache, getSite);                             // admin + sub_admin (access-checked)
