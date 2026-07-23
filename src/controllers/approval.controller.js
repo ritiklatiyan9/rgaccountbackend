@@ -155,9 +155,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
   // Helper to build WHERE clause.
   //   scopedAssigneeId: when set, forces assigned_admin_id = that user (used for sub-admins who
   //   don't hold a module grant but still need to see entries explicitly delegated to them).
-  const buildWhere = (tableAlias, siteAlias, extraConditions = [], scopedAssigneeId = null) => {
+  const buildWhere = (tableAlias, siteAlias, extraConditions = [], scopedAssigneeId = null, status = 'pending') => {
     const sAlias = siteAlias || tableAlias;
-    const conditions = [`${tableAlias}.status = 'pending'`, ...extraConditions];
+    const conditions = [`${tableAlias}.status = '${status}'`, ...extraConditions];
     const params = [];
     let idx = 1;
     if (site_id) {
@@ -374,6 +374,43 @@ export const listAllPending = asyncHandler(async (req, res) => {
   const visEx = moduleVisibility(req.user, allowedModules, 'expense');
   if ((!module || module === 'expense') && visEx.include) {
     const { where, params } = buildWhere('e', 'e', [], visEx.scoped ? req.user.id : null);
+    const q = `
+                  SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                    COALESCE(aa.name, aa.email) AS assigned_admin_name,
+             COALESCE(em.full_name, e.to_entity, e.from_entity, u.name, u.email) AS entity_name,
+             CASE
+               WHEN em.id IS NOT NULL THEN COALESCE(em.member_type, 'Member')
+               WHEN e.to_entity IS NOT NULL OR e.from_entity IS NOT NULL THEN 'Expense party'
+               ELSE 'Request creator (party not recorded)'
+             END AS entity_type,
+             COALESCE(e.category, e.from_entity) AS entity_secondary,
+             NULL::text AS entity_plot_no,
+             'expense' AS source
+      FROM expenses e
+      JOIN sites s ON e.site_id = s.id
+      LEFT JOIN users u ON e.created_by = u.id
+      LEFT JOIN members em ON em.id = e.assigned_user_id
+            LEFT JOIN users aa ON e.assigned_admin_id = aa.id
+      WHERE ${where}
+      ORDER BY e.date DESC, e.id DESC
+    `;
+    const r = await pool.query(q, params);
+    results.push(...r.rows.map(row => ({
+      ...row,
+      entry_label: `${row.to_entity || row.remark || 'Expense'} - Dr:₹${row.debit} Cr:₹${row.credit}`,
+      module_label: 'Expense',
+    })));
+  }
+
+  // 6b. Expenses already approved but still missing a voucher/bill. The
+  // status='pending' query above stops tracking an expense the moment it's
+  // approved, so a voucher gap would otherwise vanish from this list forever
+  // instead of staying visible until someone uploads it.
+  if ((!module || module === 'expense') && visEx.include) {
+    const { where, params } = buildWhere('e', 'e', [
+      `(e.voucher_url IS NULL OR e.voucher_url = '')`,
+      `(e.bill_url IS NULL OR e.bill_url = '')`,
+    ], visEx.scoped ? req.user.id : null, 'approved');
     const q = `
                   SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
