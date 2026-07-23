@@ -9,8 +9,8 @@ import siteModel from '../models/Site.model.js';
 import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
 
-/* ── Email OTP second factor — super_admin / admin / sub_admin only ── */
-const OTP_ROLES = new Set(['super_admin', 'admin', 'sub_admin']);
+/* ── Email OTP second factor — admin / sub_admin only, super_admin is exempt ── */
+const OTP_ROLES = new Set(['admin', 'sub_admin']);
 const OTP_TTL_MINUTES = 5;
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_RESEND_SECONDS = 30;

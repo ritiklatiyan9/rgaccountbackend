@@ -3,12 +3,12 @@ import multer from 'multer';
 import path from 'path';
 import {
   createCase, extractPreview, getCase, getDocument, retryDocument,
-  updateCaseCustomer, uploadDocument, verifyCase,
+  listPendingCases, updateCaseCustomer, uploadDocument, verifyCase,
 } from '../controllers/memberKyc.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
-import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
+import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
 
@@ -39,7 +39,9 @@ const acceptUpload = (req, res, next) => {
 };
 
 router.use(authMiddleware, requireRole('admin', 'sub_admin'));
-const bustMemberCache = invalidateCacheOnSuccess(['members|']);
+const pendingKycReadCache = cacheResponse({ ttlSeconds: 20, namespace: 'member-kyc-pending' });
+const bustMemberCache = invalidateCacheOnSuccess(['members|', 'member-kyc-pending|']);
+const bustPendingKycCache = invalidateCacheOnSuccess(['member-kyc-pending|']);
 
 const loadClientKycPermissions = async (req, res, next) => {
   try {
@@ -104,14 +106,15 @@ const requireKycMutationPermission = (caseSource) => async (req, res, next) => {
 
 router.use(loadClientKycPermissions);
 
+router.get('/pending', requireRole('admin'), requirePermission('clients', 'read'), pendingKycReadCache, listPendingCases);
 router.post('/cases', requireKycStartPermission, bustMemberCache, createCase);
 router.get('/case/:id', requirePermission('clients', 'read'), getCase);
 router.patch('/case/:id/customer', requireKycMutationPermission('params'), bustMemberCache, updateCaseCustomer);
 // Multer must parse the multipart body before the ownership middleware can read
 // kyc_case_id. Authentication/role checks have already run at router level.
-router.post('/upload', acceptUpload, requireKycMutationPermission('body'), uploadDocument);
+router.post('/upload', acceptUpload, requireKycMutationPermission('body'), bustPendingKycCache, uploadDocument);
 router.get('/document/:id', requirePermission('clients', 'read'), getDocument);
-router.post('/document/:id/retry', requireKycMutationPermission('document'), retryDocument);
+router.post('/document/:id/retry', requireKycMutationPermission('document'), bustPendingKycCache, retryDocument);
 router.post('/case/:id/extract-preview', requirePermission('clients', 'read'), extractPreview);
 router.post('/case/:id/verify', requireKycMutationPermission('params'), bustMemberCache, verifyCase);
 

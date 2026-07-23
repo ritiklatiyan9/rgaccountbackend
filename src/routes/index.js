@@ -39,6 +39,7 @@ import applicationSettingRoutes from './applicationSetting.routes.js';
 import constructionRoutes from './construction.routes.js';
 import inventoryRoutes from './inventory.routes.js';
 import reportRoutes from './report.routes.js';
+import pendingLookoutRoutes from './pendingLookout.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -78,4 +79,5 @@ router.use('/settings', applicationSettingRoutes);
 router.use('/construction', constructionRoutes);
 router.use('/inventory', inventoryRoutes);
 router.use('/reports', reportRoutes);
+router.use('/pending-lookout', pendingLookoutRoutes);
 export default router;

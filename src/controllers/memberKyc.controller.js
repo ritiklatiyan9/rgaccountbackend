@@ -268,6 +268,79 @@ const processKycDocument = async (documentId, preloadedBuffer = null) => {
   }
 };
 
+/**
+ * GET /member-kyc/pending?site_id=X&limit=500
+ *
+ * A compact, admin-only feed for operational review screens. Keeping this
+ * projection separate from getCase avoids loading signed document URLs and OCR
+ * payloads for every row in the lookout queue.
+ */
+export const listPendingCases = asyncHandler(async (req, res) => {
+  const siteId = Number.parseInt(req.query.site_id, 10);
+  if (!Number.isInteger(siteId)) {
+    return res.status(400).json({ message: 'A valid site_id is required' });
+  }
+  if (!(await canAccessSite(req.user, siteId))) {
+    return res.status(403).json({ message: 'This site is unavailable to your account' });
+  }
+
+  const requestedLimit = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isInteger(requestedLimit)
+    ? Math.min(Math.max(requestedLimit, 1), 500)
+    : 300;
+
+  const { rows } = await pool.query(
+    `WITH document_stats AS (
+       SELECT d.kyc_case_id,
+              COUNT(*)::int AS document_count,
+              COUNT(*) FILTER (WHERE d.ocr_status = 'DONE')::int AS completed_documents,
+              COUNT(*) FILTER (WHERE d.ocr_status IN ('PENDING', 'PROCESSING'))::int AS processing_documents,
+              COUNT(*) FILTER (WHERE d.ocr_status = 'FAILED')::int AS failed_documents
+         FROM documents d
+         JOIN kyc_cases scoped_case ON scoped_case.id = d.kyc_case_id
+        WHERE scoped_case.site_id = $1
+          AND scoped_case.status NOT IN ('VERIFIED', 'REJECTED')
+        GROUP BY d.kyc_case_id
+     ), pending_cases AS (
+       SELECT k.id, k.site_id, k.booking_id, k.client_member_id, k.mode, k.status,
+              k.created_at, k.updated_at,
+              m.full_name AS client_name, m.phone AS client_phone,
+              s.name AS site_name,
+              COALESCE(u.name, u.email) AS created_by_name,
+              COALESCE(ds.document_count, 0)::int AS document_count,
+              COALESCE(ds.completed_documents, 0)::int AS completed_documents,
+              COALESCE(ds.processing_documents, 0)::int AS processing_documents,
+              COALESCE(ds.failed_documents, 0)::int AS failed_documents
+         FROM kyc_cases k
+         LEFT JOIN members m ON m.id = k.client_member_id
+         LEFT JOIN sites s ON s.id = k.site_id
+         LEFT JOIN users u ON u.id = k.created_by
+         LEFT JOIN document_stats ds ON ds.kyc_case_id = k.id
+        WHERE k.site_id = $1
+          AND k.status NOT IN ('VERIFIED', 'REJECTED')
+     )
+     SELECT pending_cases.*, COUNT(*) OVER()::int AS total_count
+       FROM pending_cases
+      ORDER BY
+        CASE status WHEN 'OCR_DONE' THEN 0 WHEN 'OCR_PENDING' THEN 1 ELSE 2 END,
+        COALESCE(updated_at, created_at) ASC,
+        id ASC
+      LIMIT $2`,
+    [siteId, limit]
+  );
+
+  const total = rows[0]?.total_count || 0;
+  res.json({
+    cases: rows.map((row) => {
+      const kycCase = { ...row };
+      delete kycCase.total_count;
+      return kycCase;
+    }),
+    total,
+    truncated: total > rows.length,
+  });
+});
+
 /** POST /member-kyc/cases */
 export const createCase = asyncHandler(async (req, res) => {
   const siteId = Number.parseInt(req.body.site_id, 10);

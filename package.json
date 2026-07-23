@@ -4,9 +4,9 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && node src/server.js",
+    "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && node src/server.js",
     "dev": "nodemon src/server.js",
-    "migrate": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log",
+    "migrate": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout",
     "migrate:plot-documents": "node src/migrations/059_plot_documents.js",
     "migrate:dms": "node src/migrations/069_dms_documents.js",
     "migrate:member-kyc-document-field": "node src/migrations/072_member_kyc_document_field.js",
@@ -15,6 +15,7 @@
     "migrate:registry-payment-invariants": "node src/migrations/075_registry_payment_plot_invariants.js",
     "migrate:transaction-person-mapping": "node src/migrations/076_transaction_person_mapping.js",
     "migrate:sms-reminder-log": "node src/migrations/078_sms_reminder_log.js",
+    "migrate:admin-lookout": "node src/migrations/080_admin_lookout_indexes.js",
     "worker:sms": "node src/workers/smsWorker.js"
   },
   "dependencies": {
