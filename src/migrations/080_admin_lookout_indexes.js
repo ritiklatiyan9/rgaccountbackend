@@ -18,6 +18,11 @@ const migrate = async () => {
         WHERE status NOT IN ('VERIFIED', 'REJECTED')
     `);
     await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_kyc_cases_member_status_lookout
+        ON kyc_cases (site_id, client_member_id, status)
+        WHERE client_member_id IS NOT NULL
+    `);
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_kyc_documents_case_status
         ON documents (kyc_case_id, ocr_status)
     `);

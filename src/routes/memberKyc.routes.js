@@ -106,7 +106,7 @@ const requireKycMutationPermission = (caseSource) => async (req, res, next) => {
 
 router.use(loadClientKycPermissions);
 
-router.get('/pending', requireRole('admin'), requirePermission('clients', 'read'), pendingKycReadCache, listPendingCases);
+router.get('/pending', requirePermission('clients', 'read'), pendingKycReadCache, listPendingCases);
 router.post('/cases', requireKycStartPermission, bustMemberCache, createCase);
 router.get('/case/:id', requirePermission('clients', 'read'), getCase);
 router.patch('/case/:id/customer', requireKycMutationPermission('params'), bustMemberCache, updateCaseCustomer);

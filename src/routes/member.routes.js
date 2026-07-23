@@ -19,7 +19,7 @@ const memberReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'members' });
 // by every member write. The bust prefix below is anchored with `|` so the
 // "members-ac" namespace doesn't accidentally match.
 const autocompleteCache = cacheResponse({ ttlSeconds: 300, namespace: 'members-ac' });
-const bustMemberCache = invalidateCacheOnSuccess(['members|']);
+const bustMemberCache = invalidateCacheOnSuccess(['members|', 'member-kyc-pending|']);
 const kycUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
