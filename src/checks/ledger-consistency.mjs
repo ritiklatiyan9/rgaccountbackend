@@ -59,6 +59,17 @@ for (const site of sites) {
     const { total: expense } = await getExpenseBreakdown(site.id, '1900-01-01', FAR_FUTURE);
     assert.ok(revenue >= 0 && expense >= 0, `${label}: negative revenue/expense`);
 
+    // 3a. The Expenses card must equal the ledger's NET debit for those same
+    //     modules — reversal rows (negative amounts) included. Filtering them
+    //     out turned the card into "committed" rather than "paid till now".
+    const { rows: [led] } = await pool.query(
+      `SELECT COALESCE(SUM(debit), 0)::numeric AS total FROM ledger_entries
+        WHERE site_id = $1
+          AND source_key NOT IN ('personal_ledger', 'plot_payments', 'plot_installment_payments', 'day_book')
+          AND ledger_type <> 'person'`, [site.id]);
+    assert.ok(near(expense, parseFloat(led.total)),
+      `${label}: expenses card ${money(expense)} vs ledger net debit ${money(led.total)}`);
+
     // 4. The Cash/Bank Day Book "In"/"Out" cards are cumulative gross flow
     //    through the selected date, so they must equal the Overall statement's
     //    Money in / Money out for the same scope and end date. The cards used

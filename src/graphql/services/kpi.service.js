@@ -48,6 +48,11 @@ export async function getRevenue(siteId, start, end, excludeOldPlots = false) {
 // counted under that module's own source_key — e.g. OM Associates had 3
 // "…COMMISSION" Day Book rows for plots already fully paid off in
 // plot_commission_payments, double-counting ₹4,53,570 as expense.
+// `debit <> 0`, NOT `debit > 0`: a reversed/refunded payment is entered as a
+// negative-amount row in its module, and dropping those made the card show
+// what was *committed* instead of what was actually paid out — ₹5.99 cr too
+// high on OM Associates farmer payments alone. Site Balance and the
+// Revenue-vs-Expense chart already net them, so the card was the odd one out.
 export async function getExpenseBreakdown(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT source_key AS source_type,
@@ -55,7 +60,7 @@ export async function getExpenseBreakdown(siteId, start, end) {
             COUNT(*)::int AS txn_count
        FROM ledger_entries
       WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
-        AND debit > 0
+        AND debit <> 0
         AND source_key NOT IN ('personal_ledger', 'plot_payments', 'plot_installment_payments', 'day_book')
         AND ledger_type <> 'person'
       GROUP BY source_key`,
