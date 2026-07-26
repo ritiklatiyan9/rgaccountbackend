@@ -326,6 +326,24 @@ export const listPayments = asyncHandler(async (req, res) => {
        COALESCE(SUM(fp.amount), 0) AS total_paid,
        COALESCE(SUM(fp.interest_amount), 0) AS total_interest,
        COUNT(fp.id) AS payment_count,
+       -- Same CASE the farmers LIST page uses (Farmer.model.js findBySiteId),
+       -- so both pages report the same Cash/Bank split for a farmer. Summing
+       -- fp.cash_amount / fp.bank_amount in JS did NOT: those columns are 0/0
+       -- for CHEQUE rows, so cheque payments counted in neither book.
+       COALESCE(SUM(
+         CASE
+           WHEN UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT' THEN COALESCE(fp.cash_amount, 0)
+           WHEN ledger_bucket(fp.payment_mode) = 'cash' THEN fp.amount
+           ELSE 0
+         END
+       ), 0) AS cash_paid,
+       COALESCE(SUM(
+         CASE
+           WHEN UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT' THEN COALESCE(fp.bank_amount, 0)
+           WHEN ledger_bucket(fp.payment_mode) = 'cash' THEN 0
+           ELSE fp.amount
+         END
+       ), 0) AS bank_paid,
        s.name  AS site_name,
        s.code  AS site_code,
        s.address AS site_address,
@@ -347,15 +365,8 @@ export const listPayments = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Farmer not found' });
   }
 
-  // Cash / bank paid totals derived from the already-fetched payments — no
-  // extra DB round-trip required.
-  let cashPaid = 0, bankPaid = 0;
-  for (const p of payments) {
-    if (p.cheque_status && (p.cheque_status === 'BOUNCED' || p.cheque_status === 'RETURNED')) continue;
-    cashPaid += parseFloat(p.cash_amount) || 0;
-    bankPaid += parseFloat(p.bank_amount) || 0;
-  }
-
+  const cashPaid = parseFloat(farmer.cash_paid) || 0;
+  const bankPaid = parseFloat(farmer.bank_paid) || 0;
   const totalPaid = parseFloat(farmer.total_paid) || 0;
   const totalInterest = parseFloat(farmer.total_interest) || 0;
 
