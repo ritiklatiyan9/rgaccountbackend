@@ -78,6 +78,39 @@ async function getOrSeedDailyBalance(siteId, date, pool) {
 //  DAY BOOK ENDPOINTS
 // ══════════════════════════════════════════════════
 
+// Stable identity used only by the Day Book's presentation-order layer. Linked
+// day_book copies resolve to their owning module, so the key remains stable
+// whether the daily response renders the source row or its enriched copy.
+const dayBookOrderKey = (entry) => {
+  if (entry.expense_id) return `expenses:${entry.expense_id}`;
+  if (entry.farmer_payment_id) return `farmer_payments:${entry.farmer_payment_id}`;
+  if (entry.commission_id) return `plot_commissions:${entry.commission_id}`;
+  if (entry.cash_flow_entry_id) return `personal_ledger:${entry.cash_flow_entry_id}`;
+  if (entry.firm_transaction_id) return `firm_transactions:${entry.firm_transaction_id}`;
+  if (entry.plot_payment_id) return `plot_payments:${entry.plot_payment_id}`;
+  if (entry.vendor_payment_id) return `vendor_payments:${entry.vendor_payment_id}`;
+  if (entry.source_key && entry.source_id) return `${entry.source_key}:${entry.source_id}`;
+
+  if (typeof entry.id === 'string') {
+    const [prefix, rawId] = entry.id.split('_');
+    const sourceByPrefix = {
+      expense: 'expenses',
+      fp: 'farmer_payments',
+      comm: 'plot_commissions',
+      cf: 'personal_ledger',
+      ft: 'firm_transactions',
+      pp: 'plot_payments',
+      pip: 'plot_installment_payments',
+      vp: 'vendor_payments',
+      pcp: 'plot_commission_payments',
+      prp: 'plot_registry_payments',
+    };
+    if (sourceByPrefix[prefix] && rawId) return `${sourceByPrefix[prefix]}:${rawId}`;
+  }
+
+  return `day_book:${entry.id}`;
+};
+
 /**
  * POST /daybook
  * Create a new day book entry.
@@ -920,6 +953,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         updated_at: m.updated_at,
         assigned_admin_id: m.assigned_admin_id,
         assigned_admin_name: m.assigned_admin_name,
+        source_key: m.source_module,
+        source_id: m.source_id,
         source: meta.source,
         read_only: true,
       };
@@ -935,8 +970,34 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     }
     return x.id;
   };
-  const allEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments, ...transformedModuleLedger]
+  const fallbackEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments, ...transformedModuleLedger]
     .sort((a, b) => sortId(a) - sortId(b));
+
+  // Apply a saved Day Book-only sequence. Rows with no saved position (usually
+  // newly created entries) append in the existing fallback order. No source
+  // table is updated or re-sorted.
+  const savedOrder = await pool.query(
+    `SELECT entry_key, position
+       FROM daybook_entry_order
+      WHERE site_id = $1 AND entry_date = $2`,
+    [parseInt(siteId), queryDate]
+  );
+  const positionByKey = new Map(savedOrder.rows.map((row) => [row.entry_key, Number(row.position)]));
+  const allEntries = fallbackEntries
+    .map((entry, fallbackIndex) => ({
+      ...entry,
+      order_key: dayBookOrderKey(entry),
+      _fallback_order: fallbackIndex,
+    }))
+    .sort((a, b) => {
+      const aPosition = positionByKey.get(a.order_key);
+      const bPosition = positionByKey.get(b.order_key);
+      if (aPosition != null && bPosition != null) return aPosition - bPosition;
+      if (aPosition != null) return -1;
+      if (bPosition != null) return 1;
+      return a._fallback_order - b._fallback_order;
+    })
+    .map(({ _fallback_order, ...entry }, index) => ({ ...entry, display_order: index + 1 }));
 
   // Compute summary
   let total_debit = 0, total_credit = 0;
@@ -1039,6 +1100,72 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     typeBreakdown: Object.values(typeMap).sort((a, b) => b.total_debit - a.total_debit),
     modeBreakdown: Object.values(modeMap).sort((a, b) => b.total_debit - a.total_debit),
     categoryBreakdown: Object.values(catMap).sort((a, b) => b.total_debit - a.total_debit),
+  });
+});
+
+/**
+ * PUT /daybook/order
+ * Persist the presentation sequence for one site's single-day Day Book.
+ * This intentionally writes only daybook_entry_order; owning transaction
+ * modules and accounting values are never touched.
+ */
+export const updateDayBookOrder = asyncHandler(async (req, res) => {
+  const siteId = Number.parseInt(req.body.site_id, 10);
+  const entryDate = String(req.body.date || '');
+  const entryKeys = req.body.entry_keys;
+
+  if (!Number.isInteger(siteId) || siteId <= 0) {
+    return res.status(400).json({ message: 'A valid site_id is required' });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(entryDate)) {
+    return res.status(400).json({ message: 'A valid date is required' });
+  }
+  if (!Array.isArray(entryKeys) || entryKeys.length > 5000) {
+    return res.status(400).json({ message: 'entry_keys must be an array of at most 5000 entries' });
+  }
+
+  const normalizedKeys = entryKeys.map((key) => String(key || '').trim());
+  if (normalizedKeys.some((key) => !/^[a-z_]+:[A-Za-z0-9:.-]+$/.test(key) || key.length > 160)) {
+    return res.status(400).json({ message: 'One or more entry keys are invalid' });
+  }
+  if (new Set(normalizedKeys).size !== normalizedKeys.length) {
+    return res.status(400).json({ message: 'Duplicate entries are not allowed in the saved order' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [`daybook-order:${siteId}:${entryDate}`]
+    );
+    await client.query(
+      `DELETE FROM daybook_entry_order WHERE site_id = $1 AND entry_date = $2`,
+      [siteId, entryDate]
+    );
+
+    if (normalizedKeys.length > 0) {
+      await client.query(
+        `INSERT INTO daybook_entry_order
+           (site_id, entry_date, entry_key, position, updated_by, updated_at)
+         SELECT $1, $2::date, ordered.entry_key, ordered.position::int, $3, NOW()
+           FROM unnest($4::text[]) WITH ORDINALITY AS ordered(entry_key, position)`,
+        [siteId, entryDate, req.user.id, normalizedKeys]
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json({
+    message: 'Day Book order saved',
+    date: entryDate,
+    count: normalizedKeys.length,
   });
 });
 

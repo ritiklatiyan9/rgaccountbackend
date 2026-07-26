@@ -13,26 +13,34 @@ import pool from '../config/db.js';
  */
 const SCOPED = `
   WITH scoped_entries AS (
-    SELECT *
-    FROM ledger_entries
-    WHERE site_id = $1
-      AND ($4::text = 'all' OR ($4::text = 'cash' AND bucket = 'cash')
-                            OR ($4::text = 'bank' AND bucket <> 'cash'))
-      AND ($5::text = 'all' OR source_key = $5::text)
+    SELECT le.*, dbo.position AS display_position
+    FROM ledger_entries le
+    LEFT JOIN daybook_entry_order dbo
+      ON dbo.site_id = le.site_id
+     AND dbo.entry_date = le.entry_date
+     AND dbo.entry_key = CONCAT(
+       le.source_key,
+       ':',
+       COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
+     )
+    WHERE le.site_id = $1
+      AND ($4::text = 'all' OR ($4::text = 'cash' AND le.bucket = 'cash')
+                            OR ($4::text = 'bank' AND le.bucket <> 'cash'))
+      AND ($5::text = 'all' OR le.source_key = $5::text)
       -- 'cash'/'bank' select the whole bucket; any other value (cheque, upi,
       -- imps, rtgs…) matches the exact mode the user recorded.
-      AND ($6::text = 'all' OR bucket = $6::text OR raw_mode = $6::text)
+      AND ($6::text = 'all' OR le.bucket = $6::text OR le.raw_mode = $6::text)
       AND (
         $7::text = 'all'
-        OR ($7::text = 'credit' AND credit > 0)
-        OR ($7::text = 'debit' AND debit > 0)
+        OR ($7::text = 'credit' AND le.credit > 0)
+        OR ($7::text = 'debit' AND le.debit > 0)
       )
       AND (
         $8::text = ''
-        OR particular ILIKE CONCAT('%', $8::text, '%')
-        OR COALESCE(entity_name, '') ILIKE CONCAT('%', $8::text, '%')
-        OR COALESCE(linked_detail, '') ILIKE CONCAT('%', $8::text, '%')
-        OR COALESCE(remarks, '') ILIKE CONCAT('%', $8::text, '%')
+        OR le.particular ILIKE CONCAT('%', $8::text, '%')
+        OR COALESCE(le.entity_name, '') ILIKE CONCAT('%', $8::text, '%')
+        OR COALESCE(le.linked_detail, '') ILIKE CONCAT('%', $8::text, '%')
+        OR COALESCE(le.remarks, '') ILIKE CONCAT('%', $8::text, '%')
       )
   ),
   period_entries AS (
@@ -86,7 +94,10 @@ const REPORT_QUERY = `${SCOPED}
       'total_entries', summary.total_entries
     ),
     'transactions', COALESCE((
-      SELECT jsonb_agg(to_jsonb(tx) ORDER BY tx.entry_date DESC, tx.created_at DESC, tx.id DESC)
+      SELECT jsonb_agg(
+        to_jsonb(tx)
+        ORDER BY tx.entry_date DESC, tx.display_position ASC NULLS LAST, tx.created_at DESC, tx.id DESC
+      )
       FROM (
         SELECT
           id,
@@ -94,9 +105,10 @@ const REPORT_QUERY = `${SCOPED}
           particular, remarks, debit, credit,
           raw_mode AS payment_mode,
           bucket, source_key, source_id, status, cheque_status, cheque_no,
-          voucher_url, entity_name, linked_detail, created_by_name, created_at
+          voucher_url, entity_name, linked_detail, created_by_name, created_at,
+          display_position
         FROM period_entries
-        ORDER BY entry_date DESC, created_at DESC, id DESC
+        ORDER BY entry_date DESC, display_position ASC NULLS LAST, created_at DESC, id DESC
         LIMIT $9::int
       ) tx
     ), '[]'::jsonb),

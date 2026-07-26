@@ -32,6 +32,7 @@ import {
   getModeBalance,
   updateModuleEntryFromDayBook,
   deleteModuleEntryFromDayBook,
+  updateDayBookOrder,
 } from '../controllers/daybook.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -46,6 +47,9 @@ router.use(authMiddleware);
 const daybookReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'daybook' });
 // Daybook mutations affect expenses, farmers, cashflow, plots, firms — bust all related caches
 const bustDaybookCache = invalidateCacheOnSuccess(['/daybook', '/expenses', '/farmers', '/cashflow', '/plots', '/firms', '/vendors', '/plot-commission']);
+// Presentation ordering belongs only to Day Book; dedicated module caches and
+// their native ordering are deliberately unaffected.
+const bustDaybookOrderCache = invalidateCacheOnSuccess(['/daybook']);
 
 // Recent transactions (Dashboard) — must be before /:id route
 router.get('/recent', requireRole('admin', 'sub_admin'), daybookReadCache, listRecentTransactions);
@@ -69,6 +73,7 @@ router.get('/mode-balance', requireRole('admin', 'sub_admin'), requirePermission
 // Day Book CRUD
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'write'), bustDaybookCache, createDayBookEntry);
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, listDayBookEntries);
+router.put('/order', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookOrderCache, updateDayBookOrder);
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, getAutocomplete);
 
 // Farmers list for dropdown
