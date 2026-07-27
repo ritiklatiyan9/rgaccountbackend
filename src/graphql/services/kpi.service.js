@@ -163,6 +163,7 @@ export async function getOutstanding(siteId, start, end) {
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      WHERE cfe.site_id = $1
        AND LOWER(cfm.ledger_type) = 'person'
+       AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
        AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
        AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
     [siteId]
@@ -180,6 +181,7 @@ export async function getPersonalLedgerCredit(siteId, start, end) {
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
        AND LOWER(cfm.ledger_type) = 'person'
+       AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
        AND cfe.credit > 0
        AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
        AND (cfe.status IS NULL OR cfe.status != 'rejected')`,

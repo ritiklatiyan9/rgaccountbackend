@@ -68,6 +68,7 @@ class CashFlowMonthModel extends MasterModel {
           COUNT(*)::int AS entry_count
         FROM cash_flow_entries cfe
         WHERE cfe.cash_flow_month_id = cfm.id
+          AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ) agg ON TRUE
       WHERE cfm.site_id = $1
       ORDER BY cfm.year DESC, cfm.month DESC, cfm.ledger_name ASC
@@ -114,6 +115,7 @@ class CashFlowMonthModel extends MasterModel {
           COUNT(*)::int AS entry_count
         FROM cash_flow_entries cfe
         WHERE cfe.cash_flow_month_id = cfm.id
+          AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ) agg ON TRUE
       WHERE cfm.id = $1
     `;
@@ -130,7 +132,7 @@ class CashFlowMonthModel extends MasterModel {
         COALESCE(SUM(cfe.debit), 0) AS total_debit,
         cfm.opening_balance + COALESCE(SUM(cfe.credit), 0) - COALESCE(SUM(cfe.debit), 0) AS closing_balance
       FROM cash_flow_months cfm
-      LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected')
+      LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND (cfe.status IS NULL OR cfe.status != 'rejected') AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       WHERE cfm.id = $1
       GROUP BY cfm.id
     `;
@@ -173,6 +175,7 @@ class CashFlowEntryModel extends MasterModel {
       LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
       LEFT JOIN users u ON u.id = cfe.created_by
       WHERE cfe.cash_flow_month_id = $1
+        AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ORDER BY date ASC, created_at ASC
     `;
     const result = await pool.query(query, [monthId]);
@@ -188,6 +191,7 @@ class CashFlowEntryModel extends MasterModel {
         COALESCE(SUM(credit), 0) AS total_credit
       FROM cash_flow_entries
       WHERE cash_flow_month_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND (source_module IS NULL OR source_module !~ '_person$')
     `;
     const result = await pool.query(query, [monthId]);
     return result.rows[0];
@@ -214,6 +218,7 @@ class CashFlowEntryModel extends MasterModel {
         COALESCE(SUM(credit), 0) AS total_credit
       FROM cash_flow_entries
       WHERE cash_flow_month_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND (source_module IS NULL OR source_module !~ '_person$')
       GROUP BY particular
       ORDER BY total_debit DESC
     `;

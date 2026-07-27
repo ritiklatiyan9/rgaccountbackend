@@ -456,7 +456,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
   const memberName = member.full_name;
 
   // Run all queries in parallel using name matching + FK where available
-  const [expRes, commRes, plotPayRes, farmerPayRes, firmRes] = await Promise.all([
+  const [expRes, commRes, plotPayRes, farmerPayRes, firmRes, commPayRes] = await Promise.all([
     // 1. Expenses — by assigned_user_id or name match
     pool.query(
       `SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
@@ -467,7 +467,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
        ORDER BY e.date DESC, e.id DESC`,
       [siteId, memberId, memberName]
     ),
-    // 2. Plot Commissions — by particular (person name)
+    // 2. Plot Commissions (legacy v1) — by particular (person name)
     pool.query(
       `SELECT pc.id, pc.date, pc.particular, pc.amount, pc.plot_no, pc.plot_size,
               pc.by_note, pc.remarks, pc.status, pc.voucher_url
@@ -510,6 +510,18 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
        ORDER BY ft.date DESC, ft.id DESC`,
       [siteId, memberName]
     ),
+    // 6. Commission Payments (v2) — member is the plot's commission agent
+    pool.query(
+      `SELECT pcp.id, pcp.date, pcp.amount, pcp.payment_mode, pcp.bank_name,
+              pcp.transaction_id, pcp.remarks, pcp.status, pcp.voucher_url,
+              p.plot_no, p.block
+       FROM plot_commission_payments pcp
+       JOIN plot_commissions_v2 pc ON pc.id = pcp.plot_commission_id
+       LEFT JOIN plots p ON p.id = pc.plot_id
+       WHERE pcp.site_id = $1 AND pc.agent_id = $2
+       ORDER BY pcp.date DESC, pcp.id DESC`,
+      [siteId, memberId]
+    ),
   ]);
 
   const expenses = expRes.rows;
@@ -517,6 +529,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
   const plotPayments = plotPayRes.rows;
   const farmerPayments = farmerPayRes.rows;
   const firmTransactions = firmRes.rows;
+  const commissionPayments = commPayRes.rows;
 
   // Summaries per category
   const expTotal = expenses.reduce((s, e) => ({ debit: s.debit + (parseFloat(e.debit) || 0), credit: s.credit + (parseFloat(e.credit) || 0) }), { debit: 0, credit: 0 });
@@ -524,6 +537,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
   const plotPayTotal = plotPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
   const farmerPayTotal = farmerPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
   const firmTotal = firmTransactions.reduce((s, f) => ({ debit: s.debit + (parseFloat(f.debit) || 0), credit: s.credit + (parseFloat(f.credit) || 0) }), { debit: 0, credit: 0 });
+  const commPayTotal = commissionPayments.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
 
   res.json({
     expenses,
@@ -531,13 +545,15 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     plot_payments: plotPayments,
     farmer_payments: farmerPayments,
     firm_transactions: firmTransactions,
+    commission_payments: commissionPayments,
     summary: {
       expenses: { count: expenses.length, debit: expTotal.debit, credit: expTotal.credit },
       commissions: { count: commissions.length, total: commTotal },
       plot_payments: { count: plotPayments.length, total: plotPayTotal },
       farmer_payments: { count: farmerPayments.length, total: farmerPayTotal },
       firm_transactions: { count: firmTransactions.length, debit: firmTotal.debit, credit: firmTotal.credit },
-      grand_total_entries: expenses.length + commissions.length + plotPayments.length + farmerPayments.length + firmTransactions.length,
+      commission_payments: { count: commissionPayments.length, total: commPayTotal },
+      grand_total_entries: expenses.length + commissions.length + plotPayments.length + farmerPayments.length + firmTransactions.length + commissionPayments.length,
     },
   });
 });

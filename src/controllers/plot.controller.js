@@ -589,12 +589,9 @@ export const deletePlot = asyncHandler(async (req, res) => {
 
 /** POST /plots/payments — Create a payment */
 export const createPayment = asyncHandler(async (req, res) => {
-  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, mapped_member_id, mapped_user_id } = req.body;
+  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id } = req.body;
 
   if (!plot_id) return res.status(400).json({ message: 'Plot is required' });
-  if (mapped_member_id && mapped_user_id) {
-    return res.status(400).json({ message: 'Map this payment to either a client or a user, not both' });
-  }
 
   const plotIdInt = parseInt(plot_id);
   const normalizedPaymentType = ['BANK', 'CHEQUE'].includes(payment_type) ? payment_type : 'CASH';
@@ -609,10 +606,10 @@ export const createPayment = asyncHandler(async (req, res) => {
      INSERT INTO plot_payments (
        plot_id, site_id, date, payment_from, payment_type, bank_details, bank_name,
        branch, narration, amount, created_by, voucher_url, assigned_admin_id, status,
-       cheque_no, cheque_status, buyer_name, booked_by, mapped_member_id, mapped_user_id
+       cheque_no, cheque_status, buyer_name, booked_by
      )
      SELECT $1, plot.site_id, $2::date, $3, $4, $5, $6, $7, $8, $9::numeric,
-            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by, $15, $16
+            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by
        FROM plot
      RETURNING *`,
     [
@@ -630,8 +627,6 @@ export const createPayment = asyncHandler(async (req, res) => {
       assigned_admin_id ? parseInt(assigned_admin_id) : null,             // $12
       req.body.cheque_no ? String(req.body.cheque_no).trim() : null,      // $13
       normalizedPaymentType === 'CHEQUE' ? 'PENDING' : null,              // $14
-      mapped_member_id ? parseInt(mapped_member_id) : null,               // $15
-      mapped_user_id ? parseInt(mapped_user_id) : null,                   // $16
     ]
   );
   const payment = result.rows[0];

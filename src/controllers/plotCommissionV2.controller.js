@@ -392,13 +392,10 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
  * Record an installment payment.
  */
 export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
-  const { master_id, date, amount, payment_mode, bank_name, transaction_id, remarks, voucher_number, voucher_url, assigned_admin_id, cheque_no, mapped_member_id, mapped_user_id } = req.body;
+  const { master_id, date, amount, payment_mode, bank_name, transaction_id, remarks, voucher_number, voucher_url, assigned_admin_id, cheque_no } = req.body;
 
   if (!master_id || !amount) {
     return res.status(400).json({ message: 'master_id and amount are required' });
-  }
-  if (mapped_member_id && mapped_user_id) {
-    return res.status(400).json({ message: 'Map this payment to either a client or a user, not both' });
   }
 
   const masterIdInt = parseInt(master_id);
@@ -428,14 +425,14 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
          site_id, plot_commission_id, date, amount, balance_after_payment,
          payment_mode, bank_name, transaction_id, remarks, status,
          voucher_number, voucher_url, assigned_admin_id, created_by,
-         cheque_no, cheque_status, mapped_member_id, mapped_user_id
+         cheque_no, cheque_status
        )
        SELECT
          m.site_id, $1, $2::date, $3::numeric,
          (m.total_commission - (m.already_paid + $3::numeric)),
          $4::text, $5::text, $6::text, $7::text, 'pending',
          $8::text, $9::text, $10::int, $11::int,
-         $12::text, $13::text, $14::int, $15::int
+         $12::text, $13::text
        FROM master m
        RETURNING *
      )
@@ -454,8 +451,6 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
       req.user.id,                                                // $11
       cheque_no ? cheque_no.trim() : null,                        // $12
       chequeStatus,                                               // $13
-      mapped_member_id ? parseInt(mapped_member_id) : null,       // $14
-      mapped_user_id ? parseInt(mapped_user_id) : null,           // $15
     ]
   );
 
