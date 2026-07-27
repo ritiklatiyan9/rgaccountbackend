@@ -589,7 +589,7 @@ export const deletePlot = asyncHandler(async (req, res) => {
 
 /** POST /plots/payments — Create a payment */
 export const createPayment = asyncHandler(async (req, res) => {
-  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, buyer_name, booked_by, mapped_member_id, mapped_user_id } = req.body;
+  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, mapped_member_id, mapped_user_id } = req.body;
 
   if (!plot_id) return res.status(400).json({ message: 'Plot is required' });
   if (mapped_member_id && mapped_user_id) {
@@ -600,17 +600,19 @@ export const createPayment = asyncHandler(async (req, res) => {
   const normalizedPaymentType = ['BANK', 'CHEQUE'].includes(payment_type) ? payment_type : 'CASH';
   const isBankish = ['BANK', 'CHEQUE'].includes(normalizedPaymentType);
 
-  // Single CTE: lookup plot.site_id + INSERT in ONE round-trip.
+  // Single CTE: lookup plot ownership data + INSERT in ONE round-trip.
+  // Buyer and dealer are fixed to the parent plot so individual payments can
+  // never lose or drift away from the selected plot's identities.
   // Was: SELECT plot + INSERT = 2 RTTs.
   const result = await pool.query(
-    `WITH plot AS (SELECT id, site_id FROM plots WHERE id = $1)
+    `WITH plot AS (SELECT id, site_id, buyer_name, booking_by FROM plots WHERE id = $1)
      INSERT INTO plot_payments (
        plot_id, site_id, date, payment_from, payment_type, bank_details, bank_name,
        branch, narration, amount, created_by, voucher_url, assigned_admin_id, status,
        cheque_no, cheque_status, buyer_name, booked_by, mapped_member_id, mapped_user_id
      )
      SELECT $1, plot.site_id, $2::date, $3, $4, $5, $6, $7, $8, $9::numeric,
-            $10, $11, $12, 'pending', $13, $14, $15, $16, $17, $18
+            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by, $15, $16
        FROM plot
      RETURNING *`,
     [
@@ -628,10 +630,8 @@ export const createPayment = asyncHandler(async (req, res) => {
       assigned_admin_id ? parseInt(assigned_admin_id) : null,             // $12
       req.body.cheque_no ? String(req.body.cheque_no).trim() : null,      // $13
       normalizedPaymentType === 'CHEQUE' ? 'PENDING' : null,              // $14
-      buyer_name ? buyer_name.trim().toUpperCase() : null,                // $15
-      booked_by ? booked_by.trim().toUpperCase() : null,                  // $16
-      mapped_member_id ? parseInt(mapped_member_id) : null,               // $17
-      mapped_user_id ? parseInt(mapped_user_id) : null,                   // $18
+      mapped_member_id ? parseInt(mapped_member_id) : null,               // $15
+      mapped_user_id ? parseInt(mapped_user_id) : null,                   // $16
     ]
   );
   const payment = result.rows[0];
@@ -709,6 +709,10 @@ export const listPayments = asyncHandler(async (req, res) => {
 
   const paymentsWithVerify = payments.map((p) => ({
     ...p,
+    // Older Dashboard Quick Entry rows may have omitted these duplicated
+    // display fields. Use the parent plot identity without rewriting history.
+    buyer_name: p.buyer_name || plot?.buyer_name || null,
+    booked_by: plot?.booking_by || p.booked_by || null,
     verifyUrl: buildVerifyUrl({
       t: ReceiptType.PLOT,
       i: p.id,
@@ -737,7 +741,7 @@ export const getPayment = asyncHandler(async (req, res) => {
 /** PUT /plots/payments/:id — Update a payment */
 export const updatePayment = asyncHandler(async (req, res) => {
   const paymentId = parseInt(req.params.id);
-  const { date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, buyer_name, booked_by, cheque_no, cheque_status, received_by } = req.body;
+  const { date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, cheque_no, cheque_status, received_by } = req.body;
 
   const updateData = {};
   const normalizedPaymentType = payment_type !== undefined ? (['BANK', 'CHEQUE'].includes(payment_type) ? payment_type : 'CASH') : undefined;
@@ -751,8 +755,6 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (amount !== undefined) updateData.amount = parseFloat(amount) || 0;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
-  if (buyer_name !== undefined) updateData.buyer_name = buyer_name ? buyer_name.trim().toUpperCase() : null;
-  if (booked_by !== undefined) updateData.booked_by = booked_by ? booked_by.trim().toUpperCase() : null;
   if (cheque_no !== undefined) updateData.cheque_no = cheque_no ? String(cheque_no).trim() : null;
   if (cheque_status !== undefined) updateData.cheque_status = cheque_status || null;
   if (received_by !== undefined) updateData.received_by = received_by ? received_by.trim().toUpperCase() : null;
@@ -765,7 +767,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
   // Atomic UPDATE — saves a SELECT round-trip.
-  const updated = await plotPaymentModel.update(paymentId, updateData, pool);
+  const updated = await plotPaymentModel.updateWithPlotIdentity(paymentId, updateData, pool);
   if (!updated) return res.status(404).json({ message: 'Payment not found' });
   res.json({ payment: updated });
 });

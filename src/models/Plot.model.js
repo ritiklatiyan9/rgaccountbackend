@@ -133,6 +133,32 @@ class PlotPaymentModel extends MasterModel {
     super('plot_payments');
   }
 
+  /**
+   * Update a payment while re-syncing its buyer and dealer from the parent
+   * plot. These identities are intentionally not accepted from payment forms.
+   */
+  async updateWithPlotIdentity(id, data, pool) {
+    const keys = Object.keys(data);
+    const values = Object.values(data);
+    const setClause = [
+      ...keys.map((key, index) => `${key} = $${index + 1}`),
+      'buyer_name = p.buyer_name',
+      'booked_by = p.booking_by',
+    ].join(', ');
+    values.push(id);
+
+    const query = `
+      UPDATE plot_payments AS pp
+         SET ${setClause}
+        FROM plots AS p
+       WHERE pp.id = $${values.length}
+         AND p.id = pp.plot_id
+       RETURNING pp.*
+    `;
+    const result = await pool.query(query, values);
+    return result.rows[0];
+  }
+
   /** All payments for a plot, ordered by date ASC */
   async findByPlotId(plotId, pool) {
     const query = `
