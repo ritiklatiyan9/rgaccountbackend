@@ -15,7 +15,7 @@ import { emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
 
 // ══════════════════════════════════════════════════
 //  OPENING BALANCE HELPERS
-//  Computes the Site Balance (dashboard "gamma") as of a cutoff date.
+//  Computes the available Site Balance as of a cutoff date.
 //  Used to seed the first day's opening when no prior snapshot exists.
 // ══════════════════════════════════════════════════
 // Money still in the site's own hands, as of a cutoff (exclusive).
@@ -1285,7 +1285,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
 /**
  * GET /daybook/daily-balance?site_id=X&date=YYYY-MM-DD
  * Returns the opening + closing balance for a site+date.
- * Seeds today's record if missing (opening = yesterday's closing OR Site Balance gamma).
+ * Seeds today's record if missing (opening = yesterday's closing or Site Balance).
  * Returns tracked:false for past dates that pre-date the feature rollout.
  */
 export const getDailyBalance = asyncHandler(async (req, res) => {

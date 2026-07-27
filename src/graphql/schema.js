@@ -198,6 +198,19 @@ const ImprestPairType = new GraphQLObjectType({
   },
 });
 
+const SiteBalanceDetailType = new GraphQLObjectType({
+  name: 'SiteBalanceDetail',
+  fields: {
+    totalMoneyIn:         { type: new GraphQLNonNull(GraphQLFloat) },
+    totalMoneyOut:        { type: new GraphQLNonNull(GraphQLFloat) },
+    cashBalance:          { type: new GraphQLNonNull(GraphQLFloat) },
+    bankBalance:          { type: new GraphQLNonNull(GraphQLFloat) },
+    balanceBeforeImprest: { type: new GraphQLNonNull(GraphQLFloat) },
+    imprestHeld:          { type: new GraphQLNonNull(GraphQLFloat) },
+    siteBalance:          { type: new GraphQLNonNull(GraphQLFloat) },
+  },
+});
+
 const KpiCardsType = new GraphQLObjectType({
   name: 'KpiCards',
   fields: {
@@ -205,6 +218,7 @@ const KpiCardsType = new GraphQLObjectType({
     // the Day Book and Balance Sheet show; the dashboard renders this instead
     // of re-deriving it from revenue/expense/outstanding components.
     siteBalance:           { type: new GraphQLNonNull(GraphQLFloat) },
+    siteBalanceDetail:     { type: new GraphQLNonNull(SiteBalanceDetailType) },
     totalRevenue:          { type: new GraphQLNonNull(GraphQLFloat) },
     totalExpense:          { type: new GraphQLNonNull(GraphQLFloat) },
     netProfit:             { type: new GraphQLNonNull(GraphQLFloat) },
@@ -811,7 +825,9 @@ const QueryType = new GraphQLObjectType({
         // single biggest perf win on the dashboard. Mutations on any of
         // the 6 source modules already call clearCacheByPrefixes(['dashboard:'])
         // (see e.g. cashflow.controller.js), so cached values stay fresh.
-        const key = cacheKey(`kpi-cards${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
+        // v2 includes the exact Site Balance reconciliation fields. Versioning
+        // prevents an older cached payload from returning a blank detail.
+        const key = cacheKey(`kpi-cards-v2${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);

@@ -78,28 +78,60 @@ export async function getExpenseBreakdown(siteId, start, end) {
 }
 
 // ── Site Balance: the one number every page must agree on ──
-// Net of the ledger minus the imprest float (cash sitting with sub-admins).
-// Identical to daybook's siteBalanceAsOf and the Balance Sheet's
-// balance_in_hand — computed here so the dashboard stops re-deriving it from
-// revenue/expense/outstanding components that each rounded differently.
-export async function getSiteBalance(siteId, end) {
+// The detail object gives the dashboard a plain, fully reconciling explanation:
+//
+//   cash balance + bank balance - imprest held by staff = site balance
+//
+// `totalMoneyIn - totalMoneyOut` is also returned as an audit line and must
+// equal cash + bank. This deliberately avoids explaining Site Balance with the
+// narrower Plot Revenue / Module Expenses cards, which do not represent every
+// entry in the shared ledger.
+export async function getSiteBalanceDetail(siteId, end) {
   const { rows } = await pool.query(
-    `SELECT
-       (SELECT COALESCE(SUM(credit - debit), 0)::numeric
-          FROM ledger_entries
-         WHERE site_id = $1 AND entry_date < $2::date)
-       -
-       (SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric
-          FROM (
-            SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
-            FROM imprest_ledger
-            WHERE site_id IS NOT NULL AND site_id = $1 AND created_at < $2
-            GROUP BY user_id
-          ) u)
-       AS balance`,
+    `WITH ledger AS (
+       SELECT
+         COALESCE(SUM(credit), 0)::numeric AS total_money_in,
+         COALESCE(SUM(debit), 0)::numeric AS total_money_out,
+         COALESCE(SUM(credit - debit) FILTER (WHERE bucket = 'cash'), 0)::numeric AS cash_balance,
+         COALESCE(SUM(credit - debit) FILTER (WHERE bucket <> 'cash'), 0)::numeric AS bank_balance,
+         COALESCE(SUM(credit - debit), 0)::numeric AS balance_before_imprest
+       FROM ledger_entries
+       WHERE site_id = $1 AND entry_date < $2::date
+     ),
+     imprest AS (
+       SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS imprest_held
+       FROM (
+         SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
+         FROM imprest_ledger
+         WHERE site_id IS NOT NULL AND site_id = $1 AND created_at < $2
+         GROUP BY user_id
+       ) u
+     )
+     SELECT
+       ledger.*,
+       imprest.imprest_held,
+       ledger.balance_before_imprest - imprest.imprest_held AS site_balance
+     FROM ledger CROSS JOIN imprest`,
     [siteId, end]
   );
-  return parseFloat(rows[0].balance) || 0;
+
+  const row = rows[0];
+  return {
+    totalMoneyIn:         parseFloat(row.total_money_in) || 0,
+    totalMoneyOut:        parseFloat(row.total_money_out) || 0,
+    cashBalance:          parseFloat(row.cash_balance) || 0,
+    bankBalance:          parseFloat(row.bank_balance) || 0,
+    balanceBeforeImprest: parseFloat(row.balance_before_imprest) || 0,
+    imprestHeld:          parseFloat(row.imprest_held) || 0,
+    siteBalance:          parseFloat(row.site_balance) || 0,
+  };
+}
+
+// Kept as the small compatibility API used by consistency checks and any
+// callers that only need the final number.
+export async function getSiteBalance(siteId, end) {
+  const detail = await getSiteBalanceDetail(siteId, end);
+  return detail.siteBalance;
 }
 
 // ── Site Cashflow: credit − debit from site-type ledgers ──
@@ -306,7 +338,7 @@ export async function getImprestDistribution(siteId, start, end) {
 
 // ── Combined KPI fetch (single round-trip where possible) ──
 export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
-  const [revenue, expData, cashflow, outstanding, personalLedgerCredit, imprestGiven, imprestDistribution, registryPayments, imprestPairs, siteBalance] = await Promise.all([
+  const [revenue, expData, cashflow, outstanding, personalLedgerCredit, imprestGiven, imprestDistribution, registryPayments, imprestPairs, siteBalanceDetail] = await Promise.all([
     getRevenue(siteId, start, end, excludeOldPlots),
     getExpenseBreakdown(siteId, start, end),
     getSiteCashflow(siteId, start, end),
@@ -316,7 +348,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     getImprestDistribution(siteId, start, end),
     getRegistryPayments(siteId, start, end),
     getImprestPairs(siteId, start, end),
-    getSiteBalance(siteId, end),
+    getSiteBalanceDetail(siteId, end),
   ]);
 
   // Total Incoming = Plot Payments only
@@ -326,7 +358,8 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
   const profitMargin = revenue > 0 ? (netProfit / revenue) * 100 : 0;
 
   return {
-    siteBalance,
+    siteBalance: siteBalanceDetail.siteBalance,
+    siteBalanceDetail,
     totalRevenue: revenue,
     totalExpense: expData.total,
     netProfit,
