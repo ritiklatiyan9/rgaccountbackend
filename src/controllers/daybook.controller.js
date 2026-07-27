@@ -1138,6 +1138,116 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'A valid site_id is required' });
   }
 
+  // A range statement may be arranged across accounting dates. This is a
+  // presentation-only site-wide sequence; transaction dates remain unchanged.
+  if (req.body.global_entry_keys !== undefined) {
+    const requestedKeys = req.body.global_entry_keys;
+    if (!Array.isArray(requestedKeys) || requestedKeys.length === 0 || requestedKeys.length > 100000) {
+      return res.status(400).json({ message: 'global_entry_keys must contain between 1 and 100000 entries' });
+    }
+    const normalizedKeys = requestedKeys.map((key) => String(key || '').trim());
+    if (normalizedKeys.some((key) => !/^[a-z_]+:[A-Za-z0-9:.-]+$/.test(key) || key.length > 160)) {
+      return res.status(400).json({ message: 'One or more global entry keys are invalid' });
+    }
+    if (new Set(normalizedKeys).size !== normalizedKeys.length) {
+      return res.status(400).json({ message: 'Duplicate global entries are not allowed' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtext($1))`,
+        [`daybook-global-order:${siteId}`]
+      );
+
+      let entryKeys = normalizedKeys;
+      if (partial) {
+        // Build the full current presentation sequence, then replace only the
+        // submitted page's slots. Rows on every other page retain their exact
+        // relative order.
+        const currentKeys = (await client.query(
+          `SELECT ordered.entry_key
+             FROM (
+               SELECT
+                 CONCAT(
+                   le.source_key,
+                   ':',
+                   COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
+                 ) AS entry_key,
+                 MIN(dgo.position) AS global_position,
+                 MAX(le.entry_date) AS entry_date,
+                 MIN(dbo.position) AS local_position,
+                 MAX(le.created_at) AS created_at,
+                 MAX(le.id) AS ledger_id
+               FROM ledger_entries le
+               LEFT JOIN daybook_global_order dgo
+                 ON dgo.site_id = le.site_id
+                AND dgo.entry_key = CONCAT(
+                  le.source_key,
+                  ':',
+                  COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
+                )
+               LEFT JOIN daybook_entry_order dbo
+                 ON dbo.site_id = le.site_id
+                AND dbo.entry_date = le.entry_date
+                AND dbo.entry_key = CONCAT(
+                  le.source_key,
+                  ':',
+                  COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
+                )
+              WHERE le.site_id = $1
+              GROUP BY 1
+             ) ordered
+            ORDER BY ordered.global_position ASC NULLS LAST,
+                     ordered.entry_date DESC,
+                     ordered.local_position ASC NULLS LAST,
+                     ordered.created_at DESC,
+                     ordered.ledger_id DESC`,
+          [siteId]
+        )).rows.map((row) => row.entry_key);
+
+        const currentKeySet = new Set(currentKeys);
+        const missingKeys = entryKeys.filter((key) => !currentKeySet.has(key));
+        if (missingKeys.length > 0) {
+          const error = new Error('One or more entries are no longer available');
+          error.statusCode = 409;
+          throw error;
+        }
+
+        const scopedKeySet = new Set(entryKeys);
+        let scopedIndex = 0;
+        entryKeys = currentKeys.map((key) => (
+          scopedKeySet.has(key) ? entryKeys[scopedIndex++] : key
+        ));
+      }
+
+      await client.query(
+        `DELETE FROM daybook_global_order WHERE site_id = $1`,
+        [siteId]
+      );
+      await client.query(
+        `INSERT INTO daybook_global_order
+           (site_id, entry_key, position, updated_by, updated_at)
+         SELECT $1, ordered.entry_key, ordered.position::int, $2, NOW()
+           FROM unnest($3::text[]) WITH ORDINALITY AS ordered(entry_key, position)`,
+        [siteId, req.user.id, entryKeys]
+      );
+      await client.query('COMMIT');
+
+      return res.json({
+        message: 'Day Book cross-date order saved',
+        scope: 'global',
+        count: normalizedKeys.length,
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   const requestedOrders = Array.isArray(req.body.orders)
     ? req.body.orders
     : [{ date: req.body.date, entry_keys: req.body.entry_keys }];

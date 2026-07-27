@@ -13,12 +13,22 @@ import pool from '../config/db.js';
  */
 const SCOPED = `
   WITH scoped_entries AS (
-    SELECT le.*, dbo.position AS display_position
+    SELECT
+      le.*,
+      dbo.position AS display_position,
+      dgo.position AS global_display_position
     FROM ledger_entries le
     LEFT JOIN daybook_entry_order dbo
       ON dbo.site_id = le.site_id
      AND dbo.entry_date = le.entry_date
      AND dbo.entry_key = CONCAT(
+       le.source_key,
+       ':',
+       COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
+     )
+    LEFT JOIN daybook_global_order dgo
+      ON dgo.site_id = le.site_id
+     AND dgo.entry_key = CONCAT(
        le.source_key,
        ':',
        COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
@@ -96,7 +106,11 @@ const REPORT_QUERY = `${SCOPED}
     'transactions', COALESCE((
       SELECT jsonb_agg(
         to_jsonb(tx)
-        ORDER BY tx.entry_date DESC, tx.display_position ASC NULLS LAST, tx.created_at DESC, tx.id DESC
+        ORDER BY tx.global_display_position ASC NULLS LAST,
+                 tx.entry_date DESC,
+                 tx.display_position ASC NULLS LAST,
+                 tx.created_at DESC,
+                 tx.id DESC
       )
       FROM (
         SELECT
@@ -106,9 +120,13 @@ const REPORT_QUERY = `${SCOPED}
           raw_mode AS payment_mode,
           bucket, source_key, source_id, status, cheque_status, cheque_no,
           voucher_url, entity_name, linked_detail, created_by_name, created_at,
-          display_position
+          display_position, global_display_position
         FROM period_entries
-        ORDER BY entry_date DESC, display_position ASC NULLS LAST, created_at DESC, id DESC
+        ORDER BY global_display_position ASC NULLS LAST,
+                 entry_date DESC,
+                 display_position ASC NULLS LAST,
+                 created_at DESC,
+                 id DESC
         LIMIT $9::int
       ) tx
     ), '[]'::jsonb),
