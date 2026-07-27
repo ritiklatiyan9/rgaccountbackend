@@ -1,4 +1,11 @@
-import { cacheEnabled, cacheGet, cacheSet, clearCacheByPrefixes, getDefaultTTL } from '../config/cache.js';
+import {
+  cacheEnabled,
+  cacheGet,
+  cacheSet,
+  clearCacheByPrefixes,
+  getCacheGeneration,
+  getDefaultTTL,
+} from '../config/cache.js';
 
 const sortQueryEntries = (queryObj = {}) => (
   Object.entries(queryObj)
@@ -26,6 +33,7 @@ export const cacheResponse = ({ ttlSeconds, namespace = 'api' } = {}) => {
     if (noCacheRequested) return next();
 
     const key = buildKey(req, namespace);
+    const requestGeneration = getCacheGeneration();
 
     try {
       const cached = await cacheGet(key);
@@ -40,8 +48,11 @@ export const cacheResponse = ({ ttlSeconds, namespace = 'api' } = {}) => {
     const originalJson = res.json.bind(res);
     res.json = (payload) => {
       if (res.statusCode >= 200 && res.statusCode < 300) {
-        // Fire-and-forget: don't await cache write
-        cacheSet(key, { statusCode: res.statusCode, payload }, ttl).catch(() => {});
+        // A mutation may have invalidated this read while its database work
+        // was still running. Never let that old response refill the cache.
+        if (requestGeneration === getCacheGeneration()) {
+          cacheSet(key, { statusCode: res.statusCode, payload }, ttl).catch(() => {});
+        }
       }
       res.setHeader('X-Cache', 'MISS');
       return originalJson(payload);

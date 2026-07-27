@@ -5,6 +5,7 @@ const stdTTL = parseInt(process.env.CACHE_STD_TTL_SECONDS || '45', 10);
 
 // ponytail: single-process cache; if the API ever runs multiple instances, swap back to a shared store
 const cache = new NodeCache({ stdTTL, checkperiod: 60, useClones: false });
+let cacheGeneration = 0;
 
 export const initCache = () => {
   console.log(`[Cache] node-cache ready (ttl ${stdTTL}s)`);
@@ -15,6 +16,7 @@ export const cacheEnabled = () =>
   String(process.env.CACHE_ENABLED || 'true').toLowerCase() === 'true';
 
 export const getDefaultTTL = () => stdTTL;
+export const getCacheGeneration = () => cacheGeneration;
 
 /**
  * Get a cached value by key.
@@ -36,6 +38,10 @@ export const cacheSet = async (key, value, ttlSeconds = stdTTL) => {
  */
 export const clearCacheByPrefixes = async (prefixes = []) => {
   if (!prefixes?.length) return 0;
+  // Any response that started before this mutation must not populate the
+  // cache after invalidation. cacheResponse captures this generation when a
+  // read starts and checks it again immediately before writing.
+  cacheGeneration += 1;
   const regexes = prefixes.map((p) => new RegExp(
     p.replace(/^\/+/, '').replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
   ));

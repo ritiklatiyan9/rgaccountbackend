@@ -4,9 +4,9 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && node src/server.js",
+    "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && npm run migrate:daybook-order-state && node src/server.js",
     "dev": "nodemon src/server.js",
-    "migrate": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order",
+    "migrate": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && npm run migrate:daybook-order-state",
     "migrate:plot-documents": "node src/migrations/059_plot_documents.js",
     "migrate:dms": "node src/migrations/069_dms_documents.js",
     "migrate:member-kyc-document-field": "node src/migrations/072_member_kyc_document_field.js",
@@ -17,6 +17,8 @@
     "migrate:sms-reminder-log": "node src/migrations/078_sms_reminder_log.js",
     "migrate:admin-lookout": "node src/migrations/080_admin_lookout_indexes.js",
     "migrate:daybook-order": "node src/migrations/081_daybook_entry_order.js",
+    "migrate:daybook-order-state": "node src/migrations/082_daybook_order_state.js",
+    "test:cache-race": "node --test src/middlewares/cache.middleware.test.mjs",
     "worker:sms": "node src/workers/smsWorker.js"
   },
   "dependencies": {

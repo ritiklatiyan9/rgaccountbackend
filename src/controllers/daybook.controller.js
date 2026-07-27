@@ -10,6 +10,7 @@ import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import { installmentModel } from '../models/Installment.model.js';
 import pool from '../config/db.js';
+import { clearCacheByPrefixes } from '../config/cache.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
 
@@ -550,10 +551,19 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // Default to today if no date provided
   const queryDate = date || new Date().toISOString().split('T')[0];
 
-  console.log(`[daybook] listEntries site_id=${siteId} date=${queryDate}`);
-
   // Fetch ONLY the requested date from all tables — fast indexed queries
-  const [dayBookEntriesRaw, expenseEntries, farmerPaymentEntries, commissionEntries, cashFlowEntries, firmTxnEntries, plotPaymentEntries, moduleLedgerEntries] = await Promise.all([
+  const [
+    dayBookEntriesRaw,
+    expenseEntries,
+    farmerPaymentEntries,
+    commissionEntries,
+    cashFlowEntries,
+    firmTxnEntries,
+    plotPaymentEntries,
+    moduleLedgerEntries,
+    savedOrderRows,
+    siteRow,
+  ] = await Promise.all([
     dayBookModel.findBySiteAndDate(siteId, queryDate, pool),
     expenseModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] expense query error:', err.message); return []; }),
     farmerPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] farmer_payment query error:', err.message); return []; }),
@@ -578,6 +588,23 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'`,
       [siteId, queryDate]
     ).then(r => r.rows).catch(err => { console.error('[daybook] module ledger query error:', err.message); return []; }),
+    pool.query(
+      `SELECT dbo.entry_key, dbo.position, state.revision AS order_revision
+         FROM (
+           SELECT COALESCE((
+             SELECT revision
+               FROM daybook_order_state
+              WHERE site_id = $1 AND entry_date = $2
+           ), 0)::bigint AS revision
+         ) state
+         LEFT JOIN daybook_entry_order dbo
+           ON dbo.site_id = $1 AND dbo.entry_date = $2`,
+      [parseInt(siteId), queryDate]
+    ).then((result) => result.rows),
+    pool.query(
+      'SELECT name, city, state FROM sites WHERE id = $1',
+      [parseInt(siteId)]
+    ).then((result) => result.rows[0] || null),
   ]);
 
   // Exclude IMPREST entries from daybook — they are managed in the Imprest module
@@ -658,10 +685,18 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       source: 'farmer_payment',
     }));
 
+  // Linked enrichment used to call Array.find() up to five times per Day Book
+  // row. Index each source once so large days stay linear instead of O(n²).
+  const farmerPaymentById = new Map(farmerPaymentEntries.map((entry) => [entry.id, entry]));
+  const commissionById = new Map(commissionEntries.map((entry) => [entry.id, entry]));
+  const cashFlowEntryById = new Map(cashFlowEntries.map((entry) => [entry.id, entry]));
+  const firmTxnById = new Map(firmTxnEntries.map((entry) => [entry.id, entry]));
+  const plotPaymentById = new Map(plotPaymentEntries.map((entry) => [entry.id, entry]));
+
   // Enrich daybook entries that ARE linked to farmer payments, commissions, etc.
   const enrichedDayBookEntries = dayBookEntries.map(e => {
     if (e.farmer_payment_id) {
-      const fp = farmerPaymentEntries.find(fp => fp.id === e.farmer_payment_id);
+      const fp = farmerPaymentById.get(e.farmer_payment_id);
       if (fp) {
         return {
           ...e,
@@ -680,7 +715,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       }
     }
     if (e.commission_id) {
-      const pc = commissionEntries.find(c => c.id === e.commission_id);
+      const pc = commissionById.get(e.commission_id);
       if (pc) {
         return {
           ...e,
@@ -695,7 +730,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       }
     }
     if (e.cash_flow_entry_id) {
-      const cf = cashFlowEntries.find(c => c.id === e.cash_flow_entry_id);
+      const cf = cashFlowEntryById.get(e.cash_flow_entry_id);
       if (cf) {
         return {
           ...e,
@@ -709,7 +744,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       }
     }
     if (e.firm_transaction_id) {
-      const ft = firmTxnEntries.find(t => t.id === e.firm_transaction_id);
+      const ft = firmTxnById.get(e.firm_transaction_id);
       if (ft) {
         return {
           ...e,
@@ -725,7 +760,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       }
     }
     if (e.plot_payment_id) {
-      const pp = plotPaymentEntries.find(p => p.id === e.plot_payment_id);
+      const pp = plotPaymentById.get(e.plot_payment_id);
       if (pp) {
         return {
           ...e,
@@ -979,7 +1014,6 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     });
 
   // Merge and sort ASC by id
-  console.log(`[daybook] counts: daybook=${enrichedDayBookEntries.length} expenses=${transformedExpenses.length} fp=${transformedFarmerPayments.length} comm=${transformedCommissions.length} cf=${transformedCashFlow.length} ft=${transformedFirmTxns.length} pp=${transformedPlotPayments.length} modules=${transformedModuleLedger.length}`);
   const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000 };
   const sortId = (x) => {
     if (typeof x.id === 'string') {
@@ -994,13 +1028,12 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // Apply a saved Day Book-only sequence. Rows with no saved position (usually
   // newly created entries) append in the existing fallback order. No source
   // table is updated or re-sorted.
-  const savedOrder = await pool.query(
-    `SELECT entry_key, position
-       FROM daybook_entry_order
-      WHERE site_id = $1 AND entry_date = $2`,
-    [parseInt(siteId), queryDate]
+  const orderRevision = Number(savedOrderRows[0]?.order_revision) || 0;
+  const positionByKey = new Map(
+    savedOrderRows
+      .filter((row) => row.entry_key)
+      .map((row) => [row.entry_key, Number(row.position)])
   );
-  const positionByKey = new Map(savedOrder.rows.map((row) => [row.entry_key, Number(row.position)]));
   const allEntries = fallbackEntries
     .map((entry, fallbackIndex) => ({
       ...entry,
@@ -1087,11 +1120,6 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // a QR. Payload fields are minimal — display info only. The `i` field uses
   // the entry's full id (including prefix like "expense_123") so each QR is
   // uniquely identifiable.
-  const siteRow = (await pool.query(
-    'SELECT name, city, state FROM sites WHERE id = $1',
-    [parseInt(siteId)]
-  )).rows[0] || null;
-
   const amount = (e) => parseFloat(e.debit) || parseFloat(e.credit) || 0;
   const partyName = (e) =>
     e.to_entity || e.from_entity || e.farmer_name || e.agent_name ||
@@ -1116,6 +1144,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   res.json({
     entries: entriesWithVerify,
     date: queryDate,
+    order_revision: orderRevision,
     summary: { total_debit, total_credit, total_count: entriesWithVerify.length },
     balance,
     typeBreakdown: Object.values(typeMap).sort((a, b) => b.total_debit - a.total_debit),
@@ -1133,9 +1162,20 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
 export const updateDayBookOrder = asyncHandler(async (req, res) => {
   const siteId = Number.parseInt(req.body.site_id, 10);
   const partial = req.body.partial === true;
+  const requestId = req.body.request_id == null ? null : String(req.body.request_id).trim();
+  const expectedRevisionValue = req.body.expected_revision;
+  const expectedRevision = expectedRevisionValue == null
+    ? null
+    : Number(expectedRevisionValue);
 
   if (!Number.isInteger(siteId) || siteId <= 0) {
     return res.status(400).json({ message: 'A valid site_id is required' });
+  }
+  if (requestId && (!/^[A-Za-z0-9._:-]{8,128}$/.test(requestId))) {
+    return res.status(400).json({ message: 'request_id is invalid' });
+  }
+  if (expectedRevisionValue != null && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
+    return res.status(400).json({ message: 'expected_revision must be a non-negative integer' });
   }
 
   // A range statement may be arranged across accounting dates. This is a
@@ -1160,6 +1200,42 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
         `SELECT pg_advisory_xact_lock(hashtext($1))`,
         [`daybook-global-order:${siteId}`]
       );
+
+      await client.query(
+        `INSERT INTO daybook_global_order_state (site_id)
+         VALUES ($1)
+         ON CONFLICT (site_id) DO NOTHING`,
+        [siteId]
+      );
+      const state = (await client.query(
+        `SELECT revision, last_request_id
+           FROM daybook_global_order_state
+          WHERE site_id = $1
+          FOR UPDATE`,
+        [siteId]
+      )).rows[0];
+      const currentRevision = Number(state.revision) || 0;
+
+      // A timed-out client retries with the same request ID. Return the
+      // already-committed revision without touching any position rows.
+      if (requestId && state.last_request_id === requestId) {
+        await client.query('COMMIT');
+        await clearCacheByPrefixes(['daybook|', 'balance-sheet|']);
+        return res.json({
+          message: 'Day Book cross-date order already saved',
+          scope: 'global',
+          count: normalizedKeys.length,
+          order_revision: currentRevision,
+          already_applied: true,
+        });
+      }
+      if (expectedRevision != null && expectedRevision !== currentRevision) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message: 'This Day Book order changed on another screen. Reopen Reorder entries and try again.',
+          order_revision: currentRevision,
+        });
+      }
 
       let entryKeys = normalizedKeys;
       if (partial) {
@@ -1222,26 +1298,49 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
         ));
       }
 
-      await client.query(
-        `DELETE FROM daybook_global_order WHERE site_id = $1`,
-        [siteId]
-      );
-      await client.query(
+      const upserted = await client.query(
         `INSERT INTO daybook_global_order
            (site_id, entry_key, position, updated_by, updated_at)
          SELECT $1, ordered.entry_key, ordered.position::int, $2, NOW()
-           FROM unnest($3::text[]) WITH ORDINALITY AS ordered(entry_key, position)`,
+           FROM unnest($3::text[]) WITH ORDINALITY AS ordered(entry_key, position)
+         ON CONFLICT (site_id, entry_key) DO UPDATE
+           SET position = EXCLUDED.position,
+               updated_by = EXCLUDED.updated_by,
+               updated_at = EXCLUDED.updated_at
+         WHERE daybook_global_order.position IS DISTINCT FROM EXCLUDED.position`,
         [siteId, req.user.id, entryKeys]
       );
+      const deleted = await client.query(
+        `DELETE FROM daybook_global_order
+          WHERE site_id = $1
+            AND NOT (entry_key = ANY($2::text[]))`,
+        [siteId, entryKeys]
+      );
+      const revisionRow = (await client.query(
+        `UPDATE daybook_global_order_state
+            SET revision = revision + 1,
+                last_request_id = $2,
+                updated_by = $3,
+                updated_at = NOW()
+          WHERE site_id = $1
+          RETURNING revision`,
+        [siteId, requestId, req.user.id]
+      )).rows[0];
       await client.query('COMMIT');
+      await clearCacheByPrefixes(['daybook|', 'balance-sheet|']);
 
       return res.json({
         message: 'Day Book cross-date order saved',
         scope: 'global',
         count: normalizedKeys.length,
+        changed: upserted.rowCount + deleted.rowCount,
+        order_revision: Number(revisionRow.revision),
       });
     } catch (error) {
       await client.query('ROLLBACK');
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ message: error.message });
+      }
       throw error;
     } finally {
       client.release();
@@ -1261,6 +1360,14 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
   for (const requestedOrder of requestedOrders) {
     const date = String(requestedOrder?.date || '');
     const entryKeys = requestedOrder?.entry_keys;
+    const orderExpectedValue = requestedOrder?.expected_revision
+      ?? (requestedOrders.length === 1 ? expectedRevisionValue : null);
+    const orderExpectedRevision = orderExpectedValue == null
+      ? null
+      : Number(orderExpectedValue);
+    const orderRequestId = requestedOrder?.request_id
+      ? String(requestedOrder.request_id).trim()
+      : (requestedOrders.length === 1 ? requestId : null);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ message: 'Every order requires a valid date' });
     }
@@ -1269,6 +1376,12 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
     }
     if (!Array.isArray(entryKeys) || entryKeys.length > 5000) {
       return res.status(400).json({ message: 'Each entry_keys value must be an array of at most 5000 entries' });
+    }
+    if (orderExpectedValue != null && (!Number.isSafeInteger(orderExpectedRevision) || orderExpectedRevision < 0)) {
+      return res.status(400).json({ message: `expected_revision is invalid for ${date}` });
+    }
+    if (orderRequestId && !/^[A-Za-z0-9._:-]{8,128}$/.test(orderRequestId)) {
+      return res.status(400).json({ message: `request_id is invalid for ${date}` });
     }
 
     const normalizedKeys = entryKeys.map((key) => String(key || '').trim());
@@ -1281,13 +1394,19 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
 
     seenDates.add(date);
     totalEntries += normalizedKeys.length;
-    orders.push({ date, entryKeys: normalizedKeys });
+    orders.push({
+      date,
+      entryKeys: normalizedKeys,
+      expectedRevision: orderExpectedRevision,
+      requestId: orderRequestId,
+    });
   }
   if (totalEntries > 100000) {
     return res.status(400).json({ message: 'A maximum of 100000 entries can be ordered at once' });
   }
 
   const client = await pool.connect();
+  let totalChanged = 0;
   try {
     await client.query('BEGIN');
     // A stable date order prevents two overlapping range saves from taking
@@ -1299,6 +1418,32 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
         `SELECT pg_advisory_xact_lock(hashtext($1))`,
         [`daybook-order:${siteId}:${date}`]
       );
+
+      await client.query(
+        `INSERT INTO daybook_order_state (site_id, entry_date)
+         VALUES ($1, $2::date)
+         ON CONFLICT (site_id, entry_date) DO NOTHING`,
+        [siteId, date]
+      );
+      const state = (await client.query(
+        `SELECT revision, last_request_id
+           FROM daybook_order_state
+          WHERE site_id = $1 AND entry_date = $2::date
+          FOR UPDATE`,
+        [siteId, date]
+      )).rows[0];
+      const currentRevision = Number(state.revision) || 0;
+      if (order.requestId && state.last_request_id === order.requestId) {
+        order.savedRevision = currentRevision;
+        order.alreadyApplied = true;
+        continue;
+      }
+      if (order.expectedRevision != null && order.expectedRevision !== currentRevision) {
+        const error = new Error(`The Day Book order for ${date} changed on another screen. Reopen Reorder entries and try again.`);
+        error.statusCode = 409;
+        error.orderRevision = currentRevision;
+        throw error;
+      }
 
       if (partial) {
         const existingKeys = (await client.query(
@@ -1360,25 +1505,57 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
         ));
       }
 
-      await client.query(
-        `DELETE FROM daybook_entry_order WHERE site_id = $1 AND entry_date = $2`,
-        [siteId, date]
-      );
-
+      let changed = 0;
       if (entryKeys.length > 0) {
-        await client.query(
+        const upserted = await client.query(
           `INSERT INTO daybook_entry_order
              (site_id, entry_date, entry_key, position, updated_by, updated_at)
            SELECT $1, $2::date, ordered.entry_key, ordered.position::int, $3, NOW()
-             FROM unnest($4::text[]) WITH ORDINALITY AS ordered(entry_key, position)`,
+             FROM unnest($4::text[]) WITH ORDINALITY AS ordered(entry_key, position)
+           ON CONFLICT (site_id, entry_date, entry_key) DO UPDATE
+             SET position = EXCLUDED.position,
+                 updated_by = EXCLUDED.updated_by,
+                 updated_at = EXCLUDED.updated_at
+           WHERE daybook_entry_order.position IS DISTINCT FROM EXCLUDED.position`,
           [siteId, date, req.user.id, entryKeys]
         );
+        changed += upserted.rowCount;
       }
+      const deleted = await client.query(
+        `DELETE FROM daybook_entry_order
+          WHERE site_id = $1 AND entry_date = $2::date
+            AND (
+              CARDINALITY($3::text[]) = 0
+              OR NOT (entry_key = ANY($3::text[]))
+            )`,
+        [siteId, date, entryKeys]
+      );
+      changed += deleted.rowCount;
+      totalChanged += changed;
+
+      const revisionRow = (await client.query(
+        `UPDATE daybook_order_state
+            SET revision = revision + 1,
+                last_request_id = $3,
+                updated_by = $4,
+                updated_at = NOW()
+          WHERE site_id = $1 AND entry_date = $2::date
+          RETURNING revision`,
+        [siteId, date, order.requestId, req.user.id]
+      )).rows[0];
+      order.savedRevision = Number(revisionRow.revision);
     }
 
     await client.query('COMMIT');
+    await clearCacheByPrefixes(['daybook|', 'balance-sheet|']);
   } catch (error) {
     await client.query('ROLLBACK');
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        message: error.message,
+        ...(error.orderRevision == null ? {} : { order_revision: error.orderRevision }),
+      });
+    }
     throw error;
   } finally {
     client.release();
@@ -1389,6 +1566,13 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
     ...(orders.length === 1 ? { date: orders[0].date } : {}),
     dates: orders.length,
     count: totalEntries,
+    changed: totalChanged,
+    ...(orders.length === 1 ? {
+      order_revision: orders[0].savedRevision,
+      already_applied: orders[0].alreadyApplied === true,
+    } : {
+      order_revisions: Object.fromEntries(orders.map((order) => [order.date, order.savedRevision])),
+    }),
   });
 });
 

@@ -80,7 +80,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     : null;
   const grain = rangeDays !== null && rangeDays <= 62 ? 'day' : 'month';
 
-  const [siteResult, report] = await Promise.all([
+  const [siteResult, report, orderStateResult] = await Promise.all([
     pool.query('SELECT id, name, code, address, city, state FROM sites WHERE id = $1', [siteId]),
     balanceSheetModel.getReport({
       siteId,
@@ -94,6 +94,12 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
       limit,
       grain,
     }),
+    pool.query(
+      `SELECT revision
+         FROM daybook_global_order_state
+        WHERE site_id = $1`,
+      [siteId]
+    ),
   ]);
 
   const site = siteResult.rows[0];
@@ -102,6 +108,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
   res.json({
     site,
     scope,
+    order_revision: Number(orderStateResult.rows[0]?.revision) || 0,
     period: { preset, date_from: dateFrom, date_to: dateTo, grain },
     filters: { source, payment_mode: paymentMode, direction, q: search },
     ...report,
