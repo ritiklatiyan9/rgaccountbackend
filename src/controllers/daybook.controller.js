@@ -1111,6 +1111,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
  */
 export const updateDayBookOrder = asyncHandler(async (req, res) => {
   const siteId = Number.parseInt(req.body.site_id, 10);
+  const partial = req.body.partial === true;
 
   if (!Number.isInteger(siteId) || siteId <= 0) {
     return res.status(400).json({ message: 'A valid site_id is required' });
@@ -1160,11 +1161,74 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     // A stable date order prevents two overlapping range saves from taking
     // advisory locks in opposite orders.
-    for (const { date, entryKeys } of orders.sort((a, b) => a.date.localeCompare(b.date))) {
+    for (const order of orders.sort((a, b) => a.date.localeCompare(b.date))) {
+      const { date } = order;
+      let { entryKeys } = order;
       await client.query(
         `SELECT pg_advisory_xact_lock(hashtext($1))`,
         [`daybook-order:${siteId}:${date}`]
       );
+
+      if (partial) {
+        const existingKeys = (await client.query(
+          `SELECT entry_key
+             FROM daybook_entry_order
+            WHERE site_id = $1 AND entry_date = $2
+            ORDER BY position ASC`,
+          [siteId, date]
+        )).rows.map((row) => row.entry_key);
+        const canonicalKeys = (await client.query(
+          `SELECT ordered.entry_key
+             FROM (
+               SELECT
+                 CONCAT(
+                   le.source_key,
+                   ':',
+                   COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
+                 ) AS entry_key,
+                 MIN(dbo.position) AS display_position,
+                 MAX(le.created_at) AS created_at,
+                 MAX(le.id) AS ledger_id
+               FROM ledger_entries le
+               LEFT JOIN daybook_entry_order dbo
+                 ON dbo.site_id = le.site_id
+                AND dbo.entry_date = le.entry_date
+                AND dbo.entry_key = CONCAT(
+                  le.source_key,
+                  ':',
+                  COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
+                )
+              WHERE le.site_id = $1 AND le.entry_date = $2
+              GROUP BY 1
+             ) ordered
+            ORDER BY ordered.display_position ASC NULLS LAST,
+                     ordered.created_at DESC,
+                     ordered.ledger_id DESC`,
+          [siteId, date]
+        )).rows.map((row) => row.entry_key);
+
+        const fullKeys = [...existingKeys];
+        const fullKeySet = new Set(fullKeys);
+        canonicalKeys.forEach((key) => {
+          if (!fullKeySet.has(key)) {
+            fullKeys.push(key);
+            fullKeySet.add(key);
+          }
+        });
+        const missingKeys = entryKeys.filter((key) => !fullKeySet.has(key));
+        if (missingKeys.length > 0) {
+          const error = new Error(`One or more entries for ${date} are no longer available`);
+          error.statusCode = 409;
+          throw error;
+        }
+
+        const scopedKeySet = new Set(entryKeys);
+        let scopedIndex = 0;
+        entryKeys = fullKeys.map((key) => (
+          scopedKeySet.has(key) ? entryKeys[scopedIndex++] : key
+        ));
+      }
+
       await client.query(
         `DELETE FROM daybook_entry_order WHERE site_id = $1 AND entry_date = $2`,
         [siteId, date]
