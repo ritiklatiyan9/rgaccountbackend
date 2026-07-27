@@ -1105,53 +1105,80 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
 
 /**
  * PUT /daybook/order
- * Persist the presentation sequence for one site's single-day Day Book.
+ * Persist the presentation sequence for one or more dates in a site's Day Book.
  * This intentionally writes only daybook_entry_order; owning transaction
  * modules and accounting values are never touched.
  */
 export const updateDayBookOrder = asyncHandler(async (req, res) => {
   const siteId = Number.parseInt(req.body.site_id, 10);
-  const entryDate = String(req.body.date || '');
-  const entryKeys = req.body.entry_keys;
 
   if (!Number.isInteger(siteId) || siteId <= 0) {
     return res.status(400).json({ message: 'A valid site_id is required' });
   }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(entryDate)) {
-    return res.status(400).json({ message: 'A valid date is required' });
-  }
-  if (!Array.isArray(entryKeys) || entryKeys.length > 5000) {
-    return res.status(400).json({ message: 'entry_keys must be an array of at most 5000 entries' });
+
+  const requestedOrders = Array.isArray(req.body.orders)
+    ? req.body.orders
+    : [{ date: req.body.date, entry_keys: req.body.entry_keys }];
+  if (requestedOrders.length === 0 || requestedOrders.length > 5000) {
+    return res.status(400).json({ message: 'orders must contain between 1 and 5000 dates' });
   }
 
-  const normalizedKeys = entryKeys.map((key) => String(key || '').trim());
-  if (normalizedKeys.some((key) => !/^[a-z_]+:[A-Za-z0-9:.-]+$/.test(key) || key.length > 160)) {
-    return res.status(400).json({ message: 'One or more entry keys are invalid' });
+  const orders = [];
+  const seenDates = new Set();
+  let totalEntries = 0;
+  for (const requestedOrder of requestedOrders) {
+    const date = String(requestedOrder?.date || '');
+    const entryKeys = requestedOrder?.entry_keys;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ message: 'Every order requires a valid date' });
+    }
+    if (seenDates.has(date)) {
+      return res.status(400).json({ message: `Duplicate order date: ${date}` });
+    }
+    if (!Array.isArray(entryKeys) || entryKeys.length > 5000) {
+      return res.status(400).json({ message: 'Each entry_keys value must be an array of at most 5000 entries' });
+    }
+
+    const normalizedKeys = entryKeys.map((key) => String(key || '').trim());
+    if (normalizedKeys.some((key) => !/^[a-z_]+:[A-Za-z0-9:.-]+$/.test(key) || key.length > 160)) {
+      return res.status(400).json({ message: `One or more entry keys are invalid for ${date}` });
+    }
+    if (new Set(normalizedKeys).size !== normalizedKeys.length) {
+      return res.status(400).json({ message: `Duplicate entries are not allowed for ${date}` });
+    }
+
+    seenDates.add(date);
+    totalEntries += normalizedKeys.length;
+    orders.push({ date, entryKeys: normalizedKeys });
   }
-  if (new Set(normalizedKeys).size !== normalizedKeys.length) {
-    return res.status(400).json({ message: 'Duplicate entries are not allowed in the saved order' });
+  if (totalEntries > 100000) {
+    return res.status(400).json({ message: 'A maximum of 100000 entries can be ordered at once' });
   }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `SELECT pg_advisory_xact_lock(hashtext($1))`,
-      [`daybook-order:${siteId}:${entryDate}`]
-    );
-    await client.query(
-      `DELETE FROM daybook_entry_order WHERE site_id = $1 AND entry_date = $2`,
-      [siteId, entryDate]
-    );
-
-    if (normalizedKeys.length > 0) {
+    // A stable date order prevents two overlapping range saves from taking
+    // advisory locks in opposite orders.
+    for (const { date, entryKeys } of orders.sort((a, b) => a.date.localeCompare(b.date))) {
       await client.query(
-        `INSERT INTO daybook_entry_order
-           (site_id, entry_date, entry_key, position, updated_by, updated_at)
-         SELECT $1, $2::date, ordered.entry_key, ordered.position::int, $3, NOW()
-           FROM unnest($4::text[]) WITH ORDINALITY AS ordered(entry_key, position)`,
-        [siteId, entryDate, req.user.id, normalizedKeys]
+        `SELECT pg_advisory_xact_lock(hashtext($1))`,
+        [`daybook-order:${siteId}:${date}`]
       );
+      await client.query(
+        `DELETE FROM daybook_entry_order WHERE site_id = $1 AND entry_date = $2`,
+        [siteId, date]
+      );
+
+      if (entryKeys.length > 0) {
+        await client.query(
+          `INSERT INTO daybook_entry_order
+             (site_id, entry_date, entry_key, position, updated_by, updated_at)
+           SELECT $1, $2::date, ordered.entry_key, ordered.position::int, $3, NOW()
+             FROM unnest($4::text[]) WITH ORDINALITY AS ordered(entry_key, position)`,
+          [siteId, date, req.user.id, entryKeys]
+        );
+      }
     }
 
     await client.query('COMMIT');
@@ -1164,8 +1191,9 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
 
   res.json({
     message: 'Day Book order saved',
-    date: entryDate,
-    count: normalizedKeys.length,
+    ...(orders.length === 1 ? { date: orders[0].date } : {}),
+    dates: orders.length,
+    count: totalEntries,
   });
 });
 
