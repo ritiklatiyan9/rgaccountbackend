@@ -5,7 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && npm run migrate:daybook-order-state && node src/server.js",
-    "dev": "nodemon src/server.js",
+    "dev": "npm run migrate:daybook-order && npm run migrate:daybook-order-state && nodemon src/server.js",
     "migrate": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && npm run migrate:daybook-order-state",
     "migrate:plot-documents": "node src/migrations/059_plot_documents.js",
     "migrate:dms": "node src/migrations/069_dms_documents.js",
