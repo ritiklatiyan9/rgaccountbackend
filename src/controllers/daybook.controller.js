@@ -111,6 +111,24 @@ const dayBookOrderKey = (entry) => {
   return `day_book:${entry.id}`;
 };
 
+// Source modules may represent refunds/reversals as a negative amount on the
+// original side (for example a plot refund as credit = -200000). Day Book
+// presentation uses positive debit/credit columns, so flip negative credits
+// to Debit and negative debits to Credit while retaining the stored values for
+// safe editing. Net movement remains identical.
+const normalizeDayBookAmounts = (entry) => {
+  const rawDebit = parseFloat(entry.raw_debit ?? entry.debit) || 0;
+  const rawCredit = parseFloat(entry.raw_credit ?? entry.credit) || 0;
+  return {
+    ...entry,
+    raw_debit: rawDebit,
+    raw_credit: rawCredit,
+    debit: Math.max(rawDebit, 0) + Math.max(-rawCredit, 0),
+    credit: Math.max(rawCredit, 0) + Math.max(-rawDebit, 0),
+    is_reversal: rawDebit < 0 || rawCredit < 0,
+  };
+};
+
 /**
  * POST /daybook
  * Create a new day book entry.
@@ -997,7 +1015,10 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (bPosition != null) return 1;
       return a._fallback_order - b._fallback_order;
     })
-    .map(({ _fallback_order, ...entry }, index) => ({ ...entry, display_order: index + 1 }));
+    .map(({ _fallback_order, ...entry }, index) => normalizeDayBookAmounts({
+      ...entry,
+      display_order: index + 1,
+    }));
 
   // Compute summary
   let total_debit = 0, total_credit = 0;
