@@ -1172,8 +1172,9 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'expected_revision must be a non-negative integer' });
   }
 
-  // A range statement may be arranged across accounting dates. This is a
-  // presentation-only site-wide sequence; transaction dates remain unchanged.
+  // Presentation-only site-wide sequence; transaction dates remain unchanged.
+  // Date order always dominates the statement — these positions only arrange
+  // entries relative to each other WITHIN their accounting date.
   if (req.body.global_entry_keys !== undefined) {
     const requestedKeys = req.body.global_entry_keys;
     if (!Array.isArray(requestedKeys) || requestedKeys.length === 0 || requestedKeys.length > 100000) {
@@ -1269,8 +1270,8 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
               WHERE le.site_id = $1
               GROUP BY 1
              ) ordered
-            ORDER BY ordered.global_position ASC NULLS LAST,
-                     ordered.entry_date DESC,
+            ORDER BY ordered.entry_date DESC,
+                     ordered.global_position ASC NULLS LAST,
                      ordered.local_position ASC NULLS LAST,
                      ordered.created_at DESC,
                      ordered.ledger_id DESC`,

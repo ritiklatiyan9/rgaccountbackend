@@ -106,8 +106,12 @@ const REPORT_QUERY = `${SCOPED}
     'transactions', COALESCE((
       SELECT jsonb_agg(
         to_jsonb(tx)
-        ORDER BY tx.global_display_position ASC NULLS LAST,
-                 tx.entry_date DESC,
+        -- Date order always wins; saved manual positions only arrange rows
+        -- WITHIN a date. A saved sequence outranking entry_date left the
+        -- statement jumbled and sank never-positioned (new) entries to the
+        -- bottom regardless of their date.
+        ORDER BY tx.entry_date DESC,
+                 tx.global_display_position ASC NULLS LAST,
                  tx.display_position ASC NULLS LAST,
                  tx.created_at DESC,
                  tx.id DESC
@@ -122,8 +126,8 @@ const REPORT_QUERY = `${SCOPED}
           voucher_url, entity_name, linked_detail, created_by_name, created_at,
           display_position, global_display_position
         FROM period_entries
-        ORDER BY global_display_position ASC NULLS LAST,
-                 entry_date DESC,
+        ORDER BY entry_date DESC,
+                 global_display_position ASC NULLS LAST,
                  display_position ASC NULLS LAST,
                  created_at DESC,
                  id DESC
