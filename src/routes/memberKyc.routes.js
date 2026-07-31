@@ -3,7 +3,7 @@ import multer from 'multer';
 import path from 'path';
 import {
   createCase, extractPreview, getCase, getDocument, retryDocument,
-  listPendingCases, updateCaseCustomer, uploadDocument, verifyCase,
+  listPendingCases, rejectCase, updateCaseCustomer, uploadDocument, verifyCase,
 } from '../controllers/memberKyc.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
@@ -117,5 +117,6 @@ router.get('/document/:id', requirePermission('clients', 'read'), getDocument);
 router.post('/document/:id/retry', requireKycMutationPermission('document'), bustPendingKycCache, retryDocument);
 router.post('/case/:id/extract-preview', requirePermission('clients', 'read'), extractPreview);
 router.post('/case/:id/verify', requireKycMutationPermission('params'), bustMemberCache, verifyCase);
+router.post('/case/:id/reject', requireKycMutationPermission('params'), bustMemberCache, rejectCase);
 
 export default router;

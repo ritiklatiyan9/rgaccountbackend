@@ -953,3 +953,21 @@ export const verifyCase = asyncHandler(async (req, res) => {
   await clearCacheByPrefixes(['members|']);
   res.json({ message: 'KYC verified and member updated', caseId: access.kycCase.id });
 });
+
+export const rejectCase = asyncHandler(async (req, res) => {
+  const access = await getAccessibleCase(req.params.id, req.user);
+  if (access.missing) return res.status(404).json({ message: 'KYC case not found' });
+  if (access.denied) return res.status(403).json({ message: 'This KYC case is unavailable to your account' });
+
+  const { rows } = await pool.query(
+    `UPDATE kyc_cases SET status = 'REJECTED', updated_at = now()
+      WHERE id = $1 AND status = ANY($2::text[])
+      RETURNING id`,
+    [access.kycCase.id, [...MUTABLE_CASE_STATUSES]]
+  );
+  if (!rows.length) {
+    return res.status(409).json({ message: 'This KYC case is already verified or rejected' });
+  }
+  await clearCacheByPrefixes(['members|']);
+  res.json({ message: 'KYC case rejected', caseId: access.kycCase.id });
+});

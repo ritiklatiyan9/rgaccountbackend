@@ -410,6 +410,8 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const { where, params } = buildWhere('e', 'e', [
       `(e.voucher_url IS NULL OR e.voucher_url = '')`,
       `(e.bill_url IS NULL OR e.bill_url = '')`,
+      // Only cash payments need a voucher — bank/UPI/cheque leave their own trail.
+      `UPPER(COALESCE(NULLIF(e.payment_mode, ''), 'CASH')) = 'CASH'`,
     ], visEx.scoped ? req.user.id : null, 'approved');
     const q = `
                   SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -816,6 +818,50 @@ export const rejectEntry = asyncHandler(async (req, res) => {
   }
 
   res.json({ entry: result.rows[0], message: `${source} rejected` });
+});
+
+/**
+ * PUT /approvals/:id/voucher
+ * Attach an already-uploaded voucher/bill URL to an entry, from the pending
+ * lookout queue — every source table carries a `voucher_url` column, so one
+ * write clears the "missing voucher" flag regardless of module.
+ * Body: { voucher_url }
+ */
+export const attachVoucher = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { source } = req.query;
+  const { voucher_url } = req.body;
+
+  if (!source || !ALLOWED_TABLES[source]) {
+    return res.status(400).json({ message: 'source query param is required' });
+  }
+  if (!voucher_url || typeof voucher_url !== 'string') {
+    return res.status(400).json({ message: 'voucher_url is required' });
+  }
+
+  const table = getTableName(source);
+  const entryId = parseInt(id);
+
+  const check = await pool.query(`SELECT id, assigned_admin_id FROM ${table} WHERE id = $1`, [entryId]);
+  if (!check.rows[0]) return res.status(404).json({ message: 'Entry not found' });
+
+  const assignedTo = check.rows[0].assigned_admin_id ? parseInt(check.rows[0].assigned_admin_id) : null;
+  const isAssignedToCaller = assignedTo === parseInt(req.user.id);
+  if (!isAssignedToCaller) {
+    if (assignedTo) {
+      return res.status(403).json({ message: 'This entry is assigned to another user' });
+    }
+    const allowedModules = await getAllowedModules(req.user);
+    if (!isModuleAllowed(allowedModules, source)) {
+      return res.status(403).json({ message: 'You do not have permission to update this module' });
+    }
+  }
+
+  const result = await pool.query(
+    `UPDATE ${table} SET voucher_url = $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+    [entryId, voucher_url]
+  );
+  res.json({ entry: result.rows[0], message: 'Voucher attached' });
 });
 
 /**

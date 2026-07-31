@@ -6,6 +6,7 @@ import {
   getPendingCounts,
   approveEntry,
   rejectEntry,
+  attachVoucher,
   bulkApprove,
   bulkReject,
   updateChequeStatus,
@@ -29,6 +30,7 @@ router.get('/counts', approvalReadCache, getPendingCounts);           // ?site_i
 router.get('/cheques', approvalReadCache, listChequeEntries);         // ?site_id=X&status=PENDING|CLEARED|BOUNCED|RETURNED|all
 router.put('/:id/approve', bustApprovalCache, approveEntry);          // ?source=farmer_payment|plot_commission|...
 router.put('/:id/reject', bustApprovalCache, rejectEntry);            // ?source=...
+router.put('/:id/voucher', bustApprovalCache, attachVoucher);         // ?source=... { voucher_url }
 router.post('/bulk-approve', bustApprovalCache, bulkApprove);         // { items: [{ id, source }] }
 router.post('/bulk-reject', bustApprovalCache, bulkReject);           // { items: [{ id, source }] }
 router.patch('/cheque-status', bustApprovalCache, updateChequeStatus); // { id, source, cheque_status }
