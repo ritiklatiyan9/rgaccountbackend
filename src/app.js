@@ -64,7 +64,7 @@ app.use(errorMiddleware);
 
 // ── Keep-alive: ping backends every 12 minutes so they don't sleep ──
 const KEEP_ALIVE_URLS = [
-  'https://cropland-crm-backend.onrender.com',
+  'https://new-crm-backend-cropland.onrender.com',
   'https://diwan-city-backend.onrender.com',
   'https://prithivi-backend.onrender.com',
   'https://makeandman.onrender.com',
