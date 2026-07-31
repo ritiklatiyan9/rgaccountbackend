@@ -65,6 +65,38 @@ export const updatePlotRegistryWorkflow = asyncHandler(async (req, res) => {
   });
 });
 
+const SIDEBAR_ORDER_KEY = 'sidebar_order';
+
+/**
+ * GET /settings/sidebar-order
+ * The admin-defined navigation order every user sees. Readable by anyone
+ * signed in; `order: null` means "no admin order set — use the app default".
+ */
+export const getSidebarOrder = asyncHandler(async (req, res) => {
+  const stored = await applicationSettingModel.getGlobalJson(SIDEBAR_ORDER_KEY, null);
+  res.json({ order: Array.isArray(stored) ? stored : null });
+});
+
+/**
+ * PUT /settings/sidebar-order  Body: { order: string[] }
+ * Admin/super-admin only — sets the sidebar order for every user.
+ */
+export const updateSidebarOrder = asyncHandler(async (req, res) => {
+  const { order } = req.body;
+  if (!Array.isArray(order) || !order.length) {
+    return res.status(400).json({ message: 'order must be a non-empty array of sidebar ids' });
+  }
+  if (!order.every((id) => typeof id === 'string' && id.trim() && id.length <= 64)) {
+    return res.status(400).json({ message: 'order must contain only non-empty id strings' });
+  }
+  if (new Set(order).size !== order.length) {
+    return res.status(400).json({ message: 'order must not contain duplicate ids' });
+  }
+
+  const saved = await applicationSettingModel.setGlobalJson(SIDEBAR_ORDER_KEY, order, req.user.id);
+  res.json({ order: saved, message: 'Sidebar order saved for all users' });
+});
+
 /** GET /settings/sms-reminders?site_id=123 */
 export const getSmsReminderSettings = asyncHandler(async (req, res) => {
   const siteId = await getAccessibleSiteId(req, res, req.query.site_id);

@@ -4,6 +4,8 @@ import requireRole from '../middlewares/role.middleware.js';
 import {
   getFeatures,
   updatePlotRegistryWorkflow,
+  getSidebarOrder,
+  updateSidebarOrder,
   getSmsReminderSettings,
   updateSmsReminderSettings,
 } from '../controllers/applicationSetting.controller.js';
@@ -22,6 +24,11 @@ router.put(
   bustRegistryCache,
   updatePlotRegistryWorkflow
 );
+
+// Sidebar order is one shared navigation: every signed-in user reads it,
+// only an admin reorders it (and that reorder applies to everyone).
+router.get('/sidebar-order', authMiddleware, getSidebarOrder);
+router.put('/sidebar-order', authMiddleware, requireRole('admin'), updateSidebarOrder);
 
 // Payment-reminder SMS config — admin only, per site.
 router.get('/sms-reminders', authMiddleware, requireRole('admin'), getSmsReminderSettings);

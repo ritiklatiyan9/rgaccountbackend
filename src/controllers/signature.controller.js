@@ -50,6 +50,11 @@ export const SIGN_TARGETS = {
     perm: 'cashflow',
     siteQuery: 'SELECT site_id FROM cash_flow_entries WHERE id = $1 LIMIT 1',
   },
+  firm_transaction: {
+    table: 'firm_transactions',
+    perm: 'firm_transactions',
+    siteQuery: 'SELECT site_id FROM firm_transactions WHERE id = $1 LIMIT 1',
+  },
 };
 
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);

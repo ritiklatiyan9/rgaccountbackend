@@ -2569,6 +2569,20 @@ export const deletePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
  * GET /daybook/recent?site_id=X&page=1&limit=10
  * Returns recent transactions across ALL modules via cash_flow_entries.
  */
+// Receipt code per cash-flow source module, so a scanned QR names the right
+// document type. Anything unmapped falls back to a generic DayBook receipt.
+const RECENT_RECEIPT_TYPE = {
+  expenses: ReceiptType.EXPENSE,
+  farmer_payments: ReceiptType.FARMER,
+  vendor_payments: ReceiptType.VENDOR,
+  plot_payments: ReceiptType.PLOT,
+  plot_installment_payments: ReceiptType.PLOT,
+  plot_registry_payments: ReceiptType.PLOT,
+  plot_commissions: ReceiptType.COMMISSION,
+  plot_commission_payments: ReceiptType.COMMISSION,
+  day_book: ReceiptType.DAYBOOK,
+};
+
 export const listRecentTransactions = asyncHandler(async (req, res) => {
   const { site_id, limit = 10, page = 1 } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
@@ -2602,21 +2616,62 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
             CASE
               WHEN cfe.source_module = 'plot_payments' THEN pp.booked_by
               ELSE NULL
-            END AS booked_by
+            END AS booked_by,
+            -- Signatures are captured on the module row that owns the payment
+            -- (Quick Entry signs via /signatures/:target/:id), not on this
+            -- cash-flow mirror — so pull them from whichever source table applies.
+            COALESCE(cfe.customer_signature_url, pp.customer_signature_url, ex.customer_signature_url,
+                     fp.customer_signature_url, db.customer_signature_url, ft.customer_signature_url,
+                     pcp.customer_signature_url, prp.customer_signature_url, vp.customer_signature_url)
+              AS customer_signature_url,
+            COALESCE(cfe.authority_signature_url, pp.authority_signature_url, ex.authority_signature_url,
+                     fp.authority_signature_url, db.authority_signature_url, ft.authority_signature_url,
+                     pcp.authority_signature_url, prp.authority_signature_url, vp.authority_signature_url)
+              AS authority_signature_url
      FROM cash_flow_entries cfe
      LEFT JOIN users u ON cfe.created_by = u.id
      LEFT JOIN plot_payments pp ON cfe.source_module = 'plot_payments' AND cfe.source_id = pp.id
      LEFT JOIN plots pl ON pp.plot_id = pl.id
      LEFT JOIN plot_installment_payments pip ON cfe.source_module = 'plot_installment_payments' AND cfe.source_id = pip.id
      LEFT JOIN plots pli ON pip.plot_id = pli.id
+     LEFT JOIN expenses ex ON cfe.source_module = 'expenses' AND cfe.source_id = ex.id
+     LEFT JOIN farmer_payments fp ON cfe.source_module = 'farmer_payments' AND cfe.source_id = fp.id
+     LEFT JOIN day_book db ON cfe.source_module = 'day_book' AND cfe.source_id = db.id
+     LEFT JOIN firm_transactions ft ON cfe.source_module = 'firm_transactions' AND cfe.source_id = ft.id
+     LEFT JOIN plot_commission_payments pcp ON cfe.source_module = 'plot_commission_payments' AND cfe.source_id = pcp.id
+     LEFT JOIN plot_registry_payments prp ON cfe.source_module = 'plot_registry_payments' AND cfe.source_id = prp.id
+     LEFT JOIN vendor_payments vp ON cfe.source_module = 'vendor_payments' AND cfe.source_id = vp.id
      WHERE cfe.site_id = $1
      ORDER BY cfe.date DESC, cfe.created_at DESC
      LIMIT $2 OFFSET $3`,
     [siteId, lim, offset]
   );
 
+  // Each row carries a signed verifyUrl so the receipt printed from the
+  // dashboard can embed a QR. The token is self-contained (display fields
+  // only, HMAC-signed), so it is built from the cash-flow row itself.
+  const siteRowRes = await pool.query('SELECT name, city, state FROM sites WHERE id = $1', [siteId]);
+  const siteRow = siteRowRes.rows[0] || null;
+
+  const transactions = result.rows.map((row) => ({
+    ...row,
+    verifyUrl: buildVerifyUrl({
+      t: RECENT_RECEIPT_TYPE[row.source_module] || ReceiptType.DAYBOOK,
+      i: `${row.source_module || 'cashflow'}_${row.source_id || row.id}`,
+      a: Math.abs(parseFloat(row.debit) || parseFloat(row.credit) || 0),
+      dr: (parseFloat(row.debit) || 0) > 0 ? 'OUT' : 'IN',
+      d: row.date,
+      pm: row.cash_type || null,
+      pn: row.buyer_name || row.particular || null,
+      pl: row.plot_no || null,
+      sn: siteRow?.name || null,
+      sy: siteRow?.city || null,
+      ss: siteRow?.state || null,
+    }),
+  }));
+
   res.json({
-    transactions: result.rows,
+    transactions,
     pagination: {
       totalItems: total,
       totalPages: Math.ceil(total / lim),

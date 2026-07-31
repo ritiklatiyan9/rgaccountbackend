@@ -81,6 +81,28 @@ class ApplicationSettingModel {
     return rows[0] ? rows[0].setting_value : fallback;
   }
 
+  /** Read an app-wide JSON setting (site_id IS NULL) — e.g. the sidebar order. */
+  async getGlobalJson(key, fallback = null) {
+    const { rows } = await pool.query(
+      'SELECT setting_value FROM application_settings WHERE site_id IS NULL AND setting_key = $1 LIMIT 1',
+      [key]
+    );
+    return rows[0] ? rows[0].setting_value : fallback;
+  }
+
+  /** Upsert an app-wide JSON setting. Guarded by the partial unique index. */
+  async setGlobalJson(key, value, updatedBy) {
+    const { rows } = await pool.query(
+      `INSERT INTO application_settings (site_id, setting_key, setting_value, updated_by, updated_at)
+       VALUES (NULL, $1, $2::jsonb, $3, NOW())
+       ON CONFLICT (setting_key) WHERE site_id IS NULL
+       DO UPDATE SET setting_value = EXCLUDED.setting_value, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+       RETURNING setting_value`,
+      [key, JSON.stringify(value), updatedBy]
+    );
+    return rows[0].setting_value;
+  }
+
   /** Upsert an arbitrary JSON setting. */
   async setJson(siteId, key, value, updatedBy) {
     const { rows } = await pool.query(
