@@ -1,5 +1,34 @@
 import MasterModel from './MasterModel.js';
 
+/**
+ * Category WHERE fragment shared by the paginated list and the breakdown stats,
+ * so the rows and the totals can never disagree.
+ * Multiple categories are OR-combined — picking three shows rows from all three.
+ * A non-empty `categories` array overrides the legacy single `category`.
+ * Mutates `params` (pushes bind values) and returns the next placeholder index.
+ */
+export const buildCategoryWhere = (categories, category, params, pIdx) => {
+  const uncategorized = `(u.category IS NULL OR u.category = '')`;
+  const tokens = Array.isArray(categories)
+    ? categories.map((c) => String(c).trim()).filter(Boolean)
+    : [];
+
+  if (tokens.length === 0) {
+    if (!category) return { clause: '', pIdx };
+    if (String(category).toUpperCase() === 'UNCATEGORIZED') return { clause: ` AND ${uncategorized}`, pIdx };
+    params.push(category);
+    return { clause: ` AND u.category = $${pIdx}`, pIdx: pIdx + 1 };
+  }
+
+  let next = pIdx;
+  const parts = tokens.map((token) => {
+    if (token.toUpperCase() === 'UNCATEGORIZED') return uncategorized;
+    params.push(`%${token}%`);
+    return `u.category ILIKE $${next++}`;
+  });
+  return { clause: ` AND (${parts.join(' OR ')})`, pIdx: next };
+};
+
 // ── Expense Model ──
 class ExpenseModel extends MasterModel {
   constructor() {
@@ -320,26 +349,9 @@ class ExpenseModel extends MasterModel {
         whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode);
       }
     }
-    // Multi-category filter (AND-combined ILIKE). When set, overrides legacy single `category`.
-    if (Array.isArray(categories) && categories.length > 0) {
-      for (const token of categories) {
-        const trimmed = String(token).trim();
-        if (!trimmed) continue;
-        if (trimmed.toUpperCase() === 'UNCATEGORIZED') {
-          whereClause += ` AND (u.category IS NULL OR u.category = '')`;
-        } else {
-          whereClause += ` AND u.category ILIKE $${pIdx}`;
-          params.push(`%${trimmed}%`);
-          pIdx++;
-        }
-      }
-    } else if (category) {
-      if (category === 'UNCATEGORIZED') {
-        whereClause += ` AND (u.category IS NULL OR u.category = '')`;
-      } else {
-        whereClause += ` AND u.category = $${pIdx++}`; params.push(category);
-      }
-    }
+    const cat = buildCategoryWhere(categories, category, params, pIdx);
+    whereClause += cat.clause;
+    pIdx = cat.pIdx;
     if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
     if (dateFrom) { whereClause += ` AND u.date >= $${pIdx++}`; params.push(dateFrom); }
     if (dateTo) { whereClause += ` AND u.date <= $${pIdx++}`; params.push(dateTo); }
@@ -535,25 +547,9 @@ class ExpenseModel extends MasterModel {
         whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode);
       }
     }
-    if (Array.isArray(categories) && categories.length > 0) {
-      for (const token of categories) {
-        const trimmed = String(token).trim();
-        if (!trimmed) continue;
-        if (trimmed.toUpperCase() === 'UNCATEGORIZED') {
-          whereClause += ` AND (u.category IS NULL OR u.category = '')`;
-        } else {
-          whereClause += ` AND u.category ILIKE $${pIdx}`;
-          params.push(`%${trimmed}%`);
-          pIdx++;
-        }
-      }
-    } else if (category) {
-      if (category === 'UNCATEGORIZED') {
-        whereClause += ` AND (u.category IS NULL OR u.category = '')`;
-      } else {
-        whereClause += ` AND u.category = $${pIdx++}`; params.push(category);
-      }
-    }
+    const cat = buildCategoryWhere(categories, category, params, pIdx);
+    whereClause += cat.clause;
+    pIdx = cat.pIdx;
     if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
     if (dateFrom) { whereClause += ` AND u.date >= $${pIdx++}`; params.push(dateFrom); }
     if (dateTo) { whereClause += ` AND u.date <= $${pIdx++}`; params.push(dateTo); }

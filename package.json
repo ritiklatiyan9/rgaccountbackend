@@ -20,6 +20,7 @@
     "migrate:daybook-order-state": "node src/migrations/082_daybook_order_state.js",
     "migrate:person-ledger-record-only": "node src/migrations/083_person_ledger_record_only.js",
     "test:cache-race": "node --test src/middlewares/cache.middleware.test.mjs",
+    "test:expense-category": "node --test src/models/expenseCategoryFilter.test.mjs",
     "worker:sms": "node src/workers/smsWorker.js"
   },
   "dependencies": {

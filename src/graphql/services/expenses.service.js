@@ -23,8 +23,8 @@ function normalizeFilters(filters = {}) {
     order: String(filters.order || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc',
   };
 
-  // Multi-category AND filter (ILIKE tokens). Pass-through only when it's a non-empty array so
-  // the SQL model can chain one `AND category ILIKE %token%` clause per entry.
+  // Multi-category OR filter (ILIKE tokens). Pass-through only when it's a non-empty array so
+  // the SQL model can OR one `category ILIKE %token%` clause per entry.
   if (Array.isArray(filters.categories) && filters.categories.length > 0) {
     const tokens = filters.categories.map((c) => String(c).trim()).filter(Boolean);
     if (tokens.length > 0) {

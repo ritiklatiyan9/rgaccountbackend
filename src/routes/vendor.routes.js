@@ -29,6 +29,7 @@ import {
   updateInventoryOrder,
   deleteInventoryOrder,
   addInventoryPayment,
+  updateInventoryPayment,
   deleteInventoryPayment,
   listInventoryCategories,
   getInventoryStockSummary,
@@ -84,6 +85,7 @@ router.put('/inventory/:id', requirePermission('vendors', 'update'), bustVendorC
 router.delete('/inventory/:id', requirePermission('vendors', 'delete'), bustVendorCache, deleteInventoryOrder);
 
 router.post('/inventory/:id/payments', requirePermission('vendors', 'write'), bustVendorCache, addInventoryPayment);
+router.put('/inventory/inv-payments/:paymentId', requirePermission('vendors', 'update'), bustVendorCache, updateInventoryPayment);
 router.delete('/inventory/inv-payments/:paymentId', requirePermission('vendors', 'delete'), bustVendorCache, deleteInventoryPayment);
 
 export default router;

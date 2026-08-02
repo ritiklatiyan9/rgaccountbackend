@@ -341,6 +341,50 @@ export const addInventoryPayment = asyncHandler(async (req, res) => {
   res.status(201).json({ payment: result.rows[0] });
 });
 
+export const updateInventoryPayment = asyncHandler(async (req, res) => {
+  const siteId = getSiteId(req);
+  const paymentId = asInt(req.params.paymentId);
+  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  if (!Number.isInteger(paymentId)) return res.status(400).json({ message: 'Invalid payment id' });
+
+  const amount = parseFloat(req.body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: 'amount must be > 0' });
+
+  const { payment_date, payment_mode, reference_no, note, voucher_url } = req.body;
+  const normalizedMode = payment_mode || 'cash';
+  const normalizedReference = (reference_no || '').trim() || null;
+
+  const result = await pool.query(
+    `UPDATE vendor_inventory_payments p
+     SET payment_date = $3,
+         amount = $4,
+         payment_mode = $5,
+         reference_no = $6,
+         cheque_no = $7,
+         note = $8,
+         voucher_url = $9
+     FROM vendor_inventory_orders o
+     WHERE p.id = $1
+       AND p.order_id = o.id
+       AND o.site_id = $2
+     RETURNING p.*`,
+    [
+      paymentId,
+      siteId,
+      payment_date || new Date().toISOString().slice(0, 10),
+      amount,
+      normalizedMode,
+      normalizedReference,
+      normalizedMode === 'cheque' ? normalizedReference : null,
+      (note || '').trim() || null,
+      (voucher_url || '').trim() || null,
+    ]
+  );
+
+  if (!result.rows[0]) return res.status(404).json({ message: 'Payment not found' });
+  res.json({ payment: result.rows[0] });
+});
+
 export const deleteInventoryPayment = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   const paymentId = asInt(req.params.paymentId);
