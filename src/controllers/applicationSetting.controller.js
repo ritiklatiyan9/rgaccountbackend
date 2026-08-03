@@ -69,8 +69,8 @@ const SIDEBAR_ORDER_KEY = 'sidebar_order';
 
 /**
  * GET /settings/sidebar-order
- * The admin-defined navigation order every user sees. Readable by anyone
- * signed in; `order: null` means "no admin order set — use the app default".
+ * The shared navigation order every user sees. Readable by anyone signed in;
+ * `order: null` means "nobody has set an order — use the app default".
  */
 export const getSidebarOrder = asyncHandler(async (req, res) => {
   const stored = await applicationSettingModel.getGlobalJson(SIDEBAR_ORDER_KEY, null);
@@ -79,7 +79,8 @@ export const getSidebarOrder = asyncHandler(async (req, res) => {
 
 /**
  * PUT /settings/sidebar-order  Body: { order: string[] }
- * Admin/super-admin only — sets the sidebar order for every user.
+ * Any signed-in user — sets the sidebar order for every user in the org.
+ * Last write wins; `updated_by` keeps it attributable.
  */
 export const updateSidebarOrder = asyncHandler(async (req, res) => {
   const { order } = req.body;

@@ -25,10 +25,13 @@ router.put(
   updatePlotRegistryWorkflow
 );
 
-// Sidebar order is one shared navigation: every signed-in user reads it,
-// only an admin reorders it (and that reorder applies to everyone).
+// Sidebar order is one shared navigation: every signed-in user both reads AND
+// writes it, and a write applies to the whole organisation. Deliberately not
+// role-gated — the team wanted anyone to be able to tidy the nav for everyone.
+// The payload is still strictly validated in the controller, and
+// application_settings records updated_by so a change is always attributable.
 router.get('/sidebar-order', authMiddleware, getSidebarOrder);
-router.put('/sidebar-order', authMiddleware, requireRole('admin'), updateSidebarOrder);
+router.put('/sidebar-order', authMiddleware, updateSidebarOrder);
 
 // Payment-reminder SMS config — admin only, per site.
 router.get('/sms-reminders', authMiddleware, requireRole('admin'), getSmsReminderSettings);
