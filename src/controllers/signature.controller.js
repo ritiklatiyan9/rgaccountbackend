@@ -55,6 +55,11 @@ export const SIGN_TARGETS = {
     perm: 'firm_transactions',
     siteQuery: 'SELECT site_id FROM firm_transactions WHERE id = $1 LIMIT 1',
   },
+  vendor_inventory_payment: {
+    table: 'vendor_inventory_payments',
+    perm: 'vendors',
+    siteQuery: 'SELECT site_id FROM vendor_inventory_payments WHERE id = $1 LIMIT 1',
+  },
 };
 
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);

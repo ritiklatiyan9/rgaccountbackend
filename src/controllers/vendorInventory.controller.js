@@ -317,12 +317,12 @@ export const addInventoryPayment = asyncHandler(async (req, res) => {
   );
   if (!orderCheck.rows[0]) return res.status(404).json({ message: 'Order not found' });
 
-  const { payment_date, payment_mode, reference_no, note, voucher_url } = req.body;
+  const { payment_date, payment_mode, reference_no, note, voucher_url, assigned_admin_id } = req.body;
 
   const result = await pool.query(
     `INSERT INTO vendor_inventory_payments
-       (order_id, site_id, payment_date, amount, payment_mode, reference_no, cheque_no, note, voucher_url, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       (order_id, site_id, payment_date, amount, payment_mode, reference_no, cheque_no, note, voucher_url, created_by, assigned_admin_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      RETURNING *`,
     [
       orderId,
@@ -335,6 +335,7 @@ export const addInventoryPayment = asyncHandler(async (req, res) => {
       (note || '').trim() || null,
       (voucher_url || '').trim() || null,
       req.user.id,
+      assigned_admin_id ? parseInt(assigned_admin_id, 10) : null,
     ]
   );
 
@@ -350,7 +351,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
   const amount = parseFloat(req.body.amount);
   if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: 'amount must be > 0' });
 
-  const { payment_date, payment_mode, reference_no, note, voucher_url } = req.body;
+  const { payment_date, payment_mode, reference_no, note, voucher_url, assigned_admin_id } = req.body;
   const normalizedMode = payment_mode || 'cash';
   const normalizedReference = (reference_no || '').trim() || null;
 
@@ -362,7 +363,8 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
          reference_no = $6,
          cheque_no = $7,
          note = $8,
-         voucher_url = $9
+         voucher_url = $9,
+         assigned_admin_id = $10
      FROM vendor_inventory_orders o
      WHERE p.id = $1
        AND p.order_id = o.id
@@ -378,6 +380,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
       normalizedMode === 'cheque' ? normalizedReference : null,
       (note || '').trim() || null,
       (voucher_url || '').trim() || null,
+      assigned_admin_id ? parseInt(assigned_admin_id, 10) : null,
     ]
   );
 
