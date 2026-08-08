@@ -248,6 +248,27 @@ class ExpenseModel extends MasterModel {
   }
 
   /**
+   * Presentation-only drag order for one site + accounting date.
+   *
+   * `ids` is the complete visible sequence for that date; positions are
+   * rewritten 1..N. Nothing else on the row is touched — no amounts, no dates,
+   * no updated_at — so a reorder never looks like an edit in the audit trail.
+   * Returns how many rows actually matched (site + date), so the caller can
+   * reject a payload that reached across days or sites.
+   */
+  async reorderByDate(siteId, date, ids, pool) {
+    const values = ids.map((_, i) => `($${i + 3}::int, ${i + 1})`).join(', ');
+    const result = await pool.query(
+      `UPDATE expenses e
+          SET display_order = v.pos
+         FROM (VALUES ${values}) AS v(id, pos)
+        WHERE e.id = v.id AND e.site_id = $1 AND e.date = $2::date`,
+      [siteId, date, ...ids]
+    );
+    return result.rowCount;
+  }
+
+  /**
    * Summary totals for a site
    */
   async getSummary(siteId, pool) {
@@ -377,6 +398,7 @@ class ExpenseModel extends MasterModel {
           payment_mode, debit, credit, remark, account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
           assigned_user_id, assigned_admin_id, voucher_url, bill_url, customer_signature_url, authority_signature_url,
+          display_order,
           'expenses' as source
         FROM expenses
         WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
@@ -391,6 +413,7 @@ class ExpenseModel extends MasterModel {
           fp.bank_account_no as account_no, fp.bank_ifsc as branch, 'FARMER PAYMENT' as category,
           fp.status, fp.approved_by, fp.approved_at, fp.created_by, fp.created_at, fp.updated_at,
           NULL::int as assigned_user_id, fp.assigned_admin_id, fp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          NULL::int as display_order,
           'farmer_payment' as source
         FROM farmer_payments fp
         JOIN farmers f ON f.id = fp.farmer_id
@@ -406,6 +429,7 @@ class ExpenseModel extends MasterModel {
           NULL as account_no, NULL as branch, 'COMMISSION' as category,
           pcp.status, pcp.approved_by, pcp.approved_at, pcp.created_by, pcp.created_at, pcp.updated_at,
           NULL::int as assigned_user_id, pcp.assigned_admin_id, pcp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          NULL::int as display_order,
           'commission' as source
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
@@ -423,6 +447,7 @@ class ExpenseModel extends MasterModel {
           NULL as account_no, NULL as branch, 'VENDOR PAYMENT' as category,
           vp.status, vp.approved_by, vp.approved_at, vp.created_by, vp.created_at, vp.created_at as updated_at,
           NULL::int as assigned_user_id, vp.assigned_admin_id, vp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          NULL::int as display_order,
           'vendor_payment' as source
         FROM vendor_payments vp
         JOIN vendor_commitments vc ON vp.commitment_id = vc.id
@@ -438,6 +463,7 @@ class ExpenseModel extends MasterModel {
           NULL as account_no, NULL as branch, 'PERSONAL LEDGER' as category,
           'approved' as status, NULL::int as approved_by, NULL::timestamptz as approved_at, cfe.created_by, cfe.created_at, cfe.updated_at,
           NULL::int as assigned_user_id, NULL::int as assigned_admin_id, cfe.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          NULL::int as display_order,
           'personal_ledger' as source
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
@@ -456,6 +482,7 @@ class ExpenseModel extends MasterModel {
           d.account_no, d.branch, d.category,
           d.status, d.approved_by, d.approved_at, d.created_by, d.created_at, d.updated_at,
           d.assigned_user_id, d.assigned_admin_id, d.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          NULL::int as display_order,
           'daybook' as source
         FROM day_book d
         WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
@@ -478,8 +505,10 @@ class ExpenseModel extends MasterModel {
       LEFT JOIN users admin_u ON u.assigned_admin_id = admin_u.id
       LEFT JOIN users cu ON cu.id = u.created_by
       WHERE 1=1 ${whereClause}
-      ORDER BY u.date ${sortDir}, u.created_at ${sortDir},
-               CASE WHEN u.source = 'daybook' THEN 1 ELSE 0 END ${sortDir}, 
+      ORDER BY u.date ${sortDir},
+               COALESCE(u.display_order, 2147483647) ASC,
+               u.created_at ${sortDir},
+               CASE WHEN u.source = 'daybook' THEN 1 ELSE 0 END ${sortDir},
                u.original_id ${sortDir}
     `;
     const dataParams = [...params];

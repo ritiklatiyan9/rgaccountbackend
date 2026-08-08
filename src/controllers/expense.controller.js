@@ -257,6 +257,37 @@ export const bulkDeleteExpenses = asyncHandler(async (req, res) => {
   res.json({ message: `${result.rows.length} expense(s) deleted`, deleted: result.rows.map((r) => r.id) });
 });
 
+/**
+ * PUT /expenses/order
+ * Body: { site_id, date: 'YYYY-MM-DD', ids: [...] }
+ *
+ * Drag-and-drop sequence for one accounting date. Presentation only — the
+ * amounts, dates, and owning records are never touched. Every id must belong
+ * to that site and date or the whole payload is rejected, so a stale client
+ * can never renumber another day's rows.
+ */
+export const reorderExpenses = asyncHandler(async (req, res) => {
+  const siteId = parseInt(req.body.site_id, 10);
+  const date = String(req.body.date || '');
+  const ids = Array.isArray(req.body.ids)
+    ? req.body.ids.map((id) => parseInt(id, 10)).filter(Number.isInteger)
+    : [];
+
+  if (!Number.isInteger(siteId)) return res.status(400).json({ message: 'site_id is required' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: 'date must be YYYY-MM-DD' });
+  if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+  if (new Set(ids).size !== ids.length) return res.status(400).json({ message: 'ids contains duplicates' });
+
+  const updated = await expenseModel.reorderByDate(siteId, date, ids, pool);
+  if (updated !== ids.length) {
+    return res.status(409).json({
+      message: 'This list changed on another screen. Refresh before reordering.',
+    });
+  }
+
+  res.json({ message: 'Order saved', ordered: ids.length });
+});
+
 // ══════════════════════════════════════════════════
 //  EXPENSE APPROVAL ENDPOINTS (Admin only)
 // ══════════════════════════════════════════════════

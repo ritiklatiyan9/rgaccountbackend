@@ -488,8 +488,11 @@ export const getPlotCommissionAnalytics = asyncHandler(async (req, res) => {
   
   payments.forEach(p => {
     if (p.status === 'approved') {
-      if (p.payment_mode === 'CASH') cashPaid += parseFloat(p.amount);
-      if (p.payment_mode === 'BANK') bankPaid += parseFloat(p.amount);
+      // Owner rule: only CASH belongs to the cash book. UPI, IMPS, RTGS,
+      // NEFT, transfers, cheques, and any other explicit mode settle through
+      // the bank book, matching ledger_bucket() and the Commission list.
+      if (String(p.payment_mode || '').trim().toUpperCase() === 'CASH') cashPaid += parseFloat(p.amount);
+      else bankPaid += parseFloat(p.amount);
     }
   });
 

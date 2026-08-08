@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   createExpense, listExpenses, getExpense,
   updateExpense, deleteExpense, bulkDeleteExpenses, getAutocomplete,
-  listPendingExpenses, getStatusCounts,
+  listPendingExpenses, getStatusCounts, reorderExpenses,
   approveExpense, rejectExpense, bulkApproveExpenses,
 } from '../controllers/expense.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
@@ -29,6 +29,8 @@ router.get('/pending', requireRole('admin', 'sub_admin'), requirePermission('exp
 router.get('/status-counts', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'), expenseReadCache, getStatusCounts);   // Expense approval: get status counts
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, getExpense);
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'write'), bustExpenseCache, createExpense);
+// Drag order — must stay above '/:id' so 'order' is never read as an id.
+router.put('/order', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), bustExpenseCache, reorderExpenses);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), bustExpenseCache, updateExpense);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), bustExpenseCache, deleteExpense);
 router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), bustExpenseCache, bulkDeleteExpenses);
