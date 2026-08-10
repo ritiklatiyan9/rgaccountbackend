@@ -124,6 +124,7 @@ const REPORT_QUERY = `${SCOPED}
           raw_mode AS payment_mode,
           bucket, source_key, source_id, status, cheque_status, cheque_no,
           voucher_url, entity_name, linked_detail, created_by_name, created_at,
+          bank_account_id, bank_account_name,
           display_position, global_display_position
         FROM period_entries
         ORDER BY entry_date DESC,

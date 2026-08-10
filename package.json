@@ -4,9 +4,9 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && npm run migrate:daybook-order-state && npm run migrate:person-ledger-record-only && node src/server.js",
+    "start": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && npm run migrate:daybook-order-state && npm run migrate:person-ledger-record-only && npm run migrate:bank-accounts && node src/server.js",
     "dev": "nodemon src/server.js",
-    "migrate": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && npm run migrate:daybook-order-state && npm run migrate:person-ledger-record-only",
+    "migrate": "npm run migrate:plot-documents && npm run migrate:dms && npm run migrate:member-kyc-document-field && npm run migrate:balance-sheet && npm run migrate:application-settings && npm run migrate:registry-payment-invariants && npm run migrate:transaction-person-mapping && npm run migrate:sms-reminder-log && npm run migrate:admin-lookout && npm run migrate:daybook-order && npm run migrate:daybook-order-state && npm run migrate:person-ledger-record-only && npm run migrate:bank-accounts",
     "migrate:plot-documents": "node src/migrations/059_plot_documents.js",
     "migrate:dms": "node src/migrations/069_dms_documents.js",
     "migrate:member-kyc-document-field": "node src/migrations/072_member_kyc_document_field.js",
@@ -21,7 +21,8 @@
     "migrate:person-ledger-record-only": "node src/migrations/083_person_ledger_record_only.js",
     "test:cache-race": "node --test src/middlewares/cache.middleware.test.mjs",
     "test:expense-category": "node --test src/models/expenseCategoryFilter.test.mjs",
-    "worker:sms": "node src/workers/smsWorker.js"
+    "worker:sms": "node src/workers/smsWorker.js",
+    "migrate:bank-accounts": "node src/migrations/089_bank_accounts.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.700.0",

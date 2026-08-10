@@ -557,6 +557,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     moduleLedgerEntries,
     savedOrderRows,
     siteRow,
+    bankMapRows,
   ] = await Promise.all([
     dayBookModel.findBySiteAndDate(siteId, queryDate, pool),
     expenseModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] expense query error:', err.message); return []; }),
@@ -599,6 +600,16 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       'SELECT name, city, state FROM sites WHERE id = $1',
       [parseInt(siteId)]
     ).then((result) => result.rows[0] || null),
+    // Bank mappings for the day (migration 089). Every row here IS the
+    // entry's cash_flow_entries mirror, so one indexed query covers all
+    // sources at once.
+    pool.query(
+      `SELECT cfe.id, cfe.source_module, cfe.source_id, cfe.bank_account_id, ba.name AS bank_account_name
+         FROM cash_flow_entries cfe
+         JOIN bank_accounts ba ON ba.id = cfe.bank_account_id
+        WHERE cfe.site_id = $1 AND cfe.date = $2`,
+      [siteId, queryDate]
+    ).then(r => r.rows).catch(err => { console.error('[daybook] bank map query error:', err.message); return []; }),
   ]);
 
   // Exclude IMPREST entries from daybook — they are managed in the Imprest module
@@ -1046,6 +1057,40 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       ...entry,
       display_order: index + 1,
     }));
+
+  // ── Attach bank mappings (migration 089) ──
+  // A Day Book row's money lives on exactly one cash_flow_entries mirror row:
+  // linked day_book rows (FARMER PAYMENT etc.) have no mirror of their own —
+  // the linked module row does — so resolve to that source first.
+  const bankTargetOf = (e) => {
+    if (e.cash_flow_entry_id) return { key: 'cashflow_entry', id: e.cash_flow_entry_id, mapKey: `cfe:${e.cash_flow_entry_id}` };
+    if (e.farmer_payment_id) return { key: 'farmer_payments', id: e.farmer_payment_id };
+    if (e.commission_id) return { key: 'plot_commissions', id: e.commission_id };
+    if (e.firm_transaction_id) return { key: 'firm_transactions', id: e.firm_transaction_id };
+    if (e.plot_payment_id) return { key: 'plot_payments', id: e.plot_payment_id };
+    if (e.expense_id) return { key: 'expenses', id: e.expense_id };
+    if (e.vendor_payment_id) return { key: 'vendor_payments', id: e.vendor_payment_id };
+    if (e.source_key && e.source_id) return { key: e.source_key, id: e.source_id };
+    if (/^\d+$/.test(String(e.id))) return { key: 'day_book', id: e.id };
+    return null;
+  };
+  const bankByKey = new Map();
+  for (const row of bankMapRows) {
+    if (row.source_module) bankByKey.set(`${row.source_module}:${row.source_id}`, row);
+    else bankByKey.set(`cfe:${row.id}`, row);
+  }
+  for (const e of allEntries) {
+    const target = bankTargetOf(e);
+    if (!target) continue;
+    // The client's map-to-bank call reuses these instead of re-deriving them.
+    e.bank_source_key = target.key;
+    e.bank_source_id = target.id;
+    const mapped = bankByKey.get(target.mapKey || `${target.key}:${target.id}`);
+    if (mapped) {
+      e.bank_account_id = mapped.bank_account_id;
+      e.bank_account_name = mapped.bank_account_name;
+    }
+  }
 
   // Compute summary
   let total_debit = 0, total_credit = 0;
