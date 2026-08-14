@@ -77,16 +77,15 @@ export async function getExpenseBreakdown(siteId, start, end) {
   return { total, breakdown };
 }
 
-// ── Site Balance: the one number every page must agree on ──
+// ── Site Balance movement for the selected dashboard window ──
 // The detail object gives the dashboard a plain, fully reconciling explanation:
 //
 //   cash balance + bank balance - imprest held by staff = site balance
 //
 // `totalMoneyIn - totalMoneyOut` is also returned as an audit line and must
-// equal cash + bank. This deliberately avoids explaining Site Balance with the
-// narrower Plot Revenue / Module Expenses cards, which do not represent every
-// entry in the shared ledger.
-export async function getSiteBalanceDetail(siteId, end) {
+// equal cash + bank. Every term is scoped to start <= date < end so Today,
+// This Week, This Month and This Year produce distinct period values.
+export async function getSiteBalanceDetail(siteId, start, end) {
   const { rows } = await pool.query(
     `WITH ledger AS (
        SELECT
@@ -96,14 +95,18 @@ export async function getSiteBalanceDetail(siteId, end) {
          COALESCE(SUM(credit - debit) FILTER (WHERE bucket <> 'cash'), 0)::numeric AS bank_balance,
          COALESCE(SUM(credit - debit), 0)::numeric AS balance_before_imprest
        FROM ledger_entries
-       WHERE site_id = $1 AND entry_date < $2::date
+       WHERE site_id = $1
+         AND entry_date >= $2::date
+         AND entry_date < $3::date
      ),
      imprest AS (
        SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS imprest_held
        FROM (
          SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
          FROM imprest_ledger
-         WHERE site_id IS NOT NULL AND site_id = $1 AND created_at < $2
+         WHERE site_id IS NOT NULL AND site_id = $1
+           AND created_at >= $2::date
+           AND created_at < $3::date
          GROUP BY user_id
        ) u
      )
@@ -112,7 +115,7 @@ export async function getSiteBalanceDetail(siteId, end) {
        imprest.imprest_held,
        ledger.balance_before_imprest - imprest.imprest_held AS site_balance
      FROM ledger CROSS JOIN imprest`,
-    [siteId, end]
+    [siteId, start, end]
   );
 
   const row = rows[0];
@@ -130,7 +133,7 @@ export async function getSiteBalanceDetail(siteId, end) {
 // Kept as the small compatibility API used by consistency checks and any
 // callers that only need the final number.
 export async function getSiteBalance(siteId, end) {
-  const detail = await getSiteBalanceDetail(siteId, end);
+  const detail = await getSiteBalanceDetail(siteId, '1900-01-01', end);
   return detail.siteBalance;
 }
 
@@ -161,12 +164,12 @@ export async function getOutstanding(siteId, start, end) {
        COALESCE(SUM(cfe.credit), 0)::numeric AS returned
      FROM cash_flow_entries cfe
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-     WHERE cfe.site_id = $1
+     WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
        AND LOWER(cfm.ledger_type) = 'person'
        AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
        AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
        AND (cfe.status IS NULL OR cfe.status != 'rejected')`,
-    [siteId]
+    [siteId, start, end]
   );
   const given = parseFloat(rows[0].given) || 0;
   const returned = parseFloat(rows[0].returned) || 0;
@@ -191,11 +194,7 @@ export async function getPersonalLedgerCredit(siteId, start, end) {
 }
 
 // ── Registry Payments: ALL money received for plots whose status = REGISTRY ──
-// Exactly mirrors the /plot-payments page footer (with the filter set to
-// REGISTRY). To guarantee the two numbers agree we deliberately:
-//   • drop the dashboard date range — the page has no date filter, so if we
-//     applied one the dashboard would silently miss any row with an
-//     out-of-range / sentinel date.
+// Uses the same selected dashboard window as every other financial card.
 //   • match OLD-tag detection case-insensitively — plot_tag data can be
 //     'OLD' / 'old' / 'Old' in the wild; both views now bucket them the same.
 //   • trim + uppercase the status check to catch 'Registry ' / 'registry' /
@@ -209,7 +208,7 @@ export async function getPersonalLedgerCredit(siteId, start, end) {
 // Sums plot_payments + plot_installment_payments across every payment mode
 // (cash / bank / cheque / UPI / other). Scoped via plt.site_id (same join
 // the Plot Payments page uses). Bounced / returned cheques are excluded.
-export async function getRegistryPayments(siteId, _start, _end) {
+export async function getRegistryPayments(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT
        COALESCE(SUM(amount), 0)::numeric                                         AS total,
@@ -224,6 +223,7 @@ export async function getRegistryPayments(siteId, _start, _end) {
        FROM plot_payments pp
        JOIN plots plt ON plt.id = pp.plot_id
        WHERE plt.site_id = $1
+         AND pp.date >= $2 AND pp.date < $3
          AND UPPER(TRIM(COALESCE(plt.status, ''))) = 'REGISTRY'
          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
 
@@ -234,10 +234,11 @@ export async function getRegistryPayments(siteId, _start, _end) {
        FROM plot_installment_payments pip
        JOIN plots plt ON plt.id = pip.plot_id
        WHERE plt.site_id = $1
+         AND pip.payment_date >= $2 AND pip.payment_date < $3
          AND UPPER(TRIM(COALESCE(plt.status, ''))) = 'REGISTRY'
          AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
      ) u`,
-    [siteId]
+    [siteId, start, end]
   );
   const r = rows[0];
   return {
@@ -256,18 +257,18 @@ export async function getRegistryPayments(siteId, _start, _end) {
 // "money currently sitting with sub-admins" — the only portion that should
 // reduce Site Balance. Expenses spent from imprest are already in totalExpense,
 // and accepted returns cancel out allocations, so both drop out automatically.
-// Window is cumulative up to `end` (not `start..end`) because we want the
-// standing balance at period end, not in-period flow.
+// Window matches the selected dashboard period.
 export async function getImprestGiven(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS total
      FROM (
        SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
        FROM imprest_ledger
-       WHERE site_id IS NOT NULL AND site_id = $1 AND created_at < $2
+       WHERE site_id IS NOT NULL AND site_id = $1
+         AND created_at >= $2::date AND created_at < $3::date
        GROUP BY user_id
      ) u`,
-    [siteId, end]
+    [siteId, start, end]
   );
   return parseFloat(rows[0].total) || 0;
 }
@@ -323,11 +324,12 @@ export async function getImprestDistribution(siteId, start, end) {
        COUNT(*) FILTER (WHERE il.type = 'ALLOCATION')::int AS allocation_count
      FROM imprest_ledger il
      LEFT JOIN users sa ON sa.id = il.user_id
-     WHERE il.site_id IS NOT NULL AND il.site_id = $1 AND il.created_at < $2
+     WHERE il.site_id IS NOT NULL AND il.site_id = $1
+       AND il.created_at >= $2::date AND il.created_at < $3::date
      GROUP BY il.user_id, recipient_name
      HAVING SUM(il.amount) > 0
      ORDER BY balance DESC, recipient_name ASC`,
-    [siteId, end]
+    [siteId, start, end]
   );
 
   return rows.map((r) => ({
@@ -350,7 +352,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     getImprestDistribution(siteId, start, end),
     getRegistryPayments(siteId, start, end),
     getImprestPairs(siteId, start, end),
-    getSiteBalanceDetail(siteId, end),
+    getSiteBalanceDetail(siteId, start, end),
   ]);
 
   // Total Incoming = Plot Payments only

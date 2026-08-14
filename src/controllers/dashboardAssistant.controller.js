@@ -322,6 +322,30 @@ export const DASHBOARD_MODULE_CATALOG = [
     aliases: ['report', 'reports', 'download report'],
   },
   {
+    key: 'compliance_legal',
+    label: 'Compliance & legal',
+    path: '/compliance/dashboard',
+    description: 'Tracks statutory obligations, licences, inspections and their deadlines, risk and completion for the selected site.',
+    permission: 'compliance',
+    aliases: ['compliance', 'obligation', 'deadline', 'due date', 'licence', 'license', 'permit', 'noc', 'inspection', 'audit', 'overdue compliance'],
+  },
+  {
+    key: 'compliance_calendar',
+    label: 'Compliance Calendar',
+    path: '/compliance/calendar',
+    description: 'Month, week and agenda calendar of compliance deadlines, hearings, notice replies, inspections and licence expiries.',
+    permission: 'compliance',
+    aliases: ['compliance calendar', 'calendar', 'deadline calendar', 'hearing calendar', 'schedule', 'upcoming events'],
+  },
+  {
+    key: 'legal_cases',
+    label: 'Legal cases',
+    path: '/legal/cases',
+    description: 'Manages court cases, hearings, legal notices and replies with their financial exposure.',
+    permission: 'legal',
+    aliases: ['legal', 'legal case', 'court case', 'hearing', 'notice', 'legal notice', 'advocate', 'litigation'],
+  },
+  {
     key: 'sites',
     label: 'Sites',
     path: '/sites',
@@ -487,6 +511,105 @@ const getLiveDashboardSnapshot = async (siteId, request, user) => {
       registryPayments: componentVisible(visibility, 'kpi_registryPayments') ? finiteNumber(kpis.registryPayments) : null,
     },
     breakdown,
+  };
+};
+
+/* Compact compliance & calendar context for the assistant. Permission-gated:
+   sub-admins see it only with compliance/legal read access, and legal rows
+   are dropped without legal read — the same fences as the module's own APIs. */
+const getComplianceSnapshot = async (siteId, user) => {
+  const isAdmin = ADMIN_ROLES.includes(user?.role);
+  let canCompliance = isAdmin;
+  let canLegal = isAdmin;
+  if (!isAdmin) {
+    const { rows } = await pool.query(
+      `SELECT module FROM user_permissions
+        WHERE user_id=$1 AND can_read=true AND module IN ('compliance','legal')`,
+      [user?.id],
+    );
+    const readable = new Set(rows.map((row) => row.module));
+    canCompliance = readable.has('compliance');
+    canLegal = readable.has('legal');
+  }
+  if (!canCompliance && !canLegal) return null;
+
+  const [summaryResult, eventsResult] = await Promise.all([
+    canCompliance ? pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE i.status NOT IN ('COMPLETED','NOT_APPLICABLE','CANCELLED'))::int AS active,
+         COUNT(*) FILTER (WHERE i.status='OVERDUE')::int AS overdue,
+         COUNT(*) FILTER (WHERE i.current_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE+7
+           AND i.status NOT IN ('COMPLETED','NOT_APPLICABLE','CANCELLED'))::int AS due_7_days,
+         COUNT(*) FILTER (WHERE i.risk_level IN ('HIGH','CRITICAL')
+           AND i.status NOT IN ('COMPLETED','NOT_APPLICABLE','CANCELLED'))::int AS high_risk
+       FROM compliance_items i
+      WHERE i.site_id=$1 AND i.deleted_at IS NULL`,
+      [siteId],
+    ) : Promise.resolve({ rows: [{}] }),
+    pool.query(
+      `SELECT * FROM (
+         SELECT 'COMPLIANCE' AS event_type, i.title, i.current_due_date::text AS event_date,
+                NULL::text AS event_time, i.status, i.risk_level
+           FROM compliance_items i
+          WHERE $3::boolean AND i.site_id=$1 AND i.deleted_at IS NULL
+            AND i.status NOT IN ('COMPLETED','NOT_APPLICABLE','CANCELLED')
+            AND i.current_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE+30
+         UNION ALL
+         SELECT 'LEGAL_HEARING', c.title,
+                to_char(c.next_hearing_date AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD'),
+                to_char(c.next_hearing_date AT TIME ZONE 'Asia/Kolkata','HH12:MI AM'),
+                c.status, c.risk_level
+           FROM legal_cases c
+          WHERE $2::boolean AND c.site_id=$1 AND c.deleted_at IS NULL AND c.status NOT IN ('CLOSED','SETTLED')
+            AND (c.next_hearing_date AT TIME ZONE 'Asia/Kolkata')::date BETWEEN CURRENT_DATE AND CURRENT_DATE+30
+         UNION ALL
+         SELECT 'NOTICE_REPLY', n.subject, n.reply_due_date::text, NULL, n.status, n.risk_level
+           FROM legal_notices n
+          WHERE $2::boolean AND n.site_id=$1 AND n.deleted_at IS NULL AND n.status NOT IN ('CLOSED','REPLY_SUBMITTED')
+            AND n.reply_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE+30
+         UNION ALL
+         SELECT 'INSPECTION', x.inspection_type,
+                to_char(x.scheduled_at AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD'),
+                to_char(x.scheduled_at AT TIME ZONE 'Asia/Kolkata','HH12:MI AM'),
+                x.status, 'MEDIUM'
+           FROM compliance_inspections x
+          WHERE $3::boolean AND x.site_id=$1 AND x.deleted_at IS NULL AND x.status NOT IN ('COMPLETED','CANCELLED')
+            AND (x.scheduled_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN CURRENT_DATE AND CURRENT_DATE+30
+         UNION ALL
+         SELECT 'LICENCE_EXPIRY', l.name, l.expiry_date::text, NULL, l.renewal_status, 'HIGH'
+           FROM compliance_licences l
+          WHERE $3::boolean AND l.site_id=$1 AND l.deleted_at IS NULL
+            AND l.expiry_date BETWEEN CURRENT_DATE AND CURRENT_DATE+30
+       ) events
+       ORDER BY event_date
+       LIMIT 15`,
+      [siteId, canLegal, canCompliance],
+    ),
+  ]);
+
+  const summary = summaryResult.rows[0] || {};
+  if (canLegal) {
+    const { rows } = await pool.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM legal_cases c
+           WHERE c.site_id=$1 AND c.deleted_at IS NULL AND c.status NOT IN ('CLOSED','SETTLED')) AS open_legal_cases,
+         (SELECT COUNT(*)::int FROM legal_notices n
+           WHERE n.site_id=$1 AND n.deleted_at IS NULL AND n.status NOT IN ('CLOSED','REPLY_SUBMITTED')) AS pending_notices`,
+      [siteId],
+    );
+    Object.assign(summary, rows[0]);
+  }
+
+  return {
+    summary,
+    upcoming30Days: eventsResult.rows.map((row) => ({
+      type: row.event_type,
+      title: cleanText(row.title, 120),
+      date: row.event_date,
+      time: row.event_time || undefined,
+      status: row.status,
+      risk: row.risk_level,
+    })),
   };
 };
 
@@ -690,7 +813,7 @@ export const buildLocalDashboardAnswer = (question, snapshot, actions, visibleMo
     : `I can explain ${visibleModules.length} available modules, recommend the correct page, and explain the live figures for ${site.name}. Tell me what you want to do—for example, “compare every site” or “how does Personal Ledger work?”`;
 };
 
-const buildSystemPrompt = ({ site, snapshot, modules }) => `
+const buildSystemPrompt = ({ site, snapshot, compliance, modules }) => `
 You are "DG Accounts AI", the navigation and data assistant inside DG Account.
 
 Answer in the same language and script as the user. Understand English, Hindi,
@@ -724,8 +847,16 @@ Rules:
 - Stay under 120 words unless the user asks for detail.
 - Do not output JSON, markdown tables, provider names, API details or generic disclaimers.
 
+- Compliance & calendar context (when supplied) covers the selected site: summary
+  counts plus every deadline, hearing, notice reply, inspection and licence expiry
+  in the next 30 days. Answer "what is due / overdue / upcoming / next hearing"
+  questions from it, naming the item, its date (and time if given) and risk.
+  For anything beyond the next 30 days, or full history, recommend the
+  Compliance Calendar or Compliance & legal module. If compliance context is
+  absent, say the user has no compliance access instead of guessing.
+
 Selected site and dashboard context:
-${JSON.stringify({ site, snapshot })}
+${JSON.stringify({ site, snapshot, compliance })}
 
 Available sidebar modules:
 ${JSON.stringify(modules.map(({ key, label, path, description }) => ({ key, label, path, description })))}
@@ -814,6 +945,12 @@ export const streamDashboardAssistant = asyncHandler(async (req, res) => {
     if (error?.statusCode === 400) return res.status(400).json({ message: error.message });
     throw error;
   }
+  // Compliance & calendar context is additive — a failure here must not take
+  // down the finance assistant.
+  const compliance = await getComplianceSnapshot(siteId, req.user).catch((error) => {
+    console.error('dashboard assistant compliance snapshot failed:', error.message);
+    return null;
+  });
   const generatedAt = new Date().toISOString();
 
   res.status(200);
@@ -868,6 +1005,7 @@ export const streamDashboardAssistant = asyncHandler(async (req, res) => {
             content: buildSystemPrompt({
               site,
               snapshot,
+              compliance,
               modules: visibleModules,
             }),
           },

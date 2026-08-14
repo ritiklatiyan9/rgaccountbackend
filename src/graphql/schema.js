@@ -827,7 +827,7 @@ const QueryType = new GraphQLObjectType({
         // (see e.g. cashflow.controller.js), so cached values stay fresh.
         // v2 includes the exact Site Balance reconciliation fields. Versioning
         // prevents an older cached payload from returning a blank detail.
-        const key = cacheKey(`kpi-cards-v2${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
+        const key = cacheKey(`kpi-cards-v3-range${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);
