@@ -5,6 +5,7 @@ import { connectDB } from './config/db.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
 import { startSmsReminderScheduler } from './services/smsReminder.service.js';
+import { startComplianceScheduler, stopComplianceScheduler } from './services/complianceScheduler.service.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -20,7 +21,18 @@ connectDB().then(async () => {
     console.log(`Server running on port ${PORT}`);
   });
   startSmsReminderScheduler();
+  startComplianceScheduler();
 }).catch(err => {
   console.error('Failed to connect to DB', err);
   process.exit(1);
 });
+
+const shutdown = (signal) => {
+  console.log(`${signal} received — shutting down`);
+  stopComplianceScheduler();
+  server.close(() => process.exit(0));
+  // Fallback if open sockets keep the server from closing promptly.
+  setTimeout(() => process.exit(0), 5000).unref();
+};
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));

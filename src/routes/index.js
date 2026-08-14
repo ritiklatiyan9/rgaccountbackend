@@ -43,6 +43,9 @@ import inventoryRoutes from './inventory.routes.js';
 import reportRoutes from './report.routes.js';
 import pendingLookoutRoutes from './pendingLookout.routes.js';
 import dashboardAssistantRoutes from './dashboardAssistant.routes.js';
+import complianceRoutes from './compliance.routes.js';
+import complianceDocumentRoutes from './complianceDocument.routes.js';
+import googleCalendarRoutes from './googleCalendar.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -79,7 +82,13 @@ router.use('/dashboard-permissions', dashboardPermissionRoutes);
 router.use('/upi', upiRoutes);
 router.use('/signatures', signatureRoutes);
 router.use('/balance-sheet', balanceSheetRoutes);
+// googleCalendarRoutes must mount on /settings BEFORE any router that applies
+// auth middleware to the whole prefix — the OAuth callback is unauthenticated
+// (the HMAC-signed state param is the proof of who initiated the flow).
+router.use('/settings', googleCalendarRoutes);
 router.use('/settings', applicationSettingRoutes);
+router.use('/compliance', complianceRoutes);
+router.use('/compliance-documents', complianceDocumentRoutes);
 router.use('/construction', constructionRoutes);
 router.use('/inventory', inventoryRoutes);
 router.use('/reports', reportRoutes);

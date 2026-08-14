@@ -24,6 +24,19 @@ export const getCacheGeneration = () => cacheGeneration;
  */
 export const cacheGet = async (key) => cache.get(key) ?? null;
 
+/** Sliding-window counter for the per-user rate limiter (shared node-cache,
+ * TTL handles expiry). Returns the running count and seconds until reset. */
+export const incrementRateLimit = (key, windowMs) => {
+  const now = Date.now();
+  const existing = cache.get(key);
+  const entry = existing && existing.resetAt > now
+    ? { count: existing.count + 1, resetAt: existing.resetAt }
+    : { count: 1, resetAt: now + windowMs };
+  const ttlSeconds = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+  cache.set(key, entry, ttlSeconds);
+  return { ...entry, ttlSeconds };
+};
+
 /**
  * Set a cached value with TTL (seconds).
  */
