@@ -52,6 +52,11 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
   const paymentMode = rawMode === 'all' || MODE_RE.test(rawMode) ? rawMode : 'all';
   const source = String(req.query.source || 'all').trim().slice(0, 80) || 'all';
   const search = String(req.query.q || '').trim().slice(0, 120);
+  const rawPlotId = String(req.query.plot_id || '').trim();
+  const plotId = rawPlotId ? Number.parseInt(rawPlotId, 10) : null;
+  if (rawPlotId && (!Number.isInteger(plotId) || plotId <= 0 || String(plotId) !== rawPlotId)) {
+    return res.status(400).json({ message: 'plot_id must be a positive integer' });
+  }
   const preset = String(req.query.preset || 'overall').toLowerCase();
 
   let { dateFrom, dateTo } = presetRange(preset);
@@ -93,6 +98,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
       search,
       limit,
       grain,
+      plotId,
     }),
     pool.query(
       `SELECT revision
@@ -110,7 +116,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     scope,
     order_revision: Number(orderStateResult.rows[0]?.revision) || 0,
     period: { preset, date_from: dateFrom, date_to: dateTo, grain },
-    filters: { source, payment_mode: paymentMode, direction, q: search },
+    filters: { source, payment_mode: paymentMode, direction, q: search, plot_id: plotId },
     ...report,
   });
 });

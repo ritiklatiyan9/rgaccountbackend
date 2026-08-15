@@ -70,6 +70,26 @@ async function reverseImprestOnRejection(createdByUserId, debitAmount, reference
 }
 
 /**
+ * An expense can carry several vouchers and several bills. The `*_urls` column
+ * holds the whole list and the older `*_url` column mirrors the first one, so
+ * every single-file reader (print, day book, approvals, the missing-bill
+ * filter, GraphQL) keeps working without knowing the list exists. Every writer
+ * goes through here so the two columns can never drift apart.
+ */
+const fileColumns = (listKey, urlKey, list, single) => {
+  const urls = (Array.isArray(list) ? list : [single])
+    .filter((u) => typeof u === 'string' && u.trim())
+    .map((u) => u.trim());
+  return { [listKey]: urls, [urlKey]: urls[0] || null };
+};
+
+const voucherColumns = (voucher_urls, voucher_url) =>
+  fileColumns('voucher_urls', 'voucher_url', voucher_urls, voucher_url);
+
+const billColumns = (bill_urls, bill_url) =>
+  fileColumns('bill_urls', 'bill_url', bill_urls, bill_url);
+
+/**
  * POST /expenses
  * Create a new expense entry (status defaults to 'pending')
  */
@@ -77,7 +97,7 @@ export const createExpense = asyncHandler(async (req, res) => {
   const {
     site_id, date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
-    assigned_user_id, assigned_admin_id, voucher_url, bill_url,
+    assigned_user_id, assigned_admin_id, voucher_url, voucher_urls, bill_url, bill_urls,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -96,8 +116,8 @@ export const createExpense = asyncHandler(async (req, res) => {
     category: category ? category.trim().toUpperCase() : null,
     assigned_user_id: assigned_user_id ? parseInt(assigned_user_id) : null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    voucher_url: voucher_url || null,
-    bill_url: bill_url || null,
+    ...voucherColumns(voucher_urls, voucher_url),
+    ...billColumns(bill_urls, bill_url),
     status: 'pending', // New expenses are pending by default
     created_by: req.user.id,
     cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
@@ -198,7 +218,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
   const {
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
-    assigned_user_id, assigned_admin_id, voucher_url, bill_url,
+    assigned_user_id, assigned_admin_id, voucher_url, voucher_urls, bill_url, bill_urls,
     customer_signature_url, authority_signature_url
   } = req.body;
 
@@ -215,8 +235,14 @@ export const updateExpense = asyncHandler(async (req, res) => {
   if (category !== undefined) data.category = category ? category.trim().toUpperCase() : null;
   if (assigned_user_id !== undefined) data.assigned_user_id = assigned_user_id ? parseInt(assigned_user_id) : null;
   if (assigned_admin_id !== undefined) data.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
-  if (voucher_url !== undefined) data.voucher_url = voucher_url || null;
-  if (bill_url !== undefined) data.bill_url = bill_url || null;
+  // A PUT that names neither key leaves that attachment alone — so the inline
+  // bill upload never clears the vouchers, and a signature-only PUT clears neither.
+  if (voucher_urls !== undefined || voucher_url !== undefined) {
+    Object.assign(data, voucherColumns(voucher_urls, voucher_url));
+  }
+  if (bill_urls !== undefined || bill_url !== undefined) {
+    Object.assign(data, billColumns(bill_urls, bill_url));
+  }
   if (customer_signature_url !== undefined) data.customer_signature_url = customer_signature_url || null;
   if (authority_signature_url !== undefined) data.authority_signature_url = authority_signature_url || null;
 

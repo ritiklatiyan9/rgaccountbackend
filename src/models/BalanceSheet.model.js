@@ -15,9 +15,20 @@ const SCOPED = `
   WITH scoped_entries AS (
     SELECT
       le.*,
+      plot.id AS plot_id,
+      plot.plot_no,
+      plot.block AS plot_block,
       dbo.position AS display_position,
       dgo.position AS global_display_position
     FROM ledger_entries le
+    -- A Bank Plot Statement must identify the actual plot record, not just
+    -- search visible narration. A direct source join keeps similarly named
+    -- plots (e.g. 1 and 10, or resale records) from bleeding into each other.
+    LEFT JOIN plot_payments pp
+      ON le.source_key = 'plot_payments' AND pp.id = le.source_id
+    LEFT JOIN plot_installment_payments pip
+      ON le.source_key = 'plot_installment_payments' AND pip.id = le.source_id
+    LEFT JOIN plots plot ON plot.id = COALESCE(pp.plot_id, pip.plot_id)
     LEFT JOIN daybook_entry_order dbo
       ON dbo.site_id = le.site_id
      AND dbo.entry_date = le.entry_date
@@ -52,6 +63,7 @@ const SCOPED = `
         OR COALESCE(le.linked_detail, '') ILIKE CONCAT('%', $8::text, '%')
         OR COALESCE(le.remarks, '') ILIKE CONCAT('%', $8::text, '%')
       )
+      AND ($11::int IS NULL OR plot.id = $11::int)
   ),
   period_entries AS (
     SELECT *
@@ -125,6 +137,7 @@ const REPORT_QUERY = `${SCOPED}
           bucket, source_key, source_id, status, cheque_status, cheque_no,
           voucher_url, entity_name, linked_detail, created_by_name, created_at,
           bank_account_id, bank_account_name,
+          plot_id, plot_no, plot_block,
           display_position, global_display_position
         FROM period_entries
         ORDER BY entry_date DESC,
@@ -211,9 +224,10 @@ class BalanceSheetModel {
     search = '',
     limit = 2500,
     grain = 'day',
+    plotId = null,
   }) {
     const result = await pool.query(REPORT_QUERY, [
-      siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain,
+      siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain, plotId,
     ]);
     return result.rows[0]?.report || null;
   }

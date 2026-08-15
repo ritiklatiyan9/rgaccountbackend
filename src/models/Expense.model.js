@@ -398,6 +398,11 @@ class ExpenseModel extends MasterModel {
           payment_mode, debit, credit, remark, account_no, branch, category, 
           status, approved_by, approved_at, created_by, created_at, updated_at, 
           assigned_user_id, assigned_admin_id, voucher_url, bill_url, customer_signature_url, authority_signature_url,
+          -- voucher_urls/bill_urls are the multi-file source of truth; rows written
+          -- by single-file writers (Quick Entry, imports) only have voucher_url or
+          -- bill_url, so fall back to those here instead of in every reader.
+          COALESCE(voucher_urls, ARRAY_REMOVE(ARRAY[voucher_url], NULL)) as voucher_urls,
+          COALESCE(bill_urls, ARRAY_REMOVE(ARRAY[bill_url], NULL)) as bill_urls,
           display_order,
           'expenses' as source
         FROM expenses
@@ -413,6 +418,8 @@ class ExpenseModel extends MasterModel {
           fp.bank_account_no as account_no, fp.bank_ifsc as branch, 'FARMER PAYMENT' as category,
           fp.status, fp.approved_by, fp.approved_at, fp.created_by, fp.created_at, fp.updated_at,
           NULL::int as assigned_user_id, fp.assigned_admin_id, fp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          ARRAY_REMOVE(ARRAY[fp.voucher_url], NULL) as voucher_urls,
+          ARRAY[]::text[] as bill_urls,
           NULL::int as display_order,
           'farmer_payment' as source
         FROM farmer_payments fp
@@ -429,6 +436,8 @@ class ExpenseModel extends MasterModel {
           NULL as account_no, NULL as branch, 'COMMISSION' as category,
           pcp.status, pcp.approved_by, pcp.approved_at, pcp.created_by, pcp.created_at, pcp.updated_at,
           NULL::int as assigned_user_id, pcp.assigned_admin_id, pcp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          ARRAY_REMOVE(ARRAY[pcp.voucher_url], NULL) as voucher_urls,
+          ARRAY[]::text[] as bill_urls,
           NULL::int as display_order,
           'commission' as source
         FROM plot_commission_payments pcp
@@ -447,6 +456,8 @@ class ExpenseModel extends MasterModel {
           NULL as account_no, NULL as branch, 'VENDOR PAYMENT' as category,
           vp.status, vp.approved_by, vp.approved_at, vp.created_by, vp.created_at, vp.created_at as updated_at,
           NULL::int as assigned_user_id, vp.assigned_admin_id, vp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          ARRAY_REMOVE(ARRAY[vp.voucher_url], NULL) as voucher_urls,
+          ARRAY[]::text[] as bill_urls,
           NULL::int as display_order,
           'vendor_payment' as source
         FROM vendor_payments vp
@@ -463,6 +474,8 @@ class ExpenseModel extends MasterModel {
           NULL as account_no, NULL as branch, 'PERSONAL LEDGER' as category,
           'approved' as status, NULL::int as approved_by, NULL::timestamptz as approved_at, cfe.created_by, cfe.created_at, cfe.updated_at,
           NULL::int as assigned_user_id, NULL::int as assigned_admin_id, cfe.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          ARRAY_REMOVE(ARRAY[cfe.voucher_url], NULL) as voucher_urls,
+          ARRAY[]::text[] as bill_urls,
           NULL::int as display_order,
           'personal_ledger' as source
         FROM cash_flow_entries cfe
@@ -482,6 +495,8 @@ class ExpenseModel extends MasterModel {
           d.account_no, d.branch, d.category,
           d.status, d.approved_by, d.approved_at, d.created_by, d.created_at, d.updated_at,
           d.assigned_user_id, d.assigned_admin_id, d.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
+          ARRAY_REMOVE(ARRAY[d.voucher_url], NULL) as voucher_urls,
+          ARRAY[]::text[] as bill_urls,
           NULL::int as display_order,
           'daybook' as source
         FROM day_book d

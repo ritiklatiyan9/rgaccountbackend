@@ -1,0 +1,27 @@
+import 'dotenv/config';
+import pkg from 'pg';
+const { Pool } = pkg;
+
+const pool = new Pool({
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT || '5432'),
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: String(process.env.DB_PASSWORD || ''),
+  ssl: process.env.DB_SSL === 'true' || (process.env.DB_HOST && process.env.DB_HOST.includes('neon'))
+    ? { rejectUnauthorized: false }
+    : false,
+});
+
+async function run() {
+  await pool.query(`
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS voucher_urls TEXT[];
+    UPDATE expenses
+       SET voucher_urls = ARRAY[voucher_url]
+     WHERE voucher_url IS NOT NULL AND voucher_url <> '' AND voucher_urls IS NULL;
+  `);
+  console.log('DONE: expenses.voucher_urls added and backfilled from voucher_url');
+  await pool.end();
+}
+
+run().catch(e => { console.error('ERR:', e.message); pool.end(); });
