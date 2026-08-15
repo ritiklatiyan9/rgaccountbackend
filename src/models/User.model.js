@@ -6,9 +6,27 @@ class UserModel extends MasterModel {
   }
 
   async findByEmail(email, pool) {
-    const query = `SELECT * FROM ${this.tableName} WHERE email = $1`;
-    const result = await pool.query(query, [email]);
+    const normalizedEmail = String(email ?? '').trim().toLowerCase();
+    if (!normalizedEmail) return undefined;
+
+    const query = `SELECT * FROM ${this.tableName} WHERE lower(btrim(email)) = $1 LIMIT 1`;
+    const result = await pool.query(query, [normalizedEmail]);
     return result.rows[0];
+  }
+
+  /** Find an account by the numeric ID shown in User ID Management or by email. */
+  async findByLoginIdentifier(identifier, pool) {
+    const normalizedIdentifier = String(identifier ?? '').trim();
+    if (!normalizedIdentifier) return undefined;
+
+    const idMatch = normalizedIdentifier.match(/^#?(\d+)$/);
+    if (idMatch) {
+      const userId = Number(idMatch[1]);
+      if (!Number.isSafeInteger(userId) || userId <= 0) return undefined;
+      return this.findById(userId, pool);
+    }
+
+    return this.findByEmail(normalizedIdentifier, pool);
   }
 
   /** Get all managed users (admins + sub-admins) created by a specific admin */

@@ -143,8 +143,11 @@ export const register = asyncHandler(async (req, res) => {
  * POST /auth/login
  */
 export const login = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
-  const user = await userModel.findByEmail(email, pool);
+  const { password } = req.body;
+  // `email` remains supported for older clients. The account UI also exposes a
+  // numeric User ID, so the current client sends it as `identifier`.
+  const identifier = req.body.identifier ?? req.body.email;
+  const user = await userModel.findByLoginIdentifier(identifier, pool);
 
   if (!user || !(await comparePassword(password, user.password))) {
     return res.status(401).json({ message: 'Invalid credentials' });
