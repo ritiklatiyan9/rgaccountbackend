@@ -3,7 +3,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { signAccessToken, signRefreshToken, verifyToken, hashPassword, comparePassword, hashRefreshToken } from '../config/jwt.js';
 import { uploadSingle } from '../utils/upload.js';
 import { firebaseEnabled, firebaseStatus, verifyFirebaseIdToken } from '../config/firebaseAdmin.js';
-import { mailerEnabled, sendLoginOtpEmail } from '../utils/mailer.js';
+import { sendLoginOtpEmail } from '../utils/mailer.js';
 import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
 import permissionModel from '../models/Permission.model.js';
@@ -14,6 +14,9 @@ const OTP_ROLES = new Set(['admin', 'sub_admin']);
 const OTP_TTL_MINUTES = 5;
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_RESEND_SECONDS = 30;
+// Disabled by default because SMTP delivery is currently unavailable. Set
+// LOGIN_OTP_ENABLED=true only after the mail transport has been verified.
+const LOGIN_OTP_ENABLED = process.env.LOGIN_OTP_ENABLED === 'true';
 
 const maskEmail = (email) => {
   const [local, domain] = String(email).split('@');
@@ -21,8 +24,8 @@ const maskEmail = (email) => {
   return `${local.slice(0, 2)}${'•'.repeat(Math.max(2, local.length - 2))}@${domain}`;
 };
 
-/** OTP applies to admin-class roles whenever the mailer is configured. */
-const needsOtp = (user) => OTP_ROLES.has(user.role) && mailerEnabled();
+/** OTP is opt-in so a broken mail transport cannot lock every admin out. */
+const needsOtp = (user) => LOGIN_OTP_ENABLED && OTP_ROLES.has(user.role);
 
 /**
  * Everything a successful sign-in returns (tokens + sites + permissions + session).
