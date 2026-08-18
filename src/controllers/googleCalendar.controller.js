@@ -137,8 +137,14 @@ export const disconnect = asyncHandler(async (req, res) => {
     `UPDATE google_calendar_connections SET status='revoked', updated_at=NOW() WHERE id=$1`,
     [rows[0].id],
   );
-  // Stale without the account — future connections start with a clean slate.
-  await pool.query('DELETE FROM google_calendar_event_links WHERE organization_id=$1', [orgId]);
+  // Preserve the canonical ERP ↔ Google mapping. A reconnect can update the
+  // same remote ids in place; deleting these rows would make duplicates much
+  // more likely and would erase the sync audit trail.
+  await pool.query(
+    `UPDATE google_calendar_event_links SET sync_status='DISCONNECTED',updated_at=NOW()
+      WHERE organization_id=$1`,
+    [orgId],
+  );
   res.json({ success: true });
 });
 
@@ -160,9 +166,9 @@ export const getStatus = asyncHandler(async (req, res) => {
   const orgId = req.user.organization_id;
   const [connection, emails] = await Promise.all([
     pool.query(
-      `SELECT google_account_email, created_at, updated_at, notify_attendees
+      `SELECT google_account_email, status, created_at, updated_at, notify_attendees
          FROM google_calendar_connections
-        WHERE organization_id=$1 AND status='active' LIMIT 1`,
+        WHERE organization_id=$1 ORDER BY updated_at DESC LIMIT 1`,
       [orgId],
     ),
     pool.query(
@@ -172,7 +178,8 @@ export const getStatus = asyncHandler(async (req, res) => {
   ]);
   res.json({
     configured: isConfigured(),
-    connection: connection.rows[0] || null,
+    connection: connection.rows[0]?.status === 'active' ? connection.rows[0] : null,
+    connection_status: connection.rows[0]?.status || 'disconnected',
     emails: emails.rows,
   });
 });

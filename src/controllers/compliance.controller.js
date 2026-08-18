@@ -9,7 +9,13 @@ import {
 import {
   buildOccurrences, COMPLIANCE_STATUSES, DEFAULT_TRANSITIONS, isTransitionAllowed, parseDate,
 } from '../services/complianceEngine.service.js';
-import { queueCalendarSync } from '../services/googleCalendarSync.service.js';
+import { queueCalendarSync as queueGoogleCalendarSync } from '../services/googleCalendarSync.service.js';
+import { queueReminderReconciliation } from '../services/eventReminder.service.js';
+
+const queueCalendarSync = (organizationId, eventType, sourceId, actorUserId = null) => {
+  queueGoogleCalendarSync(organizationId, eventType, sourceId);
+  queueReminderReconciliation(organizationId, eventType, sourceId, actorUserId);
+};
 
 // Best-effort Google Calendar push per entity; keys match ENTITY_CONFIG.
 const CALENDAR_EVENT_TYPES = Object.freeze({
@@ -918,11 +924,26 @@ export const complianceCalendar = asyncHandler(async (req, res) => {
   }
   const selectedSite = (alias) => siteParam ? `AND ${alias}.site_id=$${siteParam}` : '';
   const [items, cases, notices, inspections, licences] = await Promise.all([
-    pool.query(`SELECT i.id,'COMPLIANCE' AS event_type,i.title,i.current_due_date AS event_date,NULL::text AS event_time,i.status,i.risk_level,i.site_id,s.name AS site_name FROM compliance_items i LEFT JOIN sites s ON s.id=i.site_id WHERE i.organization_id=$1 AND i.deleted_at IS NULL AND i.current_due_date BETWEEN $2 AND $3 ${itemScope} ${selectedSite('i')}`, params),
-    canViewLegal ? pool.query(`SELECT c.id,'LEGAL_HEARING' AS event_type,c.title,to_char(c.next_hearing_date AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD') AS event_date,to_char(c.next_hearing_date AT TIME ZONE 'Asia/Kolkata','HH12:MI AM') AS event_time,c.status,c.risk_level,c.site_id,s.name AS site_name FROM legal_cases c LEFT JOIN sites s ON s.id=c.site_id WHERE c.organization_id=$1 AND c.deleted_at IS NULL AND (c.next_hearing_date AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2 AND $3 ${caseScope} ${selectedSite('c')}`, params) : Promise.resolve({ rows: [] }),
-    canViewLegal ? pool.query(`SELECT n.id,'NOTICE_REPLY' AS event_type,n.subject AS title,n.reply_due_date AS event_date,NULL::text AS event_time,n.status,n.risk_level,n.site_id,s.name AS site_name FROM legal_notices n LEFT JOIN sites s ON s.id=n.site_id WHERE n.organization_id=$1 AND n.deleted_at IS NULL AND n.reply_due_date BETWEEN $2 AND $3 ${noticeScope} ${selectedSite('n')}`, params) : Promise.resolve({ rows: [] }),
-    pool.query(`SELECT x.id,'INSPECTION' AS event_type,x.inspection_type AS title,to_char(x.scheduled_at AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD') AS event_date,to_char(x.scheduled_at AT TIME ZONE 'Asia/Kolkata','HH12:MI AM') AS event_time,x.status,'MEDIUM' AS risk_level,x.site_id,s.name AS site_name FROM compliance_inspections x LEFT JOIN sites s ON s.id=x.site_id WHERE x.organization_id=$1 AND x.deleted_at IS NULL AND (x.scheduled_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2 AND $3 ${inspectionScope} ${selectedSite('x')}`, params),
-    pool.query(`SELECT l.id,'LICENCE_EXPIRY' AS event_type,l.name AS title,l.expiry_date AS event_date,NULL::text AS event_time,l.renewal_status AS status,'HIGH' AS risk_level,l.site_id,s.name AS site_name FROM compliance_licences l LEFT JOIN sites s ON s.id=l.site_id WHERE l.organization_id=$1 AND l.deleted_at IS NULL AND l.expiry_date BETWEEN $2 AND $3 ${licenceScope} ${selectedSite('l')}`, params),
+    pool.query(`SELECT i.id,'COMPLIANCE' AS event_type,i.title,i.current_due_date AS event_date,NULL::text AS event_time,i.status,i.risk_level,i.site_id,s.name AS site_name,
+      (SELECT COUNT(*)::int FROM event_reminders r WHERE r.organization_id=i.organization_id AND r.event_type='COMPLIANCE' AND r.source_id=i.id AND r.status IN ('PENDING','PROCESSING','FAILED')) AS reminder_count,
+      COALESCE((SELECT g.sync_status FROM google_calendar_event_links g WHERE g.organization_id=i.organization_id AND g.event_type='COMPLIANCE' AND g.source_id=i.id),'PENDING') AS calendar_sync_status
+      FROM compliance_items i LEFT JOIN sites s ON s.id=i.site_id WHERE i.organization_id=$1 AND i.deleted_at IS NULL AND i.current_due_date BETWEEN $2 AND $3 ${itemScope} ${selectedSite('i')}`, params),
+    canViewLegal ? pool.query(`SELECT c.id,'LEGAL_HEARING' AS event_type,c.title,to_char(c.next_hearing_date AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD') AS event_date,to_char(c.next_hearing_date AT TIME ZONE 'Asia/Kolkata','HH12:MI AM') AS event_time,c.status,c.risk_level,c.site_id,s.name AS site_name,
+      (SELECT COUNT(*)::int FROM event_reminders r WHERE r.organization_id=c.organization_id AND r.event_type='LEGAL_HEARING' AND r.source_id=c.id AND r.status IN ('PENDING','PROCESSING','FAILED')) AS reminder_count,
+      COALESCE((SELECT g.sync_status FROM google_calendar_event_links g WHERE g.organization_id=c.organization_id AND g.event_type='LEGAL_HEARING' AND g.source_id=c.id),'PENDING') AS calendar_sync_status
+      FROM legal_cases c LEFT JOIN sites s ON s.id=c.site_id WHERE c.organization_id=$1 AND c.deleted_at IS NULL AND (c.next_hearing_date AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2 AND $3 ${caseScope} ${selectedSite('c')}`, params) : Promise.resolve({ rows: [] }),
+    canViewLegal ? pool.query(`SELECT n.id,'NOTICE_REPLY' AS event_type,n.subject AS title,n.reply_due_date AS event_date,NULL::text AS event_time,n.status,n.risk_level,n.site_id,s.name AS site_name,
+      (SELECT COUNT(*)::int FROM event_reminders r WHERE r.organization_id=n.organization_id AND r.event_type='NOTICE_REPLY' AND r.source_id=n.id AND r.status IN ('PENDING','PROCESSING','FAILED')) AS reminder_count,
+      COALESCE((SELECT g.sync_status FROM google_calendar_event_links g WHERE g.organization_id=n.organization_id AND g.event_type='NOTICE_REPLY' AND g.source_id=n.id),'PENDING') AS calendar_sync_status
+      FROM legal_notices n LEFT JOIN sites s ON s.id=n.site_id WHERE n.organization_id=$1 AND n.deleted_at IS NULL AND n.reply_due_date BETWEEN $2 AND $3 ${noticeScope} ${selectedSite('n')}`, params) : Promise.resolve({ rows: [] }),
+    pool.query(`SELECT x.id,'INSPECTION' AS event_type,x.inspection_type AS title,to_char(x.scheduled_at AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD') AS event_date,to_char(x.scheduled_at AT TIME ZONE 'Asia/Kolkata','HH12:MI AM') AS event_time,x.status,'MEDIUM' AS risk_level,x.site_id,s.name AS site_name,
+      (SELECT COUNT(*)::int FROM event_reminders r WHERE r.organization_id=x.organization_id AND r.event_type='INSPECTION' AND r.source_id=x.id AND r.status IN ('PENDING','PROCESSING','FAILED')) AS reminder_count,
+      COALESCE((SELECT g.sync_status FROM google_calendar_event_links g WHERE g.organization_id=x.organization_id AND g.event_type='INSPECTION' AND g.source_id=x.id),'PENDING') AS calendar_sync_status
+      FROM compliance_inspections x LEFT JOIN sites s ON s.id=x.site_id WHERE x.organization_id=$1 AND x.deleted_at IS NULL AND (x.scheduled_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2 AND $3 ${inspectionScope} ${selectedSite('x')}`, params),
+    pool.query(`SELECT l.id,'LICENCE_EXPIRY' AS event_type,l.name AS title,l.expiry_date AS event_date,NULL::text AS event_time,l.renewal_status AS status,'HIGH' AS risk_level,l.site_id,s.name AS site_name,
+      (SELECT COUNT(*)::int FROM event_reminders r WHERE r.organization_id=l.organization_id AND r.event_type='LICENCE_EXPIRY' AND r.source_id=l.id AND r.status IN ('PENDING','PROCESSING','FAILED')) AS reminder_count,
+      COALESCE((SELECT g.sync_status FROM google_calendar_event_links g WHERE g.organization_id=l.organization_id AND g.event_type='LICENCE_EXPIRY' AND g.source_id=l.id),'PENDING') AS calendar_sync_status
+      FROM compliance_licences l LEFT JOIN sites s ON s.id=l.site_id WHERE l.organization_id=$1 AND l.deleted_at IS NULL AND l.expiry_date BETWEEN $2 AND $3 ${licenceScope} ${selectedSite('l')}`, params),
   ]);
   res.json({ events: [...items.rows, ...cases.rows, ...notices.rows, ...inspections.rows, ...licences.rows].sort((a, b) => String(a.event_date).localeCompare(String(b.event_date))) });
 });

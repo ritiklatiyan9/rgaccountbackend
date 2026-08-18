@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import { getMessaging } from 'firebase-admin/messaging';
 
 /**
  * Firebase Admin — verifies Google Sign-In ID tokens minted by the frontend's
@@ -75,3 +76,11 @@ export const firebaseStatus = () => ({
 
 /** Verify a Firebase ID token → decoded payload (throws on invalid/expired). */
 export const verifyFirebaseIdToken = (idToken) => getAuth(app).verifyIdToken(idToken);
+
+/** Browser push is an optional channel. Callers receive per-token outcomes so
+ * invalid registrations can be retired without affecting email delivery. */
+export const sendFirebaseMessages = async (tokens, message) => {
+  if (!app) throw new Error('Firebase Admin is not configured');
+  if (!tokens.length) return { successCount: 0, failureCount: 0, responses: [] };
+  return getMessaging(app).sendEachForMulticast({ tokens, ...message });
+};

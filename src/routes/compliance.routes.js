@@ -18,6 +18,10 @@ import {
   updateAuthority, updateChecklistItem, updateComplianceEntity, updateComplianceItem,
   updateComplianceSettings, updateComplianceStatus, updateLegalNoticeStatus, updateTemplate,
 } from '../controllers/compliance.controller.js';
+import {
+  getEventReminderState, getReminderEngineHealth, registerPushToken, removePushToken,
+  retryEventCalendarSync, retryEventReminders, updateEventReminderState,
+} from '../controllers/eventReminder.controller.js';
 
 const router = express.Router();
 const cache = cacheResponse({ ttlSeconds: 45, namespace: 'compliance' });
@@ -28,6 +32,13 @@ router.use(attachOrgContext);
 
 router.get('/dashboard', requirePermission('compliance', 'read'), cache, complianceDashboard);
 router.get('/calendar', requirePermission('compliance', 'read'), cache, complianceCalendar);
+router.get('/calendar/events/:eventType/:sourceId/reminders', getEventReminderState);
+router.put('/calendar/events/:eventType/:sourceId/reminders', bust, updateEventReminderState);
+router.post('/calendar/events/:eventType/:sourceId/reminders/retry', retryEventReminders);
+router.post('/calendar/events/:eventType/:sourceId/google-calendar/retry', retryEventCalendarSync);
+router.post('/push-tokens', registerPushToken);
+router.delete('/push-tokens', removePushToken);
+router.get('/reminder-engine/health', getReminderEngineHealth);
 router.get('/my-tasks', requirePermission('compliance', 'read'), getMyComplianceTasks);
 router.get('/users', requirePermission('compliance', 'read'), listComplianceUsers);
 router.get('/legal-users', requirePermission('legal', 'read'), listComplianceUsers);
