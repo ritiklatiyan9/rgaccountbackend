@@ -46,6 +46,7 @@ import dashboardAssistantRoutes from './dashboardAssistant.routes.js';
 import complianceRoutes from './compliance.routes.js';
 import complianceDocumentRoutes from './complianceDocument.routes.js';
 import googleCalendarRoutes from './googleCalendar.routes.js';
+import transactionTransferRoutes from './transactionTransfer.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -95,4 +96,5 @@ router.use('/reports', reportRoutes);
 router.use('/pending-lookout', pendingLookoutRoutes);
 router.use('/receipts', receiptVerifyUrlRoutes);
 router.use('/dashboard-ai', dashboardAssistantRoutes);
+router.use('/transaction-transfers', transactionTransferRoutes);
 export default router;
