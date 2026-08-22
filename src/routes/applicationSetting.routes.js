@@ -8,6 +8,8 @@ import {
   updateSidebarOrder,
   getSmsReminderSettings,
   updateSmsReminderSettings,
+  getReceiptDesign,
+  updateReceiptDesign,
 } from '../controllers/applicationSetting.controller.js';
 import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
@@ -36,5 +38,10 @@ router.put('/sidebar-order', authMiddleware, updateSidebarOrder);
 // Payment-reminder SMS config — admin only, per site.
 router.get('/sms-reminders', authMiddleware, requireRole('admin'), getSmsReminderSettings);
 router.put('/sms-reminders', authMiddleware, requireRole('admin'), updateSmsReminderSettings);
+
+// Receipt rendering is shared by every transaction module, so every assigned
+// user can read the active site design. Organisation-level edits remain admin-only.
+router.get('/receipt-design', authMiddleware, getReceiptDesign);
+router.put('/receipt-design', authMiddleware, requireRole('admin'), updateReceiptDesign);
 
 export default router;

@@ -3,6 +3,12 @@ import pool from '../config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 import { getConfig as getSmsConfig, saveConfig as saveSmsConfig } from '../services/smsReminder.service.js';
 import { isSmsQueueConfigured } from '../utils/sqs.js';
+import {
+  getReceiptDesign as readReceiptDesign,
+  saveReceiptDesign,
+  RECEIPT_TEMPLATE_IDS,
+  RECEIPT_FIELD_KEYS,
+} from '../services/receiptDesign.service.js';
 
 const getAccessibleSiteId = async (req, res, rawSiteId) => {
   const siteId = Number.parseInt(rawSiteId, 10);
@@ -124,4 +130,30 @@ export const updateSmsReminderSettings = asyncHandler(async (req, res) => {
       ? `Automatic SMS reminders on — ${settings.days_before.join(', ')} day(s) around the due date at ${String(settings.send_hour).padStart(2, '0')}:00 IST`
       : 'Automatic SMS reminders turned off',
   });
+});
+
+/** GET /settings/receipt-design?site_id=123 */
+export const getReceiptDesign = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.query.site_id);
+  if (!siteId) return;
+
+  res.json({
+    site_id: siteId,
+    design: await readReceiptDesign(siteId),
+    template_ids: RECEIPT_TEMPLATE_IDS,
+    field_keys: RECEIPT_FIELD_KEYS,
+  });
+});
+
+/** PUT /settings/receipt-design  Body: { site_id, design } */
+export const updateReceiptDesign = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.body.site_id);
+  if (!siteId) return;
+
+  if (!req.body.design || typeof req.body.design !== 'object' || Array.isArray(req.body.design)) {
+    return res.status(400).json({ message: 'design must be an object' });
+  }
+
+  const design = await saveReceiptDesign(siteId, req.body.design, req.user.id);
+  res.json({ site_id: siteId, design, message: 'Receipt designs saved for this site' });
 });
