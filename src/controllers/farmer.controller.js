@@ -3,6 +3,7 @@ import { farmerModel, farmerPaymentModel } from '../models/Farmer.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, verifyReceiptToken, ReceiptType } from '../utils/receiptToken.js';
+import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 // ──────────────────────────────────────────────────────────────
 // FARMER CRUD
@@ -309,6 +310,7 @@ export const createPayment = asyncHandler(async (req, res) => {
  */
 export const listPayments = asyncHandler(async (req, res) => {
   const farmerId = parseInt(req.params.farmerId);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'farmers', req.query.created_by);
 
   // The previous implementation ran 4–5 SERIAL queries:
   //   findByIdWithSummary → findByFarmerId → getTotalPaid → getTotalInterest → site
@@ -347,12 +349,13 @@ export const listPayments = asyncHandler(async (req, res) => {
      FROM farmers f
      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
        AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND ($2::int IS NULL OR fp.created_by = $2::int)
      LEFT JOIN sites s ON s.id = f.site_id
      WHERE f.id = $1
      GROUP BY f.id, s.id`,
-    [farmerId]
+    [farmerId, entryVisibility.creatorId]
   );
-  const paymentsPromise = farmerPaymentModel.findByFarmerId(farmerId, pool);
+  const paymentsPromise = farmerPaymentModel.findByFarmerId(farmerId, pool, entryVisibility.creatorId);
 
   const [farmerRes, payments] = await Promise.all([farmerWithSitePromise, paymentsPromise]);
   const farmer = farmerRes.rows[0];
@@ -395,6 +398,7 @@ export const listPayments = asyncHandler(async (req, res) => {
       cash_remaining: (parseFloat(farmer.cash_amount) || 0) - cashPaid,
       bank_remaining: (parseFloat(farmer.bank_amount) || 0) - bankPaid,
     },
+    entryVisibility,
   });
 });
 
@@ -405,6 +409,7 @@ export const listPayments = asyncHandler(async (req, res) => {
 export const updatePayment = asyncHandler(async (req, res) => {
   const farmerId = parseInt(req.params.farmerId);
   const paymentId = parseInt(req.params.paymentId);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'farmers', null);
   const {
     date, particular, amount, by_note, remarks,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
@@ -434,11 +439,12 @@ export const updatePayment = asyncHandler(async (req, res) => {
   // SELECT round-trip to verify ownership.
   const keys = Object.keys(updateData);
   const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-  const values = [...Object.values(updateData), paymentId, farmerId];
+  const values = [...Object.values(updateData), paymentId, farmerId, entryVisibility.creatorId];
   const result = await pool.query(
     `UPDATE farmer_payments
         SET ${setClause}
       WHERE id = $${keys.length + 1} AND farmer_id = $${keys.length + 2}
+        AND ($${keys.length + 3}::int IS NULL OR created_by = $${keys.length + 3}::int)
       RETURNING *`,
     values
   );
@@ -455,18 +461,23 @@ export const updatePayment = asyncHandler(async (req, res) => {
 export const deletePayment = asyncHandler(async (req, res) => {
   const farmerId = parseInt(req.params.farmerId);
   const paymentId = parseInt(req.params.paymentId);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'farmers', null);
 
   // Single round-trip: cascade-delete the linked DayBook rows AND the payment
   // in one atomic statement (CTE). Previously: SELECT + DELETE day_book +
   // DELETE payment = 3 serial round-trips.
   const result = await pool.query(
-    `WITH del_daybook AS (
-       DELETE FROM day_book WHERE farmer_payment_id = $1
+    `WITH visible_payment AS (
+       SELECT id FROM farmer_payments
+        WHERE id = $1 AND farmer_id = $2
+          AND ($3::int IS NULL OR created_by = $3::int)
+     ), del_daybook AS (
+       DELETE FROM day_book WHERE farmer_payment_id IN (SELECT id FROM visible_payment)
      )
      DELETE FROM farmer_payments
-      WHERE id = $1 AND farmer_id = $2
+      WHERE id IN (SELECT id FROM visible_payment)
       RETURNING id`,
-    [paymentId, farmerId]
+    [paymentId, farmerId, entryVisibility.creatorId]
   );
   if (!result.rows[0]) {
     return res.status(404).json({ message: 'Payment not found' });
@@ -482,15 +493,20 @@ export const bulkDeletePayments = asyncHandler(async (req, res) => {
   const farmerId = parseInt(req.params.farmerId);
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'farmers', null);
 
   const result = await pool.query(
-    `WITH del_daybook AS (
-       DELETE FROM day_book WHERE farmer_payment_id = ANY($1::int[])
+    `WITH visible_payments AS (
+       SELECT id FROM farmer_payments
+        WHERE id = ANY($1::int[]) AND farmer_id = $2
+          AND ($3::int IS NULL OR created_by = $3::int)
+     ), del_daybook AS (
+       DELETE FROM day_book WHERE farmer_payment_id IN (SELECT id FROM visible_payments)
      )
      DELETE FROM farmer_payments
-      WHERE id = ANY($1::int[]) AND farmer_id = $2
+      WHERE id IN (SELECT id FROM visible_payments)
       RETURNING id`,
-    [ids, farmerId]
+    [ids, farmerId, entryVisibility.creatorId]
   );
   res.json({ message: `${result.rows.length} payment(s) deleted`, deleted: result.rows.map((r) => r.id) });
 });

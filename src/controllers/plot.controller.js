@@ -3,6 +3,7 @@ import { plotModel, plotPaymentModel, PP_COUNTABLE } from '../models/Plot.model.
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { notifyPlotPaymentRecorded } from '../utils/notify.js';
+import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -645,6 +646,7 @@ export const listPayments = asyncHandler(async (req, res) => {
   if (!plot_id) return res.status(400).json({ message: 'plot_id is required' });
 
   const plotIdInt = parseInt(plot_id);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
 
   // 4-way parallel reads (was already parallel — keep). Site lookup needs
   // plot.site_id, but in practice that comes from the plot row itself —
@@ -672,9 +674,10 @@ export const listPayments = asyncHandler(async (req, res) => {
            COUNT(*) FILTER (WHERE ${PP_COUNTABLE})::int AS payment_count
          FROM plot_payments pp
          WHERE pp.plot_id = p.id
+           AND ($2::int IS NULL OR pp.created_by = $2::int)
        ) agg ON TRUE
       WHERE p.id = $1`,
-    [plotIdInt]
+    [plotIdInt, entryVisibility.creatorId]
   );
 
   const [paymentsRes, plotRes, fromBreakdown, receivedByBreakdown] = await Promise.all([
@@ -683,12 +686,13 @@ export const listPayments = asyncHandler(async (req, res) => {
          FROM plot_payments pp
          LEFT JOIN users u ON u.id = pp.created_by
         WHERE pp.plot_id = $1
+          AND ($2::int IS NULL OR pp.created_by = $2::int)
         ORDER BY pp.date ASC, pp.created_at ASC`,
-      [plotIdInt]
+      [plotIdInt, entryVisibility.creatorId]
     ),
     plotPromise,
-    plotPaymentModel.getFromBreakdown(plotIdInt, pool),
-    plotPaymentModel.getReceivedByBreakdown(plotIdInt, pool),
+    plotPaymentModel.getFromBreakdown(plotIdInt, pool, entryVisibility.creatorId),
+    plotPaymentModel.getReceivedByBreakdown(plotIdInt, pool, entryVisibility.creatorId),
   ]);
   const payments = paymentsRes.rows;
   const plot = plotRes.rows[0] || null;
@@ -722,7 +726,7 @@ export const listPayments = asyncHandler(async (req, res) => {
     }),
   }));
 
-  res.json({ payments: paymentsWithVerify, plot, fromBreakdown, receivedByBreakdown });
+  res.json({ payments: paymentsWithVerify, plot, fromBreakdown, receivedByBreakdown, entryVisibility });
 });
 
 /** GET /plots/payments/:id — Get a single payment */
@@ -730,6 +734,9 @@ export const getPayment = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const payment = await plotPaymentModel.findById(parseInt(id), pool);
   if (!payment) return res.status(404).json({ message: 'Payment not found' });
+  if (!(await canUserViewEntry(req.user, 'plot_payments', payment.created_by))) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
   res.json({ payment });
 });
 
@@ -737,6 +744,10 @@ export const getPayment = asyncHandler(async (req, res) => {
 export const updatePayment = asyncHandler(async (req, res) => {
   const paymentId = parseInt(req.params.id);
   const { date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, cheque_no, cheque_status, received_by } = req.body;
+  const existing = await plotPaymentModel.findById(paymentId, pool);
+  if (!existing || !(await canUserViewEntry(req.user, 'plot_payments', existing.created_by))) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
 
   const updateData = {};
   const normalizedPaymentType = payment_type !== undefined ? (['BANK', 'CHEQUE'].includes(payment_type) ? payment_type : 'CASH') : undefined;
@@ -770,6 +781,10 @@ export const updatePayment = asyncHandler(async (req, res) => {
 /** DELETE /plots/payments/:id — Delete a payment */
 export const deletePayment = asyncHandler(async (req, res) => {
   const paymentId = parseInt(req.params.id);
+  const existing = await plotPaymentModel.findById(paymentId, pool);
+  if (!existing || !(await canUserViewEntry(req.user, 'plot_payments', existing.created_by))) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
   const { rows: registryLinks } = await pool.query(
     `SELECT id FROM plot_registry_payments
       WHERE source_plot_payment_id = $1

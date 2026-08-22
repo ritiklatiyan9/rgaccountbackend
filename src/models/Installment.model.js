@@ -48,29 +48,31 @@ class InstallmentPaymentModel extends MasterModel {
   }
 
   /** All payments for an installment */
-  async findByInstallmentId(installmentId, pool) {
+  async findByInstallmentId(installmentId, pool, creatorId = null) {
     const query = `
       SELECT pip.*, u.name AS created_by_name
       FROM plot_installment_payments pip
       LEFT JOIN users u ON u.id = pip.created_by
       WHERE pip.installment_id = $1
+        AND ($2::int IS NULL OR pip.created_by = $2::int)
       ORDER BY pip.payment_date ASC, pip.created_at ASC
     `;
-    const result = await pool.query(query, [installmentId]);
+    const result = await pool.query(query, [installmentId, creatorId]);
     return result.rows;
   }
 
   /** All payments for a plot */
-  async findByPlotId(plotId, pool) {
+  async findByPlotId(plotId, pool, creatorId = null) {
     const query = `
       SELECT pip.*, pi.installment_name, pi.due_date, u.name AS created_by_name
       FROM plot_installment_payments pip
       JOIN plot_installments pi ON pi.id = pip.installment_id
       LEFT JOIN users u ON u.id = pip.created_by
       WHERE pip.plot_id = $1
+        AND ($2::int IS NULL OR pip.created_by = $2::int)
       ORDER BY pip.payment_date ASC, pip.created_at ASC
     `;
-    const result = await pool.query(query, [plotId]);
+    const result = await pool.query(query, [plotId, creatorId]);
     return result.rows;
   }
 }

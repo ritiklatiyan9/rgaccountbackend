@@ -97,6 +97,7 @@ const ExpensesPageFiltersInput = new GraphQLInputObjectType({
     missingBill: { type: GraphQLBoolean },
     order:       { type: ExpenseSortOrderEnum },
     onlySite:    { type: GraphQLBoolean },
+    createdBy:   { type: GraphQLInt },
   },
 });
 
@@ -939,6 +940,9 @@ const QueryType = new GraphQLObjectType({
         const id = requireModuleRead(ctx, 'expenses', siteId);
         const safePage = Number.isFinite(page) ? Math.max(1, page) : 1;
         const safeLimit = Number.isFinite(limit) ? Math.max(0, limit) : 20;
+        const canViewAllEntries = PRIVILEGED_ROLES.has(ctx.user.role)
+          || ctx.permissions?.get('expenses')?.can_view_all === true;
+        const requestedCreator = Number(filters.createdBy);
         const normalizedFilters = {
           search: filters.search || undefined,
           mode: filters.mode || undefined,
@@ -953,6 +957,9 @@ const QueryType = new GraphQLObjectType({
           order: filters.order || 'desc',
           // Expenses module should show only entries from expense page.
           only_site: filters.onlySite === false ? undefined : 'true',
+          created_by: canViewAllEntries
+            ? (Number.isInteger(requestedCreator) && requestedCreator > 0 ? requestedCreator : undefined)
+            : Number(ctx.user.id),
         };
 
         const key = expensesCacheKey(
@@ -988,6 +995,9 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, filters = {} }, ctx) {
         const id = requireModuleRead(ctx, 'expenses', siteId);
+        const canViewAllEntries = PRIVILEGED_ROLES.has(ctx.user.role)
+          || ctx.permissions?.get('expenses')?.can_view_all === true;
+        const requestedCreator = Number(filters.createdBy);
         const normalizedFilters = {
           search: filters.search || undefined,
           mode: filters.mode || undefined,
@@ -1001,6 +1011,9 @@ const QueryType = new GraphQLObjectType({
           missing_bill: filters.missingBill ? 'true' : undefined,
           order: filters.order || 'desc',
           only_site: filters.onlySite === false ? undefined : 'true',
+          created_by: canViewAllEntries
+            ? (Number.isInteger(requestedCreator) && requestedCreator > 0 ? requestedCreator : undefined)
+            : Number(ctx.user.id),
         };
 
         const key = `expenses:breakdown:${ctx.user.id || 'anon'}:${id}:${serializeFilters(normalizedFilters)}`;
@@ -1023,17 +1036,21 @@ const QueryType = new GraphQLObjectType({
       type: PlotPageDataType,
       args: {
         siteId: { type: new GraphQLNonNull(GraphQLID) },
+        createdBy: { type: GraphQLInt },
       },
-      async resolve(_, { siteId }, ctx) {
+      async resolve(_, { siteId, createdBy }, ctx) {
         const id = requireModuleRead(ctx, 'plot_payments', siteId);
-        const key = `plots:pageData:${id}`;
+        const canViewAll = ['admin', 'super_admin'].includes(ctx.user?.role)
+          || ctx.permissions?.get('plot_payments')?.can_view_all === true;
+        const creatorId = canViewAll ? (createdBy || null) : Number(ctx.user.id);
+        const key = `plots:pageData:${id}:creator:${creatorId || 'all'}`;
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);
           if (cached) return cached;
         }
 
-        const data = await getPlotPageData(id);
+        const data = await getPlotPageData(id, creatorId);
 
         if (cacheEnabled()) await cacheSet(key, data, 60); // 1 min cache
         return data;
@@ -1045,10 +1062,14 @@ const QueryType = new GraphQLObjectType({
       args: {
         plotId: { type: new GraphQLNonNull(GraphQLID) },
         siteId: { type: new GraphQLNonNull(GraphQLID) },
+        createdBy: { type: GraphQLInt },
       },
-      async resolve(_, { plotId, siteId }, ctx) {
+      async resolve(_, { plotId, siteId, createdBy }, ctx) {
         const id = requireModuleRead(ctx, 'plot_payments', siteId);
-        const data = await getPlotPaymentDetail(requirePositiveId(plotId, 'plotId'), id);
+        const canViewAll = ['admin', 'super_admin'].includes(ctx.user?.role)
+          || ctx.permissions?.get('plot_payments')?.can_view_all === true;
+        const creatorId = canViewAll ? (createdBy || null) : Number(ctx.user.id);
+        const data = await getPlotPaymentDetail(requirePositiveId(plotId, 'plotId'), id, creatorId);
         return data;
       },
     },
@@ -1057,10 +1078,14 @@ const QueryType = new GraphQLObjectType({
       type: new GraphQLList(RegistryLinkablePaymentType),
       args: {
         siteId: { type: new GraphQLNonNull(GraphQLID) },
+        createdBy: { type: GraphQLInt },
       },
-      async resolve(_, { siteId }, ctx) {
+      async resolve(_, { siteId, createdBy }, ctx) {
         const id = requireModuleRead(ctx, 'plot_registry', siteId);
-        return getRegistryBankChequePayments(id);
+        const canViewAll = ['admin', 'super_admin'].includes(ctx.user?.role)
+          || ctx.permissions?.get('plot_registry')?.can_view_all === true;
+        const creatorId = canViewAll ? (createdBy || null) : Number(ctx.user.id);
+        return getRegistryBankChequePayments(id, creatorId);
       },
     },
   },

@@ -3,6 +3,7 @@ import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegis
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import pool from '../config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
+import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 // ══════════════════════════════════════════════════
 //  REGISTRY ENDPOINTS
@@ -320,14 +321,16 @@ export const listRegistries = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const registries = await plotRegistryModel.findBySiteId(parseInt(site_id), pool);
-  res.json({ registries });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'plot_registry', req.query.created_by);
+  const registries = await plotRegistryModel.findBySiteId(parseInt(site_id), pool, entryVisibility.creatorId);
+  res.json({ registries, entryVisibility });
 });
 
 /** GET /registries/:id — Get single registry with totals */
 export const getRegistry = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const registry = await plotRegistryModel.findByIdWithTotals(parseInt(id), pool);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'plot_registry', req.query.created_by);
+  const registry = await plotRegistryModel.findByIdWithTotals(parseInt(id), pool, entryVisibility.creatorId);
   if (!registry) return res.status(404).json({ message: 'Registry not found' });
   res.json({ registry });
 });
@@ -618,13 +621,14 @@ export const createRegistryPayment = asyncHandler(async (req, res) => {
 export const listRegistryPayments = asyncHandler(async (req, res) => {
   const { registry_id } = req.query;
   if (!registry_id) return res.status(400).json({ message: 'registry_id is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'plot_registry', req.query.created_by);
 
   const [payments, registry] = await Promise.all([
-    plotRegistryPaymentModel.findByRegistryId(parseInt(registry_id), pool),
-    plotRegistryModel.findByIdWithTotals(parseInt(registry_id), pool),
+    plotRegistryPaymentModel.findByRegistryId(parseInt(registry_id), pool, entryVisibility.creatorId),
+    plotRegistryModel.findByIdWithTotals(parseInt(registry_id), pool, entryVisibility.creatorId),
   ]);
 
-  res.json({ payments, registry });
+  res.json({ payments, registry, entryVisibility });
 });
 
 /** GET /registries/payments/:id */
@@ -632,12 +636,19 @@ export const getRegistryPayment = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const payment = await plotRegistryPaymentModel.findById(parseInt(id), pool);
   if (!payment) return res.status(404).json({ message: 'Payment not found' });
+  if (!(await canUserViewEntry(req.user, 'plot_registry', payment.created_by))) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
   res.json({ payment });
 });
 
 /** PUT /registries/payments/:id */
 export const updateRegistryPayment = asyncHandler(async (req, res) => {
   const paymentId = parseInt(req.params.id);
+  const existing = await plotRegistryPaymentModel.findById(paymentId, pool);
+  if (!existing || !(await canUserViewEntry(req.user, 'plot_registry', existing.created_by))) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
   const { payment_date, amount, payment_mode, tally_date, tally_amount, notes } = req.body;
 
   const updateData = {};
@@ -659,10 +670,13 @@ export const updateRegistryPayment = asyncHandler(async (req, res) => {
 
 /** DELETE /registries/payments/:id */
 export const deleteRegistryPayment = asyncHandler(async (req, res) => {
+  const entryVisibility = await resolveEntryVisibility(req.user, 'plot_registry', null);
   // Atomic DELETE — saves a SELECT round-trip.
   const result = await pool.query(
-    `DELETE FROM plot_registry_payments WHERE id = $1 RETURNING id`,
-    [parseInt(req.params.id)]
+    `DELETE FROM plot_registry_payments
+      WHERE id = $1 AND ($2::int IS NULL OR created_by = $2::int)
+      RETURNING id`,
+    [parseInt(req.params.id), entryVisibility.creatorId]
   );
   if (!result.rows[0]) return res.status(404).json({ message: 'Payment not found' });
   res.json({ message: 'Payment deleted' });

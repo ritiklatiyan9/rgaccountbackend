@@ -13,6 +13,7 @@ import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
+import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 // ══════════════════════════════════════════════════
 //  OPENING BALANCE HELPERS
@@ -538,10 +539,11 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
  * Expenses appear as EXPENSE-type entries with source:'expense'
  */
 export const listDayBookEntries = asyncHandler(async (req, res) => {
-  const { site_id, date } = req.query;
+  const { site_id, date, created_by } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
   const siteId = site_id;
+  const visibility = await resolveEntryVisibility(req.user, 'daybook', created_by);
   // Default to today if no date provided
   const queryDate = date || new Date().toISOString().split('T')[0];
 
@@ -559,7 +561,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     siteRow,
     bankMapRows,
   ] = await Promise.all([
-    dayBookModel.findBySiteAndDate(siteId, queryDate, pool),
+    dayBookModel.findBySiteAndDate(siteId, queryDate, pool, visibility.creatorId),
     expenseModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] expense query error:', err.message); return []; }),
     farmerPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] farmer_payment query error:', err.message); return []; }),
     plotCommissionModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] commission query error:', err.message); return []; }),
@@ -682,6 +684,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       interest_amount: fp.interest_amount,
       cheque_status: fp.cheque_status,
       cheque_no: fp.cheque_no,
+      created_by: fp.created_by,
       created_at: fp.created_at,
       updated_at: fp.updated_at,
       assigned_admin_id: fp.assigned_admin_id,
@@ -1028,6 +1031,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     return x.id;
   };
   const fallbackEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments, ...transformedModuleLedger]
+    .filter((entry) => !visibility.creatorId || Number(entry.created_by) === Number(visibility.creatorId))
     .sort((a, b) => sortId(a) - sortId(b));
 
   // Apply a saved Day Book-only sequence. Rows with no saved position (usually
@@ -1125,6 +1129,17 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // ── Daily balance (opening + running/closing) ──
   // Seeds today's row if missing; closing is kept in sync with live entries for every tracked date.
   let balance = null;
+  if (visibility.creatorId) {
+    const running = total_credit - total_debit;
+    balance = {
+      opening_balance: 0,
+      closing_balance: running,
+      running_balance: running,
+      is_live: true,
+      tracked: true,
+      creator_scoped: true,
+    };
+  } else {
   try {
     const todayIso = new Date().toISOString().split('T')[0];
     const row = await getOrSeedDailyBalance(siteId, queryDate, pool);
@@ -1153,6 +1168,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   } catch (err) {
     console.error('[daybook] balance compute error:', err.message);
     balance = { opening_balance: null, closing_balance: null, running_balance: null, is_live: false, tracked: false };
+  }
   }
 
   // Attach a signed verifyUrl to each entry so the DayBook receipt can embed
@@ -1189,6 +1205,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     typeBreakdown: Object.values(typeMap).sort((a, b) => b.total_debit - a.total_debit),
     modeBreakdown: Object.values(modeMap).sort((a, b) => b.total_debit - a.total_debit),
     categoryBreakdown: Object.values(catMap).sort((a, b) => b.total_debit - a.total_debit),
+    entryVisibility: { canViewAll: visibility.canViewAll, creatorId: visibility.creatorId },
   });
 });
 
@@ -1657,10 +1674,11 @@ export const getDailyBalance = asyncHandler(async (req, res) => {
  * eleven hand-maintained UNIONs over raw module tables.
  */
 export const getModeBalance = asyncHandler(async (req, res) => {
-  const { site_id, date } = req.query;
+  const { site_id, date, created_by } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
   const queryDate = date || new Date().toISOString().split('T')[0];
   const siteId = parseInt(site_id);
+  const visibility = await resolveEntryVisibility(req.user, 'daybook', created_by);
 
   // Hand-written cash-flow ledgers have no source module. Splitting them by
   // ledger_type keeps "money lent to a person" apart from "site-to-site
@@ -1703,12 +1721,15 @@ export const getModeBalance = asyncHandler(async (req, res) => {
                 ${SRC_EXPR} AS src,
                 COALESCE(SUM(credit), 0)::numeric AS credit,
                 COALESCE(SUM(debit),  0)::numeric AS debit
-           FROM ledger_entries
-          WHERE site_id = $1 AND entry_date <= $2::date
+           FROM ledger_entries le
+           LEFT JOIN cash_flow_entries creator_cfe
+             ON creator_cfe.id = split_part(le.id, ':', 1)::int
+          WHERE le.site_id = $1 AND le.entry_date <= $2::date
+            ${visibility.creatorId ? 'AND creator_cfe.created_by = $3' : ''}
           GROUP BY bucket, is_before, src`,
-        [siteId, queryDate]
+        visibility.creatorId ? [siteId, queryDate, visibility.creatorId] : [siteId, queryDate]
       ),
-      pool.query(
+      visibility.creatorId ? Promise.resolve({ rows: [{ total: 0 }] }) : pool.query(
         `SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS total
          FROM (
            SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
@@ -1718,8 +1739,8 @@ export const getModeBalance = asyncHandler(async (req, res) => {
          ) u`,
         [siteId]
       ),
-      siteBalanceAsOf(siteId, queryDate, pool),
-      siteBalanceAsOf(siteId, FAR_FUTURE, pool),
+      visibility.creatorId ? Promise.resolve(null) : siteBalanceAsOf(siteId, queryDate, pool),
+      visibility.creatorId ? Promise.resolve(null) : siteBalanceAsOf(siteId, FAR_FUTURE, pool),
     ]);
 
     imprestFloat = parseFloat(floatRes.rows[0].total) || 0;
@@ -1798,6 +1819,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
         day_debit: total.day_debit,
       }
     : total;
+  payload.entryVisibility = { canViewAll: visibility.canViewAll, creatorId: visibility.creatorId };
 
   res.json(payload);
 });
@@ -1808,7 +1830,8 @@ export const getModeBalance = asyncHandler(async (req, res) => {
 export const getAutocomplete = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
-  const data = await dayBookModel.getAutocomplete(site_id, pool);
+  const visibility = await resolveEntryVisibility(req.user, 'daybook', null);
+  const data = await dayBookModel.getAutocomplete(site_id, pool, visibility.creatorId);
   res.json(data);
 });
 
@@ -3064,27 +3087,29 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
 
 /* ── Latest date with data (for auto-jump on site change) ── */
 export const getLatestDate = asyncHandler(async (req, res) => {
-  const { site_id } = req.query;
+  const { site_id, created_by } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
   const siteId = parseInt(site_id);
+  const visibility = await resolveEntryVisibility(req.user, 'daybook', created_by);
+  const creatorClause = visibility.creatorId ? ' AND created_by = $2' : '';
 
   const result = await pool.query(
     `SELECT MAX(d)::text AS latest_date FROM (
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) AS d FROM day_book WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) AS d FROM day_book WHERE site_id = $1${creatorClause}
        UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM expenses WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM expenses WHERE site_id = $1${creatorClause}
        UNION ALL
-       SELECT MAX((fp.date AT TIME ZONE 'Asia/Kolkata')::date) FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE f.site_id = $1
+       SELECT MAX((fp.date AT TIME ZONE 'Asia/Kolkata')::date) FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE f.site_id = $1${visibility.creatorId ? ' AND fp.created_by = $2' : ''}
        UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_commissions WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_commissions WHERE site_id = $1${creatorClause}
        UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM cash_flow_entries WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM cash_flow_entries WHERE site_id = $1${creatorClause}
        UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM firm_transactions WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM firm_transactions WHERE site_id = $1${creatorClause}
        UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_payments WHERE site_id = $1
+       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_payments WHERE site_id = $1${creatorClause}
      ) sub`,
-    [siteId]
+    visibility.creatorId ? [siteId, visibility.creatorId] : [siteId]
   );
 
   const latestDate = result.rows[0]?.latest_date || null;

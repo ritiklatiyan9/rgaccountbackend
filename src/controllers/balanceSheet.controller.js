@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import balanceSheetModel from '../models/BalanceSheet.model.js';
 import pool from '../config/db.js';
+import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const VALID_SCOPES = new Set(['all', 'cash', 'bank']);
@@ -58,6 +59,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'plot_id must be a positive integer' });
   }
   const preset = String(req.query.preset || 'overall').toLowerCase();
+  const entryVisibility = await resolveEntryVisibility(req.user, 'daybook', req.query.created_by);
 
   let { dateFrom, dateTo } = presetRange(preset);
   if (req.query.date) {
@@ -99,6 +101,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
       limit,
       grain,
       plotId,
+      creatorId: entryVisibility.creatorId,
     }),
     pool.query(
       `SELECT revision
@@ -116,7 +119,8 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     scope,
     order_revision: Number(orderStateResult.rows[0]?.revision) || 0,
     period: { preset, date_from: dateFrom, date_to: dateTo, grain },
-    filters: { source, payment_mode: paymentMode, direction, q: search, plot_id: plotId },
+    filters: { source, payment_mode: paymentMode, direction, q: search, plot_id: plotId, created_by: entryVisibility.creatorId },
+    entryVisibility,
     ...report,
   });
 });

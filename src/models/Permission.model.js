@@ -59,12 +59,12 @@ const RESTRICTED_MODULES = new Set([
 
 const getDefaultPermissions = (module) => {
     if (RESTRICTED_MODULES.has(module)) {
-        return { can_read: false, can_write: false, can_update: false, can_delete: false };
+        return { can_read: false, can_write: false, can_update: false, can_delete: false, can_view_all: false };
     }
     if (READ_ONLY_MODULES.has(module)) {
-        return { can_read: true, can_write: false, can_update: false, can_delete: false };
+        return { can_read: true, can_write: false, can_update: false, can_delete: false, can_view_all: false };
     }
-    return { can_read: true, can_write: true, can_update: true, can_delete: false };
+    return { can_read: true, can_write: true, can_update: true, can_delete: false, can_view_all: false };
 };
 
 class PermissionModel {
@@ -96,14 +96,15 @@ class PermissionModel {
             throw new Error(`Unknown permission module: ${module}`);
         }
         const query = `
-      INSERT INTO user_permissions (user_id, module, can_read, can_write, can_update, can_delete, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      INSERT INTO user_permissions (user_id, module, can_read, can_write, can_update, can_delete, can_view_all, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
       ON CONFLICT (user_id, module)
       DO UPDATE SET
         can_read = EXCLUDED.can_read,
         can_write = EXCLUDED.can_write,
         can_update = EXCLUDED.can_update,
         can_delete = EXCLUDED.can_delete,
+        can_view_all = EXCLUDED.can_view_all,
         updated_at = NOW()
       RETURNING *
     `;
@@ -115,6 +116,7 @@ class PermissionModel {
             permissions.can_write ?? defaults.can_write,
             permissions.can_update ?? defaults.can_update,
             permissions.can_delete ?? defaults.can_delete,
+            permissions.can_view_all ?? defaults.can_view_all,
         ]);
         return result.rows[0];
     }
@@ -144,14 +146,15 @@ class PermissionModel {
         const modules = ALL_MODULES.map(module => ({ module, ...getDefaultPermissions(module) }));
         await pool.query(
             `INSERT INTO user_permissions
-               (user_id, module, can_read, can_write, can_update, can_delete)
-             SELECT $1, x.module, x.can_read, x.can_write, x.can_update, x.can_delete
+               (user_id, module, can_read, can_write, can_update, can_delete, can_view_all)
+             SELECT $1, x.module, x.can_read, x.can_write, x.can_update, x.can_delete, x.can_view_all
              FROM jsonb_to_recordset($2::jsonb) AS x(
                module text,
                can_read boolean,
                can_write boolean,
                can_update boolean,
-               can_delete boolean
+               can_delete boolean,
+               can_view_all boolean
              )
              ON CONFLICT (user_id, module) DO NOTHING`,
             [userId, JSON.stringify(modules)]

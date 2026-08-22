@@ -21,6 +21,8 @@ const SCOPED = `
       dbo.position AS display_position,
       dgo.position AS global_display_position
     FROM ledger_entries le
+    LEFT JOIN cash_flow_entries creator_cfe
+      ON creator_cfe.id = NULLIF(SPLIT_PART(le.id, ':', 1), '')::int
     -- A Bank Plot Statement must identify the actual plot record, not just
     -- search visible narration. A direct source join keeps similarly named
     -- plots (e.g. 1 and 10, or resale records) from bleeding into each other.
@@ -64,6 +66,7 @@ const SCOPED = `
         OR COALESCE(le.remarks, '') ILIKE CONCAT('%', $8::text, '%')
       )
       AND ($11::int IS NULL OR plot.id = $11::int)
+      AND ($12::int IS NULL OR creator_cfe.created_by = $12::int)
   ),
   period_entries AS (
     SELECT *
@@ -225,9 +228,10 @@ class BalanceSheetModel {
     limit = 2500,
     grain = 'day',
     plotId = null,
+    creatorId = null,
   }) {
     const result = await pool.query(REPORT_QUERY, [
-      siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain, plotId,
+      siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain, plotId, creatorId,
     ]);
     return result.rows[0]?.report || null;
   }

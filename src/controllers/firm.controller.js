@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model.js';
 import pool from '../config/db.js';
+import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 const normalizeTxnText = (value) => (value || '').toString().trim().replace(/\s+/g, ' ').toUpperCase();
 
@@ -667,6 +668,7 @@ export const listTransactions = asyncHandler(async (req, res) => {
   if (!firm_id) return res.status(400).json({ message: 'firm_id is required' });
 
   const fId = parseInt(firm_id);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'firm_transactions', req.query.created_by);
 
   // Step 1: load transactions + parallel breakdowns + firm + cf-firm-entries.
   // The cf-firm-entries query no longer depends on the transactions list,
@@ -680,6 +682,8 @@ export const listTransactions = asyncHandler(async (req, res) => {
        CASE WHEN cfe.to_firm_id   = $1 THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0) ELSE 0 END AS credit,
        cfe.cash_type AS payment_mode,
        cfe.status,
+       cfe.created_by,
+       creator.name AS created_by_name,
        cfe.remarks AS remark,
        CASE
          WHEN cfe.from_firm_id = $1 AND cfe.to_name IS NOT NULL THEN cfe.to_name
@@ -694,17 +698,19 @@ export const listTransactions = asyncHandler(async (req, res) => {
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      LEFT JOIN firms ff ON ff.id = cfe.from_firm_id
      LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
+     LEFT JOIN users creator ON creator.id = cfe.created_by
      WHERE cfe.is_firm_transaction = TRUE
        AND (cfe.from_firm_id = $1 OR cfe.to_firm_id = $1)
+       AND ($2::int IS NULL OR cfe.created_by = $2::int)
      ORDER BY cfe.date ASC, cfe.created_at ASC`,
-    [fId]
+    [fId, entryVisibility.creatorId]
   );
 
   const [transactions, summary, remarkBreakdown, nameBreakdown, firmData, cfFirmResult] = await Promise.all([
-    firmTransactionModel.findByFirmId(fId, pool),
-    firmTransactionModel.getFirmSummary(fId, pool),
-    firmTransactionModel.getRemarkBreakdown(fId, pool),
-    firmTransactionModel.getNameBreakdown(fId, pool),
+    firmTransactionModel.findByFirmId(fId, pool, entryVisibility.creatorId),
+    firmTransactionModel.getFirmSummary(fId, pool, entryVisibility.creatorId),
+    firmTransactionModel.getRemarkBreakdown(fId, pool, entryVisibility.creatorId),
+    firmTransactionModel.getNameBreakdown(fId, pool, entryVisibility.creatorId),
     firmModel.findByIdWithTotals(fId, pool),
     cfFirmPromise,
   ]);
@@ -748,7 +754,7 @@ export const listTransactions = asyncHandler(async (req, res) => {
   });
 
   // summary already includes cashflow entries (getFirmSummary was updated to include them)
-  res.json({ transactions: allTransactions, summary, remarkBreakdown, nameBreakdown, firm: firmData });
+  res.json({ transactions: allTransactions, summary, remarkBreakdown, nameBreakdown, firm: firmData, entryVisibility });
 });
 
 /**
@@ -758,6 +764,9 @@ export const getTransaction = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const txn = await firmTransactionModel.findById(parseInt(id), pool);
   if (!txn) return res.status(404).json({ message: 'Transaction not found' });
+  if (!(await canUserViewEntry(req.user, 'firm_transactions', txn.created_by))) {
+    return res.status(404).json({ message: 'Transaction not found' });
+  }
   res.json({ transaction: txn });
 });
 
@@ -771,6 +780,9 @@ export const updateTransaction = asyncHandler(async (req, res) => {
 
   const existing = await firmTransactionModel.findById(txnId, pool);
   if (!existing) return res.status(404).json({ message: 'Transaction not found' });
+  if (!(await canUserViewEntry(req.user, 'firm_transactions', existing.created_by))) {
+    return res.status(404).json({ message: 'Transaction not found' });
+  }
 
   const updateData = {};
   if (date !== undefined) updateData.date = date;
@@ -834,7 +846,7 @@ export const deleteTransaction = asyncHandler(async (req, res) => {
   // Single round-trip lookup: existing transaction + its linked CF entry's
   // lock state. Was 3 serial RTTs (txn lookup, cf entry, cf month).
   const ctxRes = await pool.query(
-    `SELECT ft.id, ft.cash_flow_entry_id, cfm.is_locked AS cf_is_locked
+    `SELECT ft.id, ft.cash_flow_entry_id, ft.created_by, cfm.is_locked AS cf_is_locked
        FROM firm_transactions ft
        LEFT JOIN cash_flow_entries cfe ON cfe.id = ft.cash_flow_entry_id
        LEFT JOIN cash_flow_months cfm  ON cfm.id = cfe.cash_flow_month_id
@@ -843,6 +855,9 @@ export const deleteTransaction = asyncHandler(async (req, res) => {
   );
   const existing = ctxRes.rows[0];
   if (!existing) return res.status(404).json({ message: 'Transaction not found' });
+  if (!(await canUserViewEntry(req.user, 'firm_transactions', existing.created_by))) {
+    return res.status(404).json({ message: 'Transaction not found' });
+  }
   if (existing.cash_flow_entry_id && existing.cf_is_locked) {
     return res.status(403).json({ message: 'Cannot delete — linked cash flow month is locked' });
   }
@@ -867,14 +882,16 @@ export const deleteTransaction = asyncHandler(async (req, res) => {
 export const bulkDeleteTransactions = asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'firm_transactions', null);
 
   const ctxRes = await pool.query(
     `SELECT ft.id, ft.cash_flow_entry_id, cfm.is_locked AS cf_is_locked
        FROM firm_transactions ft
        LEFT JOIN cash_flow_entries cfe ON cfe.id = ft.cash_flow_entry_id
        LEFT JOIN cash_flow_months cfm  ON cfm.id = cfe.cash_flow_month_id
-      WHERE ft.id = ANY($1::int[])`,
-    [ids]
+      WHERE ft.id = ANY($1::int[])
+        AND ($2::int IS NULL OR ft.created_by = $2::int)`,
+    [ids, entryVisibility.creatorId]
   );
   const deletable = ctxRes.rows.filter((r) => !(r.cash_flow_entry_id && r.cf_is_locked));
   const deletableIds = deletable.map((r) => r.id);

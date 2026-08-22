@@ -8,7 +8,7 @@ import pool from '../../config/db.js';
  * Fetch all plots for a site with payment aggregates in a SINGLE query
  * using LEFT JOIN + GROUP BY instead of 6 correlated subqueries per row.
  */
-export async function getPlotsWithTotals(siteId) {
+export async function getPlotsWithTotals(siteId, creatorId = null) {
   // Per-plot RECEIVED = plot_payments + plot_installment_payments (both across
   // every payment mode). Two LATERAL joins keep the query readable; the final
   // `total_received`, `received_bank` and `received_cash` are the sum of each
@@ -47,6 +47,7 @@ export async function getPlotsWithTotals(siteId) {
           AS payment_booked_bys
       FROM plot_payments pp
       WHERE pp.plot_id = p.id
+        AND ($2::int IS NULL OR pp.created_by = $2::int)
     ) pp_agg ON true
     LEFT JOIN LATERAL (
       SELECT
@@ -59,11 +60,12 @@ export async function getPlotsWithTotals(siteId) {
         COUNT(*)::int AS payment_count
       FROM plot_installment_payments pip
       WHERE pip.plot_id = p.id
+        AND ($2::int IS NULL OR pip.created_by = $2::int)
     ) ip_agg ON true
     WHERE p.site_id = $1
     ORDER BY p.plot_no ASC
   `;
-  const { rows } = await pool.query(query, [siteId]);
+  const { rows } = await pool.query(query, [siteId, creatorId]);
   return rows;
 }
 
@@ -71,7 +73,7 @@ export async function getPlotsWithTotals(siteId) {
  * Fetch autocomplete data for a site in a SINGLE query using UNION ALL
  * instead of 6+ separate queries.
  */
-export async function getPlotAutocomplete(siteId) {
+export async function getPlotAutocomplete(siteId, creatorId = null) {
   const query = `
     SELECT 'buyerName' AS type, p.buyer_name AS val
     FROM plots p
@@ -82,19 +84,19 @@ export async function getPlotAutocomplete(siteId) {
   const paymentQuery = `
     SELECT type, val FROM (
       SELECT 'paymentFrom' AS type, payment_from AS val
-      FROM plot_payments WHERE site_id = $1 AND payment_from IS NOT NULL AND payment_from != ''
+      FROM plot_payments WHERE site_id = $1 AND ($2::int IS NULL OR created_by = $2::int) AND payment_from IS NOT NULL AND payment_from != ''
       UNION
       SELECT 'bankDetail' AS type, bank_details AS val
-      FROM plot_payments WHERE site_id = $1 AND bank_details IS NOT NULL AND bank_details != ''
+      FROM plot_payments WHERE site_id = $1 AND ($2::int IS NULL OR created_by = $2::int) AND bank_details IS NOT NULL AND bank_details != ''
       UNION
       SELECT 'narration' AS type, narration AS val
-      FROM plot_payments WHERE site_id = $1 AND narration IS NOT NULL AND narration != ''
+      FROM plot_payments WHERE site_id = $1 AND ($2::int IS NULL OR created_by = $2::int) AND narration IS NOT NULL AND narration != ''
       UNION
       SELECT 'receivedBy' AS type, received_by AS val
-      FROM plot_payments WHERE site_id = $1 AND received_by IS NOT NULL AND received_by != ''
+      FROM plot_payments WHERE site_id = $1 AND ($2::int IS NULL OR created_by = $2::int) AND received_by IS NOT NULL AND received_by != ''
       UNION
       SELECT 'bookedBy' AS type, booked_by AS val
-      FROM plot_payments WHERE site_id = $1 AND booked_by IS NOT NULL AND booked_by != ''
+      FROM plot_payments WHERE site_id = $1 AND ($2::int IS NULL OR created_by = $2::int) AND booked_by IS NOT NULL AND booked_by != ''
     ) sub
     ORDER BY type, val
   `;
@@ -107,7 +109,7 @@ export async function getPlotAutocomplete(siteId) {
 
   const [buyerRes, paymentRes, memberRes] = await Promise.all([
     pool.query(query, [siteId]),
-    pool.query(paymentQuery, [siteId]),
+    pool.query(paymentQuery, [siteId, creatorId]),
     pool.query(memberQuery, [siteId]),
   ]);
 
@@ -152,7 +154,7 @@ export async function getPlotAutocomplete(siteId) {
  * Fetch plot payments page data in a single call (plots + autocomplete).
  * This replaces the two parallel REST calls in the frontend.
  */
-export async function getPlotPageData(siteId) {
+export async function getPlotPageData(siteId, creatorId = null) {
   // Run free-to-sale check in parallel with data fetching
   const checkFreeToSaleQuery = `
     SELECT p.id, p.status, p.grace_period_days, p.free_to_sale_days
@@ -164,8 +166,8 @@ export async function getPlotPageData(siteId) {
   `;
 
   const [plots, autocomplete] = await Promise.all([
-    getPlotsWithTotals(siteId),
-    getPlotAutocomplete(siteId),
+    getPlotsWithTotals(siteId, creatorId),
+    getPlotAutocomplete(siteId, creatorId),
   ]);
 
   return { plots, autocomplete };
@@ -174,7 +176,7 @@ export async function getPlotPageData(siteId) {
 /**
  * Fetch payments for a selected plot with breakdowns — replaces 3 REST calls.
  */
-export async function getPlotPaymentDetail(plotId, siteId) {
+export async function getPlotPaymentDetail(plotId, siteId, creatorId = null) {
   const paymentsQuery = `
     SELECT pp.*, 'payment' AS source, u.name AS created_by_name
     FROM plot_payments pp
@@ -183,6 +185,7 @@ export async function getPlotPaymentDetail(plotId, siteId) {
      AND authorized_plot.site_id = $2
     LEFT JOIN users u ON u.id = pp.created_by
     WHERE pp.plot_id = $1
+      AND ($3::int IS NULL OR pp.created_by = $3::int)
     ORDER BY pp.date ASC, pp.created_at ASC
   `;
 
@@ -210,6 +213,7 @@ export async function getPlotPaymentDetail(plotId, siteId) {
         COUNT(*)::int AS payment_count
       FROM plot_payments pp
       WHERE pp.plot_id = p.id
+        AND ($3::int IS NULL OR pp.created_by = $3::int)
     ) pp_agg ON true
     LEFT JOIN LATERAL (
       SELECT
@@ -222,6 +226,7 @@ export async function getPlotPaymentDetail(plotId, siteId) {
         COUNT(*)::int AS payment_count
       FROM plot_installment_payments pip
       WHERE pip.plot_id = p.id
+        AND ($3::int IS NULL OR pip.created_by = $3::int)
     ) ip_agg ON true
     WHERE p.id = $1
       AND p.site_id = $2
@@ -237,6 +242,7 @@ export async function getPlotPaymentDetail(plotId, siteId) {
       ON authorized_plot.id = pp.plot_id
      AND authorized_plot.site_id = $2
     WHERE pp.plot_id = $1
+      AND ($3::int IS NULL OR pp.created_by = $3::int)
       AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     GROUP BY COALESCE(NULLIF(pp.payment_from, ''), 'OTHER')
     ORDER BY total_amount DESC
@@ -252,6 +258,7 @@ export async function getPlotPaymentDetail(plotId, siteId) {
       ON authorized_plot.id = pp.plot_id
      AND authorized_plot.site_id = $2
     WHERE pp.plot_id = $1
+      AND ($3::int IS NULL OR pp.created_by = $3::int)
       AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     GROUP BY COALESCE(NULLIF(pp.received_by, ''), 'UNKNOWN')
     ORDER BY total_amount DESC
@@ -260,7 +267,9 @@ export async function getPlotPaymentDetail(plotId, siteId) {
   const installmentsQuery = `
     SELECT pi.*,
       COALESCE(
-        (SELECT SUM(pip.amount) FROM plot_installment_payments pip WHERE pip.installment_id = pi.id),
+        (SELECT SUM(pip.amount) FROM plot_installment_payments pip
+          WHERE pip.installment_id = pi.id
+            AND ($3::int IS NULL OR pip.created_by = $3::int)),
         0
       ) AS paid_amount
     FROM plot_installments pi
@@ -272,11 +281,11 @@ export async function getPlotPaymentDetail(plotId, siteId) {
   `;
 
   const [paymentsRes, plotRes, fromRes, recByRes, instRes] = await Promise.all([
-    pool.query(paymentsQuery, [plotId, siteId]),
-    pool.query(plotQuery, [plotId, siteId]),
-    pool.query(fromBreakdownQuery, [plotId, siteId]),
-    pool.query(receivedByBreakdownQuery, [plotId, siteId]),
-    pool.query(installmentsQuery, [plotId, siteId]),
+    pool.query(paymentsQuery, [plotId, siteId, creatorId]),
+    pool.query(plotQuery, [plotId, siteId, creatorId]),
+    pool.query(fromBreakdownQuery, [plotId, siteId, creatorId]),
+    pool.query(receivedByBreakdownQuery, [plotId, siteId, creatorId]),
+    pool.query(installmentsQuery, [plotId, siteId, creatorId]),
   ]);
 
   return {
@@ -292,7 +301,7 @@ export async function getPlotPaymentDetail(plotId, siteId) {
  * Fetch recent BANK + CHEQUE plot payments for a site — used by PlotRegistry "Link Payments" dropdown.
  * Checks if source_plot_payment_id column exists for mapped_registry_payment_id tracking.
  */
-export async function getRegistryBankChequePayments(siteId) {
+export async function getRegistryBankChequePayments(siteId, creatorId = null) {
   const hasColResult = await pool.query(`
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
@@ -316,6 +325,7 @@ export async function getRegistryBankChequePayments(siteId) {
       LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
       LEFT JOIN plot_registry_payments prp ON prp.source_plot_payment_id = pp.id
       WHERE pp.site_id = $1
+        AND ($2::int IS NULL OR pp.created_by = $2::int)
         AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE', 'CASH')
         AND (pp.amount IS NOT NULL AND pp.amount > 0)
       ORDER BY pp.date DESC, pp.created_at DESC
@@ -332,12 +342,13 @@ export async function getRegistryBankChequePayments(siteId) {
       LEFT JOIN plots p ON p.id = pp.plot_id
       LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
       WHERE pp.site_id = $1
+        AND ($2::int IS NULL OR pp.created_by = $2::int)
         AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE', 'CASH')
         AND (pp.amount IS NOT NULL AND pp.amount > 0)
       ORDER BY pp.date DESC, pp.created_at DESC
     `;
 
-  const { rows } = await pool.query(query, [siteId]);
+  const { rows } = await pool.query(query, [siteId, creatorId]);
   return rows.map(r => ({
     ...r,
     date: r.date instanceof Date ? r.date.toISOString() : r.date,

@@ -4,6 +4,7 @@ import { firmModel } from '../models/Firm.model.js';
 import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
+import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 // ══════════════════════════════════════════════════
 //  CASH FLOW MONTH ENDPOINTS
@@ -101,12 +102,13 @@ export const createMonth = asyncHandler(async (req, res) => {
 export const listMonths = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'cashflow', req.query.created_by);
 
   const [months, ledgerNames] = await Promise.all([
-    cashFlowMonthModel.findBySiteId(parseInt(site_id), pool),
+    cashFlowMonthModel.findBySiteId(parseInt(site_id), pool, entryVisibility.creatorId),
     cashFlowMonthModel.getUniqueLedgerNames(parseInt(site_id), pool),
   ]);
-  res.json({ months, ledgerNames });
+  res.json({ months, ledgerNames, entryVisibility });
 });
 
 /**
@@ -115,7 +117,8 @@ export const listMonths = asyncHandler(async (req, res) => {
  */
 export const getMonth = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const month = await cashFlowMonthModel.findByIdWithTotals(parseInt(id), pool);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'cashflow', req.query.created_by);
+  const month = await cashFlowMonthModel.findByIdWithTotals(parseInt(id), pool, entryVisibility.creatorId);
   if (!month) return res.status(404).json({ message: 'Cash flow month not found' });
   res.json({ month });
 });
@@ -281,12 +284,13 @@ export const listEntries = asyncHandler(async (req, res) => {
   if (!month_id) return res.status(400).json({ message: 'month_id is required' });
 
   const monthId = parseInt(month_id);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'cashflow', req.query.created_by);
   // Step 1: 4 reads in parallel (was already parallel — keep).
   const [entries, summary, categories, monthData] = await Promise.all([
-    cashFlowEntryModel.findByMonthId(monthId, pool),
-    cashFlowEntryModel.getMonthSummary(monthId, pool),
-    cashFlowEntryModel.getCategoryBreakdown(monthId, pool),
-    cashFlowMonthModel.findByIdWithTotals(monthId, pool),
+    cashFlowEntryModel.findByMonthId(monthId, pool, entryVisibility.creatorId),
+    cashFlowEntryModel.getMonthSummary(monthId, pool, entryVisibility.creatorId),
+    cashFlowEntryModel.getCategoryBreakdown(monthId, pool, entryVisibility.creatorId),
+    cashFlowMonthModel.findByIdWithTotals(monthId, pool, entryVisibility.creatorId),
   ]);
 
   // Step 2: site row needs the site_id from monthData. Previously serial
@@ -319,7 +323,7 @@ export const listEntries = asyncHandler(async (req, res) => {
     };
   });
 
-  res.json({ entries: entriesWithVerify, summary, categories, month: monthData });
+  res.json({ entries: entriesWithVerify, summary, categories, month: monthData, entryVisibility });
 });
 
 /**
@@ -341,6 +345,9 @@ export const getEntry = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const entry = await cashFlowEntryModel.findById(parseInt(id), pool);
   if (!entry) return res.status(404).json({ message: 'Entry not found' });
+  if (!(await canUserViewEntry(req.user, 'cashflow', entry.created_by))) {
+    return res.status(404).json({ message: 'Entry not found' });
+  }
   res.json({ entry });
 });
 
@@ -369,6 +376,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
   const lookupRes = await pool.query(
     `SELECT cfe.id, cfe.cash_flow_month_id, cfe.site_id, cfe.is_firm_transaction,
             cfe.from_firm_id, cfe.to_firm_id, cfe.to_name,
+            cfe.created_by,
             cfm.is_locked
        FROM cash_flow_entries cfe
        JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
@@ -377,6 +385,9 @@ export const updateEntry = asyncHandler(async (req, res) => {
   );
   const existing = lookupRes.rows[0];
   if (!existing) return res.status(404).json({ message: 'Entry not found' });
+  if (!(await canUserViewEntry(req.user, 'cashflow', existing.created_by))) {
+    return res.status(404).json({ message: 'Entry not found' });
+  }
   if (existing.is_locked) return res.status(403).json({ message: 'This month is locked.' });
 
   const updateData = {};
@@ -465,6 +476,7 @@ export const listFirmsForCashFlow = asyncHandler(async (req, res) => {
  */
 export const deleteEntry = asyncHandler(async (req, res) => {
   const entryId = parseInt(req.params.id);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'cashflow', null);
   // Single atomic DELETE — only deletes if the parent month is NOT locked.
   // Was 3 round-trips (entry SELECT, month SELECT, DELETE); now 1.
   const result = await pool.query(
@@ -473,8 +485,9 @@ export const deleteEntry = asyncHandler(async (req, res) => {
       WHERE cfe.id = $1
         AND cfe.cash_flow_month_id = cfm.id
         AND cfm.is_locked = FALSE
+        AND ($2::int IS NULL OR cfe.created_by = $2::int)
       RETURNING cfe.id`,
-    [entryId]
+    [entryId, entryVisibility.creatorId]
   );
   if (!result.rows[0]) {
     // Distinguish "not found" from "month locked" with a single follow-up.
@@ -482,8 +495,9 @@ export const deleteEntry = asyncHandler(async (req, res) => {
       `SELECT cfm.is_locked
          FROM cash_flow_entries cfe
          JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-        WHERE cfe.id = $1`,
-      [entryId]
+        WHERE cfe.id = $1
+          AND ($2::int IS NULL OR cfe.created_by = $2::int)`,
+      [entryId, entryVisibility.creatorId]
     );
     if (check.rows.length === 0) return res.status(404).json({ message: 'Entry not found' });
     return res.status(403).json({ message: 'This month is locked.' });
@@ -500,6 +514,7 @@ export const deleteEntry = asyncHandler(async (req, res) => {
 export const bulkDeleteEntries = asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'cashflow', null);
 
   const result = await pool.query(
     `DELETE FROM cash_flow_entries cfe
@@ -507,8 +522,9 @@ export const bulkDeleteEntries = asyncHandler(async (req, res) => {
       WHERE cfe.id = ANY($1::int[])
         AND cfe.cash_flow_month_id = cfm.id
         AND cfm.is_locked = FALSE
+        AND ($2::int IS NULL OR cfe.created_by = $2::int)
       RETURNING cfe.id`,
-    [ids]
+    [ids, entryVisibility.creatorId]
   );
   const deleted = result.rows.map((r) => r.id);
   const skipped = ids.filter((id) => !deleted.includes(id));

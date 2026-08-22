@@ -4,6 +4,7 @@ import { dayBookModel } from '../models/DayBook.model.js';
 import { imprestLedgerModel } from '../models/Imprest.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
+import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 // ══════════════════════════════════════════════════
 //  EXPENSE ENDPOINTS
@@ -137,12 +138,16 @@ export const listExpenses = asyncHandler(async (req, res) => {
   const {
     site_id, page = 1, limit = 20,
     search, mode, category, to_entity,
-    dateFrom, dateTo, export: isExport, missing_bill, order, only_site
+    dateFrom, dateTo, export: isExport, missing_bill, order, only_site, created_by
   } = req.query;
 
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const filters = { search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order, only_site };
+  const visibility = await resolveEntryVisibility(req.user, 'expenses', created_by);
+  const filters = {
+    search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order, only_site,
+    created_by: visibility.creatorId,
+  };
 
   // If exporting, fetch all filtered records by bypassing the limit
   const fetchLimit = isExport === 'true' ? 0 : parseInt(limit);
@@ -185,6 +190,7 @@ export const listExpenses = asyncHandler(async (req, res) => {
     },
     modeBreakdown: breakdowns.modeBreakdown,
     categoryBreakdown: breakdowns.categoryBreakdown,
+    entryVisibility: { canViewAll: visibility.canViewAll, creatorId: visibility.creatorId },
   });
 });
 
@@ -194,7 +200,8 @@ export const listExpenses = asyncHandler(async (req, res) => {
 export const getAutocomplete = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
-  const data = await expenseModel.getAutocomplete(parseInt(site_id), pool);
+  const visibility = await resolveEntryVisibility(req.user, 'expenses', null);
+  const data = await expenseModel.getAutocomplete(parseInt(site_id), pool, visibility.creatorId);
   res.json(data);
 });
 
@@ -204,6 +211,9 @@ export const getAutocomplete = asyncHandler(async (req, res) => {
 export const getExpense = asyncHandler(async (req, res) => {
   const expense = await expenseModel.findById(parseInt(req.params.id), pool);
   if (!expense) return res.status(404).json({ message: 'Expense not found' });
+  if (!(await canUserViewEntry(req.user, 'expenses', expense.created_by))) {
+    return res.status(404).json({ message: 'Expense not found' });
+  }
   res.json({ expense });
 });
 
@@ -215,6 +225,10 @@ export const getExpense = asyncHandler(async (req, res) => {
  */
 export const updateExpense = asyncHandler(async (req, res) => {
   const expenseId = parseInt(req.params.id);
+  const existing = await expenseModel.findById(expenseId, pool);
+  if (!existing || !(await canUserViewEntry(req.user, 'expenses', existing.created_by))) {
+    return res.status(404).json({ message: 'Expense not found' });
+  }
   const {
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
@@ -259,10 +273,11 @@ export const updateExpense = asyncHandler(async (req, res) => {
  * DELETE /expenses/:id
  */
 export const deleteExpense = asyncHandler(async (req, res) => {
+  const visibility = await resolveEntryVisibility(req.user, 'expenses', null);
   // Atomic DELETE — saves a SELECT round-trip.
   const result = await pool.query(
-    `DELETE FROM expenses WHERE id = $1 RETURNING id`,
-    [parseInt(req.params.id)]
+    `DELETE FROM expenses WHERE id = $1 ${visibility.creatorId ? 'AND created_by = $2' : ''} RETURNING id`,
+    visibility.creatorId ? [parseInt(req.params.id), visibility.creatorId] : [parseInt(req.params.id)]
   );
   if (!result.rows[0]) return res.status(404).json({ message: 'Expense not found' });
   res.json({ message: 'Expense deleted' });
@@ -279,7 +294,11 @@ export const bulkDeleteExpenses = asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
 
-  const result = await pool.query(`DELETE FROM expenses WHERE id = ANY($1::int[]) RETURNING id`, [ids]);
+  const visibility = await resolveEntryVisibility(req.user, 'expenses', null);
+  const result = await pool.query(
+    `DELETE FROM expenses WHERE id = ANY($1::int[]) ${visibility.creatorId ? 'AND created_by = $2' : ''} RETURNING id`,
+    visibility.creatorId ? [ids, visibility.creatorId] : [ids]
+  );
   res.json({ message: `${result.rows.length} expense(s) deleted`, deleted: result.rows.map((r) => r.id) });
 });
 
@@ -304,7 +323,8 @@ export const reorderExpenses = asyncHandler(async (req, res) => {
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
   if (new Set(ids).size !== ids.length) return res.status(400).json({ message: 'ids contains duplicates' });
 
-  const updated = await expenseModel.reorderByDate(siteId, date, ids, pool);
+  const visibility = await resolveEntryVisibility(req.user, 'expenses', null);
+  const updated = await expenseModel.reorderByDate(siteId, date, ids, pool, visibility.creatorId);
   if (updated !== ids.length) {
     return res.status(409).json({
       message: 'This list changed on another screen. Refresh before reordering.',

@@ -16,6 +16,13 @@ export const RECEIPT_FIELD_KEYS = Object.freeze([
   'authority_signature', 'printed_at', 'evidence',
 ]);
 
+export const RECEIPT_DETAIL_ITEM_DEFAULTS = Object.freeze([
+  { key: 'module', label: 'Account / Module', sample: 'Plot Payment · Plot A-18', enabled: true },
+  { key: 'payment_mode', label: 'Payment Mode', sample: 'Cash', enabled: true },
+  { key: 'reference', label: 'Reference', sample: 'Cash Book 18', enabled: true },
+  { key: 'particulars', label: 'Particulars', sample: 'Installment received against account', enabled: true },
+]);
+
 const FONT_FAMILIES = Object.freeze([
   'Inter', 'Georgia', 'Arial', 'Helvetica', 'Garamond', 'Times New Roman',
   'Trebuchet MS', 'Verdana', 'Courier New',
@@ -59,6 +66,10 @@ const modeDefaults = (mode) => ({
     qr: mode !== 'cash',
     evidence: mode !== 'cash',
   },
+  detail_items: RECEIPT_DETAIL_ITEM_DEFAULTS.map((item) => ({
+    ...item,
+    sample: item.key === 'payment_mode' && mode !== 'cash' ? 'Bank Transfer' : item.sample,
+  })),
   content: {
     title: mode === 'cash' ? 'Cash Receipt' : 'Payment Receipt',
     party_label: mode === 'cash' ? 'Party / account' : 'Party / context',
@@ -95,6 +106,7 @@ const normalizeMode = (value, mode) => {
   const colors = isObject(input.colors) ? input.colors : {};
   const fields = isObject(input.fields) ? input.fields : {};
   const content = isObject(input.content) ? input.content : {};
+  const detailItems = Array.isArray(input.detail_items) ? input.detail_items : [];
 
   const normalizedFields = {};
   for (const key of RECEIPT_FIELD_KEYS) {
@@ -115,6 +127,15 @@ const normalizeMode = (value, mode) => {
       typeof colors[key] === 'string' && HEX_COLOR.test(colors[key]) ? colors[key].toLowerCase() : fallback,
     ])),
     fields: normalizedFields,
+    detail_items: defaults.detail_items.map((fallback) => {
+      const candidate = detailItems.find((item) => isObject(item) && item.key === fallback.key) || {};
+      return {
+        key: fallback.key,
+        label: cleanText(candidate.label, fallback.label, 80),
+        sample: cleanText(candidate.sample, fallback.sample, 140),
+        enabled: typeof candidate.enabled === 'boolean' ? candidate.enabled : fallback.enabled,
+      };
+    }),
     content: {
       title: cleanText(content.title, defaults.content.title, 80),
       party_label: cleanText(content.party_label, defaults.content.party_label, 80),

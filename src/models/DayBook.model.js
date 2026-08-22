@@ -39,16 +39,16 @@ class DayBookModel extends MasterModel {
   /**
    * Day book entries for a specific date (fast, indexed query)
    */
-  async findBySiteAndDate(siteId, date, pool) {
+  async findBySiteAndDate(siteId, date, pool, creatorId = null) {
     const query = `
       SELECT d.*, u.name as assigned_admin_name, approver.name as approved_by_name
       FROM day_book d
       LEFT JOIN users u ON d.assigned_admin_id = u.id
       LEFT JOIN users approver ON d.approved_by = approver.id
-      WHERE d.site_id = $1 AND d.date = $2
+      WHERE d.site_id = $1 AND d.date = $2 ${creatorId ? 'AND d.created_by = $3' : ''}
       ORDER BY d.id ASC
     `;
-    const result = await pool.query(query, [siteId, date]);
+    const result = await pool.query(query, creatorId ? [siteId, date, creatorId] : [siteId, date]);
     return result.rows;
   }
 
@@ -143,21 +143,23 @@ class DayBookModel extends MasterModel {
   /**
    * Autocomplete values
    */
-  async getAutocomplete(siteId, pool) {
+  async getAutocomplete(siteId, pool, creatorId = null) {
+    const creatorClause = creatorId ? ' AND created_by = $2' : '';
     const queries = {
-      particulars: `SELECT DISTINCT particular   AS val FROM day_book WHERE site_id = $1 AND particular   IS NOT NULL AND particular   != '' ORDER BY val LIMIT 50`,
-      fromEntities: `SELECT DISTINCT from_entity  AS val FROM day_book WHERE site_id = $1 AND from_entity  IS NOT NULL AND from_entity  != '' ORDER BY val LIMIT 50`,
-      toEntities: `SELECT DISTINCT to_entity    AS val FROM day_book WHERE site_id = $1 AND to_entity    IS NOT NULL AND to_entity    != '' ORDER BY val LIMIT 50`,
-      paymentModes: `SELECT DISTINCT payment_mode AS val FROM day_book WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val LIMIT 50`,
-      remarks: `SELECT DISTINCT remarks      AS val FROM day_book WHERE site_id = $1 AND remarks      IS NOT NULL AND remarks      != '' ORDER BY val LIMIT 50`,
-      accountNos: `SELECT DISTINCT account_no   AS val FROM day_book WHERE site_id = $1 AND account_no   IS NOT NULL AND account_no   != '' ORDER BY val LIMIT 50`,
-      branches: `SELECT DISTINCT branch       AS val FROM day_book WHERE site_id = $1 AND branch       IS NOT NULL AND branch       != '' ORDER BY val LIMIT 50`,
-      categories: `SELECT DISTINCT category     AS val FROM day_book WHERE site_id = $1 AND category     IS NOT NULL AND category     != '' ORDER BY val LIMIT 50`,
+      particulars: `SELECT DISTINCT particular   AS val FROM day_book WHERE site_id = $1${creatorClause} AND particular   IS NOT NULL AND particular   != '' ORDER BY val LIMIT 50`,
+      fromEntities: `SELECT DISTINCT from_entity  AS val FROM day_book WHERE site_id = $1${creatorClause} AND from_entity  IS NOT NULL AND from_entity  != '' ORDER BY val LIMIT 50`,
+      toEntities: `SELECT DISTINCT to_entity    AS val FROM day_book WHERE site_id = $1${creatorClause} AND to_entity    IS NOT NULL AND to_entity    != '' ORDER BY val LIMIT 50`,
+      paymentModes: `SELECT DISTINCT payment_mode AS val FROM day_book WHERE site_id = $1${creatorClause} AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val LIMIT 50`,
+      remarks: `SELECT DISTINCT remarks      AS val FROM day_book WHERE site_id = $1${creatorClause} AND remarks      IS NOT NULL AND remarks      != '' ORDER BY val LIMIT 50`,
+      accountNos: `SELECT DISTINCT account_no   AS val FROM day_book WHERE site_id = $1${creatorClause} AND account_no   IS NOT NULL AND account_no   != '' ORDER BY val LIMIT 50`,
+      branches: `SELECT DISTINCT branch       AS val FROM day_book WHERE site_id = $1${creatorClause} AND branch       IS NOT NULL AND branch       != '' ORDER BY val LIMIT 50`,
+      categories: `SELECT DISTINCT category     AS val FROM day_book WHERE site_id = $1${creatorClause} AND category     IS NOT NULL AND category     != '' ORDER BY val LIMIT 50`,
     };
 
     const keys = Object.keys(queries);
     const sqls = Object.values(queries);
-    const rows = await Promise.all(sqls.map(sql => pool.query(sql, [siteId])));
+    const queryParams = creatorId ? [siteId, creatorId] : [siteId];
+    const rows = await Promise.all(sqls.map(sql => pool.query(sql, queryParams)));
     const results = {};
     keys.forEach((k, i) => { results[k] = rows[i].rows.map(r => r.val); });
     return results;

@@ -14,7 +14,7 @@ class CashFlowMonthModel extends MasterModel {
    *
    *  Now: a single LATERAL aggregation that scans cash_flow_entries once
    *  per month and computes all six sums + the count using FILTER clauses. */
-  async findBySiteId(siteId, pool) {
+  async findBySiteId(siteId, pool, creatorId = null) {
     const query = `
       SELECT cfm.*,
         lu.name AS linked_user_name,
@@ -68,12 +68,13 @@ class CashFlowMonthModel extends MasterModel {
           COUNT(*)::int AS entry_count
         FROM cash_flow_entries cfe
         WHERE cfe.cash_flow_month_id = cfm.id
+          AND ($2::int IS NULL OR cfe.created_by = $2::int)
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ) agg ON TRUE
       WHERE cfm.site_id = $1
       ORDER BY cfm.year DESC, cfm.month DESC, cfm.ledger_name ASC
     `;
-    const result = await pool.query(query, [siteId]);
+    const result = await pool.query(query, [siteId, creatorId]);
     return result.rows;
   }
 
@@ -85,7 +86,7 @@ class CashFlowMonthModel extends MasterModel {
   }
 
   /** Get a single month with totals (1 lateral aggregation, was 3 subqueries) */
-  async findByIdWithTotals(id, pool) {
+  async findByIdWithTotals(id, pool, creatorId = null) {
     const query = `
       SELECT cfm.*,
         lu.name AS linked_user_name,
@@ -115,11 +116,12 @@ class CashFlowMonthModel extends MasterModel {
           COUNT(*)::int AS entry_count
         FROM cash_flow_entries cfe
         WHERE cfe.cash_flow_month_id = cfm.id
+          AND ($2::int IS NULL OR cfe.created_by = $2::int)
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ) agg ON TRUE
       WHERE cfm.id = $1
     `;
-    const result = await pool.query(query, [id]);
+    const result = await pool.query(query, [id, creatorId]);
     return result.rows[0];
   }
 
@@ -167,7 +169,7 @@ class CashFlowEntryModel extends MasterModel {
   }
 
   /** All entries for a month, ordered by date ASC */
-  async findByMonthId(monthId, pool) {
+  async findByMonthId(monthId, pool, creatorId = null) {
     const query = `
       SELECT cfe.*, ff.name AS from_firm_name, tf.name AS to_firm_name, u.name AS created_by_name
       FROM cash_flow_entries cfe
@@ -175,25 +177,28 @@ class CashFlowEntryModel extends MasterModel {
       LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
       LEFT JOIN users u ON u.id = cfe.created_by
       WHERE cfe.cash_flow_month_id = $1
+        AND ($2::int IS NULL OR cfe.created_by = $2::int)
         AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ORDER BY date ASC, created_at ASC
     `;
-    const result = await pool.query(query, [monthId]);
+    const result = await pool.query(query, [monthId, creatorId]);
     return result.rows;
   }
 
   /** Summary for a month */
-  async getMonthSummary(monthId, pool) {
+  async getMonthSummary(monthId, pool, creatorId = null) {
     const query = `
       SELECT
         COUNT(*)::int AS total_entries,
         COALESCE(SUM(debit), 0)  AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM cash_flow_entries
-      WHERE cash_flow_month_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE cash_flow_month_id = $1
+        AND ($2::int IS NULL OR created_by = $2::int)
+        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         AND (source_module IS NULL OR source_module !~ '_person$')
     `;
-    const result = await pool.query(query, [monthId]);
+    const result = await pool.query(query, [monthId, creatorId]);
     return result.rows[0];
   }
 
@@ -209,7 +214,7 @@ class CashFlowEntryModel extends MasterModel {
   }
 
   /** Category-wise breakdown for a month */
-  async getCategoryBreakdown(monthId, pool) {
+  async getCategoryBreakdown(monthId, pool, creatorId = null) {
     const query = `
       SELECT
         particular,
@@ -217,12 +222,14 @@ class CashFlowEntryModel extends MasterModel {
         COALESCE(SUM(debit), 0) AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM cash_flow_entries
-      WHERE cash_flow_month_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE cash_flow_month_id = $1
+        AND ($2::int IS NULL OR created_by = $2::int)
+        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         AND (source_module IS NULL OR source_module !~ '_person$')
       GROUP BY particular
       ORDER BY total_debit DESC
     `;
-    const result = await pool.query(query, [monthId]);
+    const result = await pool.query(query, [monthId, creatorId]);
     return result.rows;
   }
 

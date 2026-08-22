@@ -3,6 +3,7 @@ import { plotCommissionV2Model, plotCommissionPaymentModel } from '../models/Plo
 import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
+import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 /**
  * Helper: Auto-update commission status based on payment completion.
@@ -126,15 +127,16 @@ export const getPlotCommissionDetail = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const numId = parseInt(id);
   if (isNaN(numId)) return res.status(400).json({ message: 'Invalid commission ID' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'commissions', req.query.created_by);
   
   const [master, payments] = await Promise.all([
     plotCommissionV2Model.findByIdWithDetails(numId, pool),
-    plotCommissionPaymentModel.findByCommissionId(numId, pool)
+    plotCommissionPaymentModel.findByCommissionId(numId, pool, entryVisibility.creatorId)
   ]);
 
   if (!master) return res.status(404).json({ message: 'Commission not found' });
 
-  res.json({ master, payments });
+  res.json({ master, payments, entryVisibility });
 });
 
 /**
@@ -149,6 +151,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const numSiteId = parseInt(site_id);
   if (isNaN(numPlotId)) return res.status(400).json({ message: 'Invalid plot ID' });
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'commissions', req.query.created_by);
 
   // Step 1: load commissions for the VIEWED booking (we need the IDs to fetch payments).
   const commissions = await plotCommissionV2Model.findAllCommissionsByPlotId(numPlotId, numSiteId, pool);
@@ -184,8 +187,9 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
        LEFT JOIN users u ON pcp.created_by = u.id
        LEFT JOIN users a ON pcp.approved_by = a.id
       WHERE p.plot_no = $1 AND pc.site_id = $2
+        AND ($3::int IS NULL OR pcp.created_by = $3::int)
       ORDER BY pcp.date DESC, pcp.created_at DESC`,
-    [plotNoForPayments, numSiteId]
+    [plotNoForPayments, numSiteId, entryVisibility.creatorId]
   );
 
   const sitePromise = pool.query(
@@ -235,12 +239,13 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
               COUNT(*) AS payment_count
        FROM plot_commission_payments
        WHERE (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+         AND ($3::int IS NULL OR created_by = $3::int)
        GROUP BY plot_commission_id
      ) paid_agg ON paid_agg.plot_commission_id = pc.id
      WHERE p.plot_no = $1 AND p.site_id = $2
      GROUP BY p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.plot_commission, p.created_at
      ORDER BY p.id ASC`,
-    [plotNoForTimeline, numSiteId]
+    [plotNoForTimeline, numSiteId, entryVisibility.creatorId]
   );
 
   const [paymentsResult, siteResult, timelineResult] = await Promise.all([
@@ -332,21 +337,30 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   };
 
   // Build agent sections for the CURRENT booking (full, editable ledgers)
-  const agents = commissions.map(c => ({
+  const agents = commissions.map(c => {
+    const scopedPayments = paymentsByCommission[c.id] || [];
+    const totalPaid = scopedPayments
+      .filter((payment) => payment.status === 'approved' && !['BOUNCED', 'RETURNED'].includes(payment.cheque_status))
+      .reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
+    const totalPaidAll = scopedPayments
+      .filter((payment) => ['approved', 'pending'].includes(payment.status) && !['BOUNCED', 'RETURNED'].includes(payment.cheque_status))
+      .reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
+    return ({
     commission_id: c.id,
     agent_id: c.agent_id,
     agent_name: c.agent_name,
     agent_phone: c.agent_phone,
     total_commission: c.total_commission,
-    total_paid: parseFloat(c.total_paid) || 0,
-    total_paid_all: parseFloat(c.total_paid_all) || 0,
-    balance: parseFloat(c.balance) || 0,
+    total_paid: totalPaid,
+    total_paid_all: totalPaidAll,
+    balance: (parseFloat(c.total_commission) || 0) - totalPaidAll,
     status: c.status,
     remarks: c.remarks,
     created_at: c.created_at,
-    payments: paymentsByCommission[c.id] || [],
-    payment_count: (paymentsByCommission[c.id] || []).length,
-  }));
+    payments: scopedPayments,
+    payment_count: scopedPayments.length,
+  });
+  });
 
   // Plot-level totals for the CURRENT booking. Commission = the single DECIDED
   // plot commission (NEVER summed across agents). Use MAX so it always agrees
@@ -384,6 +398,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     grand,
     is_resale: commissions.length > 1 || timeline.length > 1,
     timeline,
+    entryVisibility,
   });
 });
 
@@ -559,6 +574,10 @@ export const deletePlotCommission = asyncHandler(async (req, res) => {
 export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   const numId = parseInt(req.params.id);
   if (isNaN(numId)) return res.status(400).json({ message: 'Invalid payment ID' });
+  const existing = await plotCommissionPaymentModel.findById(numId, pool);
+  if (!existing || !(await canUserViewEntry(req.user, 'commissions', existing.created_by))) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
 
   const { date, amount, payment_mode, bank_name, transaction_id, cheque_no, remarks, voucher_url, assigned_admin_id } = req.body;
 
@@ -621,6 +640,10 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
 export const deletePlotCommissionPayment = asyncHandler(async (req, res) => {
   const numId = parseInt(req.params.id);
   if (isNaN(numId)) return res.status(400).json({ message: 'Invalid payment ID' });
+  const existing = await plotCommissionPaymentModel.findById(numId, pool);
+  if (!existing || !(await canUserViewEntry(req.user, 'commissions', existing.created_by))) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
 
   // Atomic DELETE with the commission_id returned in the same round-trip.
   // Previously: SELECT plot_commission_id + DELETE (2 RTTs); now 1 RTT.
@@ -647,10 +670,14 @@ export const deletePlotCommissionPayment = asyncHandler(async (req, res) => {
 export const bulkDeletePlotCommissionPayments = asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'commissions', null);
 
   const deleted = await pool.query(
-    `DELETE FROM plot_commission_payments WHERE id = ANY($1::int[]) RETURNING plot_commission_id`,
-    [ids]
+    `DELETE FROM plot_commission_payments
+      WHERE id = ANY($1::int[])
+        AND ($2::int IS NULL OR created_by = $2::int)
+      RETURNING plot_commission_id`,
+    [ids, entryVisibility.creatorId]
   );
   const commissionIds = [...new Set(deleted.rows.map((r) => r.plot_commission_id))];
   commissionIds.forEach((cid) => autoUpdateCommissionStatus(cid, pool).catch(() => {}));

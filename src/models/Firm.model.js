@@ -116,19 +116,20 @@ class FirmTransactionModel extends MasterModel {
   }
 
   /** All transactions for a firm, ordered by date ASC */
-  async findByFirmId(firmId, pool) {
+  async findByFirmId(firmId, pool, creatorId = null) {
     const query = `
       SELECT * FROM firm_transactions
       WHERE firm_id = $1
+        AND ($2::int IS NULL OR created_by = $2::int)
       ORDER BY date ASC, created_at ASC
     `;
-    const result = await pool.query(query, [firmId]);
+    const result = await pool.query(query, [firmId, creatorId]);
     return result.rows;
   }
 
   /** Summary for a firm (includes cashflow entries referencing the firm).
    *  Single round-trip combining both source tables — was 2 serial queries. */
-  async getFirmSummary(firmId, pool) {
+  async getFirmSummary(firmId, pool, creatorId = null) {
     const result = await pool.query(
       `
       WITH ft_agg AS (
@@ -138,6 +139,7 @@ class FirmTransactionModel extends MasterModel {
           COALESCE(SUM(credit), 0) AS ft_credit
         FROM firm_transactions
         WHERE firm_id = $1
+          AND ($2::int IS NULL OR created_by = $2::int)
           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       ),
       cf_agg AS (
@@ -147,6 +149,7 @@ class FirmTransactionModel extends MasterModel {
           COALESCE(SUM(CASE WHEN to_firm_id   = $1 THEN COALESCE(debit, 0) + COALESCE(credit, 0) ELSE 0 END), 0) AS cf_credit
         FROM cash_flow_entries
         WHERE (from_firm_id = $1 OR to_firm_id = $1)
+          AND ($2::int IS NULL OR created_by = $2::int)
           AND is_firm_transaction = TRUE
           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       )
@@ -156,7 +159,7 @@ class FirmTransactionModel extends MasterModel {
         (ft_agg.ft_credit + cf_agg.cf_credit)    AS total_credit
       FROM ft_agg, cf_agg
       `,
-      [firmId]
+      [firmId, creatorId]
     );
     const row = result.rows[0] || {};
     return {
@@ -168,7 +171,7 @@ class FirmTransactionModel extends MasterModel {
   }
 
   /** Category/remark-wise breakdown for a firm */
-  async getRemarkBreakdown(firmId, pool) {
+  async getRemarkBreakdown(firmId, pool, creatorId = null) {
     const query = `
       SELECT
         COALESCE(NULLIF(remark, ''), 'UNCATEGORIZED') AS remark,
@@ -176,16 +179,18 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(debit), 0) AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM firm_transactions
-      WHERE firm_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE firm_id = $1
+        AND ($2::int IS NULL OR created_by = $2::int)
+        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(remark, ''), 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;
-    const result = await pool.query(query, [firmId]);
+    const result = await pool.query(query, [firmId, creatorId]);
     return result.rows;
   }
 
   /** Name-wise breakdown for a firm */
-  async getNameBreakdown(firmId, pool) {
+  async getNameBreakdown(firmId, pool, creatorId = null) {
     const query = `
       SELECT
         COALESCE(NULLIF(name, ''), 'UNKNOWN') AS name,
@@ -193,11 +198,13 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(debit), 0) AS total_debit,
         COALESCE(SUM(credit), 0) AS total_credit
       FROM firm_transactions
-      WHERE firm_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE firm_id = $1
+        AND ($2::int IS NULL OR created_by = $2::int)
+        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(name, ''), 'UNKNOWN')
       ORDER BY total_debit DESC
     `;
-    const result = await pool.query(query, [firmId]);
+    const result = await pool.query(query, [firmId, creatorId]);
     return result.rows;
   }
 

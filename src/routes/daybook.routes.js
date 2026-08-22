@@ -38,6 +38,7 @@ import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
+import { requireAllEntryVisibility, requireEntryCreatorAccess } from '../middlewares/entryCreatorAccess.middleware.js';
 
 const router = express.Router();
 
@@ -47,6 +48,14 @@ router.use(authMiddleware);
 const daybookReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'daybook' });
 // Daybook mutations affect expenses, farmers, cashflow, plots, firms — bust all related caches
 const bustDaybookCache = invalidateCacheOnSuccess(['/daybook', '/expenses', '/farmers', '/cashflow', '/plots', '/firms', '/vendors', '/plot-commission']);
+const ownDayBook = requireEntryCreatorAccess({ module: 'daybook', table: 'day_book' });
+const ownExpense = requireEntryCreatorAccess({ module: 'daybook', table: 'expenses' });
+const ownFarmerPayment = requireEntryCreatorAccess({ module: 'daybook', table: 'farmer_payments' });
+const ownCommission = requireEntryCreatorAccess({ module: 'daybook', table: 'plot_commissions' });
+const ownCashFlow = requireEntryCreatorAccess({ module: 'daybook', table: 'cash_flow_entries' });
+const ownFirmTransaction = requireEntryCreatorAccess({ module: 'daybook', table: 'firm_transactions' });
+const ownPlotPayment = requireEntryCreatorAccess({ module: 'daybook', table: 'plot_payments' });
+const ownModuleEntry = requireEntryCreatorAccess({ module: 'daybook', sourceParam: 'source' });
 // Recent transactions (Dashboard) — must be before /:id route
 router.get('/recent', requireRole('admin', 'sub_admin'), daybookReadCache, listRecentTransactions);
 
@@ -71,49 +80,49 @@ router.post('/', requireRole('admin', 'sub_admin'), requirePermission('daybook',
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, listDayBookEntries);
 // The controller clears Day Book + Balance Sheet caches before acknowledging
 // the commit, so the client can never refetch a stale order.
-router.put('/order', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), updateDayBookOrder);
+router.put('/order', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), requireAllEntryVisibility('daybook'), updateDayBookOrder);
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, getAutocomplete);
 
 // Farmers list for dropdown
 router.get('/farmers', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, listFarmersForDayBook);
 
 // Expense entries managed from Day Book
-router.put('/expense/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateExpenseFromDayBook);
-router.delete('/expense/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), bustDaybookCache, deleteExpenseFromDayBook);
+router.put('/expense/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), ownExpense, bustDaybookCache, updateExpenseFromDayBook);
+router.delete('/expense/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), ownExpense, bustDaybookCache, deleteExpenseFromDayBook);
 
 // Farmer payment entries managed from Day Book
-router.put('/farmer-payment/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateFarmerPaymentFromDayBook);
-router.delete('/farmer-payment/:id', requirePermission('daybook', 'delete'), bustDaybookCache, deleteFarmerPaymentFromDayBook);
+router.put('/farmer-payment/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), ownFarmerPayment, bustDaybookCache, updateFarmerPaymentFromDayBook);
+router.delete('/farmer-payment/:id', requirePermission('daybook', 'delete'), ownFarmerPayment, bustDaybookCache, deleteFarmerPaymentFromDayBook);
 
 // Members list for dropdown (Plot Commission)
 router.get('/members', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, listMembersForDayBook);
 
 // Commission entries managed from Day Book
-router.put('/commission/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateCommissionFromDayBook);
-router.delete('/commission/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), bustDaybookCache, deleteCommissionFromDayBook);
+router.put('/commission/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), ownCommission, bustDaybookCache, updateCommissionFromDayBook);
+router.delete('/commission/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), ownCommission, bustDaybookCache, deleteCommissionFromDayBook);
 
 // Cash Flow ledgers list for dropdown + entries managed from Day Book
 router.get('/cashflow-ledgers', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, listCashFlowLedgersForDayBook);
-router.put('/cashflow-entry/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateCashFlowEntryFromDayBook);
-router.delete('/cashflow-entry/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), bustDaybookCache, deleteCashFlowEntryFromDayBook);
+router.put('/cashflow-entry/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), ownCashFlow, bustDaybookCache, updateCashFlowEntryFromDayBook);
+router.delete('/cashflow-entry/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), ownCashFlow, bustDaybookCache, deleteCashFlowEntryFromDayBook);
 
 // Firms list for dropdown + firm transactions managed from Day Book
 router.get('/firms', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, listFirmsForDayBook);
-router.put('/firm-transaction/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateFirmTransactionFromDayBook);
-router.delete('/firm-transaction/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), bustDaybookCache, deleteFirmTransactionFromDayBook);
+router.put('/firm-transaction/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), ownFirmTransaction, bustDaybookCache, updateFirmTransactionFromDayBook);
+router.delete('/firm-transaction/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), ownFirmTransaction, bustDaybookCache, deleteFirmTransactionFromDayBook);
 
 // Plots list for dropdown + plot payments managed from Day Book
 router.get('/plots', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, listPlotsForDayBook);
-router.put('/plot-payment/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updatePlotPaymentFromDayBook);
-router.delete('/plot-payment/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), bustDaybookCache, deletePlotPaymentFromDayBook);
+router.put('/plot-payment/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), ownPlotPayment, bustDaybookCache, updatePlotPaymentFromDayBook);
+router.delete('/plot-payment/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), ownPlotPayment, bustDaybookCache, deletePlotPaymentFromDayBook);
 
 // Installment / vendor / commission-payout rows the Day Book displays on
 // behalf of their owning module. Source table is whitelisted in the controller.
-router.put('/module-entry/:source/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateModuleEntryFromDayBook);
-router.delete('/module-entry/:source/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), bustDaybookCache, deleteModuleEntryFromDayBook);
+router.put('/module-entry/:source/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), ownModuleEntry, bustDaybookCache, updateModuleEntryFromDayBook);
+router.delete('/module-entry/:source/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'delete'), ownModuleEntry, bustDaybookCache, deleteModuleEntryFromDayBook);
 
-router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), daybookReadCache, getDayBookEntry);
-router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), bustDaybookCache, updateDayBookEntry);
-router.delete('/:id', requirePermission('daybook', 'delete'), bustDaybookCache, deleteDayBookEntry);
+router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), ownDayBook, daybookReadCache, getDayBookEntry);
+router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), ownDayBook, bustDaybookCache, updateDayBookEntry);
+router.delete('/:id', requirePermission('daybook', 'delete'), ownDayBook, bustDaybookCache, deleteDayBookEntry);
 
 export default router;

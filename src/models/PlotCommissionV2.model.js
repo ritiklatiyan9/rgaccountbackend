@@ -182,16 +182,17 @@ class PlotCommissionPaymentModel extends MasterModel {
   /**
    * Get all payments for a specific commission master record.
    */
-  async findByCommissionId(commissionId, pool) {
+  async findByCommissionId(commissionId, pool, creatorId = null) {
     const query = `
       SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name
       FROM plot_commission_payments pcp
       LEFT JOIN users u ON pcp.created_by = u.id
       LEFT JOIN users a ON pcp.approved_by = a.id
       WHERE pcp.plot_commission_id = $1
+        AND ($2::int IS NULL OR pcp.created_by = $2::int)
       ORDER BY pcp.date DESC, pcp.created_at DESC
     `;
-    const result = await pool.query(query, [commissionId]);
+    const result = await pool.query(query, [commissionId, creatorId]);
     return result.rows;
   }
 }

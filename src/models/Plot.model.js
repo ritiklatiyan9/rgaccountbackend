@@ -173,34 +173,38 @@ class PlotPaymentModel extends MasterModel {
   }
 
   /** Payment-from breakdown for a plot */
-  async getFromBreakdown(plotId, pool) {
+  async getFromBreakdown(plotId, pool, creatorId = null) {
     const query = `
       SELECT
         COALESCE(NULLIF(payment_from, ''), 'OTHER') AS payment_from,
         COUNT(*)::int AS entries,
         COALESCE(SUM(amount), 0) AS total_amount
       FROM plot_payments
-      WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE plot_id = $1
+        AND ($2::int IS NULL OR created_by = $2::int)
+        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(payment_from, ''), 'OTHER')
       ORDER BY total_amount DESC
     `;
-    const result = await pool.query(query, [plotId]);
+    const result = await pool.query(query, [plotId, creatorId]);
     return result.rows;
   }
 
   /** Received-by breakdown for a plot */
-  async getReceivedByBreakdown(plotId, pool) {
+  async getReceivedByBreakdown(plotId, pool, creatorId = null) {
     const query = `
       SELECT
         COALESCE(NULLIF(received_by, ''), 'UNKNOWN') AS received_by,
         COUNT(*)::int AS entries,
         COALESCE(SUM(amount), 0) AS total_amount
       FROM plot_payments
-      WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE plot_id = $1
+        AND ($2::int IS NULL OR created_by = $2::int)
+        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(received_by, ''), 'UNKNOWN')
       ORDER BY total_amount DESC
     `;
-    const result = await pool.query(query, [plotId]);
+    const result = await pool.query(query, [plotId, creatorId]);
     return result.rows;
   }
 

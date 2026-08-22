@@ -3,6 +3,7 @@ import { installmentModel, installmentPaymentModel } from '../models/Installment
 import { plotModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 import { notifyPlotPaymentRecorded } from '../utils/notify.js';
+import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 let hasGracePeriodColumnCache = null;
 const hasGracePeriodColumn = async () => {
@@ -52,7 +53,7 @@ function calculateInterest(remainingAmount, rate, type, fromDate, toDate) {
  * Single source of truth — used by the reminders API and by the SMS reminder
  * job, so both agree on who is overdue/due and by how much.
  */
-export const buildPaymentReminders = async (site_id) => {
+export const buildPaymentReminders = async (site_id, creatorId = null) => {
   const todayStr = new Date().toISOString().split('T')[0];
   const todayMs = new Date(todayStr).getTime();
   const DAY = 86400000;
@@ -88,8 +89,10 @@ export const buildPaymentReminders = async (site_id) => {
   // 3. Total received per plot
   const payRes = await pool.query(
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
-     FROM plot_payments WHERE plot_id = ANY($1) AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
-    [plotIds]
+     FROM plot_payments WHERE plot_id = ANY($1)
+       AND ($2::int IS NULL OR created_by = $2::int)
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
+    [plotIds, creatorId]
   );
   const receivedMap = {};
   for (const r of payRes.rows) receivedMap[r.plot_id] = parseFloat(r.total_received) || 0;
@@ -97,8 +100,9 @@ export const buildPaymentReminders = async (site_id) => {
   // 4. Last payment date per plot
   const lastPayRes = await pool.query(
     `SELECT plot_id, MAX(date) AS last_payment_date
-     FROM plot_payments WHERE plot_id = ANY($1) GROUP BY plot_id`,
-    [plotIds]
+     FROM plot_payments WHERE plot_id = ANY($1)
+       AND ($2::int IS NULL OR created_by = $2::int) GROUP BY plot_id`,
+    [plotIds, creatorId]
   );
   const lastPayMap = {};
   for (const r of lastPayRes.rows) lastPayMap[r.plot_id] = r.last_payment_date;
@@ -106,8 +110,9 @@ export const buildPaymentReminders = async (site_id) => {
   // 5. Individual payments per plot (for pattern detection)
   const allPayRes = await pool.query(
     `SELECT plot_id, date, amount FROM plot_payments
-     WHERE plot_id = ANY($1) ORDER BY plot_id, date ASC`,
-    [plotIds]
+     WHERE plot_id = ANY($1)
+       AND ($2::int IS NULL OR created_by = $2::int) ORDER BY plot_id, date ASC`,
+    [plotIds, creatorId]
   );
   const paymentsByPlot = {};
   for (const r of allPayRes.rows) {
@@ -360,7 +365,8 @@ export const paymentReminders = asyncHandler(async (req, res) => {
   const { site_id, page = 1, limit = 10 } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const deduped = await buildPaymentReminders(site_id);
+  const visibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
+  const deduped = await buildPaymentReminders(site_id, visibility.creatorId);
 
   // Summary
   const summary = {
@@ -438,9 +444,13 @@ export const listInstallments = asyncHandler(async (req, res) => {
   const today = new Date();
 
   // Get total received from plot_payments (the single source of truth)
+  const visibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
   const totalRes = await pool.query(
-    `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments WHERE plot_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
-    [parseInt(id)]
+    `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments
+      WHERE plot_id = $1
+        AND ($2::int IS NULL OR created_by = $2::int)
+        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
+    [parseInt(id), visibility.creatorId]
   );
   let remaining_pool = parseFloat(totalRes.rows[0].total_received) || 0;
 
@@ -680,7 +690,8 @@ export const recordInstallmentPayment = asyncHandler(async (req, res) => {
 /** GET /plots/:id/installment-payments — All payments for a plot's installments */
 export const listInstallmentPayments = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const payments = await installmentPaymentModel.findByPlotId(parseInt(id), pool);
+  const visibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
+  const payments = await installmentPaymentModel.findByPlotId(parseInt(id), pool, visibility.creatorId);
   res.json({ payments });
 });
 
@@ -693,6 +704,8 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
   const { site_id, status, search, due_filter, date_from, date_to } = req.query;
 
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const visibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
+  const creatorId = visibility.creatorId;
 
   const today = new Date().toISOString().split('T')[0];
 
@@ -743,13 +756,15 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
      FROM (
        SELECT pp.plot_id, pp.amount FROM plot_payments pp
-        WHERE pp.plot_id = ANY($1) AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        WHERE pp.plot_id = ANY($1) AND ($2::int IS NULL OR pp.created_by = $2::int)
+          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
        UNION ALL
        SELECT pip.plot_id, pip.amount FROM plot_installment_payments pip
-        WHERE pip.plot_id = ANY($1) AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        WHERE pip.plot_id = ANY($1) AND ($2::int IS NULL OR pip.created_by = $2::int)
+          AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      ) u
      GROUP BY plot_id`,
-    [plotIds]
+    [plotIds, creatorId]
   );
   const receivedMap = {};
   for (const r of payResult.rows) receivedMap[r.plot_id] = parseFloat(r.total_received) || 0;
@@ -760,15 +775,17 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
      FROM (
        SELECT pp.date AS d, pp.amount FROM plot_payments pp
         WHERE pp.site_id = $1 AND pp.date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
+          AND ($2::int IS NULL OR pp.created_by = $2::int)
           AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
        UNION ALL
        SELECT pip.payment_date AS d, pip.amount FROM plot_installment_payments pip
         JOIN plots p ON p.id = pip.plot_id
         WHERE p.site_id = $1 AND pip.payment_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
+          AND ($2::int IS NULL OR pip.created_by = $2::int)
           AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      ) u
      GROUP BY 1 ORDER BY 1`,
-    [parseInt(site_id)]
+    [parseInt(site_id), creatorId]
   );
   const collections = collectionsResult.rows.map((r) => ({ month: r.month, amount: parseFloat(r.amount) || 0 }));
 
@@ -980,6 +997,8 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
 export const paymentAnalytics = asyncHandler(async (req, res) => {
   const { site_id, mode, installment_no, month, year, date_from, date_to } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const visibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
+  const creatorId = visibility.creatorId;
 
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
@@ -1022,14 +1041,16 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     `SELECT plot_id, SUM(amount) AS total_received FROM (
         SELECT plot_id, amount FROM plot_payments
          WHERE plot_id = ANY($1)
+           AND ($2::int IS NULL OR created_by = $2::int)
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         UNION ALL
         SELECT plot_id, amount FROM plot_installment_payments
          WHERE plot_id = ANY($1)
+           AND ($2::int IS NULL OR created_by = $2::int)
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      ) combined
      GROUP BY plot_id`,
-    [plotIds]
+    [plotIds, creatorId]
   );
   const receivedMap = {};
   for (const r of payRes.rows) receivedMap[r.plot_id] = parseFloat(r.total_received) || 0;
@@ -1039,9 +1060,10 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     `SELECT installment_id, COALESCE(SUM(amount), 0) AS paid_direct
      FROM plot_installment_payments
      WHERE plot_id = ANY($1)
+       AND ($2::int IS NULL OR created_by = $2::int)
        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      GROUP BY installment_id`,
-    [plotIds]
+    [plotIds, creatorId]
   );
   const directPaidByInst = {};
   for (const r of instPayRes.rows) directPaidByInst[r.installment_id] = parseFloat(r.paid_direct) || 0;
@@ -1050,11 +1072,13 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   const lastPayRes = await pool.query(
     `SELECT plot_id, MAX(d) AS last_payment_date FROM (
         SELECT plot_id, date AS d FROM plot_payments WHERE plot_id = ANY($1)
+          AND ($2::int IS NULL OR created_by = $2::int)
         UNION ALL
         SELECT plot_id, payment_date AS d FROM plot_installment_payments WHERE plot_id = ANY($1)
+          AND ($2::int IS NULL OR created_by = $2::int)
      ) combined
      GROUP BY plot_id`,
-    [plotIds]
+    [plotIds, creatorId]
   );
   const lastPayMap = {};
   for (const r of lastPayRes.rows) lastPayMap[r.plot_id] = r.last_payment_date;
@@ -1062,10 +1086,12 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   // ── 5. Payments per plot with dates (used by `no_payment_since` mode) ──
   const allPayRes = await pool.query(
     `SELECT plot_id, date, amount FROM plot_payments WHERE plot_id = ANY($1)
+       AND ($2::int IS NULL OR created_by = $2::int)
      UNION ALL
      SELECT plot_id, payment_date AS date, amount FROM plot_installment_payments WHERE plot_id = ANY($1)
+       AND ($2::int IS NULL OR created_by = $2::int)
      ORDER BY plot_id, date ASC`,
-    [plotIds]
+    [plotIds, creatorId]
   );
   const paymentsByPlot = {};
   for (const r of allPayRes.rows) {

@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
+import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 // Vendor inventory module — transactions-only (no deliveries / stock-in/out).
 // An "order" is: item + qty_ordered * rate - discount = net value.
@@ -29,6 +30,7 @@ const RECEIVED_QTY_SQL = `COALESCE((
 export const listInventoryOrders = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  const visibility = await resolveEntryVisibility(req.user, 'vendors', req.query.created_by);
 
   const page   = Math.max(1, parseInt(req.query.page) || 1);
   const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
@@ -66,6 +68,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
   }
 
   const where = conditions.join(' AND ');
+  const creatorIdx = idx;
 
   // Run count + paged list + global summary IN PARALLEL (was 3 serial round-trips).
   const countPromise = pool.query(
@@ -77,9 +80,18 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        o.id, o.site_id, o.vendor_member_id, o.vendor_name,
        o.item_name, o.item_category, o.unit,
        o.qty_ordered, o.rate, o.discount_pct, o.discount_amount,
-       o.total_paid, o.commitment_id,
+       COALESCE((
+         SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
+         WHERE vip.order_id = o.id
+           AND ($${creatorIdx}::int IS NULL OR vip.created_by = $${creatorIdx}::int)
+       ), 0) AS total_paid,
+       o.commitment_id,
        ${ORDER_VALUE_SQL} AS order_value,
-       (${ORDER_VALUE_SQL} - o.total_paid) AS outstanding,
+       (${ORDER_VALUE_SQL} - COALESCE((
+         SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
+         WHERE vip.order_id = o.id
+           AND ($${creatorIdx}::int IS NULL OR vip.created_by = $${creatorIdx}::int)
+       ), 0)) AS outstanding,
        ${RECEIVED_QTY_SQL} AS received_qty,
        (o.qty_ordered - ${RECEIVED_QTY_SQL}) AS pending_qty,
        o.order_date, o.expected_date, o.note, o.status, o.created_at,
@@ -90,8 +102,8 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
      LEFT JOIN vendor_commitments vc ON vc.id = o.commitment_id
      WHERE ${where}
      ORDER BY o.order_date DESC, o.id DESC
-     LIMIT $${idx} OFFSET $${idx + 1}`,
-    [...values, limit, offset]
+     LIMIT $${creatorIdx + 1} OFFSET $${creatorIdx + 2}`,
+    [...values, visibility.creatorId, limit, offset]
   );
   const sumPromise = pool.query(
     `SELECT
@@ -101,16 +113,22 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
            WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
            ELSE discount_amount
          END, 0), 2)), 0)::numeric(14,2) AS total_value,
-       COALESCE(SUM(total_paid), 0)::numeric(14,2) AS total_paid,
+       COALESCE(SUM(vp.total_paid), 0)::numeric(14,2) AS total_paid,
        COALESCE(SUM(ROUND(qty_ordered * rate
          - COALESCE(CASE
            WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
            ELSE discount_amount
-         END, 0), 2) - total_paid), 0)::numeric(14,2) AS total_outstanding,
+         END, 0), 2) - vp.total_paid), 0)::numeric(14,2) AS total_outstanding,
        COALESCE(SUM(CASE WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2) ELSE discount_amount END), 0)::numeric(14,2) AS total_discount
-     FROM vendor_inventory_orders
-     WHERE site_id = $1`,
-    [siteId]
+     FROM vendor_inventory_orders o
+     LEFT JOIN LATERAL (
+       SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
+       FROM vendor_inventory_payments vip
+       WHERE vip.order_id = o.id
+         AND ($2::int IS NULL OR vip.created_by = $2::int)
+     ) vp ON true
+     WHERE o.site_id = $1`,
+    [siteId, visibility.creatorId]
   );
 
   const [countRes, ordersRes, sumRes] = await Promise.all([countPromise, ordersPromise, sumPromise]);
@@ -129,6 +147,7 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
   const orderId = asInt(req.params.id);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   if (!Number.isInteger(orderId)) return res.status(400).json({ message: 'Invalid order id' });
+  const visibility = await resolveEntryVisibility(req.user, 'vendors', req.query.created_by);
 
   const orderRes = await pool.query(
     `SELECT o.*,
@@ -152,11 +171,16 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
      FROM vendor_inventory_payments p
      LEFT JOIN users u ON u.id = p.created_by
      WHERE p.order_id = $1
+       AND ($2::int IS NULL OR p.created_by = $2::int)
      ORDER BY p.payment_date DESC, p.id DESC`,
-    [orderId]
+    [orderId, visibility.creatorId]
   );
 
-  res.json({ order, payments: paymentsRes.rows });
+  const visiblePaid = paymentsRes.rows.reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
+  order.total_paid = visiblePaid;
+  order.outstanding = Math.max((Number(order.order_value) || 0) - visiblePaid, 0);
+
+  res.json({ order, payments: paymentsRes.rows, entryVisibility: visibility });
 });
 
 export const createInventoryOrder = asyncHandler(async (req, res) => {
@@ -347,6 +371,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
   const paymentId = asInt(req.params.paymentId);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   if (!Number.isInteger(paymentId)) return res.status(400).json({ message: 'Invalid payment id' });
+  const visibility = await resolveEntryVisibility(req.user, 'vendors', null);
 
   const amount = parseFloat(req.body.amount);
   if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: 'amount must be > 0' });
@@ -369,6 +394,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
      WHERE p.id = $1
        AND p.order_id = o.id
        AND o.site_id = $2
+       AND ($11::int IS NULL OR p.created_by = $11::int)
      RETURNING p.*`,
     [
       paymentId,
@@ -381,6 +407,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
       (note || '').trim() || null,
       (voucher_url || '').trim() || null,
       assigned_admin_id ? parseInt(assigned_admin_id, 10) : null,
+      visibility.creatorId,
     ]
   );
 
@@ -393,13 +420,15 @@ export const deleteInventoryPayment = asyncHandler(async (req, res) => {
   const paymentId = asInt(req.params.paymentId);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   if (!Number.isInteger(paymentId)) return res.status(400).json({ message: 'Invalid payment id' });
+  const visibility = await resolveEntryVisibility(req.user, 'vendors', null);
 
   const result = await pool.query(
     `DELETE FROM vendor_inventory_payments p
      USING vendor_inventory_orders o
      WHERE p.id = $1 AND p.order_id = o.id AND o.site_id = $2
+       AND ($3::int IS NULL OR p.created_by = $3::int)
      RETURNING p.id`,
-    [paymentId, siteId]
+    [paymentId, siteId, visibility.creatorId]
   );
   if (!result.rows[0]) return res.status(404).json({ message: 'Payment not found' });
 
@@ -425,6 +454,7 @@ export const listInventoryCategories = asyncHandler(async (req, res) => {
 export const getInventoryStockSummary = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  const visibility = await resolveEntryVisibility(req.user, 'vendors', req.query.created_by);
 
   // 3 independent reads in parallel — was 3 serial round-trips.
   const catPromise = pool.query(
@@ -436,20 +466,26 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
            WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
            ELSE o.discount_amount
          END, 0), 2)), 0)::numeric(14,2) AS total_value,
-       COALESCE(SUM(o.total_paid), 0)::numeric(14,2) AS total_paid,
+       COALESCE(SUM(vp.total_paid), 0)::numeric(14,2) AS total_paid,
        COALESCE(SUM(ROUND(o.qty_ordered * o.rate
          - COALESCE(CASE
            WHEN o.discount_pct > 0 THEN ROUND(o.qty_ordered * o.rate * o.discount_pct / 100, 2)
            ELSE o.discount_amount
-         END, 0), 2) - o.total_paid), 0)::numeric(14,2) AS outstanding,
+         END, 0), 2) - vp.total_paid), 0)::numeric(14,2) AS outstanding,
        COUNT(*) FILTER (WHERE o.status = 'open')::int AS open_count,
        COUNT(*) FILTER (WHERE o.status = 'partial')::int AS partial_count,
        COUNT(*) FILTER (WHERE o.status = 'completed')::int AS completed_count
      FROM vendor_inventory_orders o
+     LEFT JOIN LATERAL (
+       SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
+       FROM vendor_inventory_payments vip
+       WHERE vip.order_id = o.id
+         AND ($2::int IS NULL OR vip.created_by = $2::int)
+     ) vp ON true
      WHERE o.site_id = $1 AND o.status != 'cancelled'
      GROUP BY COALESCE(NULLIF(o.item_category, ''), 'UNCATEGORIZED')
      ORDER BY total_value DESC`,
-    [siteId]
+    [siteId, visibility.creatorId]
   );
 
   const recentTxPromise = pool.query(
@@ -458,9 +494,10 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
      FROM vendor_inventory_payments p
      INNER JOIN vendor_inventory_orders o ON o.id = p.order_id
      WHERE p.site_id = $1
+       AND ($2::int IS NULL OR p.created_by = $2::int)
      ORDER BY p.payment_date DESC, p.id DESC
      LIMIT 10`,
-    [siteId]
+    [siteId, visibility.creatorId]
   );
 
   const totalPromise = pool.query(
@@ -471,15 +508,21 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
            WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
            ELSE discount_amount
          END, 0), 2)), 0)::numeric(14,2) AS total_value,
-       COALESCE(SUM(total_paid), 0)::numeric(14,2) AS total_paid,
+       COALESCE(SUM(vp.total_paid), 0)::numeric(14,2) AS total_paid,
        COALESCE(SUM(ROUND(qty_ordered * rate
          - COALESCE(CASE
            WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2)
            ELSE discount_amount
-         END, 0), 2) - total_paid), 0)::numeric(14,2) AS total_outstanding
-     FROM vendor_inventory_orders
-     WHERE site_id = $1 AND status != 'cancelled'`,
-    [siteId]
+         END, 0), 2) - vp.total_paid), 0)::numeric(14,2) AS total_outstanding
+     FROM vendor_inventory_orders o
+     LEFT JOIN LATERAL (
+       SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
+       FROM vendor_inventory_payments vip
+       WHERE vip.order_id = o.id
+         AND ($2::int IS NULL OR vip.created_by = $2::int)
+     ) vp ON true
+     WHERE o.site_id = $1 AND o.status != 'cancelled'`,
+    [siteId, visibility.creatorId]
   );
 
   const [catRes, recentTxRes, totalRes] = await Promise.all([

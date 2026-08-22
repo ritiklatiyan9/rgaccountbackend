@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
+import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 const asInt = (v) => parseInt(v, 10);
 
@@ -296,6 +297,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
 
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   if (!Number.isInteger(commitmentId)) return res.status(400).json({ message: 'Invalid commitment id' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'vendors', req.query.created_by);
 
   // Run the four independent reads concurrently. The previous implementation
   // was 4–6 serial round-trips PLUS a serial loop fetching item-level payments
@@ -321,21 +323,24 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
       m.full_name AS vendor_member_name
      FROM vendor_commitments vc
-     LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
+       AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND ($3::int IS NULL OR vp.created_by = $3::int)
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      WHERE vc.id = $1 AND vc.site_id = $2
      GROUP BY vc.id, m.full_name`,
-    [commitmentId, siteId]
+    [commitmentId, siteId, entryVisibility.creatorId]
   );
 
   const paymentsPromise = pool.query(
-    `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.customer_signature_url, vp.authority_signature_url, vp.status, vp.approved_by, vp.approved_at, vp.created_at, vp.assigned_admin_id,
+    `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.customer_signature_url, vp.authority_signature_url, vp.status, vp.approved_by, vp.approved_at, vp.created_at, vp.assigned_admin_id, vp.created_by,
             u.name AS created_by_name
      FROM vendor_payments vp
      LEFT JOIN users u ON u.id = vp.created_by
      WHERE vp.commitment_id = $1 AND vp.site_id = $2
+       AND ($3::int IS NULL OR vp.created_by = $3::int)
      ORDER BY vp.payment_date DESC, vp.id DESC`,
-    [commitmentId, siteId]
+    [commitmentId, siteId, entryVisibility.creatorId]
   );
 
   const inventoryPromise = pool.query(
@@ -386,8 +391,9 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
        FROM vendor_inventory_payments p
        LEFT JOIN users u ON u.id = p.created_by
        WHERE p.order_id = ANY($1::int[])
+         AND ($2::int IS NULL OR p.created_by = $2::int)
        ORDER BY p.payment_date DESC, p.id DESC`,
-      [orderIds]
+      [orderIds, entryVisibility.creatorId]
     );
     for (const row of itemPaysResult.rows) {
       const list = itemPaymentsByOrder.get(row.order_id);
@@ -395,10 +401,16 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       else itemPaymentsByOrder.set(row.order_id, [row]);
     }
   }
-  const inventoryOrders = inventoryResult.rows.map((o) => ({
-    ...o,
-    payments: itemPaymentsByOrder.get(o.id) || [],
-  }));
+  const inventoryOrders = inventoryResult.rows.map((o) => {
+    const payments = itemPaymentsByOrder.get(o.id) || [];
+    const scopedPaid = payments.reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
+    return {
+      ...o,
+      total_paid: scopedPaid,
+      outstanding: (parseFloat(o.order_value) || 0) - scopedPaid,
+      payments,
+    };
+  });
 
   const siteRow = siteResult.rows[0] || null;
   const payments = paymentsResult.rows.map((p) => ({
@@ -417,7 +429,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
     }),
   }));
 
-  res.json({ commitment, payments, inventoryOrders });
+  res.json({ commitment, payments, inventoryOrders, entryVisibility });
 });
 
 export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
@@ -468,6 +480,10 @@ export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
 
   const receipt = result.rows[0];
   if (!receipt) return res.status(404).json({ message: 'Payment not found' });
+  const createdByResult = await pool.query('SELECT created_by FROM vendor_payments WHERE id = $1', [paymentId]);
+  if (!(await canUserViewEntry(req.user, 'vendors', createdByResult.rows[0]?.created_by))) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
 
   res.json({ receipt });
 });
@@ -717,12 +733,15 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
   // a tx but didn't actually enforce any invariant, so all that latency was
   // wasted. We compose the WHERE on the UPDATE so it stays atomic.
   const existingResult = await pool.query(
-    `SELECT id, site_id, commitment_id, assigned_admin_id
+    `SELECT id, site_id, commitment_id, assigned_admin_id, created_by
      FROM vendor_payments WHERE id = $1`,
     [paymentId]
   );
   const existing = existingResult.rows[0];
   if (!existing || existing.site_id !== siteId) {
+    return res.status(404).json({ message: 'Payment not found' });
+  }
+  if (!(await canUserViewEntry(req.user, 'vendors', existing.created_by))) {
     return res.status(404).json({ message: 'Payment not found' });
   }
 
@@ -760,14 +779,16 @@ export const deleteVendorPayment = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!Number.isInteger(paymentId)) return res.status(400).json({ message: 'Invalid payment id' });
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'vendors', null);
 
   // Atomic DELETE scoped by both id and site — no need for a transaction or
   // a separate SELECT round-trip.
   const result = await pool.query(
     `DELETE FROM vendor_payments
       WHERE id = $1 AND site_id = $2
+        AND ($3::int IS NULL OR created_by = $3::int)
       RETURNING commitment_id`,
-    [paymentId, siteId]
+    [paymentId, siteId, entryVisibility.creatorId]
   );
   if (!result.rows[0]) {
     return res.status(404).json({ message: 'Payment not found' });
@@ -791,10 +812,14 @@ export const bulkDeleteVendorPayments = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'vendors', null);
 
   const result = await pool.query(
-    `DELETE FROM vendor_payments WHERE id = ANY($1::int[]) AND site_id = $2 RETURNING id, commitment_id`,
-    [ids, siteId]
+    `DELETE FROM vendor_payments
+      WHERE id = ANY($1::int[]) AND site_id = $2
+        AND ($3::int IS NULL OR created_by = $3::int)
+      RETURNING id, commitment_id`,
+    [ids, siteId, entryVisibility.creatorId]
   );
   const commitmentIds = [...new Set(result.rows.map((r) => r.commitment_id))];
   if (commitmentIds.length > 0) {

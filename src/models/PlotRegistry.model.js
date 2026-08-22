@@ -30,7 +30,7 @@ class PlotRegistryModel extends MasterModel {
    *  Previously: 2 scalar subqueries PER ROW (sum + count). Now: a single
    *  LATERAL aggregation that scans plot_registry_payments once per registry
    *  and computes both numbers in one go. */
-  async findBySiteId(siteId, pool) {
+  async findBySiteId(siteId, pool, creatorId = null) {
     const hasHandovers = await _resolveHandoverTableOnce(pool);
     const handoverSelect = hasHandovers
       ? `COALESCE(ho.handover_count, 0) AS handover_count,
@@ -61,6 +61,7 @@ class PlotRegistryModel extends MasterModel {
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = pr.id
+          AND ($2::int IS NULL OR prp.created_by = $2::int)
           AND (
             prp.source_plot_payment_id IS NULL
             OR (pr.plot_id IS NOT NULL AND pp.plot_id = pr.plot_id)
@@ -86,7 +87,7 @@ class PlotRegistryModel extends MasterModel {
       WHERE pr.site_id = $1
       ORDER BY pr.plot_no ASC
     `;
-    const result = await pool.query(query, [siteId]);
+    const result = await pool.query(query, [siteId, creatorId]);
     return result.rows;
   }
 
@@ -98,7 +99,7 @@ class PlotRegistryModel extends MasterModel {
   }
 
   /** Get single registry with aggregates (same LATERAL pattern) */
-  async findByIdWithTotals(id, pool) {
+  async findByIdWithTotals(id, pool, creatorId = null) {
     const query = `
       SELECT pr.*,
         COALESCE(agg.total_paid,    0) AS total_paid,
@@ -111,6 +112,7 @@ class PlotRegistryModel extends MasterModel {
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = pr.id
+          AND ($2::int IS NULL OR prp.created_by = $2::int)
           AND (
             prp.source_plot_payment_id IS NULL
             OR (pr.plot_id IS NOT NULL AND pp.plot_id = pr.plot_id)
@@ -127,7 +129,7 @@ class PlotRegistryModel extends MasterModel {
       ) agg ON TRUE
       WHERE pr.id = $1
     `;
-    const result = await pool.query(query, [id]);
+    const result = await pool.query(query, [id, creatorId]);
     return result.rows[0];
   }
 }
@@ -166,7 +168,7 @@ class PlotRegistryPaymentModel extends MasterModel {
   }
 
   /** All payments for a registry, ordered by date ASC */
-  async findByRegistryId(registryId, pool) {
+  async findByRegistryId(registryId, pool, creatorId = null) {
     const query = `
       SELECT prp.*, u.name AS created_by_name,
              CASE
@@ -184,9 +186,10 @@ class PlotRegistryPaymentModel extends MasterModel {
       LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
       LEFT JOIN users u ON u.id = prp.created_by
       WHERE prp.registry_id = $1
+        AND ($2::int IS NULL OR prp.created_by = $2::int)
       ORDER BY prp.payment_date ASC, prp.created_at ASC
     `;
-    const result = await pool.query(query, [registryId]);
+    const result = await pool.query(query, [registryId, creatorId]);
     return result.rows;
   }
 

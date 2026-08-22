@@ -21,6 +21,9 @@ function normalizeFilters(filters = {}) {
     dateFrom: filters.dateFrom || undefined,
     dateTo: filters.dateTo || undefined,
     order: String(filters.order || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc',
+    created_by: Number.isInteger(Number(filters.created_by)) && Number(filters.created_by) > 0
+      ? Number(filters.created_by)
+      : undefined,
   };
 
   // Multi-category OR filter (ILIKE tokens). Pass-through only when it's a non-empty array so
