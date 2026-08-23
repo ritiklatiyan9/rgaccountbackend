@@ -22,6 +22,8 @@ import {
   acceptReturn,
   rejectReturn,
   listTransferPeers,
+  createTransfer,
+  listTransfers,
 } from '../controllers/imprest.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -33,12 +35,15 @@ const imprestReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'imprest' })
 const bustImprestCache = invalidateCacheOnSuccess(['imprest|']);
 
 const accessByQuerySite = requireImprestSiteAccess({ entity: 'site', source: 'query', key: 'site_id' });
+const accessByRequiredQuerySite = requireImprestSiteAccess({ entity: 'site', source: 'query', key: 'site_id', required: true });
 const accessByRequiredBodySite = requireImprestSiteAccess({ entity: 'site', source: 'body', key: 'site_id', required: true });
 const accessByAllocation = requireImprestSiteAccess({ entity: 'allocation', source: 'params', key: 'id' });
 const accessByExpenseRequest = requireImprestSiteAccess({ entity: 'expenseRequest', source: 'params', key: 'id' });
 const accessByReturn = requireImprestSiteAccess({ entity: 'return', source: 'params', key: 'id' });
 const requireAllocationRecipient = requireImprestParticipant({ key: 'sub_admin_id', label: 'Recipient' });
 const requireTargetUser = requireImprestParticipant({ key: 'user_id', label: 'Target user' });
+const requireTransferSource = requireImprestParticipant({ key: 'from_user_id', label: 'Source account', required: false });
+const requireTransferRecipient = requireImprestParticipant({ key: 'to_user_id', label: 'Recipient' });
 const requireAssignedReviewer = requireImprestParticipant({
   key: 'assigned_admin_id',
   label: 'Assigned reviewer',
@@ -52,6 +57,10 @@ router.use(authMiddleware);
 router.get('/balance', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, getBalance);
 router.get('/ledger', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, getLedger);
 router.get('/peers', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, listTransferPeers);
+
+// ── Immediate balance-to-balance transfers ──
+router.get('/transfers', requirePermission('imprest', 'read'), accessByRequiredQuerySite, imprestReadCache, listTransfers);
+router.post('/transfers', requirePermission('imprest', 'write'), accessByRequiredBodySite, requireTransferSource, requireTransferRecipient, bustImprestCache, createTransfer);
 
 // ── Pending receipts (sub-admin confirms received funds) ──
 router.get('/pending-receipts', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, getPendingReceipts);

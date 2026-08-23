@@ -4,11 +4,24 @@ import {
   imprestLedgerModel,
   imprestExpenseRequestModel,
   imprestReturnModel,
+  imprestTransferModel,
 } from '../models/Imprest.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import { expenseModel } from '../models/Expense.model.js';
 import { findEligibleImprestParticipant } from '../middlewares/imprestSiteAccess.middleware.js';
 import pool from '../config/db.js';
+
+// Serialize every imprest ledger mutation per user. This keeps balance checks
+// and balance_after snapshots correct when expenses, returns, adjustments and
+// direct transfers are submitted at the same time.
+const lockImprestAccounts = async (db, ...userIds) => {
+  const ids = [...new Set(userIds.map(Number).filter(Number.isInteger))].sort((a, b) => a - b);
+  if (ids.length === 0) return;
+  await db.query(
+    'SELECT id FROM users WHERE id = ANY($1::integer[]) ORDER BY id FOR UPDATE',
+    [ids]
+  );
+};
 
 // ══════════════════════════════════════════════════
 //  IMPREST ALLOCATION (Admin)
@@ -40,6 +53,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
 
     // Peer transfers lock funds up-front so the giver can't double-spend while the request is pending.
     if (!giverIsAdmin) {
+      await lockImprestAccounts(client, req.user.id);
       const giverBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, client);
       if (giverBalance < allocationAmount) {
         await client.query('ROLLBACK');
@@ -191,6 +205,7 @@ export const cancelAllocation = asyncHandler(async (req, res) => {
     const giverResult = await client.query('SELECT role FROM users WHERE id = $1', [existing.admin_id]);
     const giverRole = giverResult.rows[0]?.role;
     if (giverRole === 'sub_admin') {
+      await lockImprestAccounts(client, existing.admin_id);
       await imprestLedgerModel.createEntry({
         user_id: existing.admin_id,
         type: 'TRANSFER_REFUND',
@@ -265,6 +280,7 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
     const giverName = giverResult.rows[0]?.name || 'Giver';
     const giverIsSubAdmin = giverResult.rows[0]?.role === 'sub_admin';
 
+    await lockImprestAccounts(client, req.user.id);
     await imprestLedgerModel.createEntry({
       user_id: req.user.id,
       type: giverIsSubAdmin ? 'TRANSFER_IN' : 'ALLOCATION',
@@ -390,8 +406,148 @@ export const listTransferPeers = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /imprest/transfers
+ * Move existing imprest funds between two participant balances.
+ * Sub-admins can only transfer from their own balance; admins can select both
+ * sides. Both ledger entries and the audit record are committed together.
+ */
+export const createTransfer = asyncHandler(async (req, res) => {
+  const { from_user_id, to_user_id, amount, remark } = req.body;
+  const siteId = req.imprestSiteId;
+  const callerIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+  const fromUserId = callerIsAdmin ? parseInt(from_user_id, 10) : req.user.id;
+  const toUserId = parseInt(to_user_id, 10);
+  const transferAmount = Number(amount);
+
+  if (!siteId) return res.status(400).json({ message: 'Site is required' });
+  if (!Number.isInteger(fromUserId) || fromUserId <= 0) {
+    return res.status(400).json({ message: 'Source account is required' });
+  }
+  if (!Number.isInteger(toUserId) || toUserId <= 0) {
+    return res.status(400).json({ message: 'Recipient is required' });
+  }
+  if (fromUserId === toUserId) {
+    return res.status(400).json({ message: 'Source and recipient must be different users' });
+  }
+  if (!Number.isFinite(transferAmount) || transferAmount <= 0) {
+    return res.status(400).json({ message: 'Amount must be positive' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const [source, recipient] = await Promise.all([
+      findEligibleImprestParticipant(fromUserId, siteId, client),
+      findEligibleImprestParticipant(toUserId, siteId, client),
+    ]);
+    if (!source) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Source account is not available for this site' });
+    }
+    if (!recipient) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Recipient is not available for this site' });
+    }
+
+    // Lock both user rows in a stable order so simultaneous transfers touching
+    // the same account cannot both spend the same opening balance.
+    await lockImprestAccounts(client, fromUserId, toUserId);
+
+    const sourceBalance = await imprestLedgerModel.getBalance(fromUserId, siteId, client);
+    if (sourceBalance < transferAmount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        message: `Insufficient imprest balance. Available ₹${sourceBalance}, needed ₹${transferAmount}`,
+        balance: sourceBalance,
+      });
+    }
+
+    const cleanRemark = typeof remark === 'string' && remark.trim() ? remark.trim() : null;
+    const transfer = await imprestTransferModel.create({
+      site_id: siteId,
+      from_user_id: fromUserId,
+      to_user_id: toUserId,
+      amount: transferAmount,
+      remark: cleanRemark,
+      initiated_by: req.user.id,
+    }, client);
+
+    const narration = cleanRemark ? ` — ${cleanRemark}` : '';
+    await imprestLedgerModel.createEntry({
+      user_id: fromUserId,
+      type: 'TRANSFER_OUT',
+      reference_id: transfer.id,
+      amount: -transferAmount,
+      remarks: `Transferred to ${recipient.name || recipient.email}${narration}`,
+      created_by: req.user.id,
+      site_id: siteId,
+    }, client);
+    await imprestLedgerModel.createEntry({
+      user_id: toUserId,
+      type: 'TRANSFER_IN',
+      reference_id: transfer.id,
+      amount: transferAmount,
+      remarks: `Received from ${source.name || source.email}${narration}`,
+      created_by: req.user.id,
+      site_id: siteId,
+    }, client);
+
+    const recipientBalance = await imprestLedgerModel.getBalance(toUserId, siteId, client);
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      transfer: {
+        ...transfer,
+        from_user_name: source.name,
+        to_user_name: recipient.name,
+        initiated_by_name: req.user.name,
+      },
+      source_balance: sourceBalance - transferAmount,
+      recipient_balance: recipientBalance,
+      message: 'Funds transferred successfully',
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+/** GET /imprest/transfers — admin sees site history; others see their own. */
+export const listTransfers = asyncHandler(async (req, res) => {
+  const siteId = req.imprestSiteId;
+  if (!siteId) return res.status(400).json({ message: 'Site is required' });
+
+  const callerIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+  const requestedUserId = parseInt(req.query.user_id, 10);
+  const userId = callerIsAdmin
+    ? (Number.isInteger(requestedUserId) && requestedUserId > 0 ? requestedUserId : null)
+    : req.user.id;
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+  const offset = (page - 1) * limit;
+
+  const [transfers, totalItems] = await Promise.all([
+    imprestTransferModel.findWithDetails({ siteId, userId, limit, offset }, pool),
+    imprestTransferModel.count({ siteId, userId }, pool),
+  ]);
+
+  res.json({
+    transfers,
+    pagination: {
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
+      currentPage: page,
+      itemsPerPage: limit,
+    },
+  });
+});
+
+/**
  * GET /imprest/all-balances
- * Admin: get all sub-admin balances
+ * Admin: get every eligible imprest account balance for the selected site
  */
 export const getAllBalances = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
@@ -425,6 +581,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
 
     // 1. Check imprest balance
     const parsedSiteId = req.imprestSiteId || parseInt(site_id);
+    await lockImprestAccounts(client, req.user.id);
     const currentBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, client);
 
     if (currentBalance <= 0) {
@@ -639,6 +796,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       return res.status(409).json({ message: 'The requester is no longer active or assigned to this site' });
     }
 
+    await lockImprestAccounts(client, request.sub_admin_id);
     const requestType = request.request_type || 'EXPENSE';
     const requestAmount = parseFloat(request.amount);
 
@@ -781,6 +939,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockImprestAccounts(client, parseInt(user_id));
 
     // Create ledger adjustment
     const entry = await imprestLedgerModel.createEntry({
@@ -924,6 +1083,7 @@ export const acceptReturn = asyncHandler(async (req, res) => {
 
     // 2. Verify sub-admin still has sufficient balance
     const returnSiteId = returnRecord.site_id ? parseInt(returnRecord.site_id) : null;
+    await lockImprestAccounts(client, returnRecord.sub_admin_id);
     const currentBalance = await imprestLedgerModel.getBalance(returnRecord.sub_admin_id, returnSiteId, client);
     if (currentBalance < returnAmount) {
       await client.query('ROLLBACK');

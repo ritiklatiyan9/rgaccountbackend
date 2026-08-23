@@ -830,7 +830,7 @@ CREATE TABLE IF NOT EXISTS imprest_ledger (
   id                  SERIAL PRIMARY KEY,
   user_id             INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   type                VARCHAR(30) NOT NULL
-                        CHECK (type IN ('ALLOCATION', 'EXPENSE', 'ADJUSTMENT', 'REFUND')),
+                        CHECK (type IN ('ALLOCATION', 'EXPENSE', 'ADJUSTMENT', 'REFUND', 'TRANSFER_IN', 'TRANSFER_OUT', 'TRANSFER_REFUND')),
   reference_id        INTEGER,
   amount              NUMERIC(15,2) NOT NULL,
   balance_after       NUMERIC(15,2) NOT NULL DEFAULT 0,
@@ -842,6 +842,21 @@ CREATE TABLE IF NOT EXISTS imprest_ledger (
 CREATE INDEX IF NOT EXISTS idx_il_user ON imprest_ledger(user_id);
 CREATE INDEX IF NOT EXISTS idx_il_type ON imprest_ledger(type);
 CREATE INDEX IF NOT EXISTS idx_il_created ON imprest_ledger(created_at);
+
+CREATE TABLE IF NOT EXISTS imprest_transfers (
+  id            SERIAL PRIMARY KEY,
+  site_id       INTEGER NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+  from_user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  to_user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  amount        NUMERIC(15,2) NOT NULL CHECK (amount > 0),
+  remark        TEXT,
+  initiated_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT imprest_transfers_different_users CHECK (from_user_id <> to_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_imprest_transfers_site_created ON imprest_transfers(site_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_imprest_transfers_from_user ON imprest_transfers(from_user_id, site_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_imprest_transfers_to_user ON imprest_transfers(to_user_id, site_id, created_at DESC);
 
 -- ──────────────────────────────────────────────────────────────
 -- IMPREST EXPENSE REQUESTS (overdraft approval workflow)

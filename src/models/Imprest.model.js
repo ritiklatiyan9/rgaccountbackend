@@ -312,23 +312,78 @@ class ImprestLedgerModel extends MasterModel {
    * Get all sub-admin balances (admin overview)
    */
   async getAllBalances(siteId, pool) {
-    let query = `
+    const query = `
       SELECT
         u.id as user_id,
         u.name,
         u.email,
+        u.role,
         COALESCE(SUM(il.amount), 0)::numeric AS balance,
         COUNT(il.id)::int AS total_transactions,
         MAX(il.created_at) AS last_transaction_at
       FROM users u
       LEFT JOIN imprest_ledger il ON u.id = il.user_id${siteId ? ' AND il.site_id = $1' : ''}
-      WHERE u.role = 'sub_admin' AND u.is_active = true
-      GROUP BY u.id, u.name, u.email
-      ORDER BY u.name ASC
+      WHERE u.role IN ('sub_admin', 'admin', 'super_admin')
+        AND u.is_active = true
+        ${siteId ? `AND (
+          u.role IN ('admin', 'super_admin')
+          OR EXISTS (
+            SELECT 1 FROM user_sites us
+            WHERE us.user_id = u.id AND us.site_id = $1
+          )
+        )` : ''}
+      GROUP BY u.id, u.name, u.email, u.role
+      ORDER BY CASE u.role WHEN 'super_admin' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+               u.name ASC
     `;
     const params = siteId ? [siteId] : [];
     const result = await pool.query(query, params);
     return result.rows;
+  }
+}
+
+// ── Imprest Transfer Model ──
+class ImprestTransferModel extends MasterModel {
+  constructor() {
+    super('imprest_transfers');
+  }
+
+  async findWithDetails({ siteId, userId = null, limit = 100, offset = 0 }, pool) {
+    const params = [siteId];
+    let query = `
+      SELECT it.*,
+             sender.name AS from_user_name,
+             sender.email AS from_user_email,
+             sender.role AS from_user_role,
+             recipient.name AS to_user_name,
+             recipient.email AS to_user_email,
+             recipient.role AS to_user_role,
+             initiator.name AS initiated_by_name
+      FROM imprest_transfers it
+      JOIN users sender ON sender.id = it.from_user_id
+      JOIN users recipient ON recipient.id = it.to_user_id
+      LEFT JOIN users initiator ON initiator.id = it.initiated_by
+      WHERE it.site_id = $1
+    `;
+    if (userId) {
+      params.push(userId);
+      query += ` AND (it.from_user_id = $2 OR it.to_user_id = $2)`;
+    }
+    params.push(limit, offset);
+    query += ` ORDER BY it.created_at DESC, it.id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`;
+    const result = await pool.query(query, params);
+    return result.rows;
+  }
+
+  async count({ siteId, userId = null }, pool) {
+    const params = [siteId];
+    let query = `SELECT COUNT(*)::int AS total FROM imprest_transfers WHERE site_id = $1`;
+    if (userId) {
+      params.push(userId);
+      query += ` AND (from_user_id = $2 OR to_user_id = $2)`;
+    }
+    const result = await pool.query(query, params);
+    return result.rows[0].total;
   }
 }
 
@@ -544,3 +599,4 @@ export const imprestAllocationModel = new ImprestAllocationModel();
 export const imprestLedgerModel = new ImprestLedgerModel();
 export const imprestExpenseRequestModel = new ImprestExpenseRequestModel();
 export const imprestReturnModel = new ImprestReturnModel();
+export const imprestTransferModel = new ImprestTransferModel();

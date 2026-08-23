@@ -62,7 +62,7 @@ async function migrate() {
         id                  SERIAL PRIMARY KEY,
         user_id             INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         type                VARCHAR(30) NOT NULL
-                              CHECK (type IN ('ALLOCATION', 'EXPENSE', 'ADJUSTMENT', 'REFUND')),
+                              CHECK (type IN ('ALLOCATION', 'EXPENSE', 'ADJUSTMENT', 'REFUND', 'TRANSFER_IN', 'TRANSFER_OUT', 'TRANSFER_REFUND')),
         reference_id        INTEGER,
         amount              NUMERIC(15,2) NOT NULL,
         balance_after       NUMERIC(15,2) NOT NULL DEFAULT 0,
