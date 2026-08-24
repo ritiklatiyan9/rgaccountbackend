@@ -32,7 +32,7 @@ export const getFarmerDocuments = asyncHandler(async (req, res) => {
 
   const { rows: documents } = await pool.query(
     `SELECT d.id, d.type, d.category, d.title, d.original_name, d.file_path,
-            d.mime_type, d.file_size, d.uploaded_source, d.created_at,
+            d.mime_type, d.file_size, d.uploaded_source, d.payment_mode, d.created_at,
             COALESCE(u.name, u.email) AS uploaded_by_name
        FROM documents d
        LEFT JOIN users u ON u.id = d.uploaded_by
@@ -57,6 +57,8 @@ export const uploadFarmerDocument = asyncHandler(async (req, res) => {
 
   const requestedCategory = String(req.body.category || 'OTHER').toUpperCase();
   const category = VALID_CATEGORIES.has(requestedCategory) ? requestedCategory : 'OTHER';
+  const requestedPaymentMode = String(req.body.payment_mode || '').toUpperCase();
+  const paymentMode = ['BANK', 'CASH'].includes(requestedPaymentMode) ? requestedPaymentMode : null;
   const title = req.body.title ? String(req.body.title).trim() : null;
   const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
   let storageKey;
@@ -67,13 +69,13 @@ export const uploadFarmerDocument = asyncHandler(async (req, res) => {
       `INSERT INTO documents
          (farmer_id, site_id, type, category, title, original_name, file_path,
           file_hash, mime_type, file_size, ocr_status, ocr_engine, ocr_completed_at,
-          uploaded_source, uploaded_by)
-       VALUES ($1, $2, 'OTHER', $3, $4, $5, $6, $7, $8, $9, 'DONE', 'none', now(), 'FARMER', $10)
+          uploaded_source, uploaded_by, payment_mode)
+       VALUES ($1, $2, 'OTHER', $3, $4, $5, $6, $7, $8, $9, 'DONE', 'none', now(), 'FARMER', $10, $11)
        RETURNING id, type, category, title, original_name, file_path, mime_type, file_size,
-                 uploaded_source, created_at`,
+                 uploaded_source, payment_mode, created_at`,
       [
         farmer.id, farmer.site_id, category, title, req.file.originalname, storageKey,
-        fileHash, req.file.mimetype, req.file.size, req.user?.id || null,
+        fileHash, req.file.mimetype, req.file.size, req.user?.id || null, paymentMode,
       ],
     );
     const document = rows[0];

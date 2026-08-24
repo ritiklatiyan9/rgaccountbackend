@@ -91,7 +91,7 @@ export const getPlotDocuments = asyncHandler(async (req, res) => {
 
   const { rows: docs } = await pool.query(
     `SELECT d.id, d.type, d.category, d.title, d.original_name, d.file_path,
-            d.mime_type, d.file_size, d.uploaded_source, d.ocr_status, d.created_at,
+            d.mime_type, d.file_size, d.uploaded_source, d.payment_mode, d.ocr_status, d.created_at,
             d.kyc_case_id, b.id AS booking_id, b.booking_no,
             COALESCE(u.name, u.email) AS uploaded_by_name
        FROM documents d
@@ -134,6 +134,8 @@ export const uploadPlotDocument = asyncHandler(async (req, res) => {
     });
   }
   const category = VALID_CATEGORIES.has(rawCat) ? rawCat : 'OTHER';
+  const requestedPaymentMode = String(req.body.payment_mode || '').toUpperCase();
+  const paymentMode = ['BANK', 'CASH'].includes(requestedPaymentMode) ? requestedPaymentMode : null;
   const title = req.body.title ? String(req.body.title).trim() : null;
 
   // If a live booking exists for this plot, link the doc to its KYC case so the booking app
@@ -176,14 +178,14 @@ export const uploadPlotDocument = asyncHandler(async (req, res) => {
       `INSERT INTO documents
          (kyc_case_id, plot_id, client_member_id, site_id, type, category, title,
           original_name, file_path, file_hash, mime_type, file_size,
-          ocr_status, ocr_engine, ocr_completed_at, uploaded_source, uploaded_by)
-       VALUES ($1, $2, $3, $4, 'OTHER', $5, $6, $7, $8, $9, $10, $11, 'DONE', 'none', now(), 'ACCOUNT', $12)
+          ocr_status, ocr_engine, ocr_completed_at, uploaded_source, uploaded_by, payment_mode)
+       VALUES ($1, $2, $3, $4, 'OTHER', $5, $6, $7, $8, $9, $10, $11, 'DONE', 'none', now(), 'ACCOUNT', $12, $13)
        RETURNING id, type, category, title, original_name, file_path, mime_type, file_size,
-                 uploaded_source, ocr_status, created_at, kyc_case_id`,
+                 uploaded_source, payment_mode, ocr_status, created_at, kyc_case_id`,
       [
         kycCaseId, plotId, clientMemberId, plot.site_id, category, title,
         req.file.originalname, storageKey, fileHash, req.file.mimetype, req.file.size,
-        req.user?.id || null,
+        req.user?.id || null, paymentMode,
       ]
     );
 
