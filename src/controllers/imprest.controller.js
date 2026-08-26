@@ -328,8 +328,14 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
       confirmation_remark.trim(),
       client
     );
+    if (!allocation) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'This handover was already confirmed or cancelled' });
+    }
 
-    // 3. Add to imprest ledger (positive amount = credit)
+    // 3. This is the first point where the recipient's balance may change.
+    // Creating a pending allocation never writes to their ledger; confirmation
+    // atomically adds the positive credit to the exact recipient account.
     const giverResult = await client.query('SELECT name, role FROM users WHERE id = $1', [existing.admin_id]);
     const giverName = giverResult.rows[0]?.name || 'Giver';
     // Funded from the giver's float => it's a transfer between people. Funded from
