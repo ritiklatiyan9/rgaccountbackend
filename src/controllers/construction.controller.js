@@ -28,12 +28,14 @@ export const listProjects = asyncHandler(async (req, res) => {
   if (req.query.search?.trim()) { params.push(`%${req.query.search.trim()}%`); where += ` AND (p.name ILIKE $${params.length} OR p.code ILIKE $${params.length})`; }
   const { rows } = await pool.query(
     `SELECT p.*,
+       aa.name AS assigned_admin_name,
        COALESCE(t.task_count, 0)::int         AS task_count,
        COALESCE(t.done_count, 0)::int         AS done_task_count,
        COALESCE(c.actual_cost, 0)             AS actual_cost,
        COALESCE(r.pending_requests, 0)::int   AS pending_requests,
        (p.target_end_date IS NOT NULL AND p.target_end_date < CURRENT_DATE AND p.status <> 'COMPLETED') AS is_overdue
      FROM construction_projects p
+     LEFT JOIN users aa ON aa.id = p.assigned_admin_id
      LEFT JOIN (SELECT project_id, COUNT(*) task_count, COUNT(*) FILTER (WHERE status='DONE') done_count
                 FROM construction_tasks GROUP BY project_id) t ON t.project_id = p.id
      LEFT JOIN (SELECT project_id, SUM(qty*rate) actual_cost
@@ -63,7 +65,13 @@ export const createProject = asyncHandler(async (req, res) => {
 
 export const getProject = asyncHandler(async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const { rows } = await pool.query('SELECT * FROM construction_projects WHERE id = $1', [id]);
+  const { rows } = await pool.query(
+    `SELECT p.*, aa.name AS assigned_admin_name
+       FROM construction_projects p
+       LEFT JOIN users aa ON aa.id = p.assigned_admin_id
+      WHERE p.id = $1`,
+    [id]
+  );
   const project = rows[0];
   if (!project) return res.status(404).json({ message: 'Project not found' });
 

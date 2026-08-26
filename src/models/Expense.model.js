@@ -165,7 +165,7 @@ class ExpenseModel extends MasterModel {
     const query = `
       UPDATE expenses
       SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW()
-      WHERE id = ANY($1::int[])
+      WHERE id = ANY($1::int[]) AND status = 'pending'
       RETURNING *
     `;
     const result = await pool.query(query, [expenseIds, approvedBy]);
@@ -280,6 +280,7 @@ class ExpenseModel extends MasterModel {
         COUNT(*)::int AS total_count
       FROM expenses
       WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND status NOT IN ('rejected', 'returned')
     `;
     const result = await pool.query(query, [siteId]);
     return result.rows[0];
@@ -297,6 +298,7 @@ class ExpenseModel extends MasterModel {
         COUNT(*)::int AS entries
       FROM expenses
       WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND status NOT IN ('rejected', 'returned')
       GROUP BY COALESCE(payment_mode, 'UNSPECIFIED')
       ORDER BY total_debit DESC
     `;
@@ -316,6 +318,7 @@ class ExpenseModel extends MasterModel {
         COUNT(*)::int AS entries
       FROM expenses
       WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND status NOT IN ('rejected', 'returned')
       GROUP BY COALESCE(category, 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;
@@ -356,7 +359,7 @@ class ExpenseModel extends MasterModel {
    * Calculates running balance dynamically across both tables.
    */
   async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
-    const { search, mode, category, categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by } = filters;
+    const { search, status, mode, category, categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
     const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -367,6 +370,7 @@ class ExpenseModel extends MasterModel {
 
     if (only_site === 'true') { whereClause += ` AND u.source = 'expenses'`; }
     if (created_by) { whereClause += ` AND u.created_by = $${pIdx++}`; params.push(created_by); }
+    if (status) { whereClause += ` AND u.status = $${pIdx++}`; params.push(status); }
     if (mode) {
       if (mode === 'UNSPECIFIED') {
         whereClause += ` AND (u.payment_mode IS NULL OR u.payment_mode = '')`;
@@ -544,7 +548,7 @@ class ExpenseModel extends MasterModel {
       WHERE 1=1 ${whereClause}
     `;
 
-    // ── Q3: Summary aggregates (exclude rejected) ──
+    // ── Q3: Summary aggregates (exclude rejected and fully returned records) ──
     // cash_debit / bank_debit etc. split totals by payment mode so the page
     // can render Cash-vs-Bank flow cards with the same classifier the Day
     // Book uses (CASH and SPLIT cash leg → cash; everything else → bank).
@@ -559,7 +563,7 @@ class ExpenseModel extends MasterModel {
         COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN credit ELSE 0 END), 0)::numeric as bank_credit,
         COUNT(*)::int as total_count
       FROM unified u
-      WHERE 1=1 ${whereClause} AND u.status != 'rejected'
+      WHERE 1=1 ${whereClause} AND u.status NOT IN ('rejected', 'returned')
     `;
 
     // ── Run all 3 in parallel ──
@@ -583,12 +587,13 @@ class ExpenseModel extends MasterModel {
    * Unified Breakdown stats based on the active filters
    */
   async getUnifiedBreakdowns(siteId, filters, pool) {
-    const { search, mode, category, categories, to_entity, dateFrom, dateTo, only_site, created_by } = filters;
+    const { search, status, mode, category, categories, to_entity, dateFrom, dateTo, only_site, created_by } = filters;
     const params = [siteId];
     let pIdx = 2;
     let whereClause = '';
 
     if (created_by) { whereClause += ` AND u.created_by = $${pIdx++}`; params.push(created_by); }
+    if (status) { whereClause += ` AND u.status = $${pIdx++}`; params.push(status); }
 
     if (mode) {
       if (mode === 'UNSPECIFIED') {
@@ -617,9 +622,9 @@ class ExpenseModel extends MasterModel {
           COALESCE(SUM(credit), 0)::numeric as total_credit,
           COUNT(*)::int as entries
         FROM (
-          SELECT payment_mode, debit, credit, date, from_entity, to_entity, remark, account_no, branch, category, created_by
+          SELECT payment_mode, debit, credit, date, from_entity, to_entity, remark, account_no, branch, category, created_by, status
           FROM expenses WHERE site_id = $1
-            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
+            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status NOT IN ('rejected', 'returned')
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(payment_mode, 'UNSPECIFIED') ORDER BY total_debit DESC`;
       const catQ = `
@@ -628,9 +633,9 @@ class ExpenseModel extends MasterModel {
           COALESCE(SUM(credit), 0)::numeric as total_credit,
           COUNT(*)::int as entries
         FROM (
-          SELECT payment_mode, debit, credit, date, from_entity, to_entity, remark, account_no, branch, category, created_by
+          SELECT payment_mode, debit, credit, date, from_entity, to_entity, remark, account_no, branch, category, created_by, status
           FROM expenses WHERE site_id = $1
-            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
+            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status NOT IN ('rejected', 'returned')
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY category ASC`;
       const [modeRes, catRes] = await Promise.all([
@@ -646,28 +651,28 @@ class ExpenseModel extends MasterModel {
     // computes both groupings using GROUPING SETS.
     const combinedQuery = `
       WITH unified AS (
-        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit, created_by
-        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status != 'rejected'
+        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit, created_by, status
+        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND status NOT IN ('rejected', 'returned')
         UNION ALL
         SELECT fp.date, fp.payment_mode, 'FARMER PAYMENT' as category, UPPER(f.name) as to_entity, NULL as from_entity,
-          UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit, fp.created_by
+          UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit, fp.created_by, fp.status
         FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
         WHERE f.site_id = $1 AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND fp.status != 'rejected'
         UNION ALL
         SELECT pcp.date, pcp.payment_mode, 'COMMISSION' as category, UPPER(ag.full_name) as to_entity, NULL as from_entity,
-          UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch, pcp.amount as debit, 0::numeric as credit, pcp.created_by
+          UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch, pcp.amount as debit, 0::numeric as credit, pcp.created_by, pcp.status
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
         JOIN members ag ON pcm.agent_id = ag.id
         WHERE pcp.site_id = $1 AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND pcp.status != 'rejected'
         UNION ALL
         SELECT vp.payment_date as date, UPPER(vp.payment_mode) as payment_mode, 'VENDOR PAYMENT' as category, UPPER(vc.vendor_name) as to_entity, NULL as from_entity,
-          UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' as remark, NULL as account_no, NULL as branch, vp.amount as debit, 0::numeric as credit, vp.created_by
+          UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' as remark, NULL as account_no, NULL as branch, vp.amount as debit, 0::numeric as credit, vp.created_by, vp.status
         FROM vendor_payments vp JOIN vendor_commitments vc ON vp.commitment_id = vc.id
         WHERE vp.site_id = $1 AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND vp.status != 'rejected'
         UNION ALL
         SELECT cfe.date, UPPER(cfe.cash_type) as payment_mode, 'PERSONAL LEDGER' as category, cfe.to_name as to_entity, NULL as from_entity,
-          COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit, cfe.created_by
+          COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit, cfe.created_by, 'approved'::varchar as status
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
@@ -675,7 +680,7 @@ class ExpenseModel extends MasterModel {
           AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
           AND (cfe.status IS NULL OR cfe.status != 'rejected')
         UNION ALL
-        SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit, d.created_by
+        SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit, d.created_by, d.status
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
           AND (d.cheque_status IS NULL OR d.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND d.status != 'rejected'

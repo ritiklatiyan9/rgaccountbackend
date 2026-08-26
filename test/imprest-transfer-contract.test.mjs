@@ -7,7 +7,10 @@ const readSource = (relativePath) => readFile(new URL(`../${relativePath}`, impo
 test('imprest transfers keep sub-admin source ownership and update both ledgers atomically', async () => {
   const controller = await readSource('src/controllers/imprest.controller.js');
 
-  assert.match(controller, /callerIsAdmin\s*\?\s*parseInt\(from_user_id, 10\)\s*:\s*req\.user\.id/);
+  // A sub-admin can never name a source: only an admin WITH an explicit
+  // from_user_id reads the body, everyone else transfers from their own float.
+  assert.match(controller, /const fromUserId = callerIsAdmin && explicitSource\s*\?\s*parseInt\(from_user_id, 10\)\s*:\s*req\.user\.id/);
+  assert.match(controller, /const explicitSource = from_user_id !== undefined/);
   assert.match(controller, /await client\.query\('BEGIN'\)/);
   assert.match(controller, /await lockImprestAccounts\(client, fromUserId, toUserId\)/);
   assert.match(controller, /sourceBalance < transferAmount/);

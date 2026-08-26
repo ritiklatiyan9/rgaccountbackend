@@ -70,7 +70,7 @@ class ImprestAllocationModel extends MasterModel {
     let query = `
       SELECT ia.*,
              sa.name as sub_admin_name, sa.email as sub_admin_email,
-             ad.name as admin_name,
+             ad.name as admin_name, ad.role as admin_role,
              asa.name as assigned_admin_name,
              s.name as site_name
       FROM imprest_allocations ia
@@ -150,9 +150,13 @@ class ImprestLedgerModel extends MasterModel {
    */
   async findByUserId(userId, siteId, limit = null, offset = null, pool) {
     let query = `
-      SELECT il.*, u.name as created_by_name
+      SELECT il.*, u.name as created_by_name, aa.name as assigned_admin_name
       FROM imprest_ledger il
       LEFT JOIN users u ON il.created_by = u.id
+      LEFT JOIN imprest_allocations ia ON il.type = 'ALLOCATION' AND ia.id = il.reference_id
+      LEFT JOIN expenses ex ON il.type = 'EXPENSE' AND ex.id = il.reference_id
+      LEFT JOIN imprest_returns ir ON il.type = 'REFUND' AND ir.id = il.reference_id
+      LEFT JOIN users aa ON aa.id = COALESCE(ia.assigned_admin_id, ex.assigned_admin_id, ir.assigned_admin_id)
       WHERE il.user_id = $1
     `;
     const params = [userId];
@@ -183,9 +187,13 @@ class ImprestLedgerModel extends MasterModel {
    */
   async findByUserIdAndDateRange(userId, siteId, dateFrom, dateTo, limit = null, offset = null, pool) {
     let query = `
-      SELECT il.*, u.name as created_by_name
+      SELECT il.*, u.name as created_by_name, aa.name as assigned_admin_name
       FROM imprest_ledger il
       LEFT JOIN users u ON il.created_by = u.id
+      LEFT JOIN imprest_allocations ia ON il.type = 'ALLOCATION' AND ia.id = il.reference_id
+      LEFT JOIN expenses ex ON il.type = 'EXPENSE' AND ex.id = il.reference_id
+      LEFT JOIN imprest_returns ir ON il.type = 'REFUND' AND ir.id = il.reference_id
+      LEFT JOIN users aa ON aa.id = COALESCE(ia.assigned_admin_id, ex.assigned_admin_id, ir.assigned_admin_id)
       WHERE il.user_id = $1
     `;
     const params = [userId];

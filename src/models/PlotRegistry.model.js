@@ -46,6 +46,7 @@ class PlotRegistryModel extends MasterModel {
       : '';
     const query = `
       SELECT pr.*,
+        aa.name AS assigned_admin_name,
         COALESCE(agg.total_paid,    0) AS total_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
@@ -54,6 +55,7 @@ class PlotRegistryModel extends MasterModel {
         p.booking_by AS agent_name
       FROM plot_registries pr
       LEFT JOIN plots p ON pr.plot_id = p.id
+      LEFT JOIN users aa ON aa.id = pr.assigned_admin_id
       LEFT JOIN LATERAL (
         SELECT
           SUM(prp.amount)::numeric AS total_paid,
@@ -171,6 +173,7 @@ class PlotRegistryPaymentModel extends MasterModel {
   async findByRegistryId(registryId, pool, creatorId = null) {
     const query = `
       SELECT prp.*, u.name AS created_by_name,
+             aa.name AS assigned_admin_name,
              CASE
                WHEN prp.source_plot_payment_id IS NULL THEN TRUE
                WHEN pr.plot_id IS NOT NULL THEN pp.plot_id = pr.plot_id
@@ -185,6 +188,7 @@ class PlotRegistryPaymentModel extends MasterModel {
       JOIN plot_registries pr ON pr.id = prp.registry_id
       LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
       LEFT JOIN users u ON u.id = prp.created_by
+      LEFT JOIN users aa ON aa.id = prp.assigned_admin_id
       WHERE prp.registry_id = $1
         AND ($2::int IS NULL OR prp.created_by = $2::int)
       ORDER BY prp.payment_date ASC, prp.created_at ASC

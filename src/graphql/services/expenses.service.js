@@ -15,6 +15,7 @@ const DEFAULT_SUMMARY = {
 function normalizeFilters(filters = {}) {
   const normalized = {
     search: filters.search?.trim() || undefined,
+    status: filters.status || undefined,
     mode: filters.mode || undefined,
     category: filters.category || undefined,
     to_entity: filters.to_entity || undefined,

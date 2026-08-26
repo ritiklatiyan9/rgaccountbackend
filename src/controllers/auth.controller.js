@@ -8,6 +8,7 @@ import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
 import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
+import { writeAuditLog } from '../services/auditLog.service.js';
 
 /* ── Email OTP second factor — admin / sub_admin only, super_admin is exempt ── */
 const OTP_ROLES = new Set(['admin', 'sub_admin']);
@@ -61,6 +62,25 @@ const buildLoginPayload = async (user, req) => {
     );
     sessionId = sessionResult.rows[0].id;
   }
+
+  writeAuditLog({
+    organizationId: user.organization_id,
+    userId: user.id,
+    action: 'LOGIN',
+    eventType: 'AUTH',
+    module: 'authentication',
+    entityType: 'user_session',
+    entityId: sessionId || user.id,
+    requestMethod: 'POST',
+    requestPath: req.originalUrl || '/auth/login',
+    statusCode: 200,
+    outcome: 'SUCCESS',
+    description: `${user.name || user.email} signed in`,
+    newValues: { role: user.role, session_id: sessionId },
+    metadata: { login_provider: req.path?.includes('google') ? 'GOOGLE' : 'PASSWORD' },
+    ipAddress: req.headers['x-forwarded-for'] || req.ip || req.connection?.remoteAddress,
+    userAgent: req.get('user-agent'),
+  }).catch((error) => console.error('[audit] login write failed:', error.message));
 
   return { user: userModel.sanitize(user), accessToken, refreshToken, sites, permissions, sessionId };
 };

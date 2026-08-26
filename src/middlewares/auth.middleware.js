@@ -10,7 +10,7 @@ const authMiddleware = async (req, res, next) => {
     const sessionIdHeader = req.header('X-Session-ID');
 
     const userResult = await pool.query(
-      'SELECT id, token_version, is_active FROM users WHERE id = $1 LIMIT 1',
+      'SELECT id, token_version, is_active, organization_id FROM users WHERE id = $1 LIMIT 1',
       [decoded.id]
     );
 
@@ -45,7 +45,7 @@ const authMiddleware = async (req, res, next) => {
     }
 
     // decoded contains: id, email, role, version
-    req.user = decoded;
+    req.user = { ...decoded, organization_id: dbUser.organization_id || 1 };
     next();
   } catch (err) {
     res.status(401).json({ message: 'Invalid or expired token' });

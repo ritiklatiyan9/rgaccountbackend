@@ -99,6 +99,7 @@ export const createExpense = asyncHandler(async (req, res) => {
     site_id, date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
     assigned_user_id, assigned_admin_id, voucher_url, voucher_urls, bill_url, bill_urls,
+    not_sure,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -119,7 +120,7 @@ export const createExpense = asyncHandler(async (req, res) => {
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     ...voucherColumns(voucher_urls, voucher_url),
     ...billColumns(bill_urls, bill_url),
-    status: 'pending', // New expenses are pending by default
+    status: not_sure === true || String(not_sure).toLowerCase() === 'true' ? 'waiting' : 'pending',
     created_by: req.user.id,
     cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
     cheque_status: (payment_mode || '').trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
@@ -137,7 +138,7 @@ export const createExpense = asyncHandler(async (req, res) => {
 export const listExpenses = asyncHandler(async (req, res) => {
   const {
     site_id, page = 1, limit = 20,
-    search, mode, category, to_entity,
+    search, status, mode, category, to_entity,
     dateFrom, dateTo, export: isExport, missing_bill, order, only_site, created_by
   } = req.query;
 
@@ -145,7 +146,7 @@ export const listExpenses = asyncHandler(async (req, res) => {
 
   const visibility = await resolveEntryVisibility(req.user, 'expenses', created_by);
   const filters = {
-    search, mode, category, to_entity, dateFrom, dateTo, missing_bill, order, only_site,
+    search, status, mode, category, to_entity, dateFrom, dateTo, missing_bill, order, only_site,
     created_by: visibility.creatorId,
   };
 
@@ -233,7 +234,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
     date, from_entity, to_entity, payment_mode,
     debit, credit, remark, account_no, branch, category,
     assigned_user_id, assigned_admin_id, voucher_url, voucher_urls, bill_url, bill_urls,
-    customer_signature_url, authority_signature_url
+    customer_signature_url, authority_signature_url, expense_status
   } = req.body;
 
   const data = {};
@@ -259,6 +260,21 @@ export const updateExpense = asyncHandler(async (req, res) => {
   }
   if (customer_signature_url !== undefined) data.customer_signature_url = customer_signature_url || null;
   if (authority_signature_url !== undefined) data.authority_signature_url = authority_signature_url || null;
+  if (expense_status !== undefined) {
+    const nextStatus = String(expense_status).trim().toLowerCase();
+    const editableStatuses = new Set(['pending', 'waiting', 'returned']);
+    if (!editableStatuses.has(nextStatus)) {
+      return res.status(400).json({ message: 'Expense status must be pending, waiting, or returned' });
+    }
+    if (['approved', 'rejected'].includes(existing.status)) {
+      return res.status(409).json({ message: 'Approved or rejected expenses cannot be moved into the waiting workflow' });
+    }
+    if (nextStatus !== existing.status) {
+      data.status = nextStatus;
+      data.approved_by = null;
+      data.approved_at = null;
+    }
+  }
 
   if (Object.keys(data).length === 0) {
     return res.status(400).json({ message: 'Nothing to update' });
@@ -558,13 +574,16 @@ export const approveExpense = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `UPDATE expenses
         SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW()
-      WHERE id = $1 AND status != 'approved'
+      WHERE id = $1 AND status IN ('pending', 'rejected')
       RETURNING *`,
     [parseInt(id), req.user.id]
   );
   if (!result.rows[0]) {
     const check = await pool.query('SELECT status FROM expenses WHERE id = $1', [parseInt(id)]);
     if (check.rows.length === 0) return res.status(404).json({ message: 'Expense not found' });
+    if (['waiting', 'returned'].includes(check.rows[0].status)) {
+      return res.status(400).json({ message: 'Resolve this waiting expense before approval' });
+    }
     return res.status(400).json({ message: 'Expense is already approved' });
   }
   const expense = result.rows[0];

@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   createMember, listMembers, searchMembers, getMemberAutocomplete,
   getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo,
-  extractKycDocument, registerMemberInSites,
+  extractKycDocument, registerMemberInSites, registerMembersInSites,
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -69,6 +69,7 @@ router.post('/', requireRole('admin', 'sub_admin'), memberUpload, requirePermiss
 router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'update'), bustMemberCache, updateMember);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), bustMemberCache, deleteMember);
 router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), bustMemberCache, bulkDeleteMembers);
+router.post('/bulk-register-sites', requireRole('admin', 'sub_admin'), requirePermission('clients', 'write'), bustMemberCache, registerMembersInSites);
 router.post('/:id/register-sites', requireRole('admin', 'sub_admin'), requirePermission('clients', 'write'), bustMemberCache, registerMemberInSites);
 
 // Member transactions

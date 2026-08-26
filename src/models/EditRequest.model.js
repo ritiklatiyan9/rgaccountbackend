@@ -14,6 +14,7 @@ class EditRequestModelClass extends MasterModel {
              u.name AS requested_by_name, u.email AS requested_by_email,
              COALESCE(s.name, s2.name) AS site_name,
              ru.name AS reviewed_by_name,
+             aa.name AS assigned_admin_name,
              COALESCE(er.original_data->>'plot_no', p.plot_no) AS record_plot_no,
              COALESCE(er.original_data->>'booking_by', er.original_data->>'booked_by', p.booking_by) AS record_booked_by,
              COALESCE(er.original_data->>'payment_type', er.original_data->>'payment_mode', er.original_data->>'particular') AS record_payment_mode,
@@ -22,6 +23,10 @@ class EditRequestModelClass extends MasterModel {
       LEFT JOIN users u ON er.requested_by = u.id
       LEFT JOIN sites s ON er.site_id = s.id
       LEFT JOIN users ru ON er.reviewed_by = ru.id
+      LEFT JOIN users aa ON aa.id = CASE
+        WHEN er.original_data->>'assigned_admin_id' ~ '^[0-9]+$'
+        THEN (er.original_data->>'assigned_admin_id')::int
+      END
       LEFT JOIN plots p ON er.module IN ('plot_payment','daybook_plot_payment') AND p.id = (er.original_data->>'plot_id')::int
       LEFT JOIN sites s2 ON er.site_id IS NULL AND s2.id = (er.original_data->>'site_id')::int
     `;
@@ -47,6 +52,7 @@ class EditRequestModelClass extends MasterModel {
              u.name AS requested_by_name, u.email AS requested_by_email,
              COALESCE(s.name, s2.name) AS site_name,
              ru.name AS reviewed_by_name,
+             aa.name AS assigned_admin_name,
              COALESCE(er.original_data->>'plot_no', p.plot_no) AS record_plot_no,
              COALESCE(er.original_data->>'booking_by', er.original_data->>'booked_by', p.booking_by) AS record_booked_by,
              COALESCE(er.original_data->>'payment_type', er.original_data->>'payment_mode', er.original_data->>'particular') AS record_payment_mode,
@@ -55,6 +61,10 @@ class EditRequestModelClass extends MasterModel {
       LEFT JOIN users u ON er.requested_by = u.id
       LEFT JOIN sites s ON er.site_id = s.id
       LEFT JOIN users ru ON er.reviewed_by = ru.id
+      LEFT JOIN users aa ON aa.id = CASE
+        WHEN er.original_data->>'assigned_admin_id' ~ '^[0-9]+$'
+        THEN (er.original_data->>'assigned_admin_id')::int
+      END
       LEFT JOIN plots p ON er.module IN ('plot_payment','daybook_plot_payment') AND p.id = (er.original_data->>'plot_id')::int
       LEFT JOIN sites s2 ON er.site_id IS NULL AND s2.id = (er.original_data->>'site_id')::int
       WHERE er.status = $1

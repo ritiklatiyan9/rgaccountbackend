@@ -85,6 +85,7 @@ const ExpensesPageFiltersInput = new GraphQLInputObjectType({
   name: 'ExpensesPageFiltersInput',
   fields: {
     search:      { type: GraphQLString },
+    status:      { type: GraphQLString },
     mode:        { type: GraphQLString },
     category:    { type: GraphQLString },
     // Multi-category filter — each entry is ILIKE-matched against the category column and
@@ -945,6 +946,7 @@ const QueryType = new GraphQLObjectType({
         const requestedCreator = Number(filters.createdBy);
         const normalizedFilters = {
           search: filters.search || undefined,
+          status: filters.status || undefined,
           mode: filters.mode || undefined,
           category: filters.category || undefined,
           categories: Array.isArray(filters.categories) && filters.categories.length > 0
@@ -1000,6 +1002,7 @@ const QueryType = new GraphQLObjectType({
         const requestedCreator = Number(filters.createdBy);
         const normalizedFilters = {
           search: filters.search || undefined,
+          status: filters.status || undefined,
           mode: filters.mode || undefined,
           category: filters.category || undefined,
           categories: Array.isArray(filters.categories) && filters.categories.length > 0

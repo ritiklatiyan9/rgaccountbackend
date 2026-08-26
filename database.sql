@@ -526,7 +526,7 @@ CREATE TABLE IF NOT EXISTS expenses (
   branch          VARCHAR(255),
   category        VARCHAR(100),
   status          VARCHAR(20) NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'approved', 'rejected')),
+                    CHECK (status IN ('pending', 'approved', 'rejected', 'waiting', 'returned')),
   approved_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
   approved_at     TIMESTAMPTZ,
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,

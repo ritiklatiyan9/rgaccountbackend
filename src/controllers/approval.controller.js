@@ -116,6 +116,11 @@ async function getAllowedModules(user) {
   }
 }
 
+// Assignment is a routing preference for administrators, not an authority
+// boundary. An admin or super-admin must always be able to clear a pending
+// financial approval when the assigned reviewer is unavailable.
+const hasGlobalApprovalOverride = (user) => user?.role === 'admin' || user?.role === 'super_admin';
+
 /** Check if a module key is allowed (handles daybook sub-types too) */
 function isModuleAllowed(allowed, moduleKey) {
   if (!allowed) return true; // admin — all allowed
@@ -626,7 +631,7 @@ export const approveEntry = asyncHandler(async (req, res) => {
   const assignedTo = check.rows[0].assigned_admin_id ? parseInt(check.rows[0].assigned_admin_id) : null;
   const isAssignedToCaller = assignedTo === parseInt(req.user.id);
 
-  if (!isAssignedToCaller) {
+  if (!hasGlobalApprovalOverride(req.user) && !isAssignedToCaller) {
     if (assignedTo) {
       return res.status(403).json({ message: 'This entry is assigned to another user for approval' });
     }
@@ -741,7 +746,7 @@ export const rejectEntry = asyncHandler(async (req, res) => {
   const assignedTo = check.rows[0].assigned_admin_id ? parseInt(check.rows[0].assigned_admin_id) : null;
   const isAssignedToCaller = assignedTo === parseInt(req.user.id);
 
-  if (!isAssignedToCaller) {
+  if (!hasGlobalApprovalOverride(req.user) && !isAssignedToCaller) {
     if (assignedTo) {
       return res.status(403).json({ message: 'This entry is assigned to another user for approval' });
     }
@@ -779,6 +784,8 @@ export const rejectEntry = asyncHandler(async (req, res) => {
               amount: debitAmount,
               remarks: `REVERSED (REJECTED): ${source.toUpperCase()} #${entryId}`,
               created_by: req.user.id,
+              // Keep the reversal on the same site or it never reaches site-scoped balances.
+              site_id: entry.site_id || null,
             }, pool);
           }
         }
@@ -847,7 +854,7 @@ export const attachVoucher = asyncHandler(async (req, res) => {
 
   const assignedTo = check.rows[0].assigned_admin_id ? parseInt(check.rows[0].assigned_admin_id) : null;
   const isAssignedToCaller = assignedTo === parseInt(req.user.id);
-  if (!isAssignedToCaller) {
+  if (!hasGlobalApprovalOverride(req.user) && !isAssignedToCaller) {
     if (assignedTo) {
       return res.status(403).json({ message: 'This entry is assigned to another user' });
     }
@@ -888,15 +895,18 @@ export const bulkApprove = asyncHandler(async (req, res) => {
   let totalApproved = 0;
   let skippedAssignedToOthers = 0;
   const affectedCommissions = new Set();
+  const canOverrideAssignment = hasGlobalApprovalOverride(req.user);
 
   for (const [table, ids] of Object.entries(grouped)) {
     if (ids.length === 0) continue;
+    const assignmentClause = canOverrideAssignment
+      ? ''
+      : ' AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)';
     const result = await pool.query(
       `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW()
-       WHERE id = ANY($1::int[]) AND status = 'pending'
-         AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)
+       WHERE id = ANY($1::int[]) AND status = 'pending'${assignmentClause}
        RETURNING *`,
-      [ids, req.user.id, req.user.id]
+      canOverrideAssignment ? [ids, req.user.id] : [ids, req.user.id, req.user.id]
     );
 
     if (table === 'firm_transactions') {
@@ -975,15 +985,18 @@ export const bulkReject = asyncHandler(async (req, res) => {
   let totalRejected = 0;
   let skippedAssignedToOthers = 0;
   const affectedCommissions = new Set();
+  const canOverrideAssignment = hasGlobalApprovalOverride(req.user);
 
   for (const [table, ids] of Object.entries(grouped)) {
     if (ids.length === 0) continue;
+    const assignmentClause = canOverrideAssignment
+      ? ''
+      : ' AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)';
     const result = await pool.query(
       `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
-       WHERE id = ANY($1::int[]) AND status = 'pending'
-         AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)
+       WHERE id = ANY($1::int[]) AND status = 'pending'${assignmentClause}
        RETURNING *`,
-      [ids, req.user.id, req.user.id]
+      canOverrideAssignment ? [ids, req.user.id] : [ids, req.user.id, req.user.id]
     );
 
     // Track plot commission payments for status update

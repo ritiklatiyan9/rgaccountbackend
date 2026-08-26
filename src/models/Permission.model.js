@@ -34,9 +34,10 @@ export const ALL_MODULES = Object.freeze([
     'legal',
     'compliance_templates',
     'compliance_settings',
+    'audit_logs',
 ]);
 
-const READ_ONLY_MODULES = new Set(['dashboard', 'finance_forecast', 'balance_sheet', 'reports', 'settings']);
+const READ_ONLY_MODULES = new Set(['dashboard', 'finance_forecast', 'balance_sheet', 'reports', 'settings', 'audit_logs']);
 // Modules introduced after the original permission rollout stay fail-closed for
 // existing sub-admins. An administrator must opt users into these sensitive
 // document/payment surfaces from the permission matrix.
@@ -55,6 +56,8 @@ const RESTRICTED_MODULES = new Set([
     'legal',
     'compliance_templates',
     'compliance_settings',
+    // Cross-module activity is sensitive and stays opt-in for sub-admins.
+    'audit_logs',
 ]);
 
 const getDefaultPermissions = (module) => {

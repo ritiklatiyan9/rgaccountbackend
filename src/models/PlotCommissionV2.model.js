@@ -184,10 +184,12 @@ class PlotCommissionPaymentModel extends MasterModel {
    */
   async findByCommissionId(commissionId, pool, creatorId = null) {
     const query = `
-      SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name
+      SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name,
+             aa.name AS assigned_admin_name
       FROM plot_commission_payments pcp
       LEFT JOIN users u ON pcp.created_by = u.id
       LEFT JOIN users a ON pcp.approved_by = a.id
+      LEFT JOIN users aa ON aa.id = pcp.assigned_admin_id
       WHERE pcp.plot_commission_id = $1
         AND ($2::int IS NULL OR pcp.created_by = $2::int)
       ORDER BY pcp.date DESC, pcp.created_at DESC

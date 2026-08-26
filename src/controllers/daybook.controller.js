@@ -576,9 +576,14 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     // three more raw tables. Mirrors mode-balance filters: skip bounced and
     // rejected, keep pending.
     pool.query(
-      `SELECT cfe.*, u.name AS assigned_admin_name
+      `SELECT cfe.*, u.name AS assigned_admin_name,
+              CASE WHEN cfe.source_module = 'plot_commission_payments' THEN p.plot_no END AS linked_plot_no
          FROM cash_flow_entries cfe
          LEFT JOIN users u ON u.id = cfe.assigned_admin_id
+         LEFT JOIN plot_commission_payments pcp
+           ON cfe.source_module = 'plot_commission_payments' AND cfe.source_id = pcp.id
+         LEFT JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
+         LEFT JOIN plots p ON pcm.plot_id = p.id
         WHERE cfe.site_id = $1 AND cfe.date = $2
           AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'plot_commission_payments')
           AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
@@ -995,6 +1000,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         site_id: m.site_id,
         date: m.date,
         particular: m.particular,
+        plot_no: m.linked_plot_no || null,
         entry_type: meta.entry_type,
         debit: m.debit,
         credit: m.credit,

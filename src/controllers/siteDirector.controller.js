@@ -57,6 +57,9 @@ const compactContext = (overview, personDetail) => ({
       bankBalance: site.bankBalance,
       totalBalance: site.totalBalance,
       imprestFloat: site.imprestFloat,
+      imprestHolders: site.imprestHolders,
+      imprestPendingCount: site.imprestPendingCount,
+      imprestPendingAmount: site.imprestPendingAmount,
       monthInflow: site.monthInflow,
       monthOutflow: site.monthOutflow,
       transactionCount: site.transactionCount,
@@ -90,6 +93,16 @@ transaction, person, date or amount.
 - Start with the direct answer, then give 2–5 concise evidence bullets and one practical action.
 - Use Indian currency notation (₹, lakh, crore).
 - Cash balance means cash book less outstanding imprest float. Total balance is cash plus bank.
+- Imprest is petty cash physically held by a person for a site. imprestFloat is the total
+  still in their hands; imprestHolders lists each holder with their name, role and balance.
+  A holder's balance rises when they receive and accept money, and falls when they spend it
+  on an expense or return it. Imprest is ALREADY subtracted from cash balance — never
+  subtract it a second time.
+- imprestPendingCount/imprestPendingAmount are handovers sent but not yet accepted by the
+  recipient; that money is held out of the giver's balance and has not reached the receiver.
+- For "who is holding cash", "who has the most imprest", "which site has unsettled float",
+  or "who has not settled", answer from imprestHolders and name the people and amounts.
+- A negative holder balance means that person has overspent their float and is in overdraft.
 - For a person, Debit/Given is money paid to them, Credit/Returned is money received back,
   and Pending is Given minus Returned. Positive Pending means the person owes us.
 - Compare sites when the question asks where, highest, lowest, risk, concentration or performance.
@@ -120,6 +133,23 @@ const localFallbackAnswer = (question, overview, detail) => {
   const ranked = [...overview.sites].sort((a, b) => b.totalBalance - a.totalBalance);
   const top = ranked[0];
   const low = ranked[ranked.length - 1];
+
+  if (/imprest|float|petty|holding cash|holder|unsettled/.test(lower)) {
+    const holders = overview.sites.flatMap((site) => (site.imprestHolders || [])
+      .filter((holder) => holder.balance !== 0)
+      .map((holder) => ({ ...holder, siteName: site.name })))
+      .sort((a, b) => b.balance - a.balance);
+    const overdrawn = holders.filter((holder) => holder.balance < 0);
+    return [
+      `${formatINR(totals.imprestFloat)} of imprest is still held by ${totals.imprestHolderCount} person${totals.imprestHolderCount === 1 ? '' : 's'} across all sites.`,
+      ...holders.slice(0, 4).map((holder) => `• ${holder.name} — ${formatINR(holder.balance)} at ${holder.siteName}`),
+      totals.imprestPendingCount > 0
+        ? `• ${formatINR(totals.imprestPendingAmount)} across ${totals.imprestPendingCount} handover(s) is still waiting to be accepted`
+        : null,
+      overdrawn.length ? `• In overdraft: ${overdrawn.map((holder) => holder.name).join(', ')}` : null,
+      'Action: settle the largest float first, then chase any handover still unaccepted.',
+    ].filter(Boolean).join('\n');
+  }
   if (/cash|bank|balance|site|portfolio|risk|highest|lowest/.test(lower)) {
     return [
       `The recorded all-site available balance is ${formatINR(totals.totalBalance)}.`,

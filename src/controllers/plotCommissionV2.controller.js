@@ -46,7 +46,7 @@ export const getPlotsForCommission = asyncHandler(async (req, res) => {
 
   // Get active plots where there's no commission assigned yet, or you can allow multiple
   const query = `
-    SELECT p.id, p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.block
+    SELECT p.id, p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.block, p.plot_tag
     FROM plots p
     WHERE p.site_id = $1
     ORDER BY p.plot_no ASC
@@ -180,12 +180,14 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   // Payments across EVERY booking of this plot_no (not just the current
   // booking) so the timeline can show each previous booking's payments inline.
   const allPaymentsPromise = pool.query(
-    `SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name
+    `SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name,
+            aa.name AS assigned_admin_name
        FROM plot_commission_payments pcp
        JOIN plot_commissions_v2 pc ON pcp.plot_commission_id = pc.id
        JOIN plots p ON pc.plot_id = p.id
        LEFT JOIN users u ON pcp.created_by = u.id
        LEFT JOIN users a ON pcp.approved_by = a.id
+       LEFT JOIN users aa ON aa.id = pcp.assigned_admin_id
       WHERE p.plot_no = $1 AND pc.site_id = $2
         AND ($3::int IS NULL OR pcp.created_by = $3::int)
       ORDER BY pcp.date DESC, pcp.created_at DESC`,

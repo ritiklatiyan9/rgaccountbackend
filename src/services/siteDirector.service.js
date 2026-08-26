@@ -153,6 +153,35 @@ const OVERVIEW_SQL = `
   ORDER BY total_balance DESC, s.name ASC
 `;
 
+// Who is actually holding the float on each site, and what has been handed over
+// but not yet accepted. The site totals already carry imprest_float; this adds
+// the per-person breakdown behind that number.
+const IMPREST_HOLDERS_SQL = `
+  SELECT il.site_id,
+         il.user_id,
+         u.name,
+         u.role,
+         SUM(il.amount)::float8 AS balance,
+         MAX(il.created_at) AS last_activity_at
+    FROM imprest_ledger il
+    LEFT JOIN users u ON u.id = il.user_id
+   WHERE il.site_id IS NOT NULL
+     AND il.created_at::date <= $1::date
+   GROUP BY il.site_id, il.user_id, u.name, u.role
+  HAVING SUM(il.amount) <> 0
+   ORDER BY il.site_id, balance DESC
+`;
+
+const IMPREST_PENDING_SQL = `
+  SELECT site_id,
+         COUNT(*)::int AS pending_count,
+         COALESCE(SUM(amount), 0)::float8 AS pending_amount
+    FROM imprest_allocations
+   WHERE status = 'PENDING_RECEIPT'
+     AND site_id IS NOT NULL
+   GROUP BY site_id
+`;
+
 const TREND_SQL = `
   WITH months AS (
     SELECT generate_series(
@@ -370,13 +399,34 @@ export async function getSiteDirectorOverview(search = '', requestedPreset = 'ov
   const tasks = [
     pool.query(OVERVIEW_SQL, [period.dateFrom, period.dateTo]),
     pool.query(TREND_SQL),
+    pool.query(IMPREST_HOLDERS_SQL, [period.dateTo]),
+    pool.query(IMPREST_PENDING_SQL),
   ];
   if (query.length >= 2) {
     tasks.push(pool.query(PERSON_SEARCH_SQL, [searchPattern]));
     tasks.push(pool.query(RECORD_SEARCH_SQL, [searchPattern]));
   }
 
-  const [siteResult, trendResult, peopleResult, recordResult] = await Promise.all(tasks);
+  const [siteResult, trendResult, holderResult, imprestPendingResult, peopleResult, recordResult] = await Promise.all(tasks);
+
+  const holdersBySite = new Map();
+  holderResult.rows.forEach((row) => {
+    const list = holdersBySite.get(row.site_id) || [];
+    list.push({
+      userId: row.user_id,
+      name: row.name || 'Unknown user',
+      role: row.role || 'sub_admin',
+      balance: round2(row.balance),
+      lastActivityAt: row.last_activity_at,
+    });
+    holdersBySite.set(row.site_id, list);
+  });
+
+  const imprestPendingBySite = new Map(imprestPendingResult.rows.map((row) => [row.site_id, {
+    count: valueOf(row.pending_count),
+    amount: round2(row.pending_amount),
+  }]));
+
   const sites = siteResult.rows.map((site) => ({
     id: site.id,
     name: site.name,
@@ -399,6 +449,9 @@ export async function getSiteDirectorOverview(search = '', requestedPreset = 'ov
     bankIn: round2(site.bank_in),
     bankOut: round2(site.bank_out),
     periodTransactionCount: valueOf(site.period_transaction_count),
+    imprestHolders: holdersBySite.get(site.id) || [],
+    imprestPendingCount: (imprestPendingBySite.get(site.id) || {}).count || 0,
+    imprestPendingAmount: (imprestPendingBySite.get(site.id) || {}).amount || 0,
   }));
 
   const totals = sites.reduce((result, site) => ({
@@ -417,11 +470,15 @@ export async function getSiteDirectorOverview(search = '', requestedPreset = 'ov
     bankIn: result.bankIn + site.bankIn,
     bankOut: result.bankOut + site.bankOut,
     periodTransactionCount: result.periodTransactionCount + site.periodTransactionCount,
+    imprestHolderCount: result.imprestHolderCount + site.imprestHolders.filter((h) => h.balance > 0).length,
+    imprestPendingCount: result.imprestPendingCount + site.imprestPendingCount,
+    imprestPendingAmount: result.imprestPendingAmount + site.imprestPendingAmount,
   }), {
     cashBook: 0, imprestFloat: 0, cashBalance: 0, bankBalance: 0,
     totalBalance: 0, totalInflow: 0, totalOutflow: 0,
     monthInflow: 0, monthOutflow: 0, transactionCount: 0,
     cashIn: 0, cashOut: 0, bankIn: 0, bankOut: 0, periodTransactionCount: 0,
+    imprestHolderCount: 0, imprestPendingCount: 0, imprestPendingAmount: 0,
   });
 
   const trendMap = new Map();

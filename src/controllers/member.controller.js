@@ -148,126 +148,146 @@ export const extractKycDocument = asyncHandler(async (req, res) => {
   }
 });
 
-/**
- * POST /members/:id/register-sites — copy an existing member profile into one
- * or more sites. Existing rows are never changed; matching site registrations
- * are reported and skipped.
- */
-export const registerMemberInSites = asyncHandler(async (req, res) => {
-  const memberId = Number.parseInt(req.params.id, 10);
-  const requestedSiteIds = Array.isArray(req.body.site_ids)
-    ? [...new Set(req.body.site_ids.map((id) => Number.parseInt(id, 10)).filter(Number.isInteger))]
-    : [];
-  if (!Number.isInteger(memberId)) return res.status(400).json({ message: 'Invalid member id' });
-  if (requestedSiteIds.length === 0) return res.status(400).json({ message: 'Select at least one site' });
+const parsedIds = (value) => Array.isArray(value)
+  ? [...new Set(value.map((id) => Number.parseInt(id, 10)).filter(Number.isInteger))]
+  : [];
 
+const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows: [source] } = await client.query('SELECT * FROM members WHERE id = $1 FOR SHARE', [memberId]);
-    if (!source) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Member not found' });
+    const { rows: sources } = await client.query(
+      'SELECT * FROM members WHERE id = ANY($1::int[]) FOR SHARE',
+      [memberIds]
+    );
+    if (sources.length !== memberIds.length) {
+      const error = new Error('One or more members were not found');
+      error.statusCode = 404;
+      throw error;
     }
 
-    const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
-    if (!isAdmin) {
-      const { rows: sourceAccess } = await client.query(
-        'SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1',
-        [req.user.id, source.site_id]
-      );
-      if (!sourceAccess[0]) {
-        await client.query('ROLLBACK');
-        return res.status(403).json({ message: 'This member is outside your assigned sites' });
-      }
-    }
-    const accessResult = isAdmin
-      ? await client.query('SELECT id, name FROM sites WHERE id = ANY($1::int[])', [requestedSiteIds])
+    const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+    const sourceSiteIds = [...new Set(sources.map((member) => member.site_id))];
+    const siteResult = isAdmin
+      ? await client.query('SELECT id, name FROM sites WHERE id = ANY($1::int[])', [siteIds])
       : await client.query(
           `SELECT s.id, s.name FROM sites s
              JOIN user_sites us ON us.site_id = s.id
             WHERE us.user_id = $1 AND s.id = ANY($2::int[])`,
-          [req.user.id, requestedSiteIds]
+          [user.id, [...new Set([...sourceSiteIds, ...siteIds])]]
         );
-    if (accessResult.rows.length !== requestedSiteIds.length) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ message: 'One or more selected sites are unavailable to your account' });
+    const accessibleSiteIds = new Set(siteResult.rows.map((site) => site.id));
+    if (
+      siteIds.some((id) => !accessibleSiteIds.has(id))
+      || (!isAdmin && sourceSiteIds.some((id) => !accessibleSiteIds.has(id)))
+    ) {
+      const error = new Error('One or more selected sites or members are unavailable to your account');
+      error.statusCode = 403;
+      throw error;
     }
 
-    const siteNames = new Map(accessResult.rows.map((site) => [site.id, site.name]));
+    const siteNames = new Map(siteResult.rows.map((site) => [site.id, site.name]));
     const created = [];
     const existing = [];
 
-    for (const targetSiteId of requestedSiteIds) {
-      if (targetSiteId === source.site_id) {
-        existing.push({ site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: source.id });
-        continue;
-      }
+    for (const source of sources) {
+      for (const targetSiteId of siteIds) {
+        if (targetSiteId === source.site_id) {
+          existing.push({ source_member_id: source.id, site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: source.id });
+          continue;
+        }
 
-      const matchConditions = [];
-      const matchParams = [targetSiteId];
-      const addMatch = (column, value, normaliser = 'alphanumeric') => {
-        if (!value) return;
-        matchParams.push(String(value).trim());
-        const parameter = `$${matchParams.length}`;
-        if (normaliser === 'phone') {
-          matchConditions.push(`RIGHT(REGEXP_REPLACE(COALESCE(${column}, ''), '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(${parameter}, '\\D', '', 'g'), 10)`);
-        } else if (normaliser === 'aadhaar') {
-          matchConditions.push(`RIGHT(REGEXP_REPLACE(COALESCE(${column}, ''), '\\D', '', 'g'), 12) = RIGHT(REGEXP_REPLACE(${parameter}, '\\D', '', 'g'), 12)`);
-        } else {
-          matchConditions.push(`UPPER(REGEXP_REPLACE(COALESCE(${column}, ''), '[^A-Za-z0-9]', '', 'g')) = UPPER(REGEXP_REPLACE(${parameter}, '[^A-Za-z0-9]', '', 'g'))`);
+        const matchConditions = [];
+        const matchParams = [targetSiteId];
+        const addMatch = (column, value, normaliser = 'alphanumeric') => {
+          if (!value) return;
+          matchParams.push(String(value).trim());
+          const parameter = `$${matchParams.length}`;
+          if (normaliser === 'phone') {
+            matchConditions.push(`RIGHT(REGEXP_REPLACE(COALESCE(${column}, ''), '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(${parameter}, '\\D', '', 'g'), 10)`);
+          } else if (normaliser === 'aadhaar') {
+            matchConditions.push(`RIGHT(REGEXP_REPLACE(COALESCE(${column}, ''), '\\D', '', 'g'), 12) = RIGHT(REGEXP_REPLACE(${parameter}, '\\D', '', 'g'), 12)`);
+          } else {
+            matchConditions.push(`UPPER(REGEXP_REPLACE(COALESCE(${column}, ''), '[^A-Za-z0-9]', '', 'g')) = UPPER(REGEXP_REPLACE(${parameter}, '[^A-Za-z0-9]', '', 'g'))`);
+          }
+        };
+        addMatch('phone', source.phone, 'phone');
+        addMatch('aadhar_no', source.aadhar_no, 'aadhaar');
+        addMatch('pan_no', source.pan_no);
+        if (matchConditions.length === 0) {
+          matchParams.push(source.full_name);
+          let fallback = `UPPER(full_name) = UPPER($${matchParams.length})`;
+          if (source.father_name) {
+            matchParams.push(source.father_name);
+            fallback += ` AND UPPER(COALESCE(father_name, '')) = UPPER($${matchParams.length})`;
+          }
+          if (source.date_of_birth) {
+            matchParams.push(source.date_of_birth);
+            fallback += ` AND date_of_birth = $${matchParams.length}`;
+          }
+          matchConditions.push(`(${fallback})`);
         }
-      };
-      addMatch('phone', source.phone, 'phone');
-      addMatch('aadhar_no', source.aadhar_no, 'aadhaar');
-      addMatch('pan_no', source.pan_no);
-      if (matchConditions.length === 0) {
-        matchParams.push(source.full_name);
-        let fallback = `UPPER(full_name) = UPPER($${matchParams.length})`;
-        if (source.father_name) {
-          matchParams.push(source.father_name);
-          fallback += ` AND UPPER(COALESCE(father_name, '')) = UPPER($${matchParams.length})`;
+        const { rows: [matched] } = await client.query(
+          `SELECT id FROM members WHERE site_id = $1 AND (${matchConditions.join(' OR ')}) LIMIT 1`,
+          matchParams
+        );
+        if (matched) {
+          existing.push({ source_member_id: source.id, site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: matched.id });
+          continue;
         }
-        if (source.date_of_birth) {
-          matchParams.push(source.date_of_birth);
-          fallback += ` AND date_of_birth = $${matchParams.length}`;
-        }
-        matchConditions.push(`(${fallback})`);
-      }
-      const { rows: [matched] } = await client.query(
-        `SELECT id, full_name FROM members WHERE site_id = $1 AND (${matchConditions.join(' OR ')}) LIMIT 1`,
-        matchParams
-      );
-      if (matched) {
-        existing.push({ site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: matched.id });
-        continue;
-      }
 
-      const copy = { site_id: targetSiteId, created_by: req.user.id };
-      [...MEMBER_FIELDS, ...DOC_FIELDS].forEach((field) => {
-        if (source[field] !== undefined) copy[field] = source[field];
-      });
-      const cloned = await memberModel.create(copy, client);
-      created.push({ site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: cloned.id });
+        const copy = { site_id: targetSiteId, created_by: user.id };
+        [...MEMBER_FIELDS, ...DOC_FIELDS].forEach((field) => {
+          if (source[field] !== undefined) copy[field] = source[field];
+        });
+        const cloned = await memberModel.create(copy, client);
+        created.push({ source_member_id: source.id, site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: cloned.id });
+      }
     }
 
     await client.query('COMMIT');
-    res.status(created.length ? 201 : 200).json({
-      message: created.length
-        ? `Registered ${source.full_name} in ${created.length} site${created.length === 1 ? '' : 's'}`
-        : 'This member is already registered in the selected sites',
-      created,
-      existing,
-    });
+    return { created, existing };
   } catch (error) {
     await client.query('ROLLBACK');
-    if (error?.code === '23505') {
-      return res.status(409).json({ message: 'A matching member is already registered in one of the selected sites' });
-    }
     throw error;
   } finally {
     client.release();
   }
+};
+
+const respondWithRegistrations = async (res, memberIds, siteIds, user) => {
+  try {
+    const { created, existing } = await copyMemberToSites({ memberIds, siteIds, user });
+    const memberLabel = memberIds.length === 1 ? 'member' : 'members';
+    const message = created.length
+      ? `Registered ${created.length} ${created.length === 1 ? 'user' : 'users'} across the selected sites`
+      : `The selected ${memberLabel} are already registered in those sites`;
+    return res.status(created.length ? 201 : 200).json({ message, created, existing });
+  } catch (error) {
+    if (error?.code === '23505') {
+      return res.status(409).json({ message: 'A matching member is already registered in one of the selected sites' });
+    }
+    if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    throw error;
+  }
+};
+
+/** POST /members/:id/register-sites — copy one existing member into selected sites. */
+export const registerMemberInSites = asyncHandler(async (req, res) => {
+  const memberId = Number.parseInt(req.params.id, 10);
+  const siteIds = parsedIds(req.body.site_ids);
+  if (!Number.isInteger(memberId)) return res.status(400).json({ message: 'Invalid member id' });
+  if (siteIds.length === 0) return res.status(400).json({ message: 'Select at least one site' });
+  return respondWithRegistrations(res, [memberId], siteIds, req.user);
+});
+
+/** POST /members/bulk-register-sites — copy selected members into selected sites in one transaction. */
+export const registerMembersInSites = asyncHandler(async (req, res) => {
+  const memberIds = parsedIds(req.body.member_ids);
+  const siteIds = parsedIds(req.body.site_ids);
+  if (memberIds.length === 0) return res.status(400).json({ message: 'Select at least one member' });
+  if (siteIds.length === 0) return res.status(400).json({ message: 'Select at least one site' });
+  return respondWithRegistrations(res, memberIds, siteIds, req.user);
 });
 
 /** GET /members?site_id=X&type=CLIENT */

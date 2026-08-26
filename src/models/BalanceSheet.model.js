@@ -18,11 +18,14 @@ const SCOPED = `
       plot.id AS plot_id,
       plot.plot_no,
       plot.block AS plot_block,
+      approval_admin.name AS approval_assignee_name,
       dbo.position AS display_position,
       dgo.position AS global_display_position
     FROM ledger_entries le
     LEFT JOIN cash_flow_entries creator_cfe
       ON creator_cfe.id = NULLIF(SPLIT_PART(le.id, ':', 1), '')::int
+    LEFT JOIN users approval_admin
+      ON approval_admin.id = le.assigned_admin_id
     -- A Bank Plot Statement must identify the actual plot record, not just
     -- search visible narration. A direct source join keeps similarly named
     -- plots (e.g. 1 and 10, or resale records) from bleeding into each other.
@@ -30,7 +33,12 @@ const SCOPED = `
       ON le.source_key = 'plot_payments' AND pp.id = le.source_id
     LEFT JOIN plot_installment_payments pip
       ON le.source_key = 'plot_installment_payments' AND pip.id = le.source_id
-    LEFT JOIN plots plot ON plot.id = COALESCE(pp.plot_id, pip.plot_id)
+    LEFT JOIN plot_commission_payments pcp
+      ON le.source_key = 'plot_commission_payments' AND pcp.id = le.source_id
+    LEFT JOIN plot_commissions_v2 pcm
+      ON pcp.plot_commission_id = pcm.id
+    LEFT JOIN plots commission_plot ON commission_plot.id = pcm.plot_id
+    LEFT JOIN plots plot ON plot.id = COALESCE(pp.plot_id, pip.plot_id, commission_plot.id)
     LEFT JOIN daybook_entry_order dbo
       ON dbo.site_id = le.site_id
      AND dbo.entry_date = le.entry_date
@@ -141,6 +149,7 @@ const REPORT_QUERY = `${SCOPED}
           voucher_url, entity_name, linked_detail, created_by_name, created_at,
           bank_account_id, bank_account_name,
           plot_id, plot_no, plot_block,
+          assigned_admin_id, approval_assignee_name,
           display_position, global_display_position
         FROM period_entries
         ORDER BY entry_date DESC,

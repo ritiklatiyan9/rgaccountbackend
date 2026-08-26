@@ -207,6 +207,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       vc.created_by,
       vc.created_at,
       COALESCE(NULLIF(TRIM(cu.name), ''), cu.email) AS created_by_name,
+      aa.name AS assigned_admin_name,
       COALESCE(SUM(vp.amount), 0)::numeric(14,2) AS paid_amount,
       (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
       m.full_name AS vendor_member_name,
@@ -219,6 +220,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      LEFT JOIN users cu ON cu.id = vc.created_by
+     LEFT JOIN users aa ON aa.id = vc.assigned_admin_id
      LEFT JOIN (
        SELECT commitment_id,
               COUNT(*)::int AS item_count,
@@ -234,7 +236,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
        GROUP BY commitment_id
      ) inv ON inv.commitment_id = vc.id
      WHERE ${whereClause}
-     GROUP BY vc.id, m.full_name, cu.name, cu.email, inv.item_count, inv.inv_net_amount, inv.inv_total_paid, inv.inv_outstanding
+     GROUP BY vc.id, m.full_name, cu.name, cu.email, aa.name, inv.item_count, inv.inv_net_amount, inv.inv_total_paid, inv.inv_outstanding
      ORDER BY vc.created_at DESC, vc.id DESC
      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     [...values, limit, offset]
@@ -319,6 +321,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       vc.status,
       vc.assigned_admin_id,
       vc.created_at,
+      aa.name AS assigned_admin_name,
       COALESCE(SUM(vp.amount), 0)::numeric(14,2) AS paid_amount,
       (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
       m.full_name AS vendor_member_name
@@ -327,16 +330,18 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
        AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
        AND ($3::int IS NULL OR vp.created_by = $3::int)
      LEFT JOIN members m ON m.id = vc.vendor_member_id
+     LEFT JOIN users aa ON aa.id = vc.assigned_admin_id
      WHERE vc.id = $1 AND vc.site_id = $2
-     GROUP BY vc.id, m.full_name`,
+     GROUP BY vc.id, m.full_name, aa.name`,
     [commitmentId, siteId, entryVisibility.creatorId]
   );
 
   const paymentsPromise = pool.query(
     `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.customer_signature_url, vp.authority_signature_url, vp.status, vp.approved_by, vp.approved_at, vp.created_at, vp.assigned_admin_id, vp.created_by,
-            u.name AS created_by_name
+            u.name AS created_by_name, aa.name AS assigned_admin_name
      FROM vendor_payments vp
      LEFT JOIN users u ON u.id = vp.created_by
+     LEFT JOIN users aa ON aa.id = vp.assigned_admin_id
      WHERE vp.commitment_id = $1 AND vp.site_id = $2
        AND ($3::int IS NULL OR vp.created_by = $3::int)
      ORDER BY vp.payment_date DESC, vp.id DESC`,
