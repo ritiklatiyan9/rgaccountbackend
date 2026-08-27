@@ -4,6 +4,35 @@ import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, verifyReceiptToken, ReceiptType } from '../utils/receiptToken.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
+
+const GAZ_TO_SQ_METRE = 0.8364;
+
+const parseOptionalArea = (value) => {
+  if (value === '' || value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeFarmerArea = (gazValue, metreValue) => {
+  const gaz = parseOptionalArea(gazValue);
+  if (gaz !== null) {
+    return {
+      land_size_gaz: Number(gaz.toFixed(4)),
+      land_size_mtr: Number((gaz * GAZ_TO_SQ_METRE).toFixed(4)),
+    };
+  }
+
+  const metres = parseOptionalArea(metreValue);
+  if (metres !== null) {
+    return {
+      land_size_gaz: Number((metres / GAZ_TO_SQ_METRE).toFixed(4)),
+      land_size_mtr: Number(metres.toFixed(4)),
+    };
+  }
+
+  return { land_size_gaz: null, land_size_mtr: null };
+};
 
 // ──────────────────────────────────────────────────────────────
 // FARMER CRUD
@@ -17,7 +46,7 @@ export const createFarmer = asyncHandler(async (req, res) => {
   const {
     name, phone, address, total_amount, interest_rate, site_id, notes, status, member_id,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
-    land_size_bigha, land_rate, commission_percentage, commission_amount,
+    land_size_bigha, land_size_gaz, land_size_mtr, land_rate, commission_percentage, commission_amount,
   } = req.body;
 
   if (!name) {
@@ -31,6 +60,7 @@ export const createFarmer = asyncHandler(async (req, res) => {
   const totalAmt = parseFloat(total_amount) || 0;
   const cashAmt = mode === 'BANK' ? 0 : (mode === 'SPLIT' ? (parseFloat(cash_amount) || 0) : totalAmt);
   const bankAmt = mode === 'CASH' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmt);
+  const normalizedArea = normalizeFarmerArea(land_size_gaz, land_size_mtr);
 
   const farmerData = {
     name,
@@ -51,6 +81,7 @@ export const createFarmer = asyncHandler(async (req, res) => {
     bank_reference: bank_reference || null,
     bank_ifsc: bank_ifsc || null,
     land_size_bigha: land_size_bigha != null && land_size_bigha !== '' ? parseFloat(land_size_bigha) : null,
+    ...normalizedArea,
     land_rate: land_rate != null && land_rate !== '' ? parseFloat(land_rate) : null,
     commission_percentage: commission_percentage != null && commission_percentage !== '' ? parseFloat(commission_percentage) : null,
     commission_amount: commission_amount != null && commission_amount !== '' ? parseFloat(commission_amount) : null,
@@ -99,7 +130,7 @@ export const updateFarmer = asyncHandler(async (req, res) => {
   const {
     name, phone, address, total_amount, interest_rate, notes, status, member_id,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
-    land_size_bigha, land_rate, commission_percentage, commission_amount,
+    land_size_bigha, land_size_gaz, land_size_mtr, land_rate, commission_percentage, commission_amount,
   } = req.body;
 
   // Build the update set without an extra existence-check round-trip — the
@@ -121,6 +152,9 @@ export const updateFarmer = asyncHandler(async (req, res) => {
   if (bank_reference !== undefined) updateData.bank_reference = bank_reference;
   if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
   if (land_size_bigha !== undefined) updateData.land_size_bigha = land_size_bigha != null && land_size_bigha !== '' ? parseFloat(land_size_bigha) : null;
+  if (land_size_gaz !== undefined || land_size_mtr !== undefined) {
+    Object.assign(updateData, normalizeFarmerArea(land_size_gaz, land_size_mtr));
+  }
   if (land_rate !== undefined) updateData.land_rate = land_rate != null && land_rate !== '' ? parseFloat(land_rate) : null;
   if (commission_percentage !== undefined) updateData.commission_percentage = commission_percentage != null && commission_percentage !== '' ? parseFloat(commission_percentage) : null;
   if (commission_amount !== undefined) updateData.commission_amount = commission_amount != null && commission_amount !== '' ? parseFloat(commission_amount) : null;
@@ -128,6 +162,12 @@ export const updateFarmer = asyncHandler(async (req, res) => {
   if (Object.keys(updateData).length === 0) {
     return res.status(400).json({ message: 'Nothing to update' });
   }
+
+  updateData.status = 'pending';
+  updateData.approved_by = null;
+  updateData.approved_at = null;
+  const finalMode = String(payment_mode !== undefined ? payment_mode : '').trim().toUpperCase();
+  if (payment_mode !== undefined) updateData.cheque_status = finalMode === 'CHEQUE' ? 'PENDING' : null;
 
   const updated = await farmerModel.update(farmerId, updateData, pool);
   if (!updated) {
@@ -349,6 +389,7 @@ export const listPayments = asyncHandler(async (req, res) => {
      FROM farmers f
      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
        AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND LOWER(COALESCE(fp.status, 'approved')) = 'approved'
        AND ($2::int IS NULL OR fp.created_by = $2::int)
      LEFT JOIN sites s ON s.id = f.site_id
      WHERE f.id = $1
@@ -441,15 +482,35 @@ export const updatePayment = asyncHandler(async (req, res) => {
   const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
   const values = [...Object.values(updateData), paymentId, farmerId, entryVisibility.creatorId];
   const result = await pool.query(
-    `UPDATE farmer_payments
+    `WITH previous AS (
+       SELECT fp.status, fp.created_by, fp.amount, f.site_id
+         FROM farmer_payments fp
+         JOIN farmers f ON f.id = fp.farmer_id
+        WHERE fp.id = $${keys.length + 1} AND fp.farmer_id = $${keys.length + 2}
+     )
+     UPDATE farmer_payments fp
         SET ${setClause}
-      WHERE id = $${keys.length + 1} AND farmer_id = $${keys.length + 2}
-        AND ($${keys.length + 3}::int IS NULL OR created_by = $${keys.length + 3}::int)
-      RETURNING *`,
+      WHERE fp.id = $${keys.length + 1} AND fp.farmer_id = $${keys.length + 2}
+        AND ($${keys.length + 3}::int IS NULL OR fp.created_by = $${keys.length + 3}::int)
+      RETURNING fp.*,
+        (SELECT status FROM previous) AS previous_status,
+        (SELECT amount FROM previous) AS previous_amount,
+        (SELECT site_id FROM previous) AS previous_site_id`,
     values
   );
   if (!result.rows[0]) {
     return res.status(404).json({ message: 'Payment not found' });
+  }
+  if (result.rows[0].previous_status === 'approved') {
+    await reverseApprovedImprestDebit({
+      createdBy: result.rows[0].created_by,
+      amount: parseFloat(result.rows[0].previous_amount) || 0,
+      referenceId: result.rows[0].id,
+      sourceModule: 'farmer_payment',
+      remarks: `FARMER PAYMENT #${result.rows[0].id}: EDITED AND RETURNED TO APPROVAL`,
+      reversedBy: req.user.id,
+      siteId: result.rows[0].previous_site_id,
+    });
   }
   res.json({ payment: result.rows[0] });
 });

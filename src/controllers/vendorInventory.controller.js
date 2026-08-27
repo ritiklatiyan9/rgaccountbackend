@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
 
 // Vendor inventory module — transactions-only (no deliveries / stock-in/out).
 // An "order" is: item + qty_ordered * rate - discount = net value.
@@ -26,6 +27,8 @@ const RECEIVED_QTY_SQL = `COALESCE((
   SELECT SUM(mv.qty) FROM inventory_movements mv
    WHERE mv.ref_type = 'VENDOR_ORDER' AND mv.ref_id = o.id AND mv.movement_type = 'RECEIPT'
 ), 0)`;
+const POSTED_INVENTORY_PAYMENT_SQL = (alias) => `LOWER(COALESCE(${alias}.status, 'approved')) = 'approved'
+  AND UPPER(COALESCE(${alias}.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')`;
 
 export const listInventoryOrders = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
@@ -83,6 +86,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        COALESCE((
          SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
          WHERE vip.order_id = o.id
+           AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
            AND ($${creatorIdx}::int IS NULL OR vip.created_by = $${creatorIdx}::int)
        ), 0) AS total_paid,
        o.commitment_id,
@@ -90,6 +94,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        (${ORDER_VALUE_SQL} - COALESCE((
          SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
          WHERE vip.order_id = o.id
+           AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
            AND ($${creatorIdx}::int IS NULL OR vip.created_by = $${creatorIdx}::int)
        ), 0)) AS outstanding,
        ${RECEIVED_QTY_SQL} AS received_qty,
@@ -125,6 +130,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
+         AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
          AND ($2::int IS NULL OR vip.created_by = $2::int)
      ) vp ON true
      WHERE o.site_id = $1`,
@@ -176,7 +182,11 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
     [orderId, visibility.creatorId]
   );
 
-  const visiblePaid = paymentsRes.rows.reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
+  const visiblePaid = paymentsRes.rows.reduce((sum, payment) => {
+    const posted = String(payment.status || 'approved').toLowerCase() === 'approved'
+      && !['BOUNCED', 'RETURNED'].includes(String(payment.cheque_status || '').toUpperCase());
+    return sum + (posted ? (Number(payment.amount) || 0) : 0);
+  }, 0);
   order.total_paid = visiblePaid;
   order.outstanding = Math.max((Number(order.order_value) || 0) - visiblePaid, 0);
 
@@ -342,20 +352,23 @@ export const addInventoryPayment = asyncHandler(async (req, res) => {
   if (!orderCheck.rows[0]) return res.status(404).json({ message: 'Order not found' });
 
   const { payment_date, payment_mode, reference_no, note, voucher_url, assigned_admin_id } = req.body;
+  const normalizedMode = (payment_mode || 'cash').toLowerCase();
 
   const result = await pool.query(
     `INSERT INTO vendor_inventory_payments
-       (order_id, site_id, payment_date, amount, payment_mode, reference_no, cheque_no, note, voucher_url, created_by, assigned_admin_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       (order_id, site_id, payment_date, amount, payment_mode, reference_no, cheque_no,
+        cheque_status, note, voucher_url, created_by, assigned_admin_id, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending')
      RETURNING *`,
     [
       orderId,
       siteId,
       payment_date || new Date().toISOString().slice(0, 10),
       amount,
-      payment_mode || 'cash',
+      normalizedMode,
       (reference_no || '').trim() || null,
-      payment_mode === 'cheque' ? ((reference_no || '').trim() || null) : null,
+      normalizedMode === 'cheque' ? ((reference_no || '').trim() || null) : null,
+      normalizedMode === 'cheque' ? 'PENDING' : null,
       (note || '').trim() || null,
       (voucher_url || '').trim() || null,
       req.user.id,
@@ -372,6 +385,15 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   if (!Number.isInteger(paymentId)) return res.status(400).json({ message: 'Invalid payment id' });
   const visibility = await resolveEntryVisibility(req.user, 'vendors', null);
+  const existingRes = await pool.query(
+    `SELECT id, site_id, status, amount, created_by
+       FROM vendor_inventory_payments
+      WHERE id = $1 AND site_id = $2
+        AND ($3::int IS NULL OR created_by = $3::int)`,
+    [paymentId, siteId, visibility.creatorId]
+  );
+  const existing = existingRes.rows[0];
+  if (!existing) return res.status(404).json({ message: 'Payment not found' });
 
   const amount = parseFloat(req.body.amount);
   if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: 'amount must be > 0' });
@@ -389,7 +411,12 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
          cheque_no = $7,
          note = $8,
          voucher_url = $9,
-         assigned_admin_id = $10
+         assigned_admin_id = $10,
+         status = 'pending',
+         approved_by = NULL,
+         approved_at = NULL,
+         cheque_status = CASE WHEN $5 = 'cheque' THEN 'PENDING' ELSE NULL END,
+         updated_at = NOW()
      FROM vendor_inventory_orders o
      WHERE p.id = $1
        AND p.order_id = o.id
@@ -412,6 +439,17 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
   );
 
   if (!result.rows[0]) return res.status(404).json({ message: 'Payment not found' });
+  if (existing.status === 'approved') {
+    await reverseApprovedImprestDebit({
+      createdBy: existing.created_by,
+      amount: parseFloat(existing.amount) || 0,
+      referenceId: existing.id,
+      sourceModule: 'vendor_inventory_payment',
+      remarks: `VENDOR INVENTORY PAYMENT #${existing.id}: EDITED AND RETURNED TO APPROVAL`,
+      reversedBy: req.user.id,
+      siteId: existing.site_id,
+    });
+  }
   res.json({ payment: result.rows[0] });
 });
 
@@ -480,6 +518,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
        SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
+         AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
          AND ($2::int IS NULL OR vip.created_by = $2::int)
      ) vp ON true
      WHERE o.site_id = $1 AND o.status != 'cancelled'
@@ -519,6 +558,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
        SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
+         AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
          AND ($2::int IS NULL OR vip.created_by = $2::int)
      ) vp ON true
      WHERE o.site_id = $1 AND o.status != 'cancelled'`,

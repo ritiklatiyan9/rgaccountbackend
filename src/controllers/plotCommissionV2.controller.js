@@ -4,6 +4,20 @@ import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
+
+// Commission list totals intentionally accept only dates the accounting ledger
+// can represent. Validate the same range at the write boundary so a malformed
+// year cannot appear paid in the detail view but disappear from the register.
+const isValidLedgerDate = (value) => {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  if (year < 1900 || year > 2100) return false;
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day;
+};
 
 /**
  * Helper: Auto-update commission status based on payment completion.
@@ -236,8 +250,8 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
      LEFT JOIN members m ON pc.agent_id = m.id
      LEFT JOIN (
        SELECT plot_commission_id,
-              SUM(amount) FILTER (WHERE status = 'approved') AS total_paid,
-              SUM(amount) FILTER (WHERE status IN ('approved', 'pending')) AS total_paid_all,
+              SUM(amount) FILTER (WHERE LOWER(COALESCE(status, 'approved')) = 'approved') AS total_paid,
+              SUM(amount) FILTER (WHERE LOWER(COALESCE(status, 'approved')) = 'approved') AS total_paid_all,
               COUNT(*) AS payment_count
        FROM plot_commission_payments
        WHERE (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
@@ -344,9 +358,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     const totalPaid = scopedPayments
       .filter((payment) => payment.status === 'approved' && !['BOUNCED', 'RETURNED'].includes(payment.cheque_status))
       .reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
-    const totalPaidAll = scopedPayments
-      .filter((payment) => ['approved', 'pending'].includes(payment.status) && !['BOUNCED', 'RETURNED'].includes(payment.cheque_status))
-      .reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
+    const totalPaidAll = totalPaid;
     return ({
     commission_id: c.id,
     agent_id: c.agent_id,
@@ -419,6 +431,10 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   const numericAmount = parseFloat(amount);
   const mode = payment_mode || 'CASH';
   const chequeStatus = mode.toUpperCase() === 'CHEQUE' ? 'PENDING' : null;
+  const paymentDate = date || new Date().toISOString().split('T')[0];
+  if (!isValidLedgerDate(paymentDate)) {
+    return res.status(400).json({ message: 'Payment date must be a valid date between 1900 and 2100' });
+  }
 
   // Single CTE round-trip: lookup master + insert payment + compute
   // balance_after_payment from the live SUM, all atomically. The previous
@@ -456,7 +472,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
      SELECT row_to_json(ins) AS payment FROM ins`,
     [
       masterIdInt,                                                // $1
-      date || new Date().toISOString().split('T')[0],             // $2
+      paymentDate,                                                 // $2
       numericAmount,                                              // $3
       mode,                                                       // $4
       bank_name ? bank_name.trim() : null,                        // $5
@@ -504,7 +520,8 @@ export const getPlotCommissionAnalytics = asyncHandler(async (req, res) => {
   let bankPaid = 0;
   
   payments.forEach(p => {
-    if (p.status === 'approved') {
+    if (String(p.status || 'approved').toLowerCase() === 'approved'
+      && !['BOUNCED', 'RETURNED'].includes(String(p.cheque_status || '').toUpperCase())) {
       // Owner rule: only CASH belongs to the cash book. UPI, IMPS, RTGS,
       // NEFT, transfers, cheques, and any other explicit mode settle through
       // the bank book, matching ledger_bucket() and the Commission list.
@@ -519,7 +536,8 @@ export const getPlotCommissionAnalytics = asyncHandler(async (req, res) => {
     total_pending: parseFloat(master.balance),
     cash_paid: cashPaid,
     bank_paid: bankPaid,
-    payment_timeline: payments.filter(p => p.status === 'approved').map(p => ({
+    payment_timeline: payments.filter((p) => String(p.status || 'approved').toLowerCase() === 'approved'
+      && !['BOUNCED', 'RETURNED'].includes(String(p.cheque_status || '').toUpperCase())).map(p => ({
       date: p.date,
       amount: parseFloat(p.amount)
     })).reverse() // Chronological order
@@ -583,6 +601,10 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
 
   const { date, amount, payment_mode, bank_name, transaction_id, cheque_no, remarks, voucher_url, assigned_admin_id } = req.body;
 
+  if (date !== undefined && !isValidLedgerDate(date)) {
+    return res.status(400).json({ message: 'Payment date must be a valid date between 1900 and 2100' });
+  }
+
   // Build the SET-list dynamically. The cheque_status update needs the
   // existing row's value when payment_mode stays CHEQUE — handled below
   // with a CASE in SQL so we don't need a separate SELECT round-trip.
@@ -600,13 +622,13 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   if (voucher_url !== undefined) add('voucher_url', voucher_url || null);
   if (assigned_admin_id !== undefined) add('assigned_admin_id', assigned_admin_id ? parseInt(assigned_admin_id) : null);
 
-  // cheque_status follows payment_mode: if mode → CHEQUE keep/init PENDING,
+  // cheque_status follows payment_mode: edited cheques return to PENDING,
   // otherwise NULL. Handled via CASE so we don't need a SELECT round-trip.
   if (payment_mode !== undefined) {
     fields.push(
       `cheque_status = CASE
          WHEN UPPER($${fields.length + 1}::text) = 'CHEQUE'
-           THEN COALESCE(plot_commission_payments.cheque_status, 'PENDING')
+           THEN 'PENDING'
          ELSE NULL
        END`
     );
@@ -615,6 +637,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
 
   if (fields.length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
+  fields.push(`status = 'pending'`, `approved_by = NULL`, `approved_at = NULL`);
   fields.push(`updated_at = NOW()`);
   values.push(numId);
 
@@ -628,6 +651,18 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
 
   const updated = result.rows[0];
   if (!updated) return res.status(404).json({ message: 'Payment not found' });
+
+  if (existing.status === 'approved') {
+    await reverseApprovedImprestDebit({
+      createdBy: existing.created_by,
+      amount: parseFloat(existing.amount) || 0,
+      referenceId: existing.id,
+      sourceModule: 'plot_commission_payment',
+      remarks: `PLOT COMMISSION PAYMENT #${existing.id}: EDITED AND RETURNED TO APPROVAL`,
+      reversedBy: req.user.id,
+      siteId: existing.site_id,
+    });
+  }
 
   // Auto-update commission status in the background (response returns sooner).
   autoUpdateCommissionStatus(updated.plot_commission_id, pool).catch(() => {});

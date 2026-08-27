@@ -77,6 +77,15 @@ class PlotRegistryModel extends MasterModel {
               )
             )
           )
+          AND (
+            (prp.source_plot_payment_id IS NULL
+              AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
+              AND (prp.cheque_status IS NULL OR prp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+            OR
+            (prp.source_plot_payment_id IS NOT NULL
+              AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+          )
       ) agg ON TRUE
       LEFT JOIN LATERAL (
         SELECT COUNT(*)::int AS registry_doc_count
@@ -127,6 +136,15 @@ class PlotRegistryModel extends MasterModel {
                    AND UPPER(target.plot_no) = UPPER(pr.plot_no)
               )
             )
+          )
+          AND (
+            (prp.source_plot_payment_id IS NULL
+              AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
+              AND (prp.cheque_status IS NULL OR prp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+            OR
+            (prp.source_plot_payment_id IS NOT NULL
+              AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
           )
       ) agg ON TRUE
       WHERE pr.id = $1
@@ -227,6 +245,8 @@ class PlotRegistryPaymentModel extends MasterModel {
         WHERE pp.site_id = $1
           AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
           AND (pp.amount IS NOT NULL AND pp.amount > 0)
+          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         ORDER BY pp.date DESC, pp.created_at DESC
       `
       : `
@@ -249,6 +269,8 @@ class PlotRegistryPaymentModel extends MasterModel {
         WHERE pp.site_id = $1
           AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
           AND (pp.amount IS NOT NULL AND pp.amount > 0)
+          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         ORDER BY pp.date DESC, pp.created_at DESC
       `;
 
@@ -261,7 +283,7 @@ class PlotRegistryPaymentModel extends MasterModel {
       pool.query(`SELECT DISTINCT payment_mode AS val FROM plot_registry_payments WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val ASC`, [siteId]),
       pool.query(`
         SELECT
-          p.id, p.plot_no, p.buyer_name, p.plot_size,
+          p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_tag,
           p.circle_rate, p.to_receive_bank, p.registry_area
         FROM plots p
         WHERE p.site_id = $1

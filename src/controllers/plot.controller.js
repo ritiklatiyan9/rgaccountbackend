@@ -2,7 +2,6 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { plotModel, plotPaymentModel, PP_COUNTABLE } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
-import { notifyPlotPaymentRecorded } from '../utils/notify.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 /**
@@ -83,6 +82,8 @@ const checkFreeToSaleStatus = async (siteId) => {
             AND status NOT IN ('UNDER CANCELLATION', 'CANCELLED', 'RESALE', 'TRANSFERRED', 'COMPANY')
        )
          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+         AND LOWER(COALESCE(status, 'approved')) = 'approved'
+         AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
        GROUP BY plot_id
     `, [siteId]);
 
@@ -251,7 +252,7 @@ export const createPlot = asyncHandler(async (req, res) => {
   if (normalizedStatus === 'REGISTRY') {
     return res.status(409).json({
       code: 'PLOT_REGISTRY_WORKFLOW_REQUIRED',
-      message: 'A plot can reach Registry status only after NOC approval in the Plot Registry module',
+      message: 'A plot reaches Registry status when its NOC is generated from Plot Payments',
     });
   }
 
@@ -456,7 +457,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
     if (nextStatus !== currentStatus && (nextStatus === 'REGISTRY' || currentStatus === 'REGISTRY')) {
       return res.status(409).json({
         code: 'PLOT_REGISTRY_WORKFLOW_REQUIRED',
-        message: 'Registry status can only be changed through the Plot Registry NOC workflow',
+        message: 'Registry status is controlled by NOC generation in Plot Payments',
       });
     }
     updateData.status = nextStatus;
@@ -634,10 +635,6 @@ export const createPayment = asyncHandler(async (req, res) => {
   if (!payment) return res.status(404).json({ message: 'Plot not found' });
   res.status(201).json({ payment });
 
-  // Fire-and-forget: WhatsApp the plot owner with the payment details.
-  // Deliberately not awaited — a notification failure must never affect the
-  // recorded payment or the API response.
-  notifyPlotPaymentRecorded(payment).catch((e) => console.error('[notify] error', e?.message || e));
 });
 
 /** GET /plots/payments/list?plot_id=X — List payments for a plot */
@@ -774,6 +771,12 @@ export const updatePayment = asyncHandler(async (req, res) => {
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
+  updateData.status = 'pending';
+  updateData.approved_by = null;
+  updateData.approved_at = null;
+  const finalPaymentType = normalizedPaymentType || existing.payment_type;
+  updateData.cheque_status = finalPaymentType === 'CHEQUE' ? 'PENDING' : null;
+
   // Atomic UPDATE — saves a SELECT round-trip.
   const updated = await plotPaymentModel.updateWithPlotIdentity(paymentId, updateData, pool);
   if (!updated) return res.status(404).json({ message: 'Payment not found' });
@@ -822,4 +825,170 @@ export const getAutocomplete = asyncHandler(async (req, res) => {
   ]);
   data.members = membersResult.rows.map(r => ({ name: r.full_name, phone: r.phone || '', team: r.team || '', member_type: r.member_type || '' }));
   res.json(data);
+});
+
+/**
+ * Resolve the Registry record that owns a plot's NOC. The NOC workspace is
+ * launched from Plot Payments, while legal metadata remains attached to the
+ * Registry and the deed remains in the Registry document vault.
+ */
+export const getPlotNocRegistry = asyncHandler(async (req, res) => {
+  const plotId = parseInt(req.params.id);
+  if (!Number.isInteger(plotId)) return res.status(400).json({ message: 'Invalid plot ID' });
+
+  const result = await pool.query(
+    `WITH target_plot AS (
+       SELECT id, site_id, plot_no FROM plots WHERE id = $1
+     )
+     SELECT pr.id, pr.plot_id, pr.plot_no, pr.noc_generated_at, pr.noc_approved_at,
+            pr.registry_payment, pr.updated_at
+       FROM plot_registries pr
+       JOIN target_plot p ON (
+         pr.plot_id = p.id
+         OR (pr.plot_id IS NULL AND pr.site_id = p.site_id AND UPPER(pr.plot_no) = UPPER(p.plot_no))
+       )
+      ORDER BY CASE WHEN pr.plot_id = $1 THEN 0 ELSE 1 END, pr.updated_at DESC NULLS LAST, pr.id DESC
+      LIMIT 1`,
+    [plotId]
+  );
+
+  const registry = result.rows[0];
+  if (!registry) {
+    return res.status(404).json({
+      code: 'REGISTRY_REQUIRED',
+      message: 'Create the linked registry record before generating an NOC.',
+    });
+  }
+  res.json({ registry });
+});
+
+/**
+ * POST /plots/:id/noc-workspace
+ *
+ * NOC belongs in Plot Payments. Its established legal/document columns are
+ * retained in plot_registries, so the first NOC visit creates that backing
+ * draft automatically from the plot and its valid approved receipts. Users
+ * never have to create a separate Registry entry just to start an NOC.
+ */
+export const createPlotNocRegistry = asyncHandler(async (req, res) => {
+  const plotId = parseInt(req.params.id);
+  if (!Number.isInteger(plotId)) return res.status(400).json({ message: 'Invalid plot ID' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock the plot so two simultaneous NOC opens cannot create two drafts.
+    const plotResult = await client.query(
+      `SELECT id, site_id, plot_no, buyer_name, plot_size, plot_size_mtr,
+              circle_rate, to_receive_bank, assigned_admin_id, status
+         FROM plots
+        WHERE id = $1
+        FOR UPDATE`,
+      [plotId]
+    );
+    const plot = plotResult.rows[0];
+    if (!plot) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Plot not found' });
+    }
+
+    const existingResult = await client.query(
+      `SELECT id, plot_id, plot_no, noc_generated_at, noc_approved_at,
+              registry_payment, updated_at
+         FROM plot_registries
+        WHERE plot_id = $1
+           OR (plot_id IS NULL AND site_id = $2 AND UPPER(plot_no) = UPPER($3))
+        ORDER BY CASE WHEN plot_id = $1 THEN 0 ELSE 1 END, updated_at DESC NULLS LAST, id DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [plot.id, plot.site_id, plot.plot_no]
+    );
+    if (existingResult.rows[0]) {
+      await client.query('COMMIT');
+      return res.json({ registry: existingResult.rows[0], created: false });
+    }
+
+    const validPaymentsResult = await client.query(
+      `SELECT pp.id, pp.date, pp.amount, pp.payment_type, pp.payment_from,
+              pp.bank_details, pp.narration, pp.cheque_no, pp.cheque_status,
+              pp.status, pp.approved_by, pp.approved_at
+         FROM plot_payments pp
+        WHERE pp.plot_id = $1
+          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND pp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
+        ORDER BY pp.date ASC, pp.created_at ASC`,
+      [plot.id]
+    );
+    const validPayments = validPaymentsResult.rows;
+    const nocAmount = validPayments.reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
+
+    const registryResult = await client.query(
+      `INSERT INTO plot_registries (
+         site_id, plot_id, plot_no, customer_name, size_meter, size_sqyard,
+         circle_rate, created_entry_date, bank_amount, registry_payment,
+         notes, assigned_admin_id, created_by
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, $10, $11, $12)
+       RETURNING id, plot_id, plot_no, noc_generated_at, noc_approved_at,
+                 registry_payment, updated_at`,
+      [
+        plot.site_id,
+        plot.id,
+        String(plot.plot_no || '').trim().toUpperCase(),
+        plot.buyer_name ? String(plot.buyer_name).trim().toUpperCase() : null,
+        parseFloat(plot.plot_size_mtr) || null,
+        parseFloat(plot.plot_size) || null,
+        parseFloat(plot.circle_rate) || null,
+        parseFloat(plot.to_receive_bank) || 0,
+        nocAmount,
+        'NOC workspace draft created automatically from Plot Payments.',
+        plot.assigned_admin_id || null,
+        req.user.id,
+      ]
+    );
+    const registry = registryResult.rows[0];
+
+    // Preselect already-approved receipts in the NOC. This is only a mapping
+    // to the NOC draft; it never creates a second plot payment.
+    for (const payment of validPayments) {
+      await client.query(
+        `INSERT INTO plot_registry_payments (
+           registry_id, site_id, payment_date, amount, payment_mode,
+           tally_date, tally_amount, notes, source_plot_payment_id,
+           include_in_noc, cheque_no, cheque_status, status,
+           approved_by, approved_at, created_by
+         )
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11, $12, $13, $14, $15
+         WHERE NOT EXISTS (
+           SELECT 1 FROM plot_registry_payments WHERE source_plot_payment_id = $9
+         )`,
+        [
+          registry.id,
+          plot.site_id,
+          payment.date,
+          parseFloat(payment.amount) || 0,
+          String(payment.payment_from || payment.payment_type || 'CASH').trim().toUpperCase(),
+          payment.date,
+          parseFloat(payment.amount) || 0,
+          String(payment.narration || payment.bank_details || 'LINKED FROM PLOT PAYMENT').trim().toUpperCase(),
+          payment.id,
+          payment.cheque_no || null,
+          payment.cheque_status || null,
+          payment.status || 'approved',
+          payment.approved_by || null,
+          payment.approved_at || null,
+          req.user.id,
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.status(201).json({ registry, created: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 });

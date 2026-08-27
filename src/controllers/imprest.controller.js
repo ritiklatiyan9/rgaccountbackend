@@ -42,8 +42,8 @@ const lockImprestAccounts = async (db, ...userIds) => {
  * POST /imprest/allocations
  * Allocate imprest to another user.
  *  - Admin → Sub-admin: creates allocation + day-book credit (admin funds entering site imprest pool).
- *  - Sub-admin → Sub-admin (peer transfer): deducts from giver's ledger immediately so the funds are
- *    locked. Recipient confirms receipt to credit their ledger. No day-book entry is created —
+ *  - Sub-admin → Sub-admin (peer transfer): both balances remain unchanged while pending.
+ *    Recipient confirmation atomically debits the giver and credits the recipient. No day-book entry is created —
  *    the money never leaves the sub-admin pool, so site-level debit/credit is unaffected.
  */
 export const createAllocation = asyncHandler(async (req, res) => {
@@ -76,8 +76,8 @@ export const createAllocation = asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Escrowed handovers lock funds up-front so the giver can't double-spend
-    // while the recipient has not confirmed yet.
+    // Validate the balance now for quick feedback. The same check is repeated
+    // under account locks at confirmation, which is when money actually moves.
     if (escrowFromGiver) {
       await lockImprestAccounts(client, req.user.id);
       const giverBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, client);
@@ -106,18 +106,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
       ...(isSelfDraw ? { confirmed_at: new Date(), confirmation_remark: 'Self-draw approved by admin' } : {}),
     }, client);
 
-    if (escrowFromGiver) {
-      // Lock giver's funds — refunded on cancel, released on receipt confirmation.
-      await imprestLedgerModel.createEntry({
-        user_id: req.user.id,
-        type: 'TRANSFER_OUT',
-        reference_id: allocation.id,
-        amount: -allocationAmount,
-        remarks: `Handover pending receipt by recipient. ${remark || ''}`.trim(),
-        created_by: req.user.id,
-        site_id: parsedSiteId,
-      }, client);
-    } else {
+    if (!escrowFromGiver) {
       // Admin → sub-admin: record the admin-to-site fund movement in Day Book.
       const subAdminResult = await client.query('SELECT name FROM users WHERE id = $1', [parseInt(sub_admin_id)]);
       const subAdminName = subAdminResult.rows[0]?.name || 'Sub-Admin';
@@ -134,7 +123,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
         category: 'IMPREST',
         from_entity: 'ADMIN',
         to_entity: subAdminName.toUpperCase(),
-        status: 'approved',
+        status: isSelfDraw ? 'approved' : 'pending',
         created_by: req.user.id,
         imprest_allocation_id: allocation.id,
       }, client);
@@ -162,7 +151,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
       message: isSelfDraw
         ? 'Imprest drawn from site balance.'
         : escrowFromGiver
-          ? 'Sent. The amount is held from your balance until the recipient accepts.'
+          ? 'Sent for acceptance. Both balances stay unchanged until the recipient accepts.'
           : 'Imprest allocated successfully. Pending receipt confirmation.',
     });
   } catch (err) {
@@ -249,11 +238,16 @@ export const cancelAllocation = asyncHandler(async (req, res) => {
       return res.status(409).json({ message: 'Allocation could not be cancelled' });
     }
 
-    // Escrow refund: return the locked funds to the giver's ledger. Legacy rows
-    // predate from_own_float, so fall back to the old role rule for those.
-    const giverResult = await client.query('SELECT role FROM users WHERE id = $1', [existing.admin_id]);
-    const giverRole = giverResult.rows[0]?.role;
-    if (existing.from_own_float === true || giverRole === 'sub_admin') {
+    // New pending handovers never change either balance. Only legacy rows that
+    // already contain an escrow debit need a compensating refund.
+    const escrow = await client.query(
+      `SELECT id FROM imprest_ledger
+        WHERE user_id = $1 AND site_id = $2 AND reference_id = $3
+          AND type = 'TRANSFER_OUT' AND amount < 0
+        LIMIT 1`,
+      [existing.admin_id, existing.site_id, allocation.id]
+    );
+    if (escrow.rows[0]) {
       await lockImprestAccounts(client, existing.admin_id);
       await imprestLedgerModel.createEntry({
         user_id: existing.admin_id,
@@ -265,6 +259,13 @@ export const cancelAllocation = asyncHandler(async (req, res) => {
         site_id: existing.site_id,
       }, client);
     }
+
+    await client.query(
+      `UPDATE day_book
+          SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
+        WHERE imprest_allocation_id = $1 AND status = 'pending'`,
+      [allocation.id, req.user.id]
+    );
 
     await client.query('COMMIT');
     res.json({ allocation, message: 'Allocation cancelled' });
@@ -322,7 +323,44 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'Allocation already confirmed or cancelled' });
     }
 
-    // 2. Confirm the allocation
+    const giverResult = await client.query('SELECT name, role FROM users WHERE id = $1', [existing.admin_id]);
+    const giverName = giverResult.rows[0]?.name || 'Giver';
+    const fundedByGiverFloat = existing.from_own_float === true || giverResult.rows[0]?.role === 'sub_admin';
+
+    if (fundedByGiverFloat) {
+      await lockImprestAccounts(client, existing.admin_id, req.user.id);
+      const legacyEscrow = await client.query(
+        `SELECT id FROM imprest_ledger
+          WHERE user_id = $1 AND site_id = $2 AND reference_id = $3
+            AND type = 'TRANSFER_OUT' AND amount < 0
+          LIMIT 1`,
+        [existing.admin_id, existing.site_id, existing.id]
+      );
+      if (!legacyEscrow.rows[0]) {
+        const giverBalance = await imprestLedgerModel.getBalance(existing.admin_id, existing.site_id, client);
+        const amount = parseFloat(existing.amount);
+        if (giverBalance < amount) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            message: `The giver no longer has enough imprest. Available ₹${giverBalance}, needed ₹${amount}`,
+            balance: giverBalance,
+          });
+        }
+        await imprestLedgerModel.createEntry({
+          user_id: existing.admin_id,
+          type: 'TRANSFER_OUT',
+          reference_id: existing.id,
+          amount: -amount,
+          remarks: `Imprest accepted by recipient. ${confirmation_remark.trim()}`,
+          created_by: req.user.id,
+          site_id: existing.site_id,
+        }, client);
+      }
+    } else {
+      await lockImprestAccounts(client, req.user.id);
+    }
+
+    // 2. Confirm only after the debit can be posted successfully.
     const allocation = await imprestAllocationModel.confirmReceipt(
       parseInt(id),
       confirmation_remark.trim(),
@@ -336,13 +374,6 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
     // 3. This is the first point where the recipient's balance may change.
     // Creating a pending allocation never writes to their ledger; confirmation
     // atomically adds the positive credit to the exact recipient account.
-    const giverResult = await client.query('SELECT name, role FROM users WHERE id = $1', [existing.admin_id]);
-    const giverName = giverResult.rows[0]?.name || 'Giver';
-    // Funded from the giver's float => it's a transfer between people. Funded from
-    // the site balance => it's a fresh allocation. Legacy rows fall back to role.
-    const fundedByGiverFloat = existing.from_own_float === true || giverResult.rows[0]?.role === 'sub_admin';
-
-    await lockImprestAccounts(client, req.user.id);
     await imprestLedgerModel.createEntry({
       user_id: req.user.id,
       type: fundedByGiverFloat ? 'TRANSFER_IN' : 'ALLOCATION',
@@ -352,6 +383,13 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
       created_by: req.user.id,
       site_id: existing.site_id,
     }, client);
+
+    await client.query(
+      `UPDATE day_book
+          SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW()
+        WHERE imprest_allocation_id = $1 AND status = 'pending'`,
+      [allocation.id, req.user.id]
+    );
 
     await client.query('COMMIT');
 
@@ -630,7 +668,8 @@ export const getAllBalances = asyncHandler(async (req, res) => {
 
 /**
  * POST /imprest/expense
- * Sub-admin creates an expense deducted from imprest
+ * Sub-admin submits an imprest expense. The expense remains visible as pending
+ * and does not change the imprest balance until an administrator approves it.
  */
 export const createExpenseFromImprest = asyncHandler(async (req, res) => {
   const {
@@ -679,56 +718,21 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
       branch: branch ? branch.trim().toUpperCase() : null,
       category: category ? category.trim().toUpperCase() : null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+      imprest_proof_key: proofKey,
       status: 'pending',
       created_by: req.user.id,
     };
 
     const expense = await expenseModel.create(expenseData, client);
 
-    // 3. Deduct from imprest ledger
-    await imprestLedgerModel.createEntry({
-      user_id: req.user.id,
-      type: 'EXPENSE',
-      reference_id: expense.id,
-      amount: -expenseAmount, // negative = deduction
-      remarks: `Expense #${expense.id}: ${remark || 'Expense from imprest'}`.toUpperCase(),
-      created_by: req.user.id,
-      site_id: parsedSiteId,
-      proof_key: proofKey,
-    }, client);
-
-    // 4. Create Day Book entry (DEBIT from imprest)
-    const dayBookData = {
-      site_id: parsedSiteId,
-      date: expenseDate,
-      particular: `EXPENSE FROM IMPREST: ${remark || to_entity || 'GENERAL'}`.toUpperCase(),
-      // ponytail: entry_type IMPREST keeps this memo row out of ledger_entries —
-      // the expenses row alone reaches the ledger, so the spend is counted once.
-      entry_type: 'IMPREST',
-      debit: expenseAmount,
-      credit: parseFloat(credit) || 0,
-      remarks: remark ? remark.trim().toUpperCase() : null,
-      payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : null,
-      category: category ? category.trim().toUpperCase() : null,
-      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-      from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
-      to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
-      account_no: account_no ? account_no.trim().toUpperCase() : null,
-      branch: branch ? branch.trim().toUpperCase() : null,
-      status: 'approved',
-      created_by: req.user.id,
-    };
-
-    await dayBookModel.create(dayBookData, client);
-
     await client.query('COMMIT');
 
-    const newBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, pool);
+    const unchangedBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, pool);
 
     res.status(201).json({
       expense,
-      balance: newBalance,
-      message: 'Expense created and imprest deducted',
+      balance: unchangedBalance,
+      message: 'Expense submitted for approval. Imprest balance is unchanged until approval.',
     });
   } catch (err) {
     await client.query('ROLLBACK');

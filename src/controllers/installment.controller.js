@@ -2,7 +2,6 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { installmentModel, installmentPaymentModel } from '../models/Installment.model.js';
 import { plotModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
-import { notifyPlotPaymentRecorded } from '../utils/notify.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
 let hasGracePeriodColumnCache = null;
@@ -91,6 +90,7 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
      FROM plot_payments WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
+       AND LOWER(COALESCE(status, 'approved')) = 'approved'
        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
     [plotIds, creatorId]
   );
@@ -101,7 +101,9 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
   const lastPayRes = await pool.query(
     `SELECT plot_id, MAX(date) AS last_payment_date
      FROM plot_payments WHERE plot_id = ANY($1)
-       AND ($2::int IS NULL OR created_by = $2::int) GROUP BY plot_id`,
+       AND ($2::int IS NULL OR created_by = $2::int)
+       AND LOWER(COALESCE(status, 'approved')) = 'approved'
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
     [plotIds, creatorId]
   );
   const lastPayMap = {};
@@ -111,7 +113,9 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
   const allPayRes = await pool.query(
     `SELECT plot_id, date, amount FROM plot_payments
      WHERE plot_id = ANY($1)
-       AND ($2::int IS NULL OR created_by = $2::int) ORDER BY plot_id, date ASC`,
+       AND ($2::int IS NULL OR created_by = $2::int)
+       AND LOWER(COALESCE(status, 'approved')) = 'approved'
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) ORDER BY plot_id, date ASC`,
     [plotIds, creatorId]
   );
   const paymentsByPlot = {};
@@ -449,6 +453,7 @@ export const listInstallments = asyncHandler(async (req, res) => {
     `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments
       WHERE plot_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
+        AND LOWER(COALESCE(status, 'approved')) = 'approved'
         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
     [parseInt(id), visibility.creatorId]
   );
@@ -602,7 +607,7 @@ export const deleteInstallment = asyncHandler(async (req, res) => {
 /** POST /plots/:id/installment-payment — Record a payment, auto-apply to earliest unpaid */
 export const recordInstallmentPayment = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { amount, payment_date, payment_mode, reference, notes, installment_id } = req.body;
+  const { amount, payment_date, payment_mode, reference, notes, installment_id, assigned_admin_id } = req.body;
 
   if (!amount || parseFloat(amount) <= 0)
     return res.status(400).json({ message: 'A positive payment amount is required' });
@@ -632,11 +637,14 @@ export const recordInstallmentPayment = asyncHandler(async (req, res) => {
       payment_mode: payment_mode || null,
       reference: reference || null,
       notes: notes || null,
+      status: 'pending',
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+      cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+      cheque_status: String(payment_mode || '').trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
       created_by: req.user.id,
     }, pool);
     payments.push(paymentRow);
 
-    await installmentModel.update(inst.id, { paid_amount: parseFloat(inst.paid_amount) + canPay }, pool);
     remaining -= canPay;
   } else {
     // Auto-apply to earliest unpaid installments
@@ -655,17 +663,20 @@ export const recordInstallmentPayment = asyncHandler(async (req, res) => {
         payment_mode: payment_mode || null,
         reference: reference || null,
         notes: notes || null,
+        status: 'pending',
+        assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+        cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+        cheque_status: String(payment_mode || '').trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
         created_by: req.user.id,
       }, pool);
       payments.push(paymentRow);
 
-      await installmentModel.update(inst.id, { paid_amount: parseFloat(inst.paid_amount) + canPay }, pool);
       remaining -= canPay;
     }
   }
 
-  // Refresh statuses after payment
-  await installmentModel.refreshStatuses(parseInt(id), pool);
+  // Pending receipts remain visible but do not change paid_amount/status. The
+  // approval controller reconciles the installment when the receipt is posted.
 
   const applied = parseFloat(amount) - remaining;
   res.status(201).json({
@@ -674,17 +685,6 @@ export const recordInstallmentPayment = asyncHandler(async (req, res) => {
     unapplied: remaining,
   });
 
-  // Fire-and-forget: WhatsApp the plot owner with the installment payment details.
-  if (applied > 0) {
-    notifyPlotPaymentRecorded({
-      id: payments?.[0]?.id,
-      plot_id: parseInt(id),
-      amount: applied,
-      payment_from: payment_mode || 'INSTALLMENT',
-      date: payment_date || new Date().toISOString().split('T')[0],
-      buyer_name: plot.buyer_name,
-    }).catch((e) => console.error('[notify] error', e?.message || e));
-  }
 });
 
 /** GET /plots/:id/installment-payments — All payments for a plot's installments */
@@ -757,10 +757,12 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
      FROM (
        SELECT pp.plot_id, pp.amount FROM plot_payments pp
         WHERE pp.plot_id = ANY($1) AND ($2::int IS NULL OR pp.created_by = $2::int)
+          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
           AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
        UNION ALL
        SELECT pip.plot_id, pip.amount FROM plot_installment_payments pip
         WHERE pip.plot_id = ANY($1) AND ($2::int IS NULL OR pip.created_by = $2::int)
+          AND LOWER(COALESCE(pip.status, 'approved')) = 'approved'
           AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      ) u
      GROUP BY plot_id`,
@@ -776,12 +778,14 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
        SELECT pp.date AS d, pp.amount FROM plot_payments pp
         WHERE pp.site_id = $1 AND pp.date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
           AND ($2::int IS NULL OR pp.created_by = $2::int)
+          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
           AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
        UNION ALL
        SELECT pip.payment_date AS d, pip.amount FROM plot_installment_payments pip
         JOIN plots p ON p.id = pip.plot_id
         WHERE p.site_id = $1 AND pip.payment_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
           AND ($2::int IS NULL OR pip.created_by = $2::int)
+          AND LOWER(COALESCE(pip.status, 'approved')) = 'approved'
           AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      ) u
      GROUP BY 1 ORDER BY 1`,
@@ -1042,11 +1046,13 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
         SELECT plot_id, amount FROM plot_payments
          WHERE plot_id = ANY($1)
            AND ($2::int IS NULL OR created_by = $2::int)
+           AND LOWER(COALESCE(status, 'approved')) = 'approved'
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         UNION ALL
         SELECT plot_id, amount FROM plot_installment_payments
          WHERE plot_id = ANY($1)
            AND ($2::int IS NULL OR created_by = $2::int)
+           AND LOWER(COALESCE(status, 'approved')) = 'approved'
            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      ) combined
      GROUP BY plot_id`,
@@ -1061,6 +1067,7 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
      FROM plot_installment_payments
      WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
+       AND LOWER(COALESCE(status, 'approved')) = 'approved'
        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      GROUP BY installment_id`,
     [plotIds, creatorId]
@@ -1073,9 +1080,13 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     `SELECT plot_id, MAX(d) AS last_payment_date FROM (
         SELECT plot_id, date AS d FROM plot_payments WHERE plot_id = ANY($1)
           AND ($2::int IS NULL OR created_by = $2::int)
+          AND LOWER(COALESCE(status, 'approved')) = 'approved'
+          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         UNION ALL
         SELECT plot_id, payment_date AS d FROM plot_installment_payments WHERE plot_id = ANY($1)
           AND ($2::int IS NULL OR created_by = $2::int)
+          AND LOWER(COALESCE(status, 'approved')) = 'approved'
+          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      ) combined
      GROUP BY plot_id`,
     [plotIds, creatorId]
@@ -1087,9 +1098,13 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   const allPayRes = await pool.query(
     `SELECT plot_id, date, amount FROM plot_payments WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
+       AND LOWER(COALESCE(status, 'approved')) = 'approved'
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      UNION ALL
      SELECT plot_id, payment_date AS date, amount FROM plot_installment_payments WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
+       AND LOWER(COALESCE(status, 'approved')) = 'approved'
+       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      ORDER BY plot_id, date ASC`,
     [plotIds, creatorId]
   );

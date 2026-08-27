@@ -184,7 +184,9 @@ class PlotPaymentModel extends MasterModel {
       FROM plot_payments
       WHERE plot_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
+        AND LOWER(COALESCE(status, 'approved')) = 'approved'
         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
       GROUP BY COALESCE(NULLIF(payment_from, ''), 'OTHER')
       ORDER BY total_amount DESC
     `;
@@ -202,7 +204,9 @@ class PlotPaymentModel extends MasterModel {
       FROM plot_payments
       WHERE plot_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
+        AND LOWER(COALESCE(status, 'approved')) = 'approved'
         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
       GROUP BY COALESCE(NULLIF(received_by, ''), 'UNKNOWN')
       ORDER BY total_amount DESC
     `;

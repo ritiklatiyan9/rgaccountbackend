@@ -454,6 +454,16 @@ export const updateEntry = asyncHandler(async (req, res) => {
     updateData.to_name = null;
   }
 
+  if (Object.keys(updateData).length === 0) {
+    return res.status(400).json({ message: 'Nothing to update' });
+  }
+  updateData.status = 'pending';
+  updateData.approved_by = null;
+  updateData.approved_at = null;
+  if (cash_type !== undefined) {
+    updateData.cheque_status = String(cash_type).toLowerCase() === 'cheque' ? 'PENDING' : null;
+  }
+
   const updated = await cashFlowEntryModel.update(entryId, updateData, pool);
   clearCacheByPrefixes(['dashboard:']).catch(() => {});
   res.json({ entry: updated });

@@ -17,7 +17,7 @@ import {
 } from '../controllers/registryDocument.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
-import requirePermission from '../middlewares/permission.middleware.js';
+import requirePermission, { requireAnyPermission } from '../middlewares/permission.middleware.js';
 import requireRegistrySiteAccess from '../middlewares/registrySiteAccess.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
@@ -27,7 +27,7 @@ const registryReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'registries
 // that survives registry/payment writes.
 const registryMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'registries-meta' });
 // Anchored prefix so 'registries-meta|...' isn't busted by writes.
-const bustRegistryCache = invalidateCacheOnSuccess(['registries|']);
+const bustRegistryCache = invalidateCacheOnSuccess(['registries|', 'registries-meta|']);
 
 const accessByQuerySite = requireRegistrySiteAccess({ entity: 'site', source: 'query', key: 'site_id' });
 const accessByBodySite = requireRegistrySiteAccess({ entity: 'site', source: 'body', key: 'site_id' });
@@ -98,9 +98,9 @@ router.get('/:id/handovers', requireRole('admin', 'sub_admin'), requirePermissio
 router.post('/:id/handovers', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'write'), accessByParamRegistry, bustRegistryCache, createRegistryHandover);
 
 // ── NOC endpoints ──
-router.get('/:id/noc', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), accessByParamRegistry, registryReadCache, getRegistryNoc);
-router.put('/:id/noc', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'update'), accessByParamRegistry, bustRegistryCache, saveRegistryNoc);
-router.put('/:id/noc/approve', requireRole('admin'), requirePermission('plot_registry', 'update'), accessByParamRegistry, bustRegistryCache, approveRegistryNoc);
+router.get('/:id/noc', requireRole('admin', 'sub_admin'), requireAnyPermission(['plot_registry', 'plot_payments'], 'read'), accessByParamRegistry, registryReadCache, getRegistryNoc);
+router.put('/:id/noc', requireRole('admin', 'sub_admin'), requireAnyPermission(['plot_registry', 'plot_payments'], 'update'), accessByParamRegistry, bustRegistryCache, saveRegistryNoc);
+router.put('/:id/noc/approve', requireRole('admin'), requireAnyPermission(['plot_registry', 'plot_payments'], 'update'), accessByParamRegistry, bustRegistryCache, approveRegistryNoc);
 
 // ── Registry endpoints ──
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), accessByQuerySite, registryReadCache, listRegistries);                                           // ?site_id=X

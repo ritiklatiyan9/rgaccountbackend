@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   createPlot, listPlots, searchPlots, getPlot, updatePlot, deletePlot,
   createPayment, listPayments, getPayment, updatePayment, deletePayment,
-  getAutocomplete,
+  getAutocomplete, getPlotNocRegistry, createPlotNocRegistry,
 } from '../controllers/plot.controller.js';
 import {
   updateInstallmentSettings, listInstallments, createInstallments,
@@ -47,6 +47,10 @@ router.get('/payment-analytics', requireRole('admin', 'sub_admin'), requirePermi
 // SMS reminders — must stay above '/:id' so they aren't swallowed by the param route.
 router.get('/payment-reminders/sms-log', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, paymentReminderSmsLog);                     // ?site_id=X
 router.post('/payment-reminders/sms', requireRole('admin'), requirePermission('plot_payments', 'write'), accessByBodySite, sendPaymentReminderSms);                                    // manual send
+// NOC is prepared from the Plot Payments workspace, while its legal record
+// remains attached to the linked registry.
+router.get('/:id/registry-noc', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, getPlotNocRegistry);
+router.post('/:id/noc-workspace', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, createPlotNocRegistry);
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, plotReadCache, getPlot);
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByBodySite, bustPlotCache, createPlot);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, updatePlot);

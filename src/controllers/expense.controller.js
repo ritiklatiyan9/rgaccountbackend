@@ -1,10 +1,13 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { expenseModel } from '../models/Expense.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
-import { imprestLedgerModel } from '../models/Imprest.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import {
+  postApprovedImprestDebit,
+  reverseApprovedImprestDebit,
+} from '../services/imprestPosting.service.js';
 
 // ══════════════════════════════════════════════════
 //  EXPENSE ENDPOINTS
@@ -15,23 +18,29 @@ import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisib
  * entry is APPROVED. Looks up the creator's role and only deducts if
  * the creator is a sub_admin and the debit amount is > 0.
  */
-async function deductImprestOnApproval(createdByUserId, debitAmount, referenceId, remarks, approvedByUserId) {
+async function deductImprestOnApproval(
+  createdByUserId,
+  debitAmount,
+  referenceId,
+  remarks,
+  approvedByUserId,
+  sourceModule,
+  siteId,
+  proofKey
+) {
   if (!debitAmount || debitAmount <= 0) return;
 
   try {
-    // Check if the creator is a sub_admin
-    const userResult = await pool.query('SELECT role FROM users WHERE id = $1', [createdByUserId]);
-    const user = userResult.rows[0];
-    if (!user || user.role !== 'sub_admin') return;
-
-    await imprestLedgerModel.createEntry({
-      user_id: createdByUserId,
-      type: 'EXPENSE',
-      reference_id: referenceId,
-      amount: -debitAmount,
-      remarks: remarks.toUpperCase(),
-      created_by: approvedByUserId,
-    }, pool);
+    await postApprovedImprestDebit({
+      createdBy: createdByUserId,
+      amount: debitAmount,
+      referenceId,
+      sourceModule,
+      remarks,
+      approvedBy: approvedByUserId,
+      siteId,
+      proofKey,
+    });
   } catch (err) {
     console.error('[Imprest] Failed to deduct on approval for ref', referenceId, err.message);
   }
@@ -41,30 +50,27 @@ async function deductImprestOnApproval(createdByUserId, debitAmount, referenceId
  * Helper: Reverse the imprest deduction when a previously-approved expense
  * is REJECTED/DECLINED. Adds back the deducted amount to restore balance.
  */
-async function reverseImprestOnRejection(createdByUserId, debitAmount, referenceId, remarks, rejectedByUserId) {
+async function reverseImprestOnRejection(
+  createdByUserId,
+  debitAmount,
+  referenceId,
+  remarks,
+  rejectedByUserId,
+  sourceModule,
+  siteId
+) {
   if (!debitAmount || debitAmount <= 0) return;
 
   try {
-    // Only reverse for sub_admin users
-    const userResult = await pool.query('SELECT role FROM users WHERE id = $1', [createdByUserId]);
-    const user = userResult.rows[0];
-    if (!user || user.role !== 'sub_admin') return;
-
-    // Check that an EXPENSE deduction actually exists for this reference
-    const existing = await pool.query(
-      `SELECT id FROM imprest_ledger WHERE user_id = $1 AND reference_id = $2 AND type = 'EXPENSE' AND amount < 0 LIMIT 1`,
-      [createdByUserId, referenceId]
-    );
-    if (existing.rows.length === 0) return; // No deduction was made, nothing to reverse
-
-    await imprestLedgerModel.createEntry({
-      user_id: createdByUserId,
-      type: 'ADJUSTMENT',
-      reference_id: referenceId,
-      amount: debitAmount, // positive = restore balance
-      remarks: `REVERSED (REJECTED): ${remarks}`.toUpperCase(),
-      created_by: rejectedByUserId,
-    }, pool);
+    await reverseApprovedImprestDebit({
+      createdBy: createdByUserId,
+      amount: debitAmount,
+      referenceId,
+      sourceModule,
+      remarks,
+      reversedBy: rejectedByUserId,
+      siteId,
+    });
   } catch (err) {
     console.error('[Imprest] Failed to reverse on rejection for ref', referenceId, err.message);
   }
@@ -89,6 +95,22 @@ const voucherColumns = (voucher_urls, voucher_url) =>
 
 const billColumns = (bill_urls, bill_url) =>
   fileColumns('bill_urls', 'bill_url', bill_urls, bill_url);
+
+const syncLinkedVendorInventoryPayments = async (payments, status, approvedBy) => {
+  const rows = Array.isArray(payments) ? payments : [payments];
+  const ids = rows.map((row) => Number(row?.id)).filter(Number.isInteger);
+  if (ids.length === 0) return;
+  await pool.query(
+    `UPDATE vendor_inventory_payments vip
+        SET status = $2, approved_by = $3, approved_at = NOW(),
+            cheque_status = vp.cheque_status, cheque_no = vp.cheque_no,
+            updated_at = NOW()
+       FROM vendor_payments vp
+      WHERE vip.source_vendor_payment_id = vp.id
+        AND vp.id = ANY($1::int[])`,
+    [ids, status, approvedBy]
+  );
+};
 
 /**
  * POST /expenses
@@ -280,8 +302,33 @@ export const updateExpense = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Nothing to update' });
   }
 
+  const postingFields = new Set([
+    'date', 'from_entity', 'to_entity', 'payment_mode', 'debit', 'credit',
+    'remark', 'account_no', 'branch', 'category',
+  ]);
+  const changesPostingData = Object.keys(data).some((key) => postingFields.has(key));
+  if (changesPostingData) {
+    if (!['waiting', 'returned'].includes(data.status)) data.status = 'pending';
+    data.approved_by = null;
+    data.approved_at = null;
+    if (payment_mode !== undefined) {
+      data.cheque_status = String(payment_mode).trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null;
+    }
+  }
+
   const updated = await expenseModel.update(expenseId, data, pool);
   if (!updated) return res.status(404).json({ message: 'Expense not found' });
+  if (changesPostingData && existing.status === 'approved') {
+    await reverseApprovedImprestDebit({
+      createdBy: existing.created_by,
+      amount: parseFloat(existing.debit) || 0,
+      referenceId: existing.id,
+      sourceModule: 'expense',
+      remarks: `EXPENSE #${existing.id}: EDITED AND RETURNED TO APPROVAL`,
+      reversedBy: req.user.id,
+      siteId: existing.site_id,
+    });
+  }
   res.json({ expense: updated });
 });
 
@@ -367,7 +414,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
   let vendorPayments = [];
 
   // Use the new findByStatus method for flexibility
-  [expensesList, daybookList] = await Promise.all([
+  [expensesList, daybookList, vendorPayments] = await Promise.all([
     expenseModel.findByStatus(
       status,
       site_id ? parseInt(site_id) : null,
@@ -534,6 +581,7 @@ export const approveExpense = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'Vendor payment is already approved' });
     }
     const approvedPayment = result.rows[0];
+    await syncLinkedVendorInventoryPayments(approvedPayment, 'approved', req.user.id);
 
     // Imprest deduction in BACKGROUND — caller doesn't need to wait.
     deductImprestOnApproval(
@@ -541,7 +589,9 @@ export const approveExpense = asyncHandler(async (req, res) => {
       parseFloat(approvedPayment.amount) || 0,
       approvedPayment.id,
       `VENDOR PAYMENT #${approvedPayment.id}`,
-      req.user.id
+      req.user.id,
+      'vendor_payment',
+      approvedPayment.site_id
     ).catch(() => {});
 
     return res.json({ expense: approvedPayment, message: 'Vendor payment approved successfully' });
@@ -564,7 +614,9 @@ export const approveExpense = asyncHandler(async (req, res) => {
       parseFloat(entry.debit) || 0,
       entry.id,
       `DAYBOOK #${entry.id}: ${entry.entry_type || 'EXPENSE'}`,
-      req.user.id
+      req.user.id,
+      'daybook',
+      entry.site_id
     ).catch(() => {});
 
     return res.json({ expense: entry, message: 'Day Book expense approved successfully' });
@@ -594,7 +646,10 @@ export const approveExpense = asyncHandler(async (req, res) => {
     parseFloat(expense.debit) || 0,
     expense.id,
     `EXPENSE #${expense.id}: ${expense.remark || 'EXPENSE'}`,
-    req.user.id
+    req.user.id,
+    'expense',
+    expense.site_id,
+    expense.imprest_proof_key
   ).catch(() => {});
 
   res.json({ expense, message: 'Expense approved successfully' });
@@ -625,6 +680,7 @@ export const rejectExpense = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'Vendor payment is already rejected' });
     }
     const rejectedPayment = result.rows[0];
+    await syncLinkedVendorInventoryPayments(rejectedPayment, 'rejected', req.user.id);
 
     // Reverse imprest deduction in BACKGROUND if previously approved.
     // (`reverseImprestOnRejection` already filters via a row check, so it's
@@ -634,7 +690,9 @@ export const rejectExpense = asyncHandler(async (req, res) => {
       parseFloat(rejectedPayment.amount) || 0,
       rejectedPayment.id,
       `VENDOR PAYMENT #${rejectedPayment.id}`,
-      req.user.id
+      req.user.id,
+      'vendor_payment',
+      rejectedPayment.site_id
     ).catch(() => {});
 
     return res.json({ expense: rejectedPayment, message: 'Vendor payment rejected' });
@@ -657,7 +715,9 @@ export const rejectExpense = asyncHandler(async (req, res) => {
         parseFloat(existing.debit) || 0,
         existing.id,
         `DAYBOOK #${existing.id}: ${existing.entry_type || 'EXPENSE'}`,
-        req.user.id
+        req.user.id,
+        'daybook',
+        existing.site_id
       ).catch(() => {});
     }
 
@@ -688,7 +748,9 @@ export const rejectExpense = asyncHandler(async (req, res) => {
       parseFloat(expense.debit) || 0,
       expense.id,
       `EXPENSE #${expense.id}: ${expense.remark || 'EXPENSE'}`,
-      req.user.id
+      req.user.id,
+      'expense',
+      expense.site_id
     ).catch(() => {});
   }
 
@@ -702,42 +764,20 @@ export const rejectExpense = asyncHandler(async (req, res) => {
 export const bulkApproveExpenses = asyncHandler(async (req, res) => {
   const { items } = req.body; // Array of { id, source }
 
-  // ── Bulk imprest helper: looks up sub_admin role status for all
-  //     unique creators in ONE query (was N queries via the per-item
-  //     deductImprestOnApproval helper) and inserts all deductions in a
-  //     single multi-row INSERT. Runs fire-and-forget after the response.
+  // Idempotent per source + row id, so retries cannot deduct imprest twice.
   const bulkImprestDeduct = async (allItems) => {
     if (!allItems || allItems.length === 0) return;
     try {
-      const creatorIds = [...new Set(allItems.map((i) => i.creator).filter(Boolean))];
-      if (creatorIds.length === 0) return;
-      const userRes = await pool.query(
-        `SELECT id, role FROM users WHERE id = ANY($1::int[])`,
-        [creatorIds]
-      );
-      const subAdminIds = new Set(
-        userRes.rows.filter((u) => u.role === 'sub_admin').map((u) => u.id)
-      );
-      const ledgerRows = allItems.filter(
-        (i) => subAdminIds.has(i.creator) && i.amount > 0
-      );
-      if (ledgerRows.length === 0) return;
-
-      const COLS = 6;
-      const placeholders = [];
-      const values = [];
-      ledgerRows.forEach((r, i) => {
-        const b = i * COLS;
-        placeholders.push(
-          `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6})`
-        );
-        values.push(r.creator, r.type, r.referenceId, -r.amount, r.remarks.toUpperCase(), req.user.id);
-      });
-      await pool.query(
-        `INSERT INTO imprest_ledger (user_id, type, reference_id, amount, remarks, created_by)
-         VALUES ${placeholders.join(',')}`,
-        values
-      );
+      await Promise.all(allItems.map((item) => postApprovedImprestDebit({
+        createdBy: item.creator,
+        amount: item.amount,
+        referenceId: item.referenceId,
+        sourceModule: item.sourceModule,
+        remarks: item.remarks,
+        approvedBy: req.user.id,
+        siteId: item.siteId,
+        proofKey: item.proofKey,
+      })));
     } catch (err) {
       console.error('[Imprest] Bulk deduct failed:', err.message);
     }
@@ -763,6 +803,9 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
       referenceId: exp.id,
       amount: parseFloat(exp.debit) || 0,
       remarks: `EXPENSE #${exp.id}: ${exp.remark || 'EXPENSE'}`,
+      sourceModule: 'expense',
+      siteId: exp.site_id,
+      proofKey: exp.imprest_proof_key,
     })));
 
     return res.json({
@@ -810,6 +853,9 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
       referenceId: exp.id,
       amount: parseFloat(exp.debit) || 0,
       remarks: `EXPENSE #${exp.id}: ${exp.remark || 'EXPENSE'}`,
+      sourceModule: 'expense',
+      siteId: exp.site_id,
+      proofKey: exp.imprest_proof_key,
     })),
     ...results[1].map((entry) => ({
       creator: entry.created_by,
@@ -817,6 +863,8 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
       referenceId: entry.id,
       amount: parseFloat(entry.debit) || 0,
       remarks: `DAYBOOK #${entry.id}: ${entry.entry_type || 'EXPENSE'}`,
+      sourceModule: 'daybook',
+      siteId: entry.site_id,
     })),
     ...results[2].map((vp) => ({
       creator: vp.created_by,
@@ -824,8 +872,11 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
       referenceId: vp.id,
       amount: parseFloat(vp.amount) || 0,
       remarks: `VENDOR PAYMENT #${vp.id}`,
+      sourceModule: 'vendor_payment',
+      siteId: vp.site_id,
     })),
   ];
+  await syncLinkedVendorInventoryPayments(results[2], 'approved', req.user.id);
   bulkImprestDeduct(ledgerPayload);
 
   const totalApproved = results[0].length + results[1].length + results[2].length;

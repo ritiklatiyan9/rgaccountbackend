@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
 
 const asInt = (v) => parseInt(v, 10);
 
@@ -217,7 +218,9 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       COALESCE(inv.inv_total_paid, 0)::numeric(14,2) AS inventory_total_paid,
       COALESCE(inv.inv_outstanding, 0)::numeric(14,2) AS inventory_outstanding
      FROM vendor_commitments vc
-     LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+     LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
+       AND LOWER(COALESCE(vp.status, 'approved')) = 'approved'
+       AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      LEFT JOIN users cu ON cu.id = vc.created_by
      LEFT JOIN users aa ON aa.id = vc.assigned_admin_id
@@ -258,6 +261,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       SELECT commitment_id, SUM(amount)::numeric(14,2) AS paid_amount
       FROM vendor_payments
       WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND LOWER(COALESCE(status, 'approved')) = 'approved'
       GROUP BY commitment_id
      ) p ON p.commitment_id = vc.id
      CROSS JOIN (
@@ -327,6 +331,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       m.full_name AS vendor_member_name
      FROM vendor_commitments vc
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
+       AND LOWER(COALESCE(vp.status, 'approved')) = 'approved'
        AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
        AND ($3::int IS NULL OR vp.created_by = $3::int)
      LEFT JOIN members m ON m.id = vc.vendor_member_id
@@ -337,7 +342,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   );
 
   const paymentsPromise = pool.query(
-    `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.customer_signature_url, vp.authority_signature_url, vp.status, vp.approved_by, vp.approved_at, vp.created_at, vp.assigned_admin_id, vp.created_by,
+    `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.customer_signature_url, vp.authority_signature_url, vp.status, vp.approved_by, vp.approved_at, vp.cheque_no, vp.cheque_status, vp.created_at, vp.assigned_admin_id, vp.created_by,
             u.name AS created_by_name, aa.name AS assigned_admin_name
      FROM vendor_payments vp
      LEFT JOIN users u ON u.id = vp.created_by
@@ -391,7 +396,8 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   let itemPaymentsByOrder = new Map();
   if (orderIds.length > 0) {
     const itemPaysResult = await pool.query(
-      `SELECT p.id, p.order_id, p.payment_date, p.amount, p.payment_mode, p.reference_no, p.note, p.voucher_url, p.created_at,
+      `SELECT p.id, p.order_id, p.payment_date, p.amount, p.payment_mode, p.reference_no,
+              p.cheque_no, p.cheque_status, p.status, p.note, p.voucher_url, p.created_at,
               u.name AS created_by_name
        FROM vendor_inventory_payments p
        LEFT JOIN users u ON u.id = p.created_by
@@ -408,7 +414,11 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   }
   const inventoryOrders = inventoryResult.rows.map((o) => {
     const payments = itemPaymentsByOrder.get(o.id) || [];
-    const scopedPaid = payments.reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
+    const scopedPaid = payments.reduce((sum, payment) => {
+      const posted = String(payment.status || 'approved').toLowerCase() === 'approved'
+        && !['BOUNCED', 'RETURNED'].includes(String(payment.cheque_status || '').toUpperCase());
+      return sum + (posted ? (parseFloat(payment.amount) || 0) : 0);
+    }, 0);
     return {
       ...o,
       total_paid: scopedPaid,
@@ -697,7 +707,9 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
       'pending',
       req.user.id,
       assigned_admin_id ? parseInt(assigned_admin_id) : null,
-      req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
+      vendorPayMode === 'cheque'
+        ? String(req.body.cheque_no || reference_no || '').trim() || null
+        : null,
       vendorPayMode === 'cheque' ? 'PENDING' : null,
     ]
   );
@@ -738,7 +750,7 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
   // a tx but didn't actually enforce any invariant, so all that latency was
   // wasted. We compose the WHERE on the UPDATE so it stays atomic.
   const existingResult = await pool.query(
-    `SELECT id, site_id, commitment_id, assigned_admin_id, created_by
+    `SELECT id, site_id, commitment_id, assigned_admin_id, created_by, status, amount
      FROM vendor_payments WHERE id = $1`,
     [paymentId]
   );
@@ -754,7 +766,11 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
     `UPDATE vendor_payments
         SET payment_date = $1, amount = $2, payment_mode = $3,
             reference_no = $4, note = $5, voucher_url = $6,
-            assigned_admin_id = $7
+            assigned_admin_id = $7, status = 'pending',
+            approved_by = NULL, approved_at = NULL,
+            cheque_no = CASE WHEN $3 = 'cheque' THEN $4 ELSE NULL END,
+            cheque_status = CASE WHEN $3 = 'cheque' THEN 'PENDING' ELSE NULL END,
+            updated_at = NOW()
       WHERE id = $8 AND site_id = $9
      RETURNING *`,
     [
@@ -769,6 +785,37 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
       siteId,
     ]
   );
+
+  await pool.query(
+    `UPDATE vendor_inventory_payments
+        SET payment_date = $2, payment_mode = $3, reference_no = $4,
+            cheque_no = CASE WHEN $3 = 'cheque' THEN $4 ELSE NULL END,
+            cheque_status = CASE WHEN $3 = 'cheque' THEN 'PENDING' ELSE NULL END,
+            note = $5, voucher_url = $6, assigned_admin_id = $7,
+            status = 'pending', approved_by = NULL, approved_at = NULL, updated_at = NOW()
+      WHERE source_vendor_payment_id = $1`,
+    [
+      paymentId,
+      payment_date,
+      (payment_mode || 'cash').toLowerCase(),
+      reference_no?.trim() || null,
+      note?.trim() || null,
+      voucher_url || null,
+      assigned_admin_id !== undefined ? (assigned_admin_id ? parseInt(assigned_admin_id) : null) : existing.assigned_admin_id,
+    ]
+  );
+
+  if (existing.status === 'approved') {
+    await reverseApprovedImprestDebit({
+      createdBy: existing.created_by,
+      amount: parseFloat(existing.amount) || 0,
+      referenceId: existing.id,
+      sourceModule: 'vendor_payment',
+      remarks: `VENDOR PAYMENT #${existing.id}: EDITED AND RETURNED TO APPROVAL`,
+      reversedBy: req.user.id,
+      siteId: existing.site_id,
+    });
+  }
 
   // Touch parent (fire-and-forget).
   pool.query(
@@ -843,7 +890,7 @@ export const distributePaymentToItems = asyncHandler(async (req, res) => {
   if (!Number.isInteger(commitmentId)) return res.status(400).json({ message: 'Invalid commitment id' });
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
 
-  const { allocations, payment_date, payment_mode, reference_no, note } = req.body;
+  const { allocations, payment_date, payment_mode, reference_no, note, source_vendor_payment_id } = req.body;
 
   // allocations = [{ order_id, amount }]
   if (!Array.isArray(allocations) || allocations.length === 0) {
@@ -866,13 +913,19 @@ export const distributePaymentToItems = asyncHandler(async (req, res) => {
 
   // 1) Validate commitment + that ALL order_ids belong to this commitment in
   //    parallel. (Previously: 1 commitment check + N item checks serially.)
-  const [comRes, validIdsRes] = await Promise.all([
+  const [comRes, validIdsRes, sourcePaymentRes] = await Promise.all([
     pool.query(`SELECT id FROM vendor_commitments WHERE id = $1 AND site_id = $2`, [commitmentId, siteId]),
     pool.query(
       `SELECT id FROM vendor_inventory_orders
         WHERE id = ANY($1::int[]) AND commitment_id = $2 AND site_id = $3`,
       [orderIds, commitmentId, siteId]
     ),
+    source_vendor_payment_id
+      ? pool.query(
+        `SELECT * FROM vendor_payments WHERE id = $1 AND commitment_id = $2 AND site_id = $3`,
+        [asInt(source_vendor_payment_id), commitmentId, siteId]
+      )
+      : Promise.resolve({ rows: [] }),
   ]);
   if (!comRes.rows[0]) return res.status(404).json({ message: 'Commitment not found' });
 
@@ -883,25 +936,41 @@ export const distributePaymentToItems = asyncHandler(async (req, res) => {
   }
 
   // 2) Single multi-row INSERT for all allocations.
-  const COLS = 8;
+  const sourcePayment = sourcePaymentRes.rows[0] || null;
+  if (source_vendor_payment_id && !sourcePayment) {
+    return res.status(400).json({ message: 'Source vendor payment is invalid' });
+  }
+
+  const COLS = 14;
   const values = [];
   const placeholders = [];
-  const txDate = payment_date || new Date().toISOString().split('T')[0];
-  const mode = (payment_mode || 'cash').toLowerCase();
-  const ref = reference_no?.trim() || null;
-  const memo = note?.trim() || null;
+  const txDate = sourcePayment?.payment_date || payment_date || new Date().toISOString().split('T')[0];
+  const mode = (sourcePayment?.payment_mode || payment_mode || 'cash').toLowerCase();
+  const ref = sourcePayment?.reference_no || reference_no?.trim() || null;
+  const memo = sourcePayment?.note || note?.trim() || null;
 
   accepted.forEach(({ orderId, amount }, i) => {
     const b = i * COLS;
     placeholders.push(
-      `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`
+      `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},
+        $${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14})`
     );
-    values.push(orderId, siteId, txDate, amount, mode, ref, memo, req.user.id);
+    values.push(
+      orderId, siteId, txDate, amount, mode, ref,
+      sourcePayment?.cheque_no || (mode === 'cheque' ? ref : null),
+      sourcePayment?.cheque_status || (mode === 'cheque' ? 'PENDING' : null),
+      memo, sourcePayment?.voucher_url || null, req.user.id,
+      sourcePayment?.assigned_admin_id || null,
+      sourcePayment?.id || null,
+      sourcePayment?.status || 'pending'
+    );
   });
 
   const insertRes = await pool.query(
     `INSERT INTO vendor_inventory_payments
-       (order_id, site_id, payment_date, amount, payment_mode, reference_no, note, created_by)
+       (order_id, site_id, payment_date, amount, payment_mode, reference_no,
+        cheque_no, cheque_status, note, voucher_url, created_by, assigned_admin_id,
+        source_vendor_payment_id, status)
      VALUES ${placeholders.join(',')}
      RETURNING *`,
     values

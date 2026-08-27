@@ -36,7 +36,7 @@ test('transfer migration persists audit history and permits every transfer ledge
   assert.match(migration, /amount\s+NUMERIC\(15,2\) NOT NULL CHECK \(amount > 0\)/);
 });
 
-test('pending allocation is ledger-neutral for its recipient until that recipient confirms', async () => {
+test('pending allocation is ledger-neutral for both parties until the recipient confirms', async () => {
   const controller = await readSource('src/controllers/imprest.controller.js');
   const createStart = controller.indexOf('export const createAllocation');
   const confirmStart = controller.indexOf('export const confirmReceipt');
@@ -46,8 +46,10 @@ test('pending allocation is ledger-neutral for its recipient until that recipien
 
   assert.match(createAllocation, /status: isSelfDraw \? 'RECEIVED' : 'PENDING_RECEIPT'/);
   assert.doesNotMatch(createAllocation, /user_id:\s*parseInt\(sub_admin_id/);
+  assert.doesNotMatch(createAllocation, /type:\s*'TRANSFER_OUT'/);
   assert.match(confirmReceipt, /existing\.sub_admin_id !== req\.user\.id/);
   assert.match(confirmReceipt, /user_id:\s*req\.user\.id/);
   assert.match(confirmReceipt, /amount:\s*parseFloat\(allocation\.amount\)/);
+  assert.match(confirmReceipt, /type:\s*'TRANSFER_OUT'/);
   assert.match(confirmReceipt, /'This handover was already confirmed or cancelled'/);
 });

@@ -378,6 +378,8 @@ CREATE TABLE IF NOT EXISTS farmers (
   member_id       INTEGER REFERENCES members(id) ON DELETE SET NULL,
   -- Land / commission fields (migration 046)
   land_size_bigha       NUMERIC(10,2),
+  land_size_gaz         NUMERIC(14,4),
+  land_size_mtr         NUMERIC(14,4),
   land_rate             NUMERIC(15,2),
   commission_percentage NUMERIC(5,2),
   commission_amount     NUMERIC(15,2),
@@ -550,11 +552,17 @@ CREATE TABLE IF NOT EXISTS plot_installment_payments (
   -- assigned_admin_id is required by the sync_cashflow_from_modules() trigger,
   -- which writes NEW.assigned_admin_id into cash_flow_entries for every source row.
   assigned_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status            VARCHAR(20) NOT NULL DEFAULT 'pending',
+  approved_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  approved_at       TIMESTAMPTZ,
+  voucher_url       TEXT,
   created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  created_at        TIMESTAMPTZ DEFAULT NOW()
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_pip_installment ON plot_installment_payments(installment_id);
 CREATE INDEX IF NOT EXISTS idx_pip_plot        ON plot_installment_payments(plot_id);
+CREATE INDEX IF NOT EXISTS idx_pip_status      ON plot_installment_payments(status);
 
 -- PLOT CIRCLE RATE HISTORY (migration 028)
 CREATE TABLE IF NOT EXISTS plot_circle_rate_history (
@@ -952,6 +960,10 @@ CREATE TABLE IF NOT EXISTS plot_registry_payments (
   tally_amount    NUMERIC(15,2),
   notes           TEXT,
   assigned_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+  approved_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  approved_at     TIMESTAMPTZ,
+  voucher_url     TEXT,
   cheque_status   VARCHAR(20),
   cheque_no       VARCHAR(50),
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -961,6 +973,7 @@ CREATE TABLE IF NOT EXISTS plot_registry_payments (
 CREATE INDEX IF NOT EXISTS idx_prp_registry ON plot_registry_payments(registry_id);
 CREATE INDEX IF NOT EXISTS idx_prp_site     ON plot_registry_payments(site_id);
 CREATE INDEX IF NOT EXISTS idx_prp_date     ON plot_registry_payments(payment_date);
+CREATE INDEX IF NOT EXISTS idx_prp_status   ON plot_registry_payments(status);
 CREATE INDEX IF NOT EXISTS idx_plot_registry_payments_assigned_admin_id ON plot_registry_payments(assigned_admin_id);
 CREATE INDEX IF NOT EXISTS idx_prp_registry_date ON plot_registry_payments(registry_id, payment_date, created_at);
 CREATE INDEX IF NOT EXISTS idx_prp_source_plot_payment ON plot_registry_payments(source_plot_payment_id)
@@ -998,6 +1011,7 @@ CREATE TABLE IF NOT EXISTS expenses (
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
   voucher_url     TEXT,
   bill_url        TEXT,
+  imprest_proof_key TEXT,
   assigned_user_id  INTEGER REFERENCES members(id) ON DELETE SET NULL,
   assigned_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   cheque_status   VARCHAR(20),
@@ -1098,7 +1112,8 @@ CREATE TABLE IF NOT EXISTS vendor_payments (
   cheque_status   VARCHAR(20),
   cheque_no       VARCHAR(50),
   created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  created_at      TIMESTAMPTZ DEFAULT NOW()
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_vendor_payments_commitment_id ON vendor_payments(commitment_id);
 CREATE INDEX IF NOT EXISTS idx_vendor_payments_site_id       ON vendor_payments(site_id);
@@ -1164,13 +1179,22 @@ CREATE TABLE IF NOT EXISTS vendor_inventory_payments (
                   CHECK (payment_mode IN ('cash','bank','upi','cheque','neft','rtgs','imps','other')),
   reference_no  VARCHAR(120),
   cheque_no     VARCHAR(50),
+  cheque_status VARCHAR(20),
   note          TEXT,
   voucher_url   TEXT,
+  status        VARCHAR(20) NOT NULL DEFAULT 'pending',
+  approved_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  approved_at   TIMESTAMPTZ,
+  assigned_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  source_vendor_payment_id INTEGER REFERENCES vendor_payments(id) ON DELETE CASCADE,
   created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  created_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+  created_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_vipay_order_id ON vendor_inventory_payments(order_id);
 CREATE INDEX IF NOT EXISTS idx_vipay_site_date ON vendor_inventory_payments(site_id, payment_date DESC);
+CREATE INDEX IF NOT EXISTS idx_vip_status ON vendor_inventory_payments(status);
+CREATE INDEX IF NOT EXISTS idx_vip_source_vendor_payment ON vendor_inventory_payments(source_vendor_payment_id);
 
 -- ============================================================================
 -- 18. IMPREST  (admin → sub-admin petty cash; ledger; overdraft requests)
@@ -1205,15 +1229,21 @@ CREATE TABLE IF NOT EXISTS imprest_ledger (
   type                VARCHAR(30) NOT NULL
                         CHECK (type IN ('ALLOCATION', 'EXPENSE', 'ADJUSTMENT', 'REFUND', 'TRANSFER_IN', 'TRANSFER_OUT', 'TRANSFER_REFUND')),
   reference_id        INTEGER,
+  source_module       VARCHAR(50),
+  site_id             INTEGER REFERENCES sites(id) ON DELETE RESTRICT,
   amount              NUMERIC(15,2) NOT NULL,
   balance_after       NUMERIC(15,2) NOT NULL DEFAULT 0,
   remarks             TEXT,
   created_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  proof_key           TEXT,
   created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_il_user    ON imprest_ledger(user_id);
 CREATE INDEX IF NOT EXISTS idx_il_type    ON imprest_ledger(type);
 CREATE INDEX IF NOT EXISTS idx_il_created ON imprest_ledger(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_imprest_posting_source
+  ON imprest_ledger(user_id, site_id, source_module, reference_id, type)
+  WHERE source_module IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS imprest_transfers (
   id            SERIAL PRIMARY KEY,

@@ -1,6 +1,10 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
-import { imprestLedgerModel } from '../models/Imprest.model.js';
+import {
+  postApprovedImprestDebit,
+  reverseApprovedImprestDebit,
+} from '../services/imprestPosting.service.js';
+import { notifyPlotPaymentRecorded } from '../utils/notify.js';
 
 /**
  * Unified approval controller for all financial modules.
@@ -16,9 +20,20 @@ const ALLOWED_TABLES = {
   cash_flow_entry: 'cash_flow_entries',
   firm_transaction: 'firm_transactions',
   plot_payment: 'plot_payments',
+  plot_installment_payment: 'plot_installment_payments',
   expense: 'expenses',
+  vendor_payment: 'vendor_payments',
+  vendor_inventory_payment: 'vendor_inventory_payments',
+  plot_registry_payment: 'plot_registry_payments',
   daybook: 'day_book',
 };
+
+const SOURCE_BY_TABLE = Object.fromEntries(
+  Object.entries(ALLOWED_TABLES).map(([source, table]) => [table, source])
+);
+const IMPREST_DEBIT_SOURCES = new Set([
+  'expense', 'farmer_payment', 'plot_commission_payment', 'vendor_payment', 'vendor_inventory_payment', 'daybook',
+]);
 
 function getTableName(source) {
   const table = ALLOWED_TABLES[source];
@@ -98,6 +113,44 @@ async function ensureInboundFirmTransferForApproval(entry, approverId) {
   );
 }
 
+async function reconcileInstallmentPayment(paymentId) {
+  const paymentRes = await pool.query(
+    `SELECT installment_id FROM plot_installment_payments WHERE id = $1`,
+    [paymentId]
+  );
+  const installmentId = paymentRes.rows[0]?.installment_id;
+  if (!installmentId) return;
+  await pool.query(
+    `UPDATE plot_installments pi
+        SET paid_amount = paid.total,
+            status = CASE
+              WHEN paid.total >= pi.amount THEN 'paid'
+              WHEN pi.due_date < CURRENT_DATE THEN 'overdue'
+              WHEN paid.total > 0 THEN 'partially_paid'
+              ELSE 'pending'
+            END,
+            updated_at = NOW()
+       FROM (
+         SELECT COALESCE(SUM(amount), 0)::numeric AS total
+           FROM plot_installment_payments
+          WHERE installment_id = $1
+            AND LOWER(COALESCE(status, 'approved')) = 'approved'
+            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       ) paid
+      WHERE pi.id = $1`,
+    [installmentId]
+  );
+}
+
+async function resolveEntrySiteId(source, entry) {
+  if (entry?.site_id) return entry.site_id;
+  if (source === 'farmer_payment' && entry?.farmer_id) {
+    const result = await pool.query('SELECT site_id FROM farmers WHERE id = $1', [entry.farmer_id]);
+    return result.rows[0]?.site_id || null;
+  }
+  return null;
+}
+
 /**
  * For sub-admins, fetch allowed approval modules from user_approval_modules.
  * Admins get null (meaning all modules allowed).
@@ -128,6 +181,7 @@ function isModuleAllowed(allowed, moduleKey) {
   if (moduleKey === 'daybook_farmer' || moduleKey === 'daybook_commission' || moduleKey === 'daybook_expense' || moduleKey === 'daybook_general') {
     return allowed.has('daybook');
   }
+  if (moduleKey === 'vendor_inventory_payment') return allowed.has('vendor_payment') || allowed.has('vendors');
   return allowed.has(moduleKey);
 }
 
@@ -160,7 +214,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   // Helper to build WHERE clause.
   //   scopedAssigneeId: when set, forces assigned_admin_id = that user (used for sub-admins who
   //   don't hold a module grant but still need to see entries explicitly delegated to them).
-  const buildWhere = (tableAlias, siteAlias, extraConditions = [], scopedAssigneeId = null, status = 'pending') => {
+  const buildWhere = (tableAlias, siteAlias, extraConditions = [], scopedAssigneeId = null, status = 'pending', dateColumn = 'date') => {
     const sAlias = siteAlias || tableAlias;
     const conditions = [`${tableAlias}.status = '${status}'`, ...extraConditions];
     const params = [];
@@ -170,11 +224,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
       params.push(parseInt(site_id));
     }
     if (date_from) {
-      conditions.push(`${tableAlias}.date >= $${idx++}`);
+      conditions.push(`${tableAlias}.${dateColumn} >= $${idx++}`);
       params.push(date_from);
     }
     if (date_to) {
-      conditions.push(`${tableAlias}.date <= $${idx++}`);
+      conditions.push(`${tableAlias}.${dateColumn} <= $${idx++}`);
       params.push(date_to);
     }
     if (scopedAssigneeId) {
@@ -375,6 +429,35 @@ export const listAllPending = asyncHandler(async (req, res) => {
     })));
   }
 
+  // 5b. Plot installment payments
+  const visPip = moduleVisibility(req.user, allowedModules, 'plot_installment_payment');
+  if ((!module || module === 'plot_installment_payment') && visPip.include) {
+    const { where, params } = buildWhere('pip', 'p', [], visPip.scoped ? req.user.id : null, 'pending', 'payment_date');
+    const q = `
+      SELECT pip.*, pip.payment_date AS date, p.site_id, s.name AS site_name,
+             COALESCE(u.name, u.email) AS created_by_name,
+             COALESCE(aa.name, aa.email) AS assigned_admin_name,
+             COALESCE(p.buyer_name, 'Plot ' || p.plot_no) AS entity_name,
+             'Plot installment payer'::text AS entity_type,
+             p.plot_no AS entity_plot_no, pi.installment_name AS entity_secondary,
+             'plot_installment_payment' AS source
+        FROM plot_installment_payments pip
+        JOIN plot_installments pi ON pi.id = pip.installment_id
+        JOIN plots p ON p.id = pip.plot_id
+        JOIN sites s ON s.id = p.site_id
+        LEFT JOIN users u ON u.id = pip.created_by
+        LEFT JOIN users aa ON aa.id = pip.assigned_admin_id
+       WHERE ${where}
+       ORDER BY pip.payment_date DESC, pip.id DESC
+    `;
+    const r = await pool.query(q, params);
+    results.push(...r.rows.map((row) => ({
+      ...row,
+      entry_label: `Plot ${row.entity_plot_no || 'N/A'} installment - ₹${row.amount}`,
+      module_label: 'Plot Installment Payment',
+    })));
+  }
+
   // 6. Expenses
   const visEx = moduleVisibility(req.user, allowedModules, 'expense');
   if ((!module || module === 'expense') && visEx.include) {
@@ -446,7 +529,98 @@ export const listAllPending = asyncHandler(async (req, res) => {
     })));
   }
 
-  // 7. Day Book entries (farmer payments, commissions, expenses auto-created in day_book)
+  // 7. Vendor payments
+  const visVp = moduleVisibility(req.user, allowedModules, 'vendor_payment');
+  if ((!module || module === 'vendor_payment') && visVp.include) {
+    const { where, params } = buildWhere('vp', 'vp', [], visVp.scoped ? req.user.id : null, 'pending', 'payment_date');
+    const q = `
+      SELECT vp.*, vp.payment_date AS date, s.name AS site_name,
+             COALESCE(u.name, u.email) AS created_by_name,
+             COALESCE(aa.name, aa.email) AS assigned_admin_name,
+             vc.vendor_name AS entity_name, 'Vendor'::text AS entity_type,
+             vc.work_title AS entity_secondary, NULL::text AS entity_plot_no,
+             'vendor_payment' AS source
+        FROM vendor_payments vp
+        JOIN vendor_commitments vc ON vc.id = vp.commitment_id
+        JOIN sites s ON s.id = vp.site_id
+        LEFT JOIN users u ON u.id = vp.created_by
+        LEFT JOIN users aa ON aa.id = vp.assigned_admin_id
+       WHERE ${where}
+       ORDER BY vp.payment_date DESC, vp.id DESC
+    `;
+    const r = await pool.query(q, params);
+    results.push(...r.rows.map((row) => ({
+      ...row,
+      entry_label: `${row.entity_name || 'Vendor'} - ₹${row.amount}`,
+      module_label: 'Vendor Payment',
+    })));
+  }
+
+  // 8. Standalone registry payments. Linked rows inherit the source plot
+  // payment's approval and therefore must not create a duplicate request.
+  const visPrp = moduleVisibility(req.user, allowedModules, 'plot_registry_payment');
+  if ((!module || module === 'plot_registry_payment') && visPrp.include) {
+    const { where, params } = buildWhere(
+      'prp', 'prp', ['prp.source_plot_payment_id IS NULL'],
+      visPrp.scoped ? req.user.id : null, 'pending', 'payment_date'
+    );
+    const q = `
+      SELECT prp.*, prp.payment_date AS date, s.name AS site_name,
+             COALESCE(u.name, u.email) AS created_by_name,
+             COALESCE(aa.name, aa.email) AS assigned_admin_name,
+             COALESCE(pr.customer_name, 'Plot ' || pr.plot_no) AS entity_name,
+             'Registry payer'::text AS entity_type,
+             pr.plot_no AS entity_plot_no, pr.farmer_name AS entity_secondary,
+             'plot_registry_payment' AS source
+        FROM plot_registry_payments prp
+        JOIN plot_registries pr ON pr.id = prp.registry_id
+        JOIN sites s ON s.id = prp.site_id
+        LEFT JOIN users u ON u.id = prp.created_by
+        LEFT JOIN users aa ON aa.id = prp.assigned_admin_id
+       WHERE ${where}
+       ORDER BY prp.payment_date DESC, prp.id DESC
+    `;
+    const r = await pool.query(q, params);
+    results.push(...r.rows.map((row) => ({
+      ...row,
+      entry_label: `Registry Plot ${row.entity_plot_no || 'N/A'} - ₹${row.amount}`,
+      module_label: 'Registry Payment',
+    })));
+  }
+
+  // 8b. Standalone inventory payments. Item allocations linked to a vendor
+  // payment inherit that payment's decision and are not duplicate requests.
+  const visVip = moduleVisibility(req.user, allowedModules, 'vendor_inventory_payment');
+  if ((!module || module === 'vendor_inventory_payment') && visVip.include) {
+    const { where, params } = buildWhere(
+      'vip', 'vip', ['vip.source_vendor_payment_id IS NULL'],
+      visVip.scoped ? req.user.id : null, 'pending', 'payment_date'
+    );
+    const q = `
+      SELECT vip.*, vip.payment_date AS date, s.name AS site_name,
+             COALESCE(u.name, u.email) AS created_by_name,
+             COALESCE(aa.name, aa.email) AS assigned_admin_name,
+             COALESCE(vio.vendor_name, vio.item_name) AS entity_name,
+             'Vendor inventory'::text AS entity_type,
+             vio.item_name AS entity_secondary, NULL::text AS entity_plot_no,
+             'vendor_inventory_payment' AS source
+        FROM vendor_inventory_payments vip
+        JOIN vendor_inventory_orders vio ON vio.id = vip.order_id
+        JOIN sites s ON s.id = vip.site_id
+        LEFT JOIN users u ON u.id = vip.created_by
+        LEFT JOIN users aa ON aa.id = vip.assigned_admin_id
+       WHERE ${where}
+       ORDER BY vip.payment_date DESC, vip.id DESC
+    `;
+    const r = await pool.query(q, params);
+    results.push(...r.rows.map((row) => ({
+      ...row,
+      entry_label: `${row.entity_name || 'Inventory payment'} - ₹${row.amount}`,
+      module_label: 'Vendor Inventory Payment',
+    })));
+  }
+
+  // 9. Day Book entries (farmer payments, commissions, expenses auto-created in day_book)
   const visDb = moduleVisibility(req.user, allowedModules, 'daybook');
   if (visDb.include) {
     const DAYBOOK_TYPE_MAP = {
@@ -566,13 +740,17 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     pool.query(`SELECT COUNT(*)::int AS count FROM cash_flow_entries cfe WHERE cfe.status = 'pending' AND cfe.source_module IS NULL ${site_id ? 'AND cfe.site_id = $1' : ''}${scopeClauseFor('cfe', 'cash_flow_entry')}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM firm_transactions ft WHERE ft.status = 'pending' ${site_id ? 'AND ft.site_id = $1' : ''}${scopeClauseFor('ft', 'firm_transaction')}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM plot_payments pp WHERE pp.status = 'pending' ${site_id ? 'AND pp.site_id = $1' : ''}${scopeClauseFor('pp', 'plot_payment')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id WHERE pip.status = 'pending' ${site_id ? 'AND p.site_id = $1' : ''}${scopeClauseFor('pip', 'plot_installment_payment')}`, params),
     pool.query(`SELECT COUNT(*)::int AS count FROM expenses e WHERE e.status = 'pending' ${site_id ? 'AND e.site_id = $1' : ''}${scopeClauseFor('e', 'expense')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM vendor_payments vp WHERE vp.status = 'pending' ${site_id ? 'AND vp.site_id = $1' : ''}${scopeClauseFor('vp', 'vendor_payment')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM vendor_inventory_payments vip WHERE vip.status = 'pending' AND vip.source_vendor_payment_id IS NULL ${site_id ? 'AND vip.site_id = $1' : ''}${scopeClauseFor('vip', 'vendor_inventory_payment')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM plot_registry_payments prp WHERE prp.status = 'pending' AND prp.source_plot_payment_id IS NULL ${site_id ? 'AND prp.site_id = $1' : ''}${scopeClauseFor('prp', 'plot_registry_payment')}`, params),
     // Linked farmer-payment Day Book rows are accounting mirrors, not separate
     // approval requests. Keep the count consistent with /approvals/pending.
     pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book d WHERE d.status = 'pending' AND d.entry_type NOT IN ('CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT', 'VENDOR PAYMENT') AND (d.entry_type <> 'FARMER PAYMENT' OR d.farmer_payment_id IS NULL) ${site_id ? 'AND d.site_id = $1' : ''}${scopeClauseFor('d', 'daybook')} GROUP BY entry_type`, params),
   ];
 
-  const [fp, pc, pcp, cf, ft, pp, ex, db] = await Promise.all(queries);
+  const [fp, pc, pcp, cf, ft, pp, pip, ex, vp, vip, prp, db] = await Promise.all(queries);
 
   // Day book counts by entry_type
   const dbMap = {};
@@ -592,6 +770,10 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     .reduce((sum, [, count]) => sum + count, 0) : 0) : 0;
   const ftCount = a('firm_transaction') ? ft.rows[0].count : 0;
   const ppCount = a('plot_payment') ? pp.rows[0].count : 0;
+  const pipCount = a('plot_installment_payment') ? pip.rows[0].count : 0;
+  const vpCount = a('vendor_payment') ? vp.rows[0].count : 0;
+  const vipCount = a('vendor_inventory_payment') ? vip.rows[0].count : 0;
+  const prpCount = a('plot_registry_payment') ? prp.rows[0].count : 0;
 
   const counts = {
     farmer_payment: fpCount,
@@ -599,8 +781,12 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     cash_flow_entry: cfCount,
     firm_transaction: ftCount,
     plot_payment: ppCount,
+    plot_installment_payment: pipCount,
     expense: exCount,
-    total: fpCount + pcCount + cfCount + ftCount + ppCount + exCount,
+    vendor_payment: vpCount,
+    vendor_inventory_payment: vipCount,
+    plot_registry_payment: prpCount,
+    total: fpCount + pcCount + cfCount + ftCount + ppCount + pipCount + exCount + vpCount + vipCount + prpCount,
   };
 
   res.json({ ...counts, allowed_modules: allowedModules ? Array.from(allowedModules) : null });
@@ -615,7 +801,7 @@ export const approveEntry = asyncHandler(async (req, res) => {
   const { source } = req.query;
 
   if (!source || !ALLOWED_TABLES[source]) {
-    return res.status(400).json({ message: 'source query param is required (farmer_payment, plot_commission, cash_flow_entry, firm_transaction, plot_payment, expense, daybook)' });
+    return res.status(400).json({ message: 'A valid financial source query param is required' });
   }
 
   const table = getTableName(source);
@@ -650,6 +836,38 @@ export const approveEntry = asyncHandler(async (req, res) => {
 
   if (source === 'firm_transaction') {
     await ensureInboundFirmTransferForApproval(entry, req.user.id);
+  }
+  if (source === 'plot_installment_payment') {
+    await reconcileInstallmentPayment(entryId);
+  }
+  if (source === 'vendor_payment') {
+    await pool.query(
+      `UPDATE vendor_inventory_payments
+          SET status = 'approved', approved_by = $2, approved_at = NOW(),
+              cheque_status = $3, cheque_no = $4, updated_at = NOW()
+        WHERE source_vendor_payment_id = $1`,
+      [entryId, req.user.id, entry.cheque_status || null, entry.cheque_no || null]
+    );
+  }
+  if (source === 'plot_payment'
+    && !['BOUNCED', 'RETURNED'].includes(String(entry.cheque_status || '').toUpperCase())) {
+    notifyPlotPaymentRecorded(entry).catch((error) => {
+      console.error('[Approval] Plot payment notification failed:', error?.message || error);
+    });
+  }
+
+  if (IMPREST_DEBIT_SOURCES.has(source)) {
+    const siteId = await resolveEntrySiteId(source, entry);
+    await postApprovedImprestDebit({
+      createdBy: entry.created_by,
+      amount: parseFloat(entry.debit || entry.amount) || 0,
+      referenceId: entryId,
+      sourceModule: source,
+      remarks: `${source.toUpperCase()} #${entryId}`,
+      approvedBy: req.user.id,
+      siteId,
+      proofKey: entry.imprest_proof_key,
+    });
   }
 
   // Auto-generate DayBook entry for new V2 commission payments (pay out + money received)
@@ -763,36 +981,33 @@ export const rejectEntry = asyncHandler(async (req, res) => {
     [entryId, req.user.id]
   );
 
-  // Reverse imprest deduction if entry was previously approved
+  if (source === 'plot_installment_payment') {
+    await reconcileInstallmentPayment(entryId);
+  }
+  if (source === 'vendor_payment') {
+    await pool.query(
+      `UPDATE vendor_inventory_payments
+          SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
+        WHERE source_vendor_payment_id = $1`,
+      [entryId, req.user.id]
+    );
+  }
+
+  // Reverse imprest deduction if entry was previously approved.
   const IMPREST_SOURCES = ['expense', 'farmer_payment', 'plot_commission_payment', 'vendor_payment', 'daybook'];
   if (wasApproved && IMPREST_SOURCES.includes(source)) {
     const entry = result.rows[0];
     const debitAmount = parseFloat(entry.debit || entry.amount) || 0;
-    if (debitAmount > 0 && entry.created_by) {
-      try {
-        const userResult = await pool.query('SELECT role FROM users WHERE id = $1', [entry.created_by]);
-        if (userResult.rows[0]?.role === 'sub_admin') {
-          const existingDeduction = await pool.query(
-            `SELECT id FROM imprest_ledger WHERE user_id = $1 AND reference_id = $2 AND type = 'EXPENSE' AND amount < 0 LIMIT 1`,
-            [entry.created_by, entryId]
-          );
-          if (existingDeduction.rows.length > 0) {
-            await imprestLedgerModel.createEntry({
-              user_id: entry.created_by,
-              type: 'ADJUSTMENT',
-              reference_id: entryId,
-              amount: debitAmount,
-              remarks: `REVERSED (REJECTED): ${source.toUpperCase()} #${entryId}`,
-              created_by: req.user.id,
-              // Keep the reversal on the same site or it never reaches site-scoped balances.
-              site_id: entry.site_id || null,
-            }, pool);
-          }
-        }
-      } catch (err) {
-        console.error('[Imprest] Failed to reverse on rejection for', source, entryId, err.message);
-      }
-    }
+    const siteId = await resolveEntrySiteId(source, entry);
+    await reverseApprovedImprestDebit({
+      createdBy: entry.created_by,
+      amount: debitAmount,
+      referenceId: entryId,
+      sourceModule: source,
+      remarks: `${source.toUpperCase()} #${entryId}`,
+      reversedBy: req.user.id,
+      siteId,
+    });
   }
 
   // Update overall commission status if plot_commission_payment was rejected
@@ -914,6 +1129,45 @@ export const bulkApprove = asyncHandler(async (req, res) => {
         await ensureInboundFirmTransferForApproval(row, req.user.id);
       }
     }
+    if (table === 'plot_installment_payments') {
+      for (const row of result.rows) await reconcileInstallmentPayment(row.id);
+    }
+    if (table === 'vendor_payments' && result.rows.length > 0) {
+      await pool.query(
+        `UPDATE vendor_inventory_payments vip
+            SET status = 'approved', approved_by = $2, approved_at = NOW(),
+                cheque_status = vp.cheque_status, cheque_no = vp.cheque_no, updated_at = NOW()
+           FROM vendor_payments vp
+          WHERE vip.source_vendor_payment_id = vp.id
+            AND vp.id = ANY($1::int[])`,
+        [result.rows.map((row) => row.id), req.user.id]
+      );
+    }
+    if (table === 'plot_payments') {
+      for (const row of result.rows) {
+        if (!['BOUNCED', 'RETURNED'].includes(String(row.cheque_status || '').toUpperCase())) {
+          notifyPlotPaymentRecorded(row).catch((error) => {
+            console.error('[Approval] Plot payment notification failed:', error?.message || error);
+          });
+        }
+      }
+    }
+    const sourceKey = SOURCE_BY_TABLE[table];
+    if (IMPREST_DEBIT_SOURCES.has(sourceKey)) {
+      for (const row of result.rows) {
+        const siteId = await resolveEntrySiteId(sourceKey, row);
+        await postApprovedImprestDebit({
+          createdBy: row.created_by,
+          amount: parseFloat(row.debit || row.amount) || 0,
+          referenceId: row.id,
+          sourceModule: sourceKey,
+          remarks: `${sourceKey.toUpperCase()} #${row.id}`,
+          approvedBy: req.user.id,
+          siteId,
+          proofKey: row.imprest_proof_key,
+        });
+      }
+    }
 
     // Track plot commission payments for status update
     if (table === 'plot_commission_payments') {
@@ -923,7 +1177,6 @@ export const bulkApprove = asyncHandler(async (req, res) => {
         }
       }
     }
-
     totalApproved += result.rowCount;
     skippedAssignedToOthers += (ids.length - result.rowCount);
   }
@@ -1007,6 +1260,17 @@ export const bulkReject = asyncHandler(async (req, res) => {
         }
       }
     }
+    if (table === 'plot_installment_payments') {
+      for (const row of result.rows) await reconcileInstallmentPayment(row.id);
+    }
+    if (table === 'vendor_payments' && result.rows.length > 0) {
+      await pool.query(
+        `UPDATE vendor_inventory_payments
+            SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
+          WHERE source_vendor_payment_id = ANY($1::int[])`,
+        [result.rows.map((row) => row.id), req.user.id]
+      );
+    }
 
     totalRejected += result.rowCount;
     skippedAssignedToOthers += (ids.length - result.rowCount);
@@ -1056,8 +1320,10 @@ const CHEQUE_TABLES = {
   cash_flow_entry: 'cash_flow_entries',
   firm_transaction: 'firm_transactions',
   plot_payment: 'plot_payments',
+  plot_installment_payment: 'plot_installment_payments',
   expense: 'expenses',
   vendor_payment: 'vendor_payments',
+  vendor_inventory_payment: 'vendor_inventory_payments',
   plot_registry_payment: 'plot_registry_payments',
   daybook: 'day_book',
 };
@@ -1071,6 +1337,29 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
   const { site_id, status } = req.query;
 
   const statusFilter = status && status !== 'all' ? status.toUpperCase() : null;
+  // Migration 104 adds this link so an inventory allocation is not listed a
+  // second time beside its parent vendor payment. Older databases do not have
+  // the column yet; detect that shape so the whole cheque dashboard remains
+  // usable while they are upgraded.
+  const inventoryColumnResult = await pool.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'vendor_inventory_payments'
+          AND column_name = 'source_vendor_payment_id'
+     ) AS has_source_vendor_payment_id,
+     EXISTS (
+       SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'vendor_inventory_payments'
+          AND column_name = 'cheque_status'
+     ) AS has_cheque_status`
+  );
+  const inventoryColumns = inventoryColumnResult.rows[0] || {};
+  const inventorySourceFilter = inventoryColumns.has_source_vendor_payment_id
+    ? ' AND t.source_vendor_payment_id IS NULL'
+    : '';
+  const inventorySupportsChequeStatus = Boolean(inventoryColumns.has_cheque_status);
 
   // Build UNION ALL query across all relevant tables
   const queries = [];
@@ -1107,9 +1396,9 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
 
   // Build all sub-queries with shared param indices
   const whereParts = (siteCol = 'site_id') => {
-    const parts = ['t.cheque_status IS NOT NULL'];
+    const parts = ["UPPER(COALESCE(t.cheque_status, '')) <> ''"];
     if (site_id) parts.push(`t.${siteCol} = $1`);
-    if (statusFilter) parts.push(`t.cheque_status = $${site_id ? 2 : 1}`);
+    if (statusFilter) parts.push(`UPPER(COALESCE(t.cheque_status, '')) = $${site_id ? 2 : 1}`);
     return parts.join(' AND ');
   };
 
@@ -1125,7 +1414,7 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
     FROM farmer_payments t
     LEFT JOIN farmers f ON f.id = t.farmer_id
     LEFT JOIN sites s ON s.id = f.site_id
-    WHERE t.cheque_status IS NOT NULL${site_id ? ` AND f.site_id = $1` : ''}${statusFilter ? ` AND t.cheque_status = $${site_id ? 2 : 1}` : ''}`,
+    WHERE UPPER(COALESCE(t.cheque_status, '')) <> ''${site_id ? ` AND f.site_id = $1` : ''}${statusFilter ? ` AND UPPER(COALESCE(t.cheque_status, '')) = $${site_id ? 2 : 1}` : ''}`,
 
     `SELECT t.id, 'plot_commission_payment' AS source, 'Commission Payment #' || t.id AS entry_label,
       COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
@@ -1134,7 +1423,7 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
     FROM plot_commission_payments t
     LEFT JOIN plot_commissions_v2 pc ON pc.id = t.plot_commission_id
     LEFT JOIN sites s ON s.id = pc.site_id
-    WHERE t.cheque_status IS NOT NULL${site_id ? ` AND pc.site_id = $1` : ''}${statusFilter ? ` AND t.cheque_status = $${site_id ? 2 : 1}` : ''}`,
+    WHERE UPPER(COALESCE(t.cheque_status, '')) <> ''${site_id ? ` AND pc.site_id = $1` : ''}${statusFilter ? ` AND UPPER(COALESCE(t.cheque_status, '')) = $${site_id ? 2 : 1}` : ''}`,
 
     `SELECT t.id, 'firm_transaction' AS source, COALESCE(t.description, '') || CASE WHEN t.name IS NOT NULL THEN ' - ' || t.name ELSE '' END AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
@@ -1153,6 +1442,15 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
     LEFT JOIN plots p ON p.id = t.plot_id
     WHERE ${whereParts()}`,
 
+    `SELECT t.id, 'plot_installment_payment' AS source, 'Plot Installment - ' || COALESCE(p.plot_no, '') AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.payment_date AS date,
+      p.site_id, s.name AS site_name, t.created_at,
+      p.plot_no, NULL::text AS booked_by
+    FROM plot_installment_payments t
+    LEFT JOIN plots p ON p.id = t.plot_id
+    LEFT JOIN sites s ON s.id = p.site_id
+    WHERE UPPER(COALESCE(t.cheque_status, '')) <> ''${site_id ? ` AND p.site_id = $1` : ''}${statusFilter ? ` AND UPPER(COALESCE(t.cheque_status, '')) = $${site_id ? 2 : 1}` : ''}`,
+
     `SELECT t.id, 'expense' AS source, COALESCE(t.remark, t.category, '') AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
       t.site_id, s.name AS site_name, t.created_at,
@@ -1170,6 +1468,15 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
     LEFT JOIN vendor_commitments vc ON vc.id = t.commitment_id
     WHERE ${whereParts()}`,
 
+    ...(inventorySupportsChequeStatus ? [`SELECT t.id, 'vendor_inventory_payment' AS source, 'Inventory - ' || COALESCE(vio.item_name, '') AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.payment_date AS date,
+      t.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
+    FROM vendor_inventory_payments t
+    LEFT JOIN sites s ON s.id = t.site_id
+    LEFT JOIN vendor_inventory_orders vio ON vio.id = t.order_id
+    WHERE ${whereParts()}${inventorySourceFilter}`] : []),
+
     `SELECT t.id, 'cash_flow_entry' AS source, COALESCE(t.particular, '') AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
       t.site_id, s.name AS site_name, t.created_at,
@@ -1185,7 +1492,7 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
     FROM plot_registry_payments t
     LEFT JOIN plot_registries r ON r.id = t.registry_id
     LEFT JOIN sites s ON s.id = r.site_id
-    WHERE t.cheque_status IS NOT NULL${site_id ? ` AND r.site_id = $1` : ''}${statusFilter ? ` AND t.cheque_status = $${site_id ? 2 : 1}` : ''}`,
+    WHERE UPPER(COALESCE(t.cheque_status, '')) <> ''${site_id ? ` AND r.site_id = $1` : ''}${statusFilter ? ` AND UPPER(COALESCE(t.cheque_status, '')) = $${site_id ? 2 : 1}` : ''}`,
 
     `SELECT t.id, 'daybook' AS source, COALESCE(t.particular, '') AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
@@ -1203,7 +1510,8 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
   // Count by status
   const statusCounts = { PENDING: 0, CLEARED: 0, BOUNCED: 0, RETURNED: 0 };
   result.rows.forEach(r => {
-    if (statusCounts[r.cheque_status] !== undefined) statusCounts[r.cheque_status]++;
+    const normalizedStatus = String(r.cheque_status || '').toUpperCase();
+    if (statusCounts[normalizedStatus] !== undefined) statusCounts[normalizedStatus]++;
   });
 
   res.json({ entries: result.rows, counts: statusCounts, total: result.rows.length });
@@ -1259,10 +1567,11 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Entry not found' });
   }
 
-  // Sync cheque_status (and cheque_no if provided) to cash_flow_entries
-  // For BOUNCED/RETURNED: zero out the amounts so they don't count in totals
+  // Sync cheque metadata to the mirrored cash-flow row. Preserve the original
+  // debit/credit: posting views exclude bounced/returned cheques, so retaining
+  // the amount keeps the audit trail intact and allows a corrected cheque
+  // status to post the same transaction again.
   if (table !== 'cash_flow_entries') {
-    const isBounced = ['BOUNCED', 'RETURNED'].includes(normalizedStatus);
     const cfSetParts = ['cheque_status = $1', 'updated_at = NOW()'];
     const cfParams = [normalizedStatus];
     let cfIdx = 2;
@@ -1271,9 +1580,6 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
       cfParams.push(trimmedChequeNo);
       cfIdx++;
     }
-    if (isBounced) {
-      cfSetParts.push('debit = 0', 'credit = 0');
-    }
     cfParams.push(table, parseInt(id));
     await pool.query(
       `UPDATE cash_flow_entries
@@ -1281,14 +1587,17 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
        WHERE source_module = $${cfIdx} AND source_id = $${cfIdx + 1}`,
       cfParams
     );
-  } else {
-    // Source IS cash_flow_entries — just zero amounts if bounced
-    if (['BOUNCED', 'RETURNED'].includes(normalizedStatus)) {
-      await pool.query(
-        `UPDATE cash_flow_entries SET debit = 0, credit = 0 WHERE id = $1`,
-        [parseInt(id)]
-      );
-    }
+  }
+
+  if (source === 'vendor_payment') {
+    await pool.query(
+      `UPDATE vendor_inventory_payments
+          SET cheque_status = $2,
+              cheque_no = CASE WHEN $3::text IS NULL THEN cheque_no ELSE $3 END,
+              updated_at = NOW()
+        WHERE source_vendor_payment_id = $1`,
+      [parseInt(id), normalizedStatus, trimmedChequeNo === undefined ? null : trimmedChequeNo]
+    );
   }
 
   // If this is a plot commission payment, auto-update the commission status
@@ -1329,6 +1638,10 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
     } catch (err) {
       console.error('Error auto-updating commission status after cheque status change:', err);
     }
+  }
+
+  if (source === 'plot_installment_payment') {
+    await reconcileInstallmentPayment(parseInt(id));
   }
 
   res.json({ entry: result.rows[0], message: `Cheque status updated to ${normalizedStatus}` });

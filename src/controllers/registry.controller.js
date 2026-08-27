@@ -40,6 +40,7 @@ export async function getPlotBankClearance(plotId) {
               SELECT SUM(pp.amount) FROM plot_payments pp
                WHERE pp.plot_id = p.id
                  AND pp.payment_type IN ('BANK', 'CHEQUE')
+                 AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
                  AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
             ), 0)::numeric
           + COALESCE((
@@ -181,7 +182,8 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
     // registry's NOC payment gate.
     const { rows } = await db.query(
       `SELECT pp.id, pp.site_id, pp.date, pp.amount, pp.payment_from, pp.payment_type,
-              pp.bank_details, pp.narration, pp.cheque_no
+              pp.bank_details, pp.narration, pp.cheque_no, pp.cheque_status,
+              pp.status, pp.approved_by, pp.approved_at
          FROM plot_payments pp
         WHERE pp.id = ANY($1::int[])
           AND pp.site_id = $2
@@ -268,14 +270,16 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
       await client.query(
         `INSERT INTO plot_registry_payments (
            registry_id, site_id, payment_date, amount, payment_mode, tally_date, tally_amount,
-           notes, source_plot_payment_id, cheque_no, created_by
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+           notes, source_plot_payment_id, cheque_no, cheque_status, status,
+           approved_by, approved_at, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
         [
           registryId, siteIdInt, pp.date || today, parseFloat(pp.amount) || 0,
           (pp.payment_from || pp.payment_type || '').trim().toUpperCase() || null,
           pp.date || null, parseFloat(pp.amount) || 0,
           (pp.narration || pp.bank_details || 'LINKED FROM PLOT PAYMENT').trim().toUpperCase(),
-          pp.id, pp.cheque_no || null, userId,
+          pp.id, pp.cheque_no || null, pp.cheque_status || null,
+          pp.status || 'approved', pp.approved_by || null, pp.approved_at || null, userId,
         ]
       );
     }
@@ -465,7 +469,7 @@ export const deleteRegistry = asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT id, plot_id, site_id, plot_no, noc_approved_at
+      `SELECT id, plot_id, site_id, plot_no, noc_generated_at, noc_approved_at
          FROM plot_registries
         WHERE id = $1
         FOR UPDATE`,
@@ -476,10 +480,10 @@ export const deleteRegistry = asyncHandler(async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Registry not found' });
     }
-    if (registry.noc_approved_at) {
+    if (registry.noc_generated_at || registry.noc_approved_at) {
       await client.query('ROLLBACK');
       return res.status(409).json({
-        message: 'An approved registry cannot be deleted. Keep the audit record and use the relevant cancellation workflow.',
+        message: 'A registry with an issued NOC cannot be deleted. Keep the revision history and use the relevant cancellation workflow.',
       });
     }
 
@@ -545,7 +549,8 @@ export const createRegistryPayment = asyncHandler(async (req, res) => {
       pool.query(`SELECT id FROM plot_registry_payments WHERE source_plot_payment_id = $1 LIMIT 1`, [sourceId]),
       pool.query(
         `SELECT pp.id, pp.site_id, pp.plot_id, p.plot_no, pp.date, pp.amount,
-                pp.payment_from, pp.payment_type, pp.bank_details, pp.narration
+                pp.payment_from, pp.payment_type, pp.bank_details, pp.narration,
+                pp.cheque_no, pp.cheque_status, pp.status, pp.approved_by, pp.approved_at
            FROM plot_payments pp
            LEFT JOIN plots p ON p.id = pp.plot_id
           WHERE pp.id = $1
@@ -582,6 +587,11 @@ export const createRegistryPayment = asyncHandler(async (req, res) => {
       tally_amount: parseFloat(sourcePayment.amount) || 0,
       notes: sourcePayment.narration ? sourcePayment.narration.trim().toUpperCase() : (sourcePayment.bank_details ? sourcePayment.bank_details.trim().toUpperCase() : 'LINKED FROM PLOT PAYMENT'),
       source_plot_payment_id: sourceId,
+      status: sourcePayment.status || 'approved',
+      approved_by: sourcePayment.approved_by || null,
+      approved_at: sourcePayment.approved_at || null,
+      cheque_no: sourcePayment.cheque_no || null,
+      cheque_status: sourcePayment.cheque_status || null,
       created_by: req.user.id,
       assigned_admin_id: req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null,
     };
@@ -610,6 +620,7 @@ export const createRegistryPayment = asyncHandler(async (req, res) => {
     created_by: req.user.id,
     cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
     cheque_status: (payment_mode || '').trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
+    status: 'pending',
   };
   if (hasSourcePlotPaymentCol) data.source_plot_payment_id = null;
 
@@ -649,6 +660,9 @@ export const updateRegistryPayment = asyncHandler(async (req, res) => {
   if (!existing || !(await canUserViewEntry(req.user, 'plot_registry', existing.created_by))) {
     return res.status(404).json({ message: 'Payment not found' });
   }
+  if (existing.source_plot_payment_id) {
+    return res.status(409).json({ message: 'Linked registry payments must be edited from the source Plot Payment entry' });
+  }
   const { payment_date, amount, payment_mode, tally_date, tally_amount, notes } = req.body;
 
   const updateData = {};
@@ -661,6 +675,12 @@ export const updateRegistryPayment = asyncHandler(async (req, res) => {
   if (req.body.assigned_admin_id !== undefined) updateData.assigned_admin_id = req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null;
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
+
+  updateData.status = 'pending';
+  updateData.approved_by = null;
+  updateData.approved_at = null;
+  const finalMode = String(payment_mode !== undefined ? payment_mode : existing.payment_mode || '').trim().toUpperCase();
+  updateData.cheque_status = finalMode === 'CHEQUE' ? 'PENDING' : null;
 
   // Atomic UPDATE — saves a SELECT round-trip.
   const updated = await plotRegistryPaymentModel.update(paymentId, updateData, pool);
@@ -731,10 +751,21 @@ const buildNocPayload = async (registryId) => {
       ORDER BY prp.payment_date ASC, prp.created_at ASC`,
     [registryId]
   );
+  const historyPromise = pool.query(
+    `SELECT h.id, h.revision_no, h.ref_no, h.ack_no, h.event_type,
+            h.change_note, h.show_payments, h.included_payment_count,
+            h.included_amount, h.snapshot, h.generated_by, h.generated_at,
+            COALESCE(u.name, u.email, 'System') AS generated_by_name
+       FROM plot_registry_noc_history h
+       LEFT JOIN users u ON u.id = h.generated_by
+      WHERE h.registry_id = $1
+      ORDER BY h.revision_no DESC`,
+    [registryId]
+  ).catch(() => ({ rows: [] }));
   const workflowOverridePromise = isRegistryWorkflowUnlocked(registry.site_id);
 
-  const [plotRes, siteRes, letterheadRes, inlineRes, workflowUnlocked] = await Promise.all([
-    plotPromise, sitePromise, letterheadPromise, inlinePromise, workflowOverridePromise,
+  const [plotRes, siteRes, letterheadRes, inlineRes, historyRes, workflowUnlocked] = await Promise.all([
+    plotPromise, sitePromise, letterheadPromise, inlinePromise, historyPromise, workflowOverridePromise,
   ]);
   const plot = plotRes.rows[0] || null;
   const site = siteRes.rows[0] || null;
@@ -744,7 +775,7 @@ const buildNocPayload = async (registryId) => {
     const payRes = await pool.query(
       `SELECT pp.id, pp.date, pp.amount, pp.payment_type, pp.payment_from, pp.bank_name,
               pp.branch, pp.bank_details, pp.narration, pp.received_by, pp.cheque_status,
-              pp.cheque_no, pp.created_at,
+              pp.cheque_no, pp.status, pp.created_at,
               prp.id AS registry_payment_id,
               prp.registry_id AS linked_registry_id,
               (prp.registry_id = $2 AND COALESCE(prp.include_in_noc, FALSE)) AS included
@@ -758,8 +789,12 @@ const buildNocPayload = async (registryId) => {
   }
   const inlinePayments = inlineRes.rows;
 
-  const includedPlot = plotPayments.filter((p) => p.included);
-  const includedInline = inlinePayments.filter((p) => p.include_in_noc);
+  const includedPlot = plotPayments.filter((p) => p.included
+    && String(p.status || 'approved').toLowerCase() === 'approved'
+    && !['BOUNCED', 'RETURNED', 'PENDING'].includes(String(p.cheque_status || '').toUpperCase()));
+  const includedInline = inlinePayments.filter((p) => p.include_in_noc
+    && String(p.status || 'approved').toLowerCase() === 'approved'
+    && !['BOUNCED', 'RETURNED', 'PENDING'].includes(String(p.cheque_status || '').toUpperCase()));
   const includedAmount =
     includedPlot.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0) +
     includedInline.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
@@ -781,7 +816,7 @@ const buildNocPayload = async (registryId) => {
     sn: site?.name || null,
     sy: site?.city || null,
     ss: site?.state || null,
-    rf: registry.noc_no || suggestedNocNo,
+    rf: registry.noc_ack_no || registry.noc_no || suggestedNocNo,
   });
 
   return {
@@ -791,6 +826,7 @@ const buildNocPayload = async (registryId) => {
     letterhead: letterheadRes.rows[0] || null,
     plotPayments,
     inlinePayments,
+    nocHistory: historyRes.rows,
     workflow_unlocked: workflowUnlocked,
     suggested_noc_no: suggestedNocNo,
     verifyUrl,
@@ -801,9 +837,9 @@ const buildNocPayload = async (registryId) => {
   };
 };
 
-/** PUT /registries/:id/noc/approve — approve a generated NOC.
- *  This is the ONLY place a plot is promoted to 'REGISTRY' status:
- *  registry created -> plot 'PENDING NOC' -> NOC generated -> approved here -> 'REGISTRY'. */
+/** PUT /registries/:id/noc/approve — optional administrative sign-off.
+ *  NOC generation is the primary transition to REGISTRY. This endpoint keeps
+ *  the legacy approval stamp and defensively promotes older generated NOCs. */
 export const approveRegistryNoc = asyncHandler(async (req, res) => {
   const registryId = parseInt(req.params.id);
   const client = await pool.connect();
@@ -824,6 +860,15 @@ export const approveRegistryNoc = asyncHandler(async (req, res) => {
                   FROM plot_registry_payments prp
                   LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
                  WHERE prp.registry_id = pr.id
+                   AND (
+                     (prp.source_plot_payment_id IS NULL
+                       AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
+                       AND (prp.cheque_status IS NULL OR prp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+                     OR
+                     (prp.source_plot_payment_id IS NOT NULL
+                       AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+                       AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+                   )
                    AND (
                      prp.source_plot_payment_id IS NULL
                      OR (pr.plot_id IS NOT NULL AND pp.plot_id = pr.plot_id)
@@ -876,8 +921,8 @@ export const approveRegistryNoc = asyncHandler(async (req, res) => {
     );
     updated = approvalResult.rows[0];
 
-    // Older registries may not carry plot_id. Resolve those records by their
-    // immutable site + plot number pair and promote only the newest match.
+    // Defensive backfill for NOCs generated before generation itself became
+    // the REGISTRY transition. Older registries may not carry plot_id.
     const plotResult = await client.query(
       `WITH target_plot AS (
          SELECT id
@@ -924,32 +969,93 @@ export const getRegistryNoc = asyncHandler(async (req, res) => {
  *  the NOC, so registry accounting is never silently deleted. */
 export const saveRegistryNoc = asyncHandler(async (req, res) => {
   const registryId = parseInt(req.params.id);
-  const { noc_no, noc_date, noc_place, noc_notes, included_plot_payment_ids, inline_payments } = req.body;
-
-  const registry = await plotRegistryModel.findById(registryId, pool);
-  if (!registry) return res.status(404).json({ message: 'Registry not found' });
-  const workflowUnlocked = await isRegistryWorkflowUnlocked(registry.site_id);
+  const {
+    noc_no, noc_date, noc_place, noc_notes, noc_show_payments,
+    included_plot_payment_ids, inline_payments, change_note,
+  } = req.body;
 
   const includedIds = Array.isArray(included_plot_payment_ids)
-    ? included_plot_payment_ids.map((n) => parseInt(n)).filter(Number.isFinite)
+    ? [...new Set(included_plot_payment_ids.map((n) => parseInt(n)).filter(Number.isFinite))]
     : null;
   const today = new Date().toISOString().split('T')[0];
 
   const client = await pool.connect();
+  let plotStatusUpdated = false;
+  let workflowUnlocked = false;
   try {
     await client.query('BEGIN');
 
+    // Serialize revisions for one registry. Two users regenerating at the
+    // same time must receive R02 and R03, never duplicate ACK numbers.
+    const lockedResult = await client.query(
+      `SELECT * FROM plot_registries WHERE id = $1 FOR UPDATE`,
+      [registryId]
+    );
+    const registry = lockedResult.rows[0];
+    if (!registry) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Registry not found' });
+    }
+    workflowUnlocked = await readRegistryWorkflowUnlocked(client, registry.site_id);
+
+    const wasGenerated = Boolean(registry.noc_generated_at);
+    const requestedRef = noc_no === undefined || noc_no === null
+      ? ''
+      : String(noc_no).trim().toUpperCase();
+    const existingRef = String(registry.noc_no || '').trim().toUpperCase();
+    if (wasGenerated && requestedRef && existingRef && requestedRef !== existingRef) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'NOC_REF_IMMUTABLE',
+        message: `REF number ${existingRef} is permanent. Regenerate the NOC to receive a new ACK number.`,
+      });
+    }
+
+    const refNo = existingRef || requestedRef
+      || `NOC/RG/${new Date().getFullYear()}/${String(registryId).padStart(4, '0')}`;
+    const revisionNo = Math.max(parseInt(registry.noc_revision) || (wasGenerated ? 1 : 0), 0) + 1;
+    const ackNo = `ACK/NOC/${String(registryId).padStart(4, '0')}/R${String(revisionNo).padStart(2, '0')}`;
+    const changeNote = change_note ? String(change_note).trim() : null;
+    if (wasGenerated && (!changeNote || changeNote.length < 3)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        code: 'NOC_REVISION_REASON_REQUIRED',
+        message: 'Enter a reason for regenerating the NOC so the revision history remains clear.',
+      });
+    }
+    const showPayments = noc_show_payments === undefined
+      ? registry.noc_show_payments !== false
+      : noc_show_payments !== false;
+
     // ── NOC meta on the registry ──
-    const sets = [];
-    const vals = [];
-    const push = (col, val) => { vals.push(val); sets.push(`${col} = $${vals.length}`); };
-    if (noc_no !== undefined) push('noc_no', noc_no ? String(noc_no).trim().toUpperCase() : null);
-    if (noc_date !== undefined) push('noc_date', noc_date || null);
-    if (noc_place !== undefined) push('noc_place', noc_place ? String(noc_place).trim().toUpperCase() : null);
-    if (noc_notes !== undefined) push('noc_notes', noc_notes ? String(noc_notes).trim() : null);
-    sets.push('noc_generated_at = NOW()', 'updated_at = NOW()');
-    vals.push(registryId);
-    await client.query(`UPDATE plot_registries SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+    await client.query(
+      `UPDATE plot_registries
+          SET noc_no = $2,
+              noc_date = $3,
+              noc_place = $4,
+              noc_notes = $5,
+              noc_show_payments = $6,
+              noc_ack_no = $7,
+              noc_revision = $8,
+              noc_generated_by = $9,
+              noc_generated_at = NOW(),
+              noc_approved_at = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_at END,
+              noc_approved_by = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_by END,
+              updated_at = NOW()
+        WHERE id = $1`,
+      [
+        registryId,
+        refNo,
+        noc_date !== undefined ? (noc_date || null) : registry.noc_date,
+        noc_place !== undefined ? (noc_place ? String(noc_place).trim().toUpperCase() : null) : registry.noc_place,
+        noc_notes !== undefined ? (noc_notes ? String(noc_notes).trim() : null) : registry.noc_notes,
+        showPayments,
+        ackNo,
+        revisionNo,
+        req.user.id,
+        wasGenerated,
+      ]
+    );
 
     // ── Sync plot-payment selections ──
     if (includedIds) {
@@ -970,6 +1076,8 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
           WHERE prp.registry_id = $1
             AND prp.source_plot_payment_id = pp.id
             AND prp.source_plot_payment_id = ANY($2::int[])
+            AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+            AND UPPER(COALESCE(pp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING')
             AND (
               ($3::integer IS NOT NULL AND pp.plot_id = $3)
               OR (
@@ -988,16 +1096,20 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
       await client.query(
         `INSERT INTO plot_registry_payments (
            registry_id, site_id, payment_date, amount, payment_mode, tally_date, tally_amount,
-           notes, source_plot_payment_id, include_in_noc, cheque_no, created_by
+           notes, source_plot_payment_id, include_in_noc, cheque_no, cheque_status,
+           status, approved_by, approved_at, created_by
          )
          SELECT $1, pp.site_id, COALESCE(pp.date, CURRENT_DATE), pp.amount,
                 COALESCE(NULLIF(UPPER(TRIM(pp.payment_from)), ''), UPPER(COALESCE(pp.payment_type, ''))),
                 pp.date, pp.amount,
                 COALESCE(NULLIF(UPPER(TRIM(pp.narration)), ''), NULLIF(UPPER(TRIM(pp.bank_details)), ''), 'LINKED FROM PLOT PAYMENT'),
-                pp.id, TRUE, pp.cheque_no, $3
+                pp.id, TRUE, pp.cheque_no, pp.cheque_status,
+                COALESCE(pp.status, 'approved'), pp.approved_by, pp.approved_at, $3
            FROM plot_payments pp
           WHERE pp.id = ANY($2::int[])
             AND pp.site_id = $4
+            AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+            AND UPPER(COALESCE(pp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING')
             AND (
               ($5::integer IS NOT NULL AND pp.plot_id = $5)
               OR (
@@ -1043,8 +1155,9 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
           await client.query(
             `INSERT INTO plot_registry_payments (
                registry_id, site_id, payment_date, amount, payment_mode, notes,
-               include_in_noc, cheque_no, cheque_status, created_by
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+               include_in_noc, cheque_no, cheque_status, status, approved_by,
+               approved_at, created_by
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', $10, NOW(), $10)`,
             [
               registryId, registry.site_id, row.payment_date || today, amount, mode,
               row.notes ? String(row.notes).trim().toUpperCase() : null, include,
@@ -1065,6 +1178,15 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
          FROM plot_registry_payments prp
          LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = $1
+          AND (
+            (prp.source_plot_payment_id IS NULL
+              AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
+              AND UPPER(COALESCE(prp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING'))
+            OR
+            (prp.source_plot_payment_id IS NOT NULL
+              AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+              AND UPPER(COALESCE(pp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING'))
+          )
           AND (
             prp.source_plot_payment_id IS NULL
             OR ($2::integer IS NOT NULL AND pp.plot_id = $2)
@@ -1090,6 +1212,119 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
       });
     }
 
+    // Snapshot exactly what was issued. Future payment edits do not rewrite
+    // an old NOC revision, and the user/date/reason remain attributable.
+    const snapshotResult = await client.query(
+      `SELECT
+         COALESCE(jsonb_agg(x.payment ORDER BY x.payment_date, x.payment_id), '[]'::jsonb) AS payments,
+         COUNT(*)::integer AS included_count,
+         COALESCE(SUM(x.amount), 0)::numeric AS included_amount
+       FROM (
+         SELECT
+           prp.id AS payment_id,
+           pp.date AS payment_date,
+           pp.amount,
+           jsonb_build_object(
+             'id', prp.id,
+             'source', 'plot',
+             'source_plot_payment_id', pp.id,
+             'date', pp.date,
+             'amount', pp.amount,
+             'mode', COALESCE(NULLIF(UPPER(TRIM(pp.payment_from)), ''), UPPER(COALESCE(pp.payment_type, ''))),
+             'notes', COALESCE(pp.narration, pp.bank_details),
+             'cheque_no', pp.cheque_no
+           ) AS payment
+         FROM plot_registry_payments prp
+         JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
+         WHERE prp.registry_id = $1
+           AND COALESCE(prp.include_in_noc, FALSE)
+           AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
+           AND UPPER(COALESCE(pp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING')
+         UNION ALL
+         SELECT
+           prp.id AS payment_id,
+           prp.payment_date,
+           prp.amount,
+           jsonb_build_object(
+             'id', prp.id,
+             'source', 'manual',
+             'date', prp.payment_date,
+             'amount', prp.amount,
+             'mode', prp.payment_mode,
+             'notes', prp.notes,
+             'cheque_no', prp.cheque_no
+           ) AS payment
+         FROM plot_registry_payments prp
+         WHERE prp.registry_id = $1
+           AND prp.source_plot_payment_id IS NULL
+           AND COALESCE(prp.include_in_noc, FALSE)
+           AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
+           AND UPPER(COALESCE(prp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING')
+       ) x`,
+      [registryId]
+    );
+    const issuedPayments = snapshotResult.rows[0]?.payments || [];
+    const includedCount = parseInt(snapshotResult.rows[0]?.included_count) || 0;
+    const includedAmount = parseFloat(snapshotResult.rows[0]?.included_amount) || 0;
+    const snapshot = {
+      noc: {
+        ref_no: refNo,
+        ack_no: ackNo,
+        revision_no: revisionNo,
+        noc_date: noc_date !== undefined ? (noc_date || null) : registry.noc_date,
+        noc_place: noc_place !== undefined ? (noc_place ? String(noc_place).trim().toUpperCase() : null) : registry.noc_place,
+        noc_notes: noc_notes !== undefined ? (noc_notes ? String(noc_notes).trim() : null) : registry.noc_notes,
+        show_payments: showPayments,
+      },
+      plot: {
+        id: registry.plot_id,
+        plot_no: registry.plot_no,
+        customer_name: registry.customer_name,
+      },
+      payments: issuedPayments,
+      totals: { included_count: includedCount, included_amount: includedAmount },
+    };
+    await client.query(
+      `INSERT INTO plot_registry_noc_history (
+         registry_id, revision_no, ref_no, ack_no, event_type, change_note,
+         show_payments, included_payment_count, included_amount, snapshot,
+         generated_by, generated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, NOW())`,
+      [
+        registryId, revisionNo, refNo, ackNo,
+        wasGenerated ? 'REGENERATED' : 'GENERATED',
+        changeNote, showPayments, includedCount, includedAmount,
+        JSON.stringify(snapshot), req.user.id,
+      ]
+    );
+
+    // Generating the NOC is the business transition requested by the plot
+    // workflow: BOOKED/PENDING NOC -> REGISTRY. The deed upload gate reads the
+    // same noc_generated_at value, so status and document readiness commit
+    // atomically.
+    const plotResult = await client.query(
+      `WITH target_plot AS (
+         SELECT id
+           FROM plots
+          WHERE ($1::integer IS NOT NULL AND id = $1)
+             OR ($1::integer IS NULL AND site_id = $2 AND UPPER(plot_no) = UPPER($3))
+          ORDER BY id DESC
+          LIMIT 1
+       )
+       UPDATE plots p
+          SET status = 'REGISTRY', updated_at = NOW()
+         FROM target_plot target
+        WHERE p.id = target.id
+          AND UPPER(COALESCE(p.status, '')) != 'REGISTRY'
+          AND UPPER(COALESCE(p.status, '')) NOT IN (
+            'CANCELLED', 'CANCEL', 'CANCELLATION', 'UNDER CANCELLATION',
+            'RESALE', 'TRANSFERRED', 'COMPANY'
+          )
+        RETURNING p.id`,
+      [registry.plot_id, registry.site_id, registry.plot_no]
+    );
+    plotStatusUpdated = plotResult.rows.length > 0;
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1099,6 +1334,8 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
   }
 
   const payload = await buildNocPayload(registryId);
+  payload.plot_status_updated = plotStatusUpdated;
+  payload.registry_deed_unlocked = Boolean(payload.registry?.noc_generated_at);
   res.json(payload);
 });
 

@@ -43,4 +43,30 @@ const requirePermission = (module, action) => {
     };
 };
 
+/**
+ * Grant access when the user holds the requested action for at least one
+ * module. The NOC workspace is launched from Plot Payments but persists its
+ * legal data against the linked Registry, so both module permissions apply.
+ */
+export const requireAnyPermission = (modules, action) => {
+    const allowedModules = Array.isArray(modules) ? modules : [modules];
+    return async (req, res, next) => {
+        try {
+            if (req.user.role === 'admin' || req.user.role === 'super_admin') return next();
+            if (req.user.role !== 'sub_admin') return res.status(403).json({ message: 'Insufficient permissions' });
+
+            const permissions = await Promise.all(
+                allowedModules.map((module) => permissionModel.getPermission(req.user.id, module))
+            );
+            const fieldName = `can_${action}`;
+            if (permissions.some((permission) => permission?.[fieldName] === true)) return next();
+
+            return res.status(403).json({ message: `You do not have permission to ${action} in this workspace` });
+        } catch (err) {
+            console.error('Permission middleware error:', err);
+            return res.status(500).json({ message: 'Permission check failed' });
+        }
+    };
+};
+
 export default requirePermission;
