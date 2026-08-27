@@ -5,6 +5,7 @@ import {
   reverseApprovedImprestDebit,
 } from '../services/imprestPosting.service.js';
 import { notifyPlotPaymentRecorded } from '../utils/notify.js';
+import { CHEQUE_STATUSES, updateChequeStatusRecord } from '../services/chequeStatus.service.js';
 
 /**
  * Unified approval controller for all financial modules.
@@ -1314,20 +1315,6 @@ export const bulkReject = asyncHandler(async (req, res) => {
 //  CHEQUE STATUS UPDATE (Admin)
 // ══════════════════════════════════════════════════
 
-const CHEQUE_TABLES = {
-  farmer_payment: 'farmer_payments',
-  plot_commission_payment: 'plot_commission_payments',
-  cash_flow_entry: 'cash_flow_entries',
-  firm_transaction: 'firm_transactions',
-  plot_payment: 'plot_payments',
-  plot_installment_payment: 'plot_installment_payments',
-  expense: 'expenses',
-  vendor_payment: 'vendor_payments',
-  vendor_inventory_payment: 'vendor_inventory_payments',
-  plot_registry_payment: 'plot_registry_payments',
-  daybook: 'day_book',
-};
-
 /**
  * GET /approvals/cheques
  * List all cheque entries across modules (for admin cheque management tab).
@@ -1524,125 +1511,33 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
  * Valid cheque_status values: PENDING, CLEARED, BOUNCED, RETURNED
  */
 export const updateChequeStatus = asyncHandler(async (req, res) => {
+  // Preserve the original accounting debit/credit values. The shared command
+  // changes cheque metadata only; ledger views exclude bounced/returned rows.
   const { id, source, cheque_status, cheque_no } = req.body;
 
   if (!id || !source || !cheque_status) {
     return res.status(400).json({ message: 'id, source, and cheque_status are required' });
   }
 
-  const VALID_STATUSES = ['PENDING', 'CLEARED', 'BOUNCED', 'RETURNED'];
   const normalizedStatus = String(cheque_status).toUpperCase();
-  if (!VALID_STATUSES.includes(normalizedStatus)) {
-    return res.status(400).json({ message: `cheque_status must be one of: ${VALID_STATUSES.join(', ')}` });
+  if (!CHEQUE_STATUSES.includes(normalizedStatus)) {
+    return res.status(400).json({ message: `cheque_status must be one of: ${CHEQUE_STATUSES.join(', ')}` });
   }
-
-  const table = CHEQUE_TABLES[source];
-  if (!table) {
-    return res.status(400).json({ message: `Invalid source: ${source}` });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await updateChequeStatusRecord(client, {
+      source,
+      entryId: id,
+      status: normalizedStatus,
+      chequeNo: cheque_no,
+    });
+    await client.query('COMMIT');
+    res.json({ entry: result.after, message: `Cheque status updated to ${normalizedStatus}` });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const trimmedChequeNo = cheque_no !== undefined ? (cheque_no ? String(cheque_no).trim() : null) : undefined;
-
-  const setClauses = ['cheque_status = $1', 'updated_at = NOW()'];
-  const queryParams = [normalizedStatus];
-  let paramIdx = 2;
-
-  if (trimmedChequeNo !== undefined) {
-    setClauses.push(`cheque_no = $${paramIdx}`);
-    queryParams.push(trimmedChequeNo);
-    paramIdx++;
-  }
-
-  queryParams.push(parseInt(id));
-
-  const result = await pool.query(
-    `UPDATE ${table}
-     SET ${setClauses.join(', ')}
-     WHERE id = $${paramIdx}
-     RETURNING *`,
-    queryParams
-  );
-
-  if (result.rowCount === 0) {
-    return res.status(404).json({ message: 'Entry not found' });
-  }
-
-  // Sync cheque metadata to the mirrored cash-flow row. Preserve the original
-  // debit/credit: posting views exclude bounced/returned cheques, so retaining
-  // the amount keeps the audit trail intact and allows a corrected cheque
-  // status to post the same transaction again.
-  if (table !== 'cash_flow_entries') {
-    const cfSetParts = ['cheque_status = $1', 'updated_at = NOW()'];
-    const cfParams = [normalizedStatus];
-    let cfIdx = 2;
-    if (trimmedChequeNo !== undefined) {
-      cfSetParts.push(`cheque_no = $${cfIdx}`);
-      cfParams.push(trimmedChequeNo);
-      cfIdx++;
-    }
-    cfParams.push(table, parseInt(id));
-    await pool.query(
-      `UPDATE cash_flow_entries
-       SET ${cfSetParts.join(', ')}
-       WHERE source_module = $${cfIdx} AND source_id = $${cfIdx + 1}`,
-      cfParams
-    );
-  }
-
-  if (source === 'vendor_payment') {
-    await pool.query(
-      `UPDATE vendor_inventory_payments
-          SET cheque_status = $2,
-              cheque_no = CASE WHEN $3::text IS NULL THEN cheque_no ELSE $3 END,
-              updated_at = NOW()
-        WHERE source_vendor_payment_id = $1`,
-      [parseInt(id), normalizedStatus, trimmedChequeNo === undefined ? null : trimmedChequeNo]
-    );
-  }
-
-  // If this is a plot commission payment, auto-update the commission status
-  if (source === 'plot_commission_payment') {
-    try {
-      const paymentRes = await pool.query(
-        `SELECT plot_commission_id FROM plot_commission_payments WHERE id = $1`,
-        [parseInt(id)]
-      );
-      if (paymentRes.rows.length > 0) {
-        const plotCommissionId = paymentRes.rows[0].plot_commission_id;
-        const commRes = await pool.query(
-          `SELECT pc.total_commission, 
-                  COALESCE(SUM(pcp.amount) FILTER (WHERE pcp.status = 'approved' 
-                  AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_paid
-           FROM plot_commissions_v2 pc
-           LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id
-           WHERE pc.id = $1
-           GROUP BY pc.id`,
-          [plotCommissionId]
-        );
-        
-        if (commRes.rows.length > 0) {
-          const { total_commission, total_paid } = commRes.rows[0];
-          const numCommission = parseFloat(total_commission) || 0;
-          const numPaid = parseFloat(total_paid) || 0;
-          
-          let newStatus = 'Pending';
-          if (numPaid >= numCommission) newStatus = 'Completed';
-          else if (numPaid > 0) newStatus = 'Partial';
-          
-          await pool.query(
-            `UPDATE plot_commissions_v2 SET status = $1, updated_at = NOW() WHERE id = $2`,
-            [newStatus, plotCommissionId]
-          );
-        }
-      }
-    } catch (err) {
-      console.error('Error auto-updating commission status after cheque status change:', err);
-    }
-  }
-
-  if (source === 'plot_installment_payment') {
-    await reconcileInstallmentPayment(parseInt(id));
-  }
-
-  res.json({ entry: result.rows[0], message: `Cheque status updated to ${normalizedStatus}` });
 });

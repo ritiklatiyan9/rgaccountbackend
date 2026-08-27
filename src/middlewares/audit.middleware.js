@@ -22,6 +22,7 @@ const MODULE_MAP = {
   compliance: 'compliance', 'compliance-documents': 'compliance', construction: 'construction',
   inventory: 'inventory', reports: 'reports', 'pending-lookout': 'approvals',
   'transaction-transfers': 'transaction_transfers', upload: 'uploads',
+  'bank-reconciliation': 'bank_reconciliation',
 };
 
 const labelize = (value) => String(value || '')

@@ -49,6 +49,7 @@ import complianceDocumentRoutes from './complianceDocument.routes.js';
 import googleCalendarRoutes from './googleCalendar.routes.js';
 import transactionTransferRoutes from './transactionTransfer.routes.js';
 import auditLogRoutes from './auditLog.routes.js';
+import bankReconciliationRoutes from './bankReconciliation.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -101,4 +102,5 @@ router.use('/receipts', receiptVerifyUrlRoutes);
 router.use('/dashboard-ai', dashboardAssistantRoutes);
 router.use('/transaction-transfers', transactionTransferRoutes);
 router.use('/audit-logs', auditLogRoutes);
+router.use('/bank-reconciliation', bankReconciliationRoutes);
 export default router;
