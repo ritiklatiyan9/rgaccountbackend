@@ -3,6 +3,11 @@ import multer from 'multer';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
+import { requireAllEntryVisibility } from '../middlewares/entryCreatorAccess.middleware.js';
+import {
+  applyBankDaybookReconciliation,
+  previewBankDaybookReconciliation,
+} from '../controllers/bankDaybookReconciliation.controller.js';
 import {
   confirmMatches,
   createUpload,
@@ -32,6 +37,25 @@ const upload = multer({
 
 router.use(authMiddleware);
 router.use(requireRole('admin', 'sub_admin'));
+
+// General Bank Day Book reconciliation is presentation-only and follows the
+// Day Book permission model. Keep it separate from the cheque-clearing routes
+// below, which intentionally remain under expense approval permissions.
+router.post(
+  '/daybook/preview',
+  requirePermission('daybook', 'read'),
+  requireAllEntryVisibility('daybook'),
+  upload.single('statement'),
+  previewBankDaybookReconciliation
+);
+router.post(
+  '/daybook/apply',
+  requirePermission('daybook', 'update'),
+  requireAllEntryVisibility('daybook'),
+  upload.single('statement'),
+  applyBankDaybookReconciliation
+);
+
 router.use(requirePermission('expense_approval', 'read'));
 
 router.get('/configuration', getConfiguration);

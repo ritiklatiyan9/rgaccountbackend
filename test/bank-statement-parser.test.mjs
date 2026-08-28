@@ -44,11 +44,13 @@ test('parses the exact Mount Valley Bank_Statement sheet with punctuation header
   assert.equal(parsed.rows.length, 10);
   assert.equal(parsed.parseErrorCount, 0);
   assert.deepEqual(parsed.rows[0].normalized, {
+    source_serial: '',
     transaction_date: '2026-08-20', value_date: '2026-08-20',
     narration: 'CTS CLEARING CHQ 123456 RAKESH KUMAR PLOT-B8',
     transaction_reference: 'MV-BNK-0001', cheque_reference: '123456',
     debit: null, credit: '500000.00', balance: '5500000.00',
-    debit_minor: null, credit_minor: '50000000', account_suffix: '4412', branch: 'MUZAFFARNAGAR',
+    debit_minor: null, credit_minor: '50000000', balance_minor: '550000000',
+    account_suffix: '4412', branch: 'MUZAFFARNAGAR',
   });
   assert.equal(parsed.rows[1].normalized.transaction_date, '2026-08-21');
   assert.equal(parsed.rows[1].normalized.cheque_reference, '654321');
@@ -105,4 +107,38 @@ test('converts monetary input to exact integer minor units', () => {
   assert.equal(decimalToMinorUnits('(12.345)'), -1235n);
   assert.equal(decimalToMinorUnits('0.004'), 0n);
   assert.equal(decimalToMinorUnits('not money'), null);
+});
+
+test('repairs split-word bank export headers and verifies oldest-first running balances', () => {
+  const buffer = workbookBuffer([
+    [null, 'Transactions List - D G ASSOCIATES (INR) - 407805000386'],
+    ['Sr No', 'Value Date', 'Transactio n Date', 'Cheque Number', 'Transactio n Remarks', 'Debit Amount', 'Credit Amount', 'Balance(IN R)'],
+    [1, '25/07/2022', '25/07/2022 05:58:29 PM', '-', 'TRFR FROM: YOGESH TYAGI', '', 50000, 50000],
+    [2, '26/07/2022', '26/07/2022 09:10:00 AM', '-', 'UPI/22070001/TEST', 1000, '', 49000],
+  ], 'Sheet1');
+  const parsed = parseBankStatement(buffer, 'dg-associates.xlsx');
+  assert.equal(parsed.rows.length, 2);
+  assert.equal(parsed.parseErrorCount, 0);
+  assert.equal(parsed.rows[0].normalized.source_serial, '1');
+  assert.equal(parsed.rows[0].normalized.transaction_date, '2022-07-25');
+  assert.equal(parsed.rows[1].normalized.narration, 'UPI/22070001/TEST');
+  assert.equal(parsed.metadata.statement_account_number, '407805000386');
+  assert.equal(parsed.metadata.statement_account_suffix, '0386');
+  assert.equal(parsed.integrity.statement_order, 'ASC');
+  assert.equal(parsed.integrity.balance_checks, 1);
+  assert.equal(parsed.integrity.balance_mismatch_count, 0);
+  assert.equal(parsed.mappedHeaders.transaction_date, 'Transactio n Date');
+  assert.equal(parsed.mappedHeaders.balance, 'Balance(IN R)');
+});
+
+test('surfaces a broken running-balance chain without inventing row data', () => {
+  const buffer = workbookBuffer([
+    ['Date', 'Description', 'Debit', 'Credit', 'Balance'],
+    ['01/01/2026', 'Opening transfer', '', 100, 100],
+    ['02/01/2026', 'Incorrect balance', 10, '', 95],
+  ], 'Statement');
+  const parsed = parseBankStatement(buffer);
+  assert.equal(parsed.parseErrorCount, 0);
+  assert.equal(parsed.integrity.balance_mismatch_count, 1);
+  assert.deepEqual(parsed.integrity.balance_mismatch_rows, [3]);
 });

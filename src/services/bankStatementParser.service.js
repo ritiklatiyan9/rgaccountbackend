@@ -1,17 +1,18 @@
 import crypto from 'crypto';
 import * as XLSX from '@e965/xlsx';
 
-export const BANK_STATEMENT_PARSER_VERSION = 'bank-statement-v2';
+export const BANK_STATEMENT_PARSER_VERSION = 'bank-statement-v3';
 
 const HEADER_ALIASES = {
+  source_serial: ['sr no', 'sr number', 'serial no', 'serial number', 's no', 'sequence'],
   transaction_date: ['transaction date', 'txn date', 'tran date', 'date', 'posting date', 'bank date'],
   value_date: ['value date', 'valued date'],
-  narration: ['narration', 'description', 'description narration', 'particulars', 'transaction details', 'remarks', 'details'],
+  narration: ['narration', 'description', 'description narration', 'particulars', 'transaction details', 'transaction remarks', 'remarks', 'details'],
   transaction_reference: ['transaction id', 'transaction reference', 'txn id', 'utr', 'reference', 'reference no', 'ref no'],
   cheque_reference: ['cheque no', 'cheque number', 'chq no', 'chq number', 'instrument no', 'instrument number', 'cheque reference no', 'reference number'],
   debit: ['debit', 'debit amount', 'withdrawal', 'withdrawal amount', 'dr amount', 'amount debited'],
   credit: ['credit', 'credit amount', 'deposit', 'deposit amount', 'cr amount', 'amount credited'],
-  balance: ['balance', 'closing balance', 'available balance'],
+  balance: ['balance', 'balance inr', 'closing balance', 'available balance'],
   account_suffix: ['account suffix', 'account last 4', 'account last four', 'account no', 'account number', 'a c no', 'account'],
   branch: ['branch', 'branch name'],
 };
@@ -40,6 +41,9 @@ const normalizeHeader = (value) => normalizeText(value)
 const aliasLookup = new Map(
   Object.entries(HEADER_ALIASES).flatMap(([field, aliases]) => aliases.map((alias) => [normalizeHeader(alias), field]))
 );
+const compactAliasLookup = new Map(
+  Object.entries(HEADER_ALIASES).flatMap(([field, aliases]) => aliases.map((alias) => [normalizeHeader(alias).replace(/\s+/g, ''), field]))
+);
 
 const REQUIRED_BANK_STATEMENT_FIELDS = [
   'transaction_reference', 'transaction_date', 'value_date', 'narration', 'cheque_reference',
@@ -64,7 +68,10 @@ function excelDateToIso(value) {
   const raw = normalizeText(value);
   if (!raw) return null;
   const iso = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
-  const indian = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/);
+  // Many Indian bank exports append a time to DD/MM/YYYY, and some exports
+  // store only a handful of rows as Excel serials. Parse both forms without
+  // handing an ambiguous DD/MM value to the JavaScript Date constructor.
+  const indian = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})(?:$|[ T])/);
   let year;
   let month;
   let day;
@@ -118,7 +125,11 @@ function mapHeaderRow(row) {
     if (!header) return;
     if (seenHeaders.has(header)) duplicates.add(cellString(value));
     seenHeaders.add(header);
-    const field = aliasLookup.get(header);
+    // Bank-generated Excel files sometimes split words at a visual wrap
+    // boundary (for example "Transactio n Date" and "Balance(IN R)"). A
+    // compact alias comparison repairs only known headers; arbitrary columns
+    // are never guessed into accounting fields.
+    const field = aliasLookup.get(header) || compactAliasLookup.get(header.replace(/\s+/g, ''));
     if (field && mapped[field] == null) {
       mapped[field] = index;
       original[field] = cellString(value);
@@ -189,6 +200,7 @@ function normalizedRow(row, mapped) {
   const creditMinor = decimalToMinorUnits(value('credit'));
   const balanceMinor = decimalToMinorUnits(value('balance'));
   return {
+    source_serial: cellString(value('source_serial')),
     transaction_date: excelDateToIso(value('transaction_date')),
     value_date: excelDateToIso(value('value_date')),
     narration: cellString(value('narration')),
@@ -199,6 +211,7 @@ function normalizedRow(row, mapped) {
     balance: minorUnitsToDecimal(balanceMinor),
     debit_minor: debitMinor?.toString() ?? null,
     credit_minor: creditMinor?.toString() ?? null,
+    balance_minor: balanceMinor?.toString() ?? null,
     account_suffix: cellString(value('account_suffix')),
     branch: cellString(value('branch')),
   };
@@ -231,6 +244,13 @@ export function parseBankStatement(buffer, filename = 'statement.xlsx') {
 
   const detected = detectStatementSheet(workbook);
   const headerRow = detected.rows[detected.headerIndex] || [];
+  const titleText = detected.rows
+    .slice(0, detected.headerIndex)
+    .flatMap((row) => row.map(cellString))
+    .filter(Boolean)
+    .join(' ');
+  const accountNumbers = titleText.match(/\b\d{8,20}\b/g) || [];
+  const statementAccountNumber = accountNumbers.sort((a, b) => b.length - a.length)[0] || '';
   const strictNamedSheet = normalizeHeader(detected.sheetName) === 'bank statement';
   const missingMappings = strictNamedSheet
     ? REQUIRED_BANK_STATEMENT_FIELDS.filter((field) => detected.mapped[field] == null)
@@ -249,11 +269,13 @@ export function parseBankStatement(buffer, filename = 'statement.xlsx') {
     const fingerprintInput = [
       normalized.transaction_date,
       normalized.value_date,
+      normalized.source_serial,
       normalized.transaction_reference,
       normalized.cheque_reference,
       normalized.narration,
       normalized.debit,
       normalized.credit,
+      normalized.balance,
       normalized.account_suffix,
     ].map((item) => normalizeText(item).toLocaleLowerCase('en-IN')).join('|');
     parsedRows.push({
@@ -271,12 +293,56 @@ export function parseBankStatement(buffer, filename = 'statement.xlsx') {
   parsedRows.forEach((row) => {
     if (fingerprintCounts.get(row.fingerprint) > 1) row.errors.push('Duplicate transaction row in this statement');
   });
+  const comparableDates = parsedRows
+    .map((row) => row.normalized.transaction_date)
+    .filter(Boolean);
+  let ascending = true;
+  let descending = true;
+  for (let index = 1; index < comparableDates.length; index += 1) {
+    if (comparableDates[index] < comparableDates[index - 1]) ascending = false;
+    if (comparableDates[index] > comparableDates[index - 1]) descending = false;
+  }
+  const statementOrder = ascending ? 'ASC' : descending ? 'DESC' : 'MIXED';
+  const chainRows = statementOrder === 'DESC' ? [...parsedRows].reverse() : parsedRows;
+  const balanceMismatchRows = [];
+  let previousBalance = null;
+  let balanceChecks = 0;
+  if (statementOrder !== 'MIXED') {
+    for (const row of chainRows) {
+      const normalized = row.normalized;
+      const balance = normalized.balance_minor == null ? null : BigInt(normalized.balance_minor);
+      const debit = normalized.debit_minor == null ? 0n : BigInt(normalized.debit_minor);
+      const credit = normalized.credit_minor == null ? 0n : BigInt(normalized.credit_minor);
+      if (balance == null) continue;
+      if (previousBalance != null) {
+        balanceChecks += 1;
+        if (previousBalance + credit - debit !== balance) balanceMismatchRows.push(row.rowNumber);
+      }
+      previousBalance = balance;
+    }
+  }
+
+  const datedRows = parsedRows.filter((row) => row.normalized.transaction_date);
+  const transactionDates = datedRows.map((row) => row.normalized.transaction_date).sort();
   return {
     filename,
     fileHash: crypto.createHash('sha256').update(buffer).digest('hex'),
     parserVersion: BANK_STATEMENT_PARSER_VERSION,
     sheetName: detected.sheetName,
     mappedHeaders: { ...detected.original, _raw_headers: rawHeaders, _column_indexes: detected.mapped },
+    metadata: {
+      title: titleText,
+      statement_account_number: statementAccountNumber,
+      statement_account_suffix: statementAccountNumber.slice(-4),
+      date_from: transactionDates[0] || null,
+      date_to: transactionDates.at(-1) || null,
+    },
+    integrity: {
+      statement_order: statementOrder,
+      balance_checks: balanceChecks,
+      balance_mismatch_count: balanceMismatchRows.length,
+      balance_mismatch_rows: balanceMismatchRows,
+    },
     rows: parsedRows,
     parseErrorCount: parsedRows.filter((row) => row.errors.length > 0).length,
   };
