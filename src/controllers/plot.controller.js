@@ -790,24 +790,48 @@ export const deletePayment = asyncHandler(async (req, res) => {
   if (!existing || !(await canUserViewEntry(req.user, 'plot_payments', existing.created_by))) {
     return res.status(404).json({ message: 'Payment not found' });
   }
-  const { rows: registryLinks } = await pool.query(
-    `SELECT id FROM plot_registry_payments
-      WHERE source_plot_payment_id = $1
-      LIMIT 1`,
-    [paymentId]
-  );
-  if (registryLinks[0]) {
-    return res.status(409).json({
-      message: 'This payment is linked to a Plot Registry record. Remove the registry link before deleting it.',
-    });
+
+  // A linked registry payment is a projection of this source payment. Remove
+  // that projection first so the registry-scope database trigger does not
+  // reject the source delete. Both deletes must commit together; otherwise a
+  // registry can retain an orphaned payment or the plot payment can remain
+  // after its registry projection has been removed.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const locked = await client.query(
+      'SELECT id FROM plot_payments WHERE id = $1 FOR UPDATE',
+      [paymentId]
+    );
+    if (!locked.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Payment not found' });
+    }
+
+    await client.query(
+      `DELETE FROM plot_registry_payments
+        WHERE source_plot_payment_id = $1`,
+      [paymentId]
+    );
+
+    const result = await client.query(
+      `DELETE FROM plot_payments WHERE id = $1 RETURNING id`,
+      [paymentId]
+    );
+    if (!result.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Payment not found' });
+    }
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 
-  // Atomic DELETE — saves a SELECT round-trip.
-  const result = await pool.query(
-    `DELETE FROM plot_payments WHERE id = $1 RETURNING id`,
-    [paymentId]
-  );
-  if (!result.rows[0]) return res.status(404).json({ message: 'Payment not found' });
   res.json({ message: 'Payment deleted' });
 });
 
