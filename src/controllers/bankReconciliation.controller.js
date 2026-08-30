@@ -7,7 +7,6 @@ import {
   hasChequeReturnSignal,
   loadPendingChequeCandidates,
   runAiAssistance,
-  runManualMatching,
   serializeMatchResult,
 } from '../services/chequeMatching.service.js';
 import { ChequeStatusError, updateChequeStatusRecord } from '../services/chequeStatus.service.js';
@@ -22,6 +21,17 @@ const numericId = (value, label = 'id') => {
   }
   return parsed;
 };
+
+export function requireAiMatchMode(value) {
+  const mode = String(value || 'AI').trim().toUpperCase();
+  if (mode !== 'AI') {
+    const error = new Error('Only AI matching is available.');
+    error.statusCode = 400;
+    error.code = 'INVALID_MATCH_MODE';
+    throw error;
+  }
+  return mode;
+}
 
 function sendError(res, error) {
   const status = Number(error.statusCode) || 500;
@@ -371,13 +381,7 @@ export async function getUpload(req, res) {
 export async function matchUpload(req, res) {
   let runId;
   try {
-    const mode = String(req.body.mode || 'manual').trim().toUpperCase();
-    if (!['MANUAL', 'AI'].includes(mode)) {
-      const error = new Error('Matching mode must be manual or ai.');
-      error.statusCode = 400;
-      error.code = 'INVALID_MATCH_MODE';
-      throw error;
-    }
+    const mode = requireAiMatchMode(req.body.mode);
     const loaded = await loadUpload(pool, req.user, req.params.uploadId);
     if (Number(loaded.upload.parse_error_count) > 0) {
       const error = new Error('Matching is blocked because the imported statement contains parsing errors. Review the raw Excel headers and row values, then upload a corrected statement.');
@@ -393,9 +397,7 @@ export async function matchUpload(req, res) {
       [loaded.upload.id, loaded.upload.organization_id, loaded.upload.site_id, mode, CHEQUE_MATCHER_VERSION, req.user.id]
     );
     runId = created.rows[0].id;
-    const outcome = mode === 'AI'
-      ? await runAiAssistance(loaded.transactions, candidates)
-      : { results: runManualMatching(loaded.transactions, candidates), provider: null };
+    const outcome = await runAiAssistance(loaded.transactions, candidates);
 
     const client = await pool.connect();
     let suggestions;

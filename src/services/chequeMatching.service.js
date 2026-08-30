@@ -29,8 +29,30 @@ const sourceCaseSql = `CASE cfe.source_module
   WHEN 'vendor_payments' THEN 'vendor_payment'
   WHEN 'vendor_inventory_payments' THEN 'vendor_inventory_payment'
   WHEN 'plot_registry_payments' THEN 'plot_registry_payment'
+  WHEN 'land_deal_payments' THEN 'land_deal_payment'
+  WHEN 'misc_income_entries' THEN 'misc_income_entry'
   WHEN 'day_book' THEN 'daybook'
   ELSE 'cash_flow_entry'
+END`;
+
+// A module row is the accounting record the user edits, so its cheque status
+// is authoritative. The ledger mirror can be stale on older/imported records;
+// filtering only on cfe.cheque_status made genuine pending cheques disappear
+// from reconciliation even though /approvals/cheques still showed them.
+const sourceChequeStatusSql = `CASE cfe.source_module
+  WHEN 'farmer_payments' THEN fp.cheque_status
+  WHEN 'plot_commission_payments' THEN pcp.cheque_status
+  WHEN 'firm_transactions' THEN ft.cheque_status
+  WHEN 'plot_payments' THEN pp.cheque_status
+  WHEN 'plot_installment_payments' THEN pip.cheque_status
+  WHEN 'expenses' THEN ex.cheque_status
+  WHEN 'vendor_payments' THEN vp.cheque_status
+  WHEN 'vendor_inventory_payments' THEN vip.cheque_status
+  WHEN 'plot_registry_payments' THEN prp.cheque_status
+  WHEN 'land_deal_payments' THEN ldp.cheque_status
+  WHEN 'misc_income_entries' THEN mie.cheque_status
+  WHEN 'day_book' THEN db.cheque_status
+  ELSE cfe.cheque_status
 END`;
 
 export async function loadPendingChequeCandidates(db, organizationId, siteId) {
@@ -39,16 +61,33 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId) {
        cfe.id AS ledger_id,
        ${sourceCaseSql} AS source,
        CASE WHEN cfe.source_module IS NULL THEN cfe.id ELSE cfe.source_id END AS entry_id,
+       CASE cfe.source_module
+         WHEN 'farmer_payments' THEN fp.farmer_id
+         WHEN 'plot_commission_payments' THEN pcp.plot_commission_id
+         WHEN 'firm_transactions' THEN ft.firm_id
+         WHEN 'plot_payments' THEN pp.plot_id
+         WHEN 'plot_installment_payments' THEN pip.plot_id
+         WHEN 'vendor_payments' THEN vp.commitment_id
+         WHEN 'vendor_inventory_payments' THEN vip.order_id
+         WHEN 'plot_registry_payments' THEN prp.registry_id
+         WHEN 'land_deal_payments' THEN ldp.land_deal_id
+         ELSE NULL
+       END AS parent_id,
        cfe.site_id,
        cfe.date,
-       COALESCE(NULLIF(cfe.cheque_no, ''), fp.cheque_no, pp.cheque_no, pip.cheque_no) AS cheque_no,
-       GREATEST(COALESCE(cfe.debit, 0), COALESCE(cfe.credit, 0))::numeric AS amount,
-       CASE WHEN COALESCE(cfe.debit, 0) > 0 THEN 'DEBIT' ELSE 'CREDIT' END AS direction,
+       COALESCE(NULLIF(fp.cheque_no, ''), NULLIF(pcp.cheque_no, ''), NULLIF(ft.cheque_no, ''),
+                NULLIF(pp.cheque_no, ''), NULLIF(pip.cheque_no, ''), NULLIF(ex.cheque_no, ''),
+                NULLIF(vp.cheque_no, ''), NULLIF(vip.cheque_no, ''), NULLIF(prp.cheque_no, ''),
+                NULLIF(ldp.cheque_no, ''), NULLIF(mie.cheque_no, ''), NULLIF(db.cheque_no, ''),
+                NULLIF(cfe.cheque_no, '')) AS cheque_no,
+       ABS(COALESCE(cfe.credit, 0) - COALESCE(cfe.debit, 0))::numeric AS amount,
+       CASE WHEN COALESCE(cfe.credit, 0) - COALESCE(cfe.debit, 0) < 0 THEN 'DEBIT' ELSE 'CREDIT' END AS direction,
        COALESCE(NULLIF(cfe.particular, ''), NULLIF(ex.remark, ''), NULLIF(db.particular, ''), 'Cheque transaction') AS entry_label,
        COALESCE(f.name, p.buyer_name, pip_p.buyer_name, vc.vendor_name, vio.vendor_name,
                 pr_real.customer_name, NULLIF(ft.name, ''), NULLIF(pp.buyer_name, ''),
                 NULLIF(ex.to_entity, ''), NULLIF(ex.from_entity, ''), NULLIF(db.to_entity, ''),
-                NULLIF(db.from_entity, ''), NULLIF(cfe.to_name, ''), NULLIF(meta.payer_names->>0, '')) AS customer_name,
+                NULLIF(db.from_entity, ''), NULLIF(ld.buyer_name, ''), NULLIF(mie.party_name, ''),
+                NULLIF(cfe.to_name, ''), NULLIF(meta.payer_names->>0, '')) AS customer_name,
        COALESCE(NULLIF(pp.booked_by, ''), NULLIF(p.booking_by, ''), NULLIF(pip_p.booking_by, ''), NULLIF(meta.booking_reference, '')) AS booking_reference,
        COALESCE(NULLIF(p.plot_no, ''), NULLIF(pip_p.plot_no, ''), NULLIF(pr_real.plot_no, ''), NULLIF(meta.plot_reference, '')) AS plot_reference,
        ba.id AS bank_account_id,
@@ -72,6 +111,9 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId) {
      LEFT JOIN vendor_inventory_orders vio ON vio.id = vip.order_id
      LEFT JOIN plot_registry_payments prp ON cfe.source_module = 'plot_registry_payments' AND prp.id = cfe.source_id
      LEFT JOIN plot_registries pr_real ON pr_real.id = prp.registry_id
+     LEFT JOIN land_deal_payments ldp ON cfe.source_module = 'land_deal_payments' AND ldp.id = cfe.source_id
+     LEFT JOIN land_deals ld ON ld.id = ldp.land_deal_id
+     LEFT JOIN misc_income_entries mie ON cfe.source_module = 'misc_income_entries' AND mie.id = cfe.source_id
      LEFT JOIN firm_transactions ft ON cfe.source_module = 'firm_transactions' AND ft.id = cfe.source_id
      LEFT JOIN expenses ex ON cfe.source_module = 'expenses' AND ex.id = cfe.source_id
      LEFT JOIN day_book db ON cfe.source_module = 'day_book' AND db.id = cfe.source_id
@@ -89,11 +131,11 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId) {
          AND a.entity_entry_id = CASE WHEN cfe.source_module IS NULL THEN cfe.id ELSE cfe.source_id END
      ) alias_rows ON TRUE
      WHERE cfe.site_id = $2
-       AND UPPER(COALESCE(cfe.cheque_status, '')) = 'PENDING'
+       AND UPPER(COALESCE(${sourceChequeStatusSql}, '')) = 'PENDING'
        AND (cfe.source_module IS NULL OR cfe.source_module IN (
          'farmer_payments', 'plot_commission_payments', 'firm_transactions', 'plot_payments',
          'plot_installment_payments', 'expenses', 'vendor_payments', 'vendor_inventory_payments',
-         'plot_registry_payments', 'day_book'
+         'plot_registry_payments', 'land_deal_payments', 'misc_income_entries', 'day_book'
        ))
        AND (cfe.source_module IS NULL OR cfe.source_id IS NOT NULL)
      ORDER BY cfe.date, cfe.id`,
@@ -103,7 +145,9 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId) {
   return result.rows.map((row) => ({
     ...row,
     id: `${row.source}:${row.entry_id}`,
+    ledger_id: Number(row.ledger_id),
     entry_id: Number(row.entry_id),
+    parent_id: row.parent_id == null ? null : Number(row.parent_id),
     amount: String(row.amount),
     aliases: Array.isArray(row.aliases) ? row.aliases : [],
   }));
@@ -167,6 +211,8 @@ function candidateSummary(candidate, score = 0, signals = [], conflicts = []) {
     candidate_id: candidate.id,
     source: candidate.source,
     entry_id: candidate.entry_id,
+    ledger_id: candidate.ledger_id,
+    parent_id: candidate.parent_id,
     cheque_no: candidate.cheque_no,
     amount: candidate.amount,
     date: candidate.date,
@@ -205,7 +251,7 @@ export function runManualMatching(transactions, candidates) {
     const dedicatedReference = String(transaction.cheque_reference ?? '');
     if (!dedicatedReference.trim()) {
       const alternatives = rankCandidates(transaction, candidates).slice(0, 5).map((item) => candidateSummary(item.candidate, item.score, item.signals, item.conflicts));
-      return reviewResult(transaction, alternatives, ['A dedicated cheque/reference value is required for Manual Rules.']);
+      return reviewResult(transaction, alternatives, ['A dedicated cheque/reference value is required for protected exact matching.']);
     }
     const exactCandidates = candidates.filter((candidate) => (
       String(candidate.cheque_no ?? '') === dedicatedReference.trim()
@@ -234,7 +280,7 @@ export function runManualMatching(transactions, candidates) {
       conflicting_signals: [],
       warnings: [],
       alternatives: [candidateSummary(candidate, 100, ['Exact dedicated cheque reference', 'Exact amount'])],
-      decision_reason: 'All conservative Manual Rules conditions passed.',
+      decision_reason: 'All protected exact-match conditions passed.',
       resolver_metadata: { matcher_version: CHEQUE_MATCHER_VERSION },
     };
   });
@@ -586,8 +632,8 @@ export async function runAiAssistance(transactions, candidates, options = {}) {
       error_code: error.code,
       provider_message: String(error.message || '').slice(0, 500),
       error_message: error.code === 'AI_RATE_LIMITED'
-        ? 'Groq rate limit was reached after retry. Wait briefly and try AI Assist again; Manual Rules results are shown meanwhile.'
-        : 'AI Assist was unavailable after retry. Manual Rules results are shown; no AI match was fabricated.',
+        ? 'AI is temporarily busy after retry. Wait briefly and run AI matching again; only protected exact checks are shown meanwhile.'
+        : 'AI matching was unavailable after retry. Only protected exact checks are shown; no uncertain match was accepted.',
     };
     return {
       results: manual.map((result) => result.review_state === 'REVIEW' ? {

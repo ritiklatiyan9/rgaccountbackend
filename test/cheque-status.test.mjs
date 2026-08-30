@@ -62,3 +62,20 @@ test('shared cheque command updates the source and mirror while preserving amoun
   assert.ok(db.calls.some((call) => call.sql.includes('UPDATE cash_flow_entries')));
   assert.ok(db.calls.every((call) => !/SET\s+(?:debit|credit|amount)/i.test(call.sql)));
 });
+
+test('shared cheque command validates a negative-credit reversal by its absolute face value', async () => {
+  const db = fakeDb((sql) => {
+    if (sql.includes('FROM cash_flow_entries')) return { rows: [{ id: 12, site_id: 8, debit: '0.00', credit: '-500000.00', cheque_status: 'CLEARED', cash_flow_month_id: null }] };
+    if (sql.includes('SELECT * FROM plot_payments')) return { rows: [{ id: 4781, amount: '-500000.00', cheque_status: 'PENDING', cheque_no: 'PNB-232158' }] };
+    if (sql.includes('UPDATE plot_payments')) return { rows: [{ id: 4781, amount: '-500000.00', cheque_status: 'BOUNCED', cheque_no: 'PNB-232158' }] };
+    return { rows: [] };
+  });
+
+  const result = await updateChequeStatusRecord(db, {
+    source: 'plot_payment', entryId: 4781, status: 'BOUNCED', expectedSiteId: 8,
+    expectedAmount: '500000.00', requirePending: true,
+  });
+
+  assert.equal(result.after.cheque_status, 'BOUNCED');
+  assert.ok(db.calls.some((call) => call.sql.includes('UPDATE cash_flow_entries')));
+});

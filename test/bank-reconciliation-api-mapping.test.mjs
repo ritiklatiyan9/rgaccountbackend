@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getConfiguration, transactionDto } from '../src/controllers/bankReconciliation.controller.js';
+import { getConfiguration, requireAiMatchMode, transactionDto } from '../src/controllers/bankReconciliation.controller.js';
 
 test('bank reconciliation API DTO preserves imported lineage fields and blank references', () => {
   const dto = transactionDto({
@@ -46,4 +46,13 @@ test('bank reconciliation configuration exposes Groq without exposing its API ke
     if (previousModel == null) delete process.env.GROQ_MODEL;
     else process.env.GROQ_MODEL = previousModel;
   }
+});
+
+test('bank reconciliation matching API accepts only the AI flow', () => {
+  assert.equal(requireAiMatchMode(undefined), 'AI');
+  assert.equal(requireAiMatchMode('ai'), 'AI');
+  assert.throws(
+    () => requireAiMatchMode('manual'),
+    (error) => error.code === 'INVALID_MATCH_MODE' && error.statusCode === 400,
+  );
 });

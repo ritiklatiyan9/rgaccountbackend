@@ -133,7 +133,10 @@ export async function updateChequeStatusRecord(db, {
     throw new ChequeStatusError('The cheque does not belong to the selected site.', 403, 'SITE_SCOPE_MISMATCH');
   }
   if (expectedAmount != null) {
-    const actual = Math.max(Number(mirror.debit || 0), Number(mirror.credit || 0)).toFixed(2);
+    // Reversal/refund rows can carry a negative credit or debit. Their cheque
+    // face value is the absolute ledger movement, not max(debit, credit), which
+    // incorrectly becomes zero for a negative-credit cheque.
+    const actual = Math.abs(Number(mirror.credit || 0) - Number(mirror.debit || 0)).toFixed(2);
     if (actual !== Number(expectedAmount).toFixed(2)) {
       throw new ChequeStatusError('The cheque amount changed after matching. Refresh and run matching again.', 409, 'STALE_AMOUNT');
     }

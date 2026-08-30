@@ -5,6 +5,8 @@ import path from 'path';
 import {
   listDocumentImprest, createDocumentImprest, returnDocumentImprest,
   updateDocumentImprest, deleteDocumentImprest,
+  recordChequeOutcome,
+  listImprestEvents,
 } from '../controllers/documentImprest.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
@@ -73,6 +75,9 @@ router.get('/peers', requirePermission('document_imprest', 'read'), asyncHandler
 }));
 router.post('/', requirePermission('document_imprest', 'write'), upload.single('photo'), createDocumentImprest);
 router.post('/:id/return', requirePermission('document_imprest', 'update'), upload.single('photo'), returnDocumentImprest);
+// Cheque handover: record what happened to it, and read the full trail.
+router.post('/:id/outcome', requirePermission('document_imprest', 'update'), upload.single('photo'), recordChequeOutcome);
+router.get('/:id/events', requirePermission('document_imprest', 'read'), listImprestEvents);
 router.put('/:id', requirePermission('document_imprest', 'update'), updateDocumentImprest);
 router.delete('/:id', requirePermission('document_imprest', 'delete'), deleteDocumentImprest);
 

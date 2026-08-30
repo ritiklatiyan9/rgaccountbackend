@@ -2,10 +2,35 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   extractInstrumentTokens,
+  loadPendingChequeCandidates,
   rankCandidates,
   runAiAssistance,
   runManualMatching,
 } from '../src/services/chequeMatching.service.js';
+
+test('pending loader trusts module status, supports newer sources, and preserves reversal face values', async () => {
+  let sql = '';
+  const db = {
+    query: async (query) => {
+      sql = String(query);
+      return { rows: [{ source: 'plot_payment', entry_id: '44', ledger_id: '488', parent_id: '816', amount: '500000.00', aliases: [] }] };
+    },
+  };
+
+  const [candidateRow] = await loadPendingChequeCandidates(db, 1, 8);
+
+  assert.match(sql, /WHEN 'plot_payments' THEN pp\.cheque_status/);
+  assert.match(sql, /WHEN 'land_deal_payments' THEN ldp\.cheque_status/);
+  assert.match(sql, /WHEN 'misc_income_entries' THEN mie\.cheque_status/);
+  assert.match(sql, /WHEN 'plot_payments' THEN pp\.plot_id/);
+  assert.match(sql, /WHEN 'vendor_inventory_payments' THEN vip\.order_id/);
+  assert.match(sql, /ABS\(COALESCE\(cfe\.credit, 0\) - COALESCE\(cfe\.debit, 0\)\)::numeric AS amount/);
+  assert.match(sql, /COALESCE\(cfe\.credit, 0\) - COALESCE\(cfe\.debit, 0\) < 0 THEN 'DEBIT'/);
+  assert.match(sql, /UPPER\(COALESCE\(CASE cfe\.source_module[\s\S]*ELSE cfe\.cheque_status[\s\S]*END, ''\)\) = 'PENDING'/);
+  assert.equal(candidateRow.parent_id, 816);
+  assert.equal(candidateRow.ledger_id, 488);
+  assert.equal(candidateRow.entry_id, 44);
+});
 
 const transaction = (id, overrides = {}) => ({
   id,
@@ -272,7 +297,7 @@ test('AI Assist honors Groq retry-after once before degrading a rate-limited run
     assert.equal(outcome.provider.error_code, 'AI_RATE_LIMITED');
     assert.equal(outcome.provider.retry_after_ms, 2000);
     assert.match(outcome.provider.provider_message, /Rate limit exceeded/i);
-    assert.match(outcome.provider.error_message, /Groq rate limit/i);
+    assert.match(outcome.provider.error_message, /AI is temporarily busy/i);
   } finally {
     if (previousKey == null) delete process.env.GROQ_API_KEY;
     else process.env.GROQ_API_KEY = previousKey;
@@ -281,7 +306,7 @@ test('AI Assist honors Groq retry-after once before degrading a rate-limited run
   }
 });
 
-test('AI Assist degrades to Manual Rules after two malformed replies instead of failing the run', async () => {
+test('AI matching degrades to protected exact checks after two malformed replies instead of failing the run', async () => {
   const previousKey = process.env.GROQ_API_KEY;
   process.env.GROQ_API_KEY = 'test-key';
   let calls = 0;
@@ -298,14 +323,14 @@ test('AI Assist degrades to Manual Rules after two malformed replies instead of 
     assert.equal(outcome.provider.error_code, 'AI_JSON_INVALID');
     assert.equal(outcome.results[0].review_state, 'REVIEW');
     assert.equal(outcome.results[0].match_origin, 'NONE');
-    assert.match(outcome.results[0].warnings.join(' '), /Manual Rules results are shown/i);
+    assert.match(outcome.results[0].warnings.join(' '), /protected exact checks are shown/i);
   } finally {
     if (previousKey == null) delete process.env.GROQ_API_KEY;
     else process.env.GROQ_API_KEY = previousKey;
   }
 });
 
-test('AI Assist degrades to Manual Rules after provider timeouts instead of failing the preview', async () => {
+test('AI matching degrades to protected exact checks after provider timeouts instead of failing the preview', async () => {
   const previousKey = process.env.GROQ_API_KEY;
   const previousTimeout = process.env.GROQ_TIMEOUT_MS;
   process.env.GROQ_API_KEY = 'test-key';
@@ -327,7 +352,7 @@ test('AI Assist degrades to Manual Rules after provider timeouts instead of fail
     assert.equal(outcome.provider.degraded, true);
     assert.equal(outcome.provider.error_code, 'AI_TIMEOUT');
     assert.equal(outcome.results[0].review_state, 'REVIEW');
-    assert.match(outcome.results[0].warnings.join(' '), /no AI match was fabricated/i);
+    assert.match(outcome.results[0].warnings.join(' '), /no uncertain match was accepted/i);
   } finally {
     if (previousKey == null) delete process.env.GROQ_API_KEY;
     else process.env.GROQ_API_KEY = previousKey;
