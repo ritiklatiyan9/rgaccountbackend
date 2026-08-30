@@ -68,6 +68,11 @@ const RESTRICTED_MODULES = new Set([
     'misc_income',
 ]);
 
+// Route-heavy screens request the same user/module permission several times
+// in parallel. Coalesce only those simultaneous reads; completed values are
+// never retained, so a permission update is visible to the next request.
+const pendingPermissionLookups = new Map();
+
 const getDefaultPermissions = (module) => {
     if (RESTRICTED_MODULES.has(module)) {
         return { can_read: false, can_write: false, can_update: false, can_delete: false, can_restore: false, can_view_all: false };
@@ -89,16 +94,29 @@ class PermissionModel {
 
     /** Get permission for a specific user + module */
     async getPermission(userId, module) {
-        const query = `SELECT * FROM user_permissions WHERE user_id = $1 AND module = $2`;
-        const result = await pool.query(query, [userId, module]);
-        if (result.rows[0]) return result.rows[0];
+        const key = `${userId}:${module}`;
+        const existing = pendingPermissionLookups.get(key);
+        if (existing) return existing;
 
-        // Auto-seed newly added modules for existing sub-admins.
-        if (ALL_MODULES.includes(module)) {
-            return this.upsert(userId, module, getDefaultPermissions(module));
-        }
+        const pending = (async () => {
+            try {
+                const query = `SELECT * FROM user_permissions WHERE user_id = $1 AND module = $2`;
+                const result = await pool.query(query, [userId, module]);
+                if (result.rows[0]) return result.rows[0];
 
-        return null;
+                // Auto-seed newly added modules for existing sub-admins.
+                if (ALL_MODULES.includes(module)) {
+                    return this.upsert(userId, module, getDefaultPermissions(module));
+                }
+
+                return null;
+            } finally {
+                pendingPermissionLookups.delete(key);
+            }
+        })();
+
+        pendingPermissionLookups.set(key, pending);
+        return pending;
     }
 
     /** Upsert a single module permission */

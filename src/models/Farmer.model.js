@@ -119,16 +119,17 @@ class FarmerPaymentModel extends MasterModel {
   }
 
   /** All farmer payments for a site on a specific date (for DayBook merge) */
-  async findBySiteAndDate(siteId, date, pool) {
+  async findBySiteAndDate(siteId, date, pool, creatorId = null) {
     const query = `
       SELECT fp.*, f.name AS farmer_name, f.site_id, u.name as assigned_admin_name
       FROM farmer_payments fp
       JOIN farmers f ON fp.farmer_id = f.id
       LEFT JOIN users u ON fp.assigned_admin_id = u.id
       WHERE f.site_id = $1 AND fp.date = $2
+        AND ($3::int IS NULL OR fp.created_by = $3::int)
       ORDER BY fp.id ASC
     `;
-    const result = await pool.query(query, [siteId, date]);
+    const result = await pool.query(query, [siteId, date, creatorId]);
     return result.rows;
   }
 }

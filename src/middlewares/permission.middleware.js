@@ -1,5 +1,16 @@
 import permissionModel from '../models/Permission.model.js';
 
+const getRequestPermission = async (req, module) => {
+    const requestCache = req.user?.permissionsByModule;
+    if (requestCache instanceof Map && requestCache.has(module)) {
+        return requestCache.get(module);
+    }
+
+    const permission = await permissionModel.getPermission(req.user.id, module);
+    if (requestCache instanceof Map) requestCache.set(module, permission);
+    return permission;
+};
+
 /**
  * Permission-based access middleware.
  * Usage: requirePermission('farmers', 'delete')
@@ -17,7 +28,7 @@ const requirePermission = (module, action) => {
 
             // For sub_admin, check permissions
             if (req.user.role === 'sub_admin') {
-                const permission = await permissionModel.getPermission(req.user.id, module);
+                const permission = await getRequestPermission(req, module);
 
                 // If no permission record exists, deny by default
                 if (!permission) {
@@ -56,7 +67,7 @@ export const requireAnyPermission = (modules, action) => {
             if (req.user.role !== 'sub_admin') return res.status(403).json({ message: 'Insufficient permissions' });
 
             const permissions = await Promise.all(
-                allowedModules.map((module) => permissionModel.getPermission(req.user.id, module))
+                allowedModules.map((module) => getRequestPermission(req, module))
             );
             const fieldName = `can_${action}`;
             if (permissions.some((permission) => permission?.[fieldName] === true)) return next();

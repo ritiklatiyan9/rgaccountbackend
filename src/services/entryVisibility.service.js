@@ -23,7 +23,13 @@ export const resolveEntryVisibility = async (user, module, requestedCreatorId) =
     return { canViewAll: false, creatorId: Number(user?.id) || -1 };
   }
 
-  const permission = await permissionModel.getPermission(user.id, module);
+  const requestCache = user?.permissionsByModule;
+  const permission = requestCache instanceof Map && requestCache.has(module)
+    ? requestCache.get(module)
+    : await permissionModel.getPermission(user.id, module);
+  if (requestCache instanceof Map && !requestCache.has(module)) {
+    requestCache.set(module, permission);
+  }
   const canViewAll = permission?.can_view_all === true;
   return {
     canViewAll,
@@ -36,4 +42,3 @@ export const canUserViewEntry = async (user, module, createdBy) => {
   if (scope.canViewAll) return true;
   return Number(createdBy) === Number(scope.creatorId);
 };
-

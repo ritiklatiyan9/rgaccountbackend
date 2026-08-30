@@ -227,7 +227,7 @@ class CashFlowEntryModel extends MasterModel {
   }
 
   /** Find all entries for a site on a specific date (for Day Book merge) */
-  async findBySiteAndDate(siteId, date, pool) {
+  async findBySiteAndDate(siteId, date, pool, creatorId = null) {
     const query = `
       SELECT cfe.*,
              cfm.ledger_name,
@@ -240,9 +240,10 @@ class CashFlowEntryModel extends MasterModel {
       LEFT JOIN users u ON cfe.assigned_admin_id = u.id
       WHERE cfe.site_id = $1 AND cfe.date = $2
         AND cfe.source_module IS NULL
+        AND ($3::int IS NULL OR cfe.created_by = $3::int)
       ORDER BY cfe.created_at ASC
     `;
-    const result = await pool.query(query, [siteId, date]);
+    const result = await pool.query(query, [siteId, date, creatorId]);
     return result.rows;
   }
 }

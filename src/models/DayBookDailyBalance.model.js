@@ -45,6 +45,7 @@ class DayBookDailyBalanceModel extends MasterModel {
       `UPDATE day_book_daily_balance
        SET closing_balance = $3, updated_at = CURRENT_TIMESTAMP
        WHERE site_id = $1 AND date = $2
+         AND closing_balance IS DISTINCT FROM $3::numeric
        RETURNING *`,
       [siteId, date, closingBalance]
     );

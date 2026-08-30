@@ -15,6 +15,11 @@ import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { transactionMovesMoney } from '../utils/transactionPosting.js';
+import {
+  loadDayBookAuxiliaryData,
+  loadDayBookModeBalanceData,
+  loadSiteBalanceAsOf,
+} from '../services/daybookRead.service.js';
 
 // ══════════════════════════════════════════════════
 //  OPENING BALANCE HELPERS
@@ -38,30 +43,7 @@ import { transactionMovesMoney } from '../utils/transactionPosting.js';
 // person-ledger credit/debit are just more ledger rows — but drifted from the
 // Balance Sheet and dashboard because each kept its own copy of the filters.
 export async function siteBalanceAsOf(siteId, cutoffDate, pool) {
-  const [ledgerRow, imprestRow] = await Promise.all([
-    pool.query(
-      `SELECT COALESCE(SUM(credit - debit), 0)::numeric AS net
-         FROM ledger_entries
-        WHERE site_id = $1 AND entry_date < $2::date`,
-      [parseInt(siteId), cutoffDate]
-    ),
-    pool.query(
-      `SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS total
-       FROM (
-         SELECT il.user_id, COALESCE(SUM(il.amount), 0) AS user_balance
-         FROM imprest_ledger il
-         JOIN users u ON u.id = il.user_id
-         WHERE il.site_id IS NOT NULL AND il.site_id = $1 AND il.created_at < $2
-           AND u.role NOT IN ('admin', 'super_admin')
-         GROUP BY il.user_id
-       ) u`,
-      [parseInt(siteId), cutoffDate]
-    ),
-  ]);
-
-  const net = parseFloat(ledgerRow.rows[0].net) || 0;
-  const imprestOutstanding = parseFloat(imprestRow.rows[0].total) || 0;
-  return net - imprestOutstanding;
+  return loadSiteBalanceAsOf(siteId, cutoffDate, pool);
 }
 
 // Fetch or seed the daily-balance row for (siteId, date).
@@ -561,17 +543,15 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     firmTxnEntries,
     plotPaymentEntries,
     moduleLedgerEntries,
-    savedOrderRows,
-    siteRow,
-    bankMapRows,
+    auxiliaryData,
   ] = await Promise.all([
     dayBookModel.findBySiteAndDate(siteId, queryDate, pool, visibility.creatorId),
-    expenseModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] expense query error:', err.message); return []; }),
-    farmerPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] farmer_payment query error:', err.message); return []; }),
-    plotCommissionModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] commission query error:', err.message); return []; }),
-    cashFlowEntryModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] cashflow query error:', err.message); return []; }),
-    firmTransactionModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] firm_transaction query error:', err.message); return []; }),
-    plotPaymentModel.findBySiteAndDate(siteId, queryDate, pool).catch(err => { console.error('[daybook] plot_payment query error:', err.message); return []; }),
+    expenseModel.findBySiteAndDate(siteId, queryDate, pool, visibility.creatorId).catch(err => { console.error('[daybook] expense query error:', err.message); return []; }),
+    farmerPaymentModel.findBySiteAndDate(siteId, queryDate, pool, visibility.creatorId).catch(err => { console.error('[daybook] farmer_payment query error:', err.message); return []; }),
+    plotCommissionModel.findBySiteAndDate(siteId, queryDate, pool, visibility.creatorId).catch(err => { console.error('[daybook] commission query error:', err.message); return []; }),
+    cashFlowEntryModel.findBySiteAndDate(siteId, queryDate, pool, visibility.creatorId).catch(err => { console.error('[daybook] cashflow query error:', err.message); return []; }),
+    firmTransactionModel.findBySiteAndDate(siteId, queryDate, pool, visibility.creatorId).catch(err => { console.error('[daybook] firm_transaction query error:', err.message); return []; }),
+    plotPaymentModel.findBySiteAndDate(siteId, queryDate, pool, visibility.creatorId).catch(err => { console.error('[daybook] plot_payment query error:', err.message); return []; }),
     // Plot installments, vendor payments and v2 commission payouts are counted
     // by getModeBalance and the Balance Sheet but had no rows here, so the
     // list totals drifted from the Remaining cards on days they occurred.
@@ -591,37 +571,23 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         WHERE cfe.site_id = $1 AND cfe.date = $2
           AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries')
           AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
-          AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'`,
-      [siteId, queryDate]
+          AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'
+          AND ($3::int IS NULL OR cfe.created_by = $3::int)`,
+      [siteId, queryDate, visibility.creatorId]
     ).then(r => r.rows).catch(err => { console.error('[daybook] module ledger query error:', err.message); return []; }),
-    pool.query(
-      `SELECT dbo.entry_key, dbo.position, state.revision AS order_revision
-         FROM (
-           SELECT COALESCE((
-             SELECT revision
-               FROM daybook_order_state
-              WHERE site_id = $1 AND entry_date = $2
-           ), 0)::bigint AS revision
-         ) state
-         LEFT JOIN daybook_entry_order dbo
-           ON dbo.site_id = $1 AND dbo.entry_date = $2`,
-      [parseInt(siteId), queryDate]
-    ).then((result) => result.rows),
-    pool.query(
-      'SELECT name, city, state FROM sites WHERE id = $1',
-      [parseInt(siteId)]
-    ).then((result) => result.rows[0] || null),
-    // Bank mappings for the day (migration 089). Every row here IS the
-    // entry's cash_flow_entries mirror, so one indexed query covers all
-    // sources at once.
-    pool.query(
-      `SELECT cfe.id, cfe.source_module, cfe.source_id, cfe.bank_account_id, ba.name AS bank_account_name
-         FROM cash_flow_entries cfe
-         JOIN bank_accounts ba ON ba.id = cfe.bank_account_id
-        WHERE cfe.site_id = $1 AND cfe.date = $2`,
-      [siteId, queryDate]
-    ).then(r => r.rows).catch(err => { console.error('[daybook] bank map query error:', err.message); return []; }),
+    // Saved order, site label, daily balance and bank mappings share one round trip.
+    // Keeping this fan-out to nine queries prevents it spilling into a second
+    // pool wave while mode-balance is loading alongside the daily entries.
+    loadDayBookAuxiliaryData(parseInt(siteId), queryDate, pool, visibility.creatorId),
   ]);
+
+  const {
+    savedOrderRows,
+    orderRevision,
+    siteRow,
+    dailyBalanceRow,
+    bankMapRows,
+  } = auxiliaryData;
 
   // Exclude IMPREST entries from daybook — they are managed in the Imprest module
   const dayBookEntries = dayBookEntriesRaw.filter(e => e.entry_type !== 'IMPREST');
@@ -1049,7 +1015,6 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // Apply a saved Day Book-only sequence. Rows with no saved position (usually
   // newly created entries) append in the existing fallback order. No source
   // table is updated or re-sorted.
-  const orderRevision = Number(savedOrderRows[0]?.order_revision) || 0;
   const positionByKey = new Map(
     savedOrderRows
       .filter((row) => row.entry_key)
@@ -1153,13 +1118,25 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   } else {
   try {
     const todayIso = new Date().toISOString().split('T')[0];
-    const row = await getOrSeedDailyBalance(siteId, queryDate, pool);
+    // The common existing snapshot was loaded with the daily metadata query.
+    // Only a missing current/future row needs the slower seed path.
+    const row = dailyBalanceRow || (
+      queryDate >= todayIso
+        ? await getOrSeedDailyBalance(siteId, queryDate, pool)
+        : null
+    );
     if (row) {
       const opening = parseFloat(row.opening_balance) || 0;
       const running = opening + total_credit - total_debit;
-      // Always refresh closing for any tracked date so edits to historical entries stay consistent.
-      const updated = await dayBookDailyBalanceModel.updateClosing(siteId, queryDate, running, pool);
-      const closing = updated ? parseFloat(updated.closing_balance) || 0 : running;
+      const storedClosing = parseFloat(row.closing_balance) || 0;
+      // Stable reads do not need a write or another database round trip. An
+      // edit still refreshes the stored snapshot before the response returns.
+      const updated = Math.abs(storedClosing - running) > 0.0001
+        ? await dayBookDailyBalanceModel.updateClosing(siteId, queryDate, running, pool)
+        : null;
+      const closing = updated
+        ? parseFloat(updated.closing_balance) || 0
+        : running;
       balance = {
         opening_balance: opening,
         closing_balance: closing,
@@ -1264,22 +1241,15 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(
-        `SELECT pg_advisory_xact_lock(hashtext($1))`,
-        [`daybook-global-order:${siteId}`]
-      );
-
-      await client.query(
+      // The state row is also the concurrency lock. One UPSERT both creates
+      // it on first use and locks/returns it thereafter, replacing the old
+      // advisory-lock + insert + select sequence (three network round trips).
+      const state = (await client.query(
         `INSERT INTO daybook_global_order_state (site_id)
          VALUES ($1)
-         ON CONFLICT (site_id) DO NOTHING`,
-        [siteId]
-      );
-      const state = (await client.query(
-        `SELECT revision, last_request_id
-           FROM daybook_global_order_state
-          WHERE site_id = $1
-          FOR UPDATE`,
+         ON CONFLICT (site_id) DO UPDATE
+           SET site_id = EXCLUDED.site_id
+         RETURNING revision, last_request_id`,
         [siteId]
       )).rows[0];
       const currentRevision = Number(state.revision) || 0;
@@ -1378,21 +1348,26 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
          WHERE daybook_global_order.position IS DISTINCT FROM EXCLUDED.position`,
         [siteId, req.user.id, entryKeys]
       );
-      const deleted = await client.query(
-        `DELETE FROM daybook_global_order
-          WHERE site_id = $1
-            AND NOT (entry_key = ANY($2::text[]))`,
-        [siteId, entryKeys]
-      );
-      const revisionRow = (await client.query(
-        `UPDATE daybook_global_order_state
-            SET revision = revision + 1,
-                last_request_id = $2,
-                updated_by = $3,
-                updated_at = NOW()
-          WHERE site_id = $1
-          RETURNING revision`,
-        [siteId, requestId, req.user.id]
+      const finalized = (await client.query(
+        `WITH deleted AS (
+           DELETE FROM daybook_global_order
+            WHERE site_id = $1
+              AND NOT (entry_key = ANY($2::text[]))
+           RETURNING 1
+         ),
+         revision_row AS (
+           UPDATE daybook_global_order_state
+              SET revision = revision + 1,
+                  last_request_id = $3,
+                  updated_by = $4,
+                  updated_at = NOW()
+            WHERE site_id = $1
+           RETURNING revision
+         )
+         SELECT
+           (SELECT COUNT(*)::int FROM deleted) AS deleted_count,
+           (SELECT revision FROM revision_row) AS revision`,
+        [siteId, entryKeys, requestId, req.user.id]
       )).rows[0];
       await client.query('COMMIT');
       await clearCacheByPrefixes(['daybook|', 'balance-sheet|']);
@@ -1401,8 +1376,8 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
         message: 'Day Book cross-date order saved',
         scope: 'global',
         count: normalizedKeys.length,
-        changed: upserted.rowCount + deleted.rowCount,
-        order_revision: Number(revisionRow.revision),
+        changed: upserted.rowCount + Number(finalized.deleted_count),
+        order_revision: Number(finalized.revision),
       });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -1478,26 +1453,19 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
     // A stable date order prevents two overlapping range saves from taking
-    // advisory locks in opposite orders.
+    // state-row locks in opposite orders.
     for (const order of orders.sort((a, b) => a.date.localeCompare(b.date))) {
       const { date } = order;
       let { entryKeys } = order;
-      await client.query(
-        `SELECT pg_advisory_xact_lock(hashtext($1))`,
-        [`daybook-order:${siteId}:${date}`]
-      );
-
-      await client.query(
+      // A no-op conflict update returns and locks the existing revision row.
+      // It also creates the row on first use, so no separate advisory lock or
+      // follow-up SELECT is needed over a high-latency database connection.
+      const state = (await client.query(
         `INSERT INTO daybook_order_state (site_id, entry_date)
          VALUES ($1, $2::date)
-         ON CONFLICT (site_id, entry_date) DO NOTHING`,
-        [siteId, date]
-      );
-      const state = (await client.query(
-        `SELECT revision, last_request_id
-           FROM daybook_order_state
-          WHERE site_id = $1 AND entry_date = $2::date
-          FOR UPDATE`,
+         ON CONFLICT (site_id, entry_date) DO UPDATE
+           SET site_id = EXCLUDED.site_id
+         RETURNING revision, last_request_id`,
         [siteId, date]
       )).rows[0];
       const currentRevision = Number(state.revision) || 0;
@@ -1589,29 +1557,33 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
         );
         changed += upserted.rowCount;
       }
-      const deleted = await client.query(
-        `DELETE FROM daybook_entry_order
-          WHERE site_id = $1 AND entry_date = $2::date
-            AND (
-              CARDINALITY($3::text[]) = 0
-              OR NOT (entry_key = ANY($3::text[]))
-            )`,
-        [siteId, date, entryKeys]
-      );
-      changed += deleted.rowCount;
-      totalChanged += changed;
-
-      const revisionRow = (await client.query(
-        `UPDATE daybook_order_state
-            SET revision = revision + 1,
-                last_request_id = $3,
-                updated_by = $4,
-                updated_at = NOW()
-          WHERE site_id = $1 AND entry_date = $2::date
-          RETURNING revision`,
-        [siteId, date, order.requestId, req.user.id]
+      const finalized = (await client.query(
+        `WITH deleted AS (
+           DELETE FROM daybook_entry_order
+            WHERE site_id = $1 AND entry_date = $2::date
+              AND (
+                CARDINALITY($3::text[]) = 0
+                OR NOT (entry_key = ANY($3::text[]))
+              )
+           RETURNING 1
+         ),
+         revision_row AS (
+           UPDATE daybook_order_state
+              SET revision = revision + 1,
+                  last_request_id = $4,
+                  updated_by = $5,
+                  updated_at = NOW()
+            WHERE site_id = $1 AND entry_date = $2::date
+           RETURNING revision
+         )
+         SELECT
+           (SELECT COUNT(*)::int FROM deleted) AS deleted_count,
+           (SELECT revision FROM revision_row) AS revision`,
+        [siteId, date, entryKeys, order.requestId, req.user.id]
       )).rows[0];
-      order.savedRevision = Number(revisionRow.revision);
+      changed += Number(finalized.deleted_count);
+      totalChanged += changed;
+      order.savedRevision = Number(finalized.revision);
     }
 
     await client.query('COMMIT');
@@ -1691,14 +1663,6 @@ export const getModeBalance = asyncHandler(async (req, res) => {
   const siteId = parseInt(site_id);
   const visibility = await resolveEntryVisibility(req.user, 'daybook', created_by);
 
-  // Hand-written cash-flow ledgers have no source module. Splitting them by
-  // ledger_type keeps "money lent to a person" apart from "site-to-site
-  // transfer", which the breakdown modal labels differently.
-  const SRC_EXPR = `CASE
-    WHEN source_key = 'personal_ledger' AND ledger_type = 'site' THEN 'site_ledger'
-    ELSE source_key
-  END`;
-
   const SRC_LABEL = {
     plot_payments:             'Plot Sales (Direct)',
     plot_installment_payments: 'Plot Installments',
@@ -1719,48 +1683,22 @@ export const getModeBalance = asyncHandler(async (req, res) => {
   const bySrc = {};
   for (const b of BUCKETS) bySrc[b] = {};
 
-  const FAR_FUTURE = '2100-01-01';
   let siteOpening = null;
   let siteCurrent = null;
   let imprestFloat = 0;
 
   try {
-    const [rowsRes, floatRes, opening, current] = await Promise.all([
-      pool.query(
-        `SELECT bucket,
-                (entry_date < $2::date) AS is_before,
-                ${SRC_EXPR} AS src,
-                COALESCE(SUM(credit), 0)::numeric AS credit,
-                COALESCE(SUM(debit),  0)::numeric AS debit
-           FROM ledger_entries le
-           LEFT JOIN cash_flow_entries creator_cfe
-             ON creator_cfe.id = split_part(le.id, ':', 1)::int
-          WHERE le.site_id = $1 AND le.entry_date <= $2::date
-            ${visibility.creatorId ? 'AND creator_cfe.created_by = $3' : ''}
-          GROUP BY bucket, is_before, src`,
-        visibility.creatorId ? [siteId, queryDate, visibility.creatorId] : [siteId, queryDate]
-      ),
-      visibility.creatorId ? Promise.resolve({ rows: [{ total: 0 }] }) : pool.query(
-        `SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS total
-         FROM (
-           SELECT il.user_id, COALESCE(SUM(il.amount), 0) AS user_balance
-           FROM imprest_ledger il
-           JOIN users u ON u.id = il.user_id
-           WHERE il.site_id IS NOT NULL AND il.site_id = $1
-             AND u.role NOT IN ('admin', 'super_admin')
-           GROUP BY il.user_id
-         ) u`,
-        [siteId]
-      ),
-      visibility.creatorId ? Promise.resolve(null) : siteBalanceAsOf(siteId, queryDate, pool),
-      visibility.creatorId ? Promise.resolve(null) : siteBalanceAsOf(siteId, FAR_FUTURE, pool),
-    ]);
+    const modeData = await loadDayBookModeBalanceData({
+      siteId,
+      date: queryDate,
+      creatorId: visibility.creatorId,
+    }, pool);
 
-    imprestFloat = parseFloat(floatRes.rows[0].total) || 0;
-    siteOpening = opening;
-    siteCurrent = current;
+    imprestFloat = modeData.imprestFloat;
+    siteOpening = modeData.siteOpening;
+    siteCurrent = modeData.siteCurrent;
 
-    for (const r of rowsRes.rows) {
+    for (const r of modeData.rows) {
       const bucket = r.bucket;
       if (!accum.before[bucket]) continue;
       const slot = accum[r.is_before ? 'before' : 'on'][bucket];
@@ -1863,32 +1801,34 @@ export const getDayBookEntry = asyncHandler(async (req, res) => {
  * Note: If entry_type changes to/from EXPENSE, manually handle expense table sync
  */
 export const updateDayBookEntry = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const existing = await dayBookModel.findById(parseInt(id), pool);
-  if (!existing) return res.status(404).json({ message: 'Day book entry not found' });
+  const id = parseInt(req.params.id);
 
   const {
     date, particular, entry_type, debit, credit, remarks,
     payment_mode, category, from_entity, to_entity, account_no, branch, voucher_url,
   } = req.body;
 
-  const data = {
-    date: date || existing.date,
-    particular: particular !== undefined ? particular.trim().toUpperCase() : existing.particular,
-    entry_type: entry_type !== undefined ? entry_type.trim().toUpperCase() : existing.entry_type,
-    debit: debit !== undefined ? (parseFloat(debit) || 0) : existing.debit,
-    credit: credit !== undefined ? (parseFloat(credit) || 0) : existing.credit,
-    remarks: remarks !== undefined ? (remarks ? remarks.trim() : null) : existing.remarks,
-    payment_mode: payment_mode !== undefined ? (payment_mode ? payment_mode.trim().toUpperCase() : null) : existing.payment_mode,
-    category: category !== undefined ? (category ? category.trim().toUpperCase() : null) : existing.category,
-    from_entity: from_entity !== undefined ? (from_entity ? from_entity.trim().toUpperCase() : null) : existing.from_entity,
-    to_entity: to_entity !== undefined ? (to_entity ? to_entity.trim().toUpperCase() : null) : existing.to_entity,
-    account_no: account_no !== undefined ? (account_no ? account_no.trim().toUpperCase() : null) : existing.account_no,
-    branch: branch !== undefined ? (branch ? branch.trim().toUpperCase() : null) : existing.branch,
-    voucher_url: voucher_url !== undefined ? (voucher_url || null) : existing.voucher_url,
-  };
+  // Patch only submitted fields. The old read-before-write added a full
+  // network round trip even though PostgreSQL can return the updated row.
+  const data = {};
+  if (date) data.date = date;
+  if (particular !== undefined) data.particular = particular.trim().toUpperCase();
+  if (entry_type !== undefined) data.entry_type = entry_type.trim().toUpperCase();
+  if (debit !== undefined) data.debit = parseFloat(debit) || 0;
+  if (credit !== undefined) data.credit = parseFloat(credit) || 0;
+  if (remarks !== undefined) data.remarks = remarks ? remarks.trim() : null;
+  if (payment_mode !== undefined) data.payment_mode = payment_mode ? payment_mode.trim().toUpperCase() : null;
+  if (category !== undefined) data.category = category ? category.trim().toUpperCase() : null;
+  if (from_entity !== undefined) data.from_entity = from_entity ? from_entity.trim().toUpperCase() : null;
+  if (to_entity !== undefined) data.to_entity = to_entity ? to_entity.trim().toUpperCase() : null;
+  if (account_no !== undefined) data.account_no = account_no ? account_no.trim().toUpperCase() : null;
+  if (branch !== undefined) data.branch = branch ? branch.trim().toUpperCase() : null;
+  if (voucher_url !== undefined) data.voucher_url = voucher_url || null;
 
-  const updated = await dayBookModel.update(parseInt(id), data, pool);
+  const updated = Object.keys(data).length > 0
+    ? await dayBookModel.update(id, data, pool)
+    : await dayBookModel.findById(id, pool);
+  if (!updated) return res.status(404).json({ message: 'Day book entry not found' });
   res.json({ entry: updated });
 });
 
@@ -1897,9 +1837,8 @@ export const updateDayBookEntry = asyncHandler(async (req, res) => {
  * Delete a day book entry
  */
 export const deleteDayBookEntry = asyncHandler(async (req, res) => {
-  const existing = await dayBookModel.findById(parseInt(req.params.id), pool);
-  if (!existing) return res.status(404).json({ message: 'Day book entry not found' });
-  await dayBookModel.delete(parseInt(req.params.id), pool);
+  const deleted = await dayBookModel.delete(parseInt(req.params.id), pool);
+  if (!deleted) return res.status(404).json({ message: 'Day book entry not found' });
   res.json({ message: 'Day book entry deleted' });
 });
 
@@ -1909,29 +1848,29 @@ export const deleteDayBookEntry = asyncHandler(async (req, res) => {
  * Maps day_book field names to expense field names
  */
 export const updateExpenseFromDayBook = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const existing = await expenseModel.findById(parseInt(id), pool);
-  if (!existing) return res.status(404).json({ message: 'Expense not found' });
+  const id = parseInt(req.params.id);
 
   const {
     date, particular, debit, credit,
     payment_mode, category, from_entity, to_entity, account_no, branch,
   } = req.body;
 
-  const data = {
-    date: date || existing.date,
-    from_entity: from_entity !== undefined ? (from_entity ? from_entity.trim().toUpperCase() : null) : existing.from_entity,
-    to_entity: to_entity !== undefined ? (to_entity ? to_entity.trim().toUpperCase() : null) : existing.to_entity,
-    payment_mode: payment_mode !== undefined ? (payment_mode ? payment_mode.trim().toUpperCase() : null) : existing.payment_mode,
-    debit: debit !== undefined ? (parseFloat(debit) || 0) : existing.debit,
-    credit: credit !== undefined ? (parseFloat(credit) || 0) : existing.credit,
-    remark: particular !== undefined ? (particular ? particular.trim().toUpperCase() : null) : existing.remark,
-    account_no: account_no !== undefined ? (account_no ? account_no.trim().toUpperCase() : null) : existing.account_no,
-    branch: branch !== undefined ? (branch ? branch.trim().toUpperCase() : null) : existing.branch,
-    category: category !== undefined ? (category ? category.trim().toUpperCase() : null) : existing.category,
-  };
+  const data = {};
+  if (date) data.date = date;
+  if (from_entity !== undefined) data.from_entity = from_entity ? from_entity.trim().toUpperCase() : null;
+  if (to_entity !== undefined) data.to_entity = to_entity ? to_entity.trim().toUpperCase() : null;
+  if (payment_mode !== undefined) data.payment_mode = payment_mode ? payment_mode.trim().toUpperCase() : null;
+  if (debit !== undefined) data.debit = parseFloat(debit) || 0;
+  if (credit !== undefined) data.credit = parseFloat(credit) || 0;
+  if (particular !== undefined) data.remark = particular ? particular.trim().toUpperCase() : null;
+  if (account_no !== undefined) data.account_no = account_no ? account_no.trim().toUpperCase() : null;
+  if (branch !== undefined) data.branch = branch ? branch.trim().toUpperCase() : null;
+  if (category !== undefined) data.category = category ? category.trim().toUpperCase() : null;
 
-  const updated = await expenseModel.update(parseInt(id), data, pool);
+  const updated = Object.keys(data).length > 0
+    ? await expenseModel.update(id, data, pool)
+    : await expenseModel.findById(id, pool);
+  if (!updated) return res.status(404).json({ message: 'Expense not found' });
   res.json({ entry: updated });
 });
 
@@ -1940,9 +1879,8 @@ export const updateExpenseFromDayBook = asyncHandler(async (req, res) => {
  * Delete an expense entry FROM the Day Book module
  */
 export const deleteExpenseFromDayBook = asyncHandler(async (req, res) => {
-  const existing = await expenseModel.findById(parseInt(req.params.id), pool);
-  if (!existing) return res.status(404).json({ message: 'Expense not found' });
-  await expenseModel.delete(parseInt(req.params.id), pool);
+  const deleted = await expenseModel.delete(parseInt(req.params.id), pool);
+  if (!deleted) return res.status(404).json({ message: 'Expense not found' });
   res.json({ message: 'Expense deleted' });
 });
 

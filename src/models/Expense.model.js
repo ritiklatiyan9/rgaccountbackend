@@ -234,16 +234,17 @@ class ExpenseModel extends MasterModel {
   /**
    * Expenses for a specific date (fast, indexed query)
    */
-  async findBySiteAndDate(siteId, date, pool) {
+  async findBySiteAndDate(siteId, date, pool, creatorId = null) {
     const query = `
       SELECT e.*, u.name as approved_by_name, admin_u.name as assigned_admin_name
       FROM expenses e
       LEFT JOIN users u ON e.approved_by = u.id
       LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
       WHERE e.site_id = $1 AND e.date = $2
+        AND ($3::int IS NULL OR e.created_by = $3::int)
       ORDER BY e.id ASC
     `;
-    const result = await pool.query(query, [siteId, date]);
+    const result = await pool.query(query, [siteId, date, creatorId]);
     return result.rows;
   }
 

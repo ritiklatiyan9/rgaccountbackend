@@ -79,7 +79,7 @@ class PlotCommissionModel extends MasterModel {
   }
 
   /** All commissions for a site on a specific date (for DayBook merge) */
-  async findBySiteAndDate(siteId, date, pool) {
+  async findBySiteAndDate(siteId, date, pool, creatorId = null) {
     const query = `
       SELECT pc.*,
              COALESCE(pc.father_name, m.father_name) AS father_name_resolved, u.name as assigned_admin_name
@@ -91,9 +91,10 @@ class PlotCommissionModel extends MasterModel {
       ) m ON true
       LEFT JOIN users u ON pc.assigned_admin_id = u.id
       WHERE pc.site_id = $1 AND pc.date = $2
+        AND ($3::int IS NULL OR pc.created_by = $3::int)
       ORDER BY pc.id ASC
     `;
-    const result = await pool.query(query, [siteId, date]);
+    const result = await pool.query(query, [siteId, date, creatorId]);
     return result.rows;
   }
 }

@@ -233,16 +233,17 @@ class FirmTransactionModel extends MasterModel {
   }
 
   /** Transactions for a site + date (for Day Book enrichment) */
-  async findBySiteAndDate(siteId, date, pool) {
+  async findBySiteAndDate(siteId, date, pool, creatorId = null) {
     const query = `
       SELECT ft.*, f.name AS firm_name, u.name as assigned_admin_name
       FROM firm_transactions ft
       JOIN firms f ON f.id = ft.firm_id
       LEFT JOIN users u ON ft.assigned_admin_id = u.id
       WHERE ft.site_id = $1 AND ft.date = $2
+        AND ($3::int IS NULL OR ft.created_by = $3::int)
       ORDER BY ft.id ASC
     `;
-    const result = await pool.query(query, [siteId, date]);
+    const result = await pool.query(query, [siteId, date, creatorId]);
     return result.rows;
   }
 }

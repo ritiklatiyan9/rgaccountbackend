@@ -278,16 +278,17 @@ class PlotPaymentModel extends MasterModel {
   }
 
   /** All plot payments for a site+date (for Day Book enrichment) */
-  async findBySiteAndDate(siteId, date, pool) {
+  async findBySiteAndDate(siteId, date, pool, creatorId = null) {
     const query = `
       SELECT pp.*, p.plot_no, p.block, p.buyer_name, p.sale_price, u.name as assigned_admin_name
       FROM plot_payments pp
       JOIN plots p ON p.id = pp.plot_id
       LEFT JOIN users u ON pp.assigned_admin_id = u.id
       WHERE pp.site_id = $1 AND pp.date = $2
+        AND ($3::int IS NULL OR pp.created_by = $3::int)
       ORDER BY pp.id ASC
     `;
-    const result = await pool.query(query, [siteId, date]);
+    const result = await pool.query(query, [siteId, date, creatorId]);
     return result.rows;
   }
 
