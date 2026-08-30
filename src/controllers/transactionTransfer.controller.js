@@ -13,7 +13,7 @@ const MODULE_BY_TYPE = {
 const LABEL_BY_TYPE = {
   personal_ledger: 'Personal Ledger',
   expense: 'Expense',
-  farmer_payment: 'Farmer Payment',
+  farmer_payment: 'Lands Payment',
   plot_payment: 'Plot Payment',
 };
 

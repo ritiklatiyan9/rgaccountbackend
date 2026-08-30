@@ -107,6 +107,6 @@ export const deleteFarmerDocument = asyncHandler(async (req, res) => {
     [document.id, document.farmer_id],
   );
   if (!deleted.rows[0]) return res.status(404).json({ message: 'Document not found' });
-  try { await deletePlotDoc(deleted.rows[0].file_path); } catch { /* File cleanup is best effort. */ }
+  // Retain the object while this record is recoverable from Recycle Bin.
   res.json({ message: 'Document deleted', documentId: document.id });
 });

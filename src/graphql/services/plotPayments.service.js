@@ -4,6 +4,9 @@
  */
 import pool from '../../config/db.js';
 
+const PP_POSTS = `financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)`;
+const PIP_POSTS = `financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)`;
+
 /**
  * Fetch all plots for a site with payment aggregates in a SINGLE query
  * using LEFT JOIN + GROUP BY instead of 6 correlated subqueries per row.
@@ -34,13 +37,13 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
     FROM plots p
     LEFT JOIN LATERAL (
       SELECT
-        SUM(pp.amount) FILTER (WHERE LOWER(COALESCE(pp.status, 'approved')) = 'approved' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pp.amount) FILTER (WHERE ${PP_POSTS})
           AS total_received,
-        SUM(pp.amount) FILTER (WHERE pp.payment_type IN ('BANK', 'CHEQUE') AND LOWER(COALESCE(pp.status, 'approved')) = 'approved' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pp.amount) FILTER (WHERE pp.payment_type IN ('BANK', 'CHEQUE') AND ${PP_POSTS})
           AS received_bank,
-        SUM(pp.amount) FILTER (WHERE pp.payment_type = 'CASH' AND LOWER(COALESCE(pp.status, 'approved')) = 'approved' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pp.amount) FILTER (WHERE pp.payment_type = 'CASH' AND ${PP_POSTS})
           AS received_cash,
-        COUNT(*) FILTER (WHERE LOWER(COALESCE(pp.status, 'approved')) = 'approved' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))::int AS payment_count,
+        COUNT(*) FILTER (WHERE ${PP_POSTS})::int AS payment_count,
         string_agg(DISTINCT pp.buyer_name, ', ') FILTER (WHERE pp.buyer_name IS NOT NULL AND pp.buyer_name != '')
           AS payment_buyer_names,
         string_agg(DISTINCT pp.booked_by, ', ') FILTER (WHERE pp.booked_by IS NOT NULL AND pp.booked_by != '')
@@ -51,13 +54,13 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
     ) pp_agg ON true
     LEFT JOIN LATERAL (
       SELECT
-        SUM(pip.amount) FILTER (WHERE LOWER(COALESCE(pip.status, 'approved')) = 'approved' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pip.amount) FILTER (WHERE ${PIP_POSTS})
           AS total_received,
-        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, '')) IN ('BANK', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER') AND LOWER(COALESCE(pip.status, 'approved')) = 'approved' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, '')) IN ('BANK', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER') AND ${PIP_POSTS})
           AS received_bank,
-        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, 'CASH')) = 'CASH' AND LOWER(COALESCE(pip.status, 'approved')) = 'approved' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, 'CASH')) = 'CASH' AND ${PIP_POSTS})
           AS received_cash,
-        COUNT(*) FILTER (WHERE LOWER(COALESCE(pip.status, 'approved')) = 'approved' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))::int AS payment_count
+        COUNT(*) FILTER (WHERE ${PIP_POSTS})::int AS payment_count
       FROM plot_installment_payments pip
       WHERE pip.plot_id = p.id
         AND ($2::int IS NULL OR pip.created_by = $2::int)
@@ -204,26 +207,26 @@ export async function getPlotPaymentDetail(plotId, siteId, creatorId = null) {
     FROM plots p
     LEFT JOIN LATERAL (
       SELECT
-        SUM(pp.amount) FILTER (WHERE LOWER(COALESCE(pp.status, 'approved')) = 'approved' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pp.amount) FILTER (WHERE ${PP_POSTS})
           AS total_received,
-        SUM(pp.amount) FILTER (WHERE pp.payment_type IN ('BANK', 'CHEQUE') AND LOWER(COALESCE(pp.status, 'approved')) = 'approved' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pp.amount) FILTER (WHERE pp.payment_type IN ('BANK', 'CHEQUE') AND ${PP_POSTS})
           AS received_bank,
-        SUM(pp.amount) FILTER (WHERE pp.payment_type = 'CASH' AND LOWER(COALESCE(pp.status, 'approved')) = 'approved' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pp.amount) FILTER (WHERE pp.payment_type = 'CASH' AND ${PP_POSTS})
           AS received_cash,
-        COUNT(*) FILTER (WHERE LOWER(COALESCE(pp.status, 'approved')) = 'approved' AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))::int AS payment_count
+        COUNT(*) FILTER (WHERE ${PP_POSTS})::int AS payment_count
       FROM plot_payments pp
       WHERE pp.plot_id = p.id
         AND ($3::int IS NULL OR pp.created_by = $3::int)
     ) pp_agg ON true
     LEFT JOIN LATERAL (
       SELECT
-        SUM(pip.amount) FILTER (WHERE LOWER(COALESCE(pip.status, 'approved')) = 'approved' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pip.amount) FILTER (WHERE ${PIP_POSTS})
           AS total_received,
-        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, '')) IN ('BANK', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER') AND LOWER(COALESCE(pip.status, 'approved')) = 'approved' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, '')) IN ('BANK', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER') AND ${PIP_POSTS})
           AS received_bank,
-        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, 'CASH')) = 'CASH' AND LOWER(COALESCE(pip.status, 'approved')) = 'approved' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+        SUM(pip.amount) FILTER (WHERE UPPER(COALESCE(pip.payment_mode, 'CASH')) = 'CASH' AND ${PIP_POSTS})
           AS received_cash,
-        COUNT(*) FILTER (WHERE LOWER(COALESCE(pip.status, 'approved')) = 'approved' AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED')))::int AS payment_count
+        COUNT(*) FILTER (WHERE ${PIP_POSTS})::int AS payment_count
       FROM plot_installment_payments pip
       WHERE pip.plot_id = p.id
         AND ($3::int IS NULL OR pip.created_by = $3::int)
@@ -243,8 +246,7 @@ export async function getPlotPaymentDetail(plotId, siteId, creatorId = null) {
      AND authorized_plot.site_id = $2
     WHERE pp.plot_id = $1
       AND ($3::int IS NULL OR pp.created_by = $3::int)
-      AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-      AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND ${PP_POSTS}
     GROUP BY COALESCE(NULLIF(pp.payment_from, ''), 'OTHER')
     ORDER BY total_amount DESC
   `;
@@ -260,8 +262,7 @@ export async function getPlotPaymentDetail(plotId, siteId, creatorId = null) {
      AND authorized_plot.site_id = $2
     WHERE pp.plot_id = $1
       AND ($3::int IS NULL OR pp.created_by = $3::int)
-      AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-      AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      AND ${PP_POSTS}
     GROUP BY COALESCE(NULLIF(pp.received_by, ''), 'UNKNOWN')
     ORDER BY total_amount DESC
   `;
@@ -272,8 +273,7 @@ export async function getPlotPaymentDetail(plotId, siteId, creatorId = null) {
         (SELECT SUM(pip.amount) FROM plot_installment_payments pip
           WHERE pip.installment_id = pi.id
             AND ($3::int IS NULL OR pip.created_by = $3::int)
-            AND LOWER(COALESCE(pip.status, 'approved')) = 'approved'
-            AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))),
+            AND ${PIP_POSTS}),
         0
       ) AS paid_amount
     FROM plot_installments pi
@@ -332,8 +332,7 @@ export async function getRegistryBankChequePayments(siteId, creatorId = null) {
         AND ($2::int IS NULL OR pp.created_by = $2::int)
         AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE', 'CASH')
         AND (pp.amount IS NOT NULL AND pp.amount > 0)
-        AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-        AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND ${PP_POSTS}
       ORDER BY pp.date DESC, pp.created_at DESC
     `
     : `
@@ -351,8 +350,7 @@ export async function getRegistryBankChequePayments(siteId, creatorId = null) {
         AND ($2::int IS NULL OR pp.created_by = $2::int)
         AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE', 'CASH')
         AND (pp.amount IS NOT NULL AND pp.amount > 0)
-        AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-        AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND ${PP_POSTS}
       ORDER BY pp.date DESC, pp.created_at DESC
     `;
 

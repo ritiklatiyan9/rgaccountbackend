@@ -1,6 +1,20 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
-import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
+import { buildVerifyUrl, ReceiptType, verifyReceiptToken } from '../utils/receiptToken.js';
+
+/**
+ * Public half of the receipt QR flow. The token contains only display fields
+ * and is HMAC signed, so verification does not expose any account data or
+ * require a signed-in user.
+ */
+export const verifyPublicReceipt = (req, res) => {
+  const result = verifyReceiptToken(req.query?.token);
+  if (!result.valid) {
+    return res.status(400).json({ valid: false, message: result.reason });
+  }
+
+  return res.json({ valid: true, receipt: result.payload });
+};
 
 /**
  * Mints the signed verify URL behind a receipt QR for a record that was just

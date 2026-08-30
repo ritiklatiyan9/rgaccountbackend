@@ -3,6 +3,7 @@ import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
+import { transactionMovesMoney } from '../utils/transactionPosting.js';
 
 const asInt = (v) => parseInt(v, 10);
 
@@ -219,8 +220,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       COALESCE(inv.inv_outstanding, 0)::numeric(14,2) AS inventory_outstanding
      FROM vendor_commitments vc
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
-       AND LOWER(COALESCE(vp.status, 'approved')) = 'approved'
-       AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      LEFT JOIN users cu ON cu.id = vc.created_by
      LEFT JOIN users aa ON aa.id = vc.assigned_admin_id
@@ -260,8 +260,8 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
      LEFT JOIN (
       SELECT commitment_id, SUM(amount)::numeric(14,2) AS paid_amount
       FROM vendor_payments
-      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
+      WHERE site_id = $1
+        AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
       GROUP BY commitment_id
      ) p ON p.commitment_id = vc.id
      CROSS JOIN (
@@ -331,8 +331,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       m.full_name AS vendor_member_name
      FROM vendor_commitments vc
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
-       AND LOWER(COALESCE(vp.status, 'approved')) = 'approved'
-       AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)
        AND ($3::int IS NULL OR vp.created_by = $3::int)
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      LEFT JOIN users aa ON aa.id = vc.assigned_admin_id
@@ -415,8 +414,12 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   const inventoryOrders = inventoryResult.rows.map((o) => {
     const payments = itemPaymentsByOrder.get(o.id) || [];
     const scopedPaid = payments.reduce((sum, payment) => {
-      const posted = String(payment.status || 'approved').toLowerCase() === 'approved'
-        && !['BOUNCED', 'RETURNED'].includes(String(payment.cheque_status || '').toUpperCase());
+      const posted = transactionMovesMoney({
+        direction: 'debit',
+        status: payment.status,
+        paymentMode: payment.payment_mode,
+        chequeStatus: payment.cheque_status,
+      });
       return sum + (posted ? (parseFloat(payment.amount) || 0) : 0);
     }, 0);
     return {
@@ -500,7 +503,24 @@ export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Payment not found' });
   }
 
-  res.json({ receipt });
+  res.json({
+    receipt: {
+      ...receipt,
+      verifyUrl: buildVerifyUrl({
+        t: ReceiptType.VENDOR,
+        i: receipt.id,
+        pn: receipt.vendor_name || null,
+        a: receipt.amount,
+        dr: 'OUT',
+        d: receipt.payment_date,
+        pm: receipt.payment_mode || null,
+        rf: receipt.reference_no || null,
+        sn: receipt.site_name || null,
+        sy: receipt.site_city || null,
+        ss: receipt.site_state || null,
+      }),
+    },
+  });
 });
 
 export const createVendorCommitment = asyncHandler(async (req, res) => {

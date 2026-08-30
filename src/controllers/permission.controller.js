@@ -29,7 +29,7 @@ export const getPermissions = asyncHandler(async (req, res) => {
 /**
  * PUT /permissions/:userId
  * Bulk update permissions for a sub-admin (admin only)
- * Body: { permissions: [{ module, can_read, can_write, can_update, can_delete, can_view_all }] }
+ * Body: { permissions: [{ module, can_read, can_write, can_update, can_delete, can_restore, can_view_all }] }
  */
 export const updatePermissions = asyncHandler(async (req, res) => {
     const { userId } = req.params;
@@ -59,7 +59,7 @@ export const updatePermissions = asyncHandler(async (req, res) => {
         });
     }
 
-    const actionFields = ['can_read', 'can_write', 'can_update', 'can_delete', 'can_view_all'];
+    const actionFields = ['can_read', 'can_write', 'can_update', 'can_delete', 'can_restore', 'can_view_all'];
     const hasInvalidAction = permissions.some(permission =>
         actionFields.some(field => typeof permission[field] !== 'boolean')
     );

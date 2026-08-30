@@ -180,6 +180,6 @@ export const deleteRecordDocument = asyncHandler(async (req, res) => {
     [documentId, record.entityType, record.id]
   );
   if (!deleted.rows[0]) return res.status(404).json({ message: 'Document not found' });
-  await deletePlotDoc(deleted.rows[0].file_path).catch(() => {});
+  // Retain the object while this record is recoverable from Recycle Bin.
   res.json({ message: 'Document deleted', documentId });
 });

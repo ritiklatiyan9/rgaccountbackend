@@ -74,8 +74,8 @@ test('plot commission writes reject malformed accounting dates before they can b
   assert.match(controller, /const isValidLedgerDate/);
   assert.match(controller, /year < 1900 \|\| year > 2100/);
   assert.match(controller, /Payment date must be a valid date between 1900 and 2100/);
-  assert.match(model, /LOWER\(COALESCE\(pcp\.status, 'approved'\)\) = 'approved'/);
-  assert.match(model, /UPPER\(COALESCE\(pcp\.cheque_status, ''\)\) NOT IN \('BOUNCED', 'RETURNED'\)/);
+  assert.match(model, /financial_transaction_posts/);
+  assert.match(model, /CASE WHEN pcp\.amount < 0 THEN 'credit' ELSE 'debit' END/);
 });
 
 test('the unified pending-cheque source list supports both upgraded and legacy inventory schemas', async () => {

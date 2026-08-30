@@ -142,16 +142,16 @@ export async function notifyPlotPaymentRecorded(payment) {
               COALESCE(pp.total, 0) + COALESCE(ip.total, 0) AS total_received
          FROM plots p
          LEFT JOIN LATERAL (
-           SELECT SUM(amount) FILTER (
-             WHERE cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')
+           SELECT SUM(ppx.amount) FILTER (
+             WHERE financial_transaction_posts('credit', ppx.status, ppx.payment_type, ppx.cheque_status)
            ) AS total
-           FROM plot_payments WHERE plot_id = p.id
+           FROM plot_payments ppx WHERE ppx.plot_id = p.id
          ) pp ON TRUE
          LEFT JOIN LATERAL (
-           SELECT SUM(amount) FILTER (
-             WHERE cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')
+           SELECT SUM(pipx.amount) FILTER (
+             WHERE financial_transaction_posts('credit', pipx.status, pipx.payment_mode, pipx.cheque_status)
            ) AS total
-           FROM plot_installment_payments WHERE plot_id = p.id
+           FROM plot_installment_payments pipx WHERE pipx.plot_id = p.id
          ) ip ON TRUE
         WHERE p.id = $1`,
       [payment.plot_id]

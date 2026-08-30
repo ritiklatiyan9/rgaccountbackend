@@ -5,6 +5,21 @@ import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
+import { transactionMovesMoney } from '../utils/transactionPosting.js';
+
+const commissionPaymentPostsSql = (alias = '') => {
+  const p = alias ? `${alias}.` : '';
+  return `financial_transaction_posts(
+    CASE WHEN ${p}amount < 0 THEN 'credit' ELSE 'debit' END,
+    ${p}status, ${p}payment_mode, ${p}cheque_status
+  )`;
+};
+const commissionPaymentMovesMoney = (payment) => transactionMovesMoney({
+  direction: Number(payment?.amount) < 0 ? 'credit' : 'debit',
+  status: payment?.status,
+  paymentMode: payment?.payment_mode,
+  chequeStatus: payment?.cheque_status,
+});
 
 // Commission list totals intentionally accept only dates the accounting ledger
 // can represent. Validate the same range at the write boundary so a malformed
@@ -38,8 +53,7 @@ const autoUpdateCommissionStatus = async (commissionId, poolConn) => {
           SELECT COALESCE(SUM(amount), 0) AS total_paid
           FROM plot_commission_payments
           WHERE plot_commission_id = $1
-            AND status = 'approved'
-            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            AND ${commissionPaymentPostsSql()}
         ) agg
         WHERE pc.id = $1`,
       [commissionId]
@@ -250,12 +264,11 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
      LEFT JOIN members m ON pc.agent_id = m.id
      LEFT JOIN (
        SELECT plot_commission_id,
-              SUM(amount) FILTER (WHERE LOWER(COALESCE(status, 'approved')) = 'approved') AS total_paid,
-              SUM(amount) FILTER (WHERE LOWER(COALESCE(status, 'approved')) = 'approved') AS total_paid_all,
+              SUM(amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid,
+              SUM(amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid_all,
               COUNT(*) AS payment_count
        FROM plot_commission_payments
-       WHERE (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-         AND ($3::int IS NULL OR created_by = $3::int)
+       WHERE ($3::int IS NULL OR created_by = $3::int)
        GROUP BY plot_commission_id
      ) paid_agg ON paid_agg.plot_commission_id = pc.id
      WHERE p.plot_no = $1 AND p.site_id = $2
@@ -356,7 +369,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   const agents = commissions.map(c => {
     const scopedPayments = paymentsByCommission[c.id] || [];
     const totalPaid = scopedPayments
-      .filter((payment) => payment.status === 'approved' && !['BOUNCED', 'RETURNED'].includes(payment.cheque_status))
+      .filter(commissionPaymentMovesMoney)
       .reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
     const totalPaidAll = totalPaid;
     return ({
@@ -440,6 +453,33 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   // balance_after_payment from the live SUM, all atomically. The previous
   // implementation was 2 SELECTs (master+totals via heavy aggregation) +
   // 1 INSERT = 3 round-trips. New status update still runs in parallel after.
+  // Cap: a payout can never push the agent past the DECIDED commission. Pending
+  // rows count too — otherwise two quick entries could both pass the check.
+  // Credits (negative amounts = money received back) are never capped.
+  const capCheck = await pool.query(
+    `SELECT pc.total_commission,
+            COALESCE(SUM(p.amount) FILTER (
+              WHERE LOWER(COALESCE(p.status, 'approved')) <> 'rejected'
+                AND (p.cheque_status IS NULL OR p.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            ), 0) AS committed
+       FROM plot_commissions_v2 pc
+       LEFT JOIN plot_commission_payments p ON p.plot_commission_id = pc.id
+      WHERE pc.id = $1
+      GROUP BY pc.id`,
+    [masterIdInt]
+  );
+  const cap = capCheck.rows[0];
+  if (!cap) return res.status(404).json({ message: 'Commission master not found' });
+  const decided = parseFloat(cap.total_commission) || 0;
+  const committed = parseFloat(cap.committed) || 0;
+  if (numericAmount > 0 && committed + numericAmount > decided + 0.005) {
+    return res.status(400).json({
+      code: 'COMMISSION_EXCEEDED',
+      decided, committed, remaining: Math.max(decided - committed, 0),
+      message: `This payout would exceed the decided commission — decided ₹${decided.toLocaleString('en-IN')}, already paid/pending ₹${committed.toLocaleString('en-IN')}, remaining ₹${Math.max(decided - committed, 0).toLocaleString('en-IN')}. Raise the decided commission first if it has changed.`,
+    });
+  }
+
   const result = await pool.query(
     `WITH master AS (
        SELECT id, site_id, total_commission,
@@ -447,8 +487,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
                 SELECT SUM(amount)
                 FROM plot_commission_payments
                 WHERE plot_commission_id = $1
-                  AND status = 'approved'
-                  AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+                  AND ${commissionPaymentPostsSql()}
               ), 0) AS already_paid
        FROM plot_commissions_v2
        WHERE id = $1
@@ -520,8 +559,7 @@ export const getPlotCommissionAnalytics = asyncHandler(async (req, res) => {
   let bankPaid = 0;
   
   payments.forEach(p => {
-    if (String(p.status || 'approved').toLowerCase() === 'approved'
-      && !['BOUNCED', 'RETURNED'].includes(String(p.cheque_status || '').toUpperCase())) {
+    if (commissionPaymentMovesMoney(p)) {
       // Owner rule: only CASH belongs to the cash book. UPI, IMPS, RTGS,
       // NEFT, transfers, cheques, and any other explicit mode settle through
       // the bank book, matching ledger_bucket() and the Commission list.
@@ -536,8 +574,7 @@ export const getPlotCommissionAnalytics = asyncHandler(async (req, res) => {
     total_pending: parseFloat(master.balance),
     cash_paid: cashPaid,
     bank_paid: bankPaid,
-    payment_timeline: payments.filter((p) => String(p.status || 'approved').toLowerCase() === 'approved'
-      && !['BOUNCED', 'RETURNED'].includes(String(p.cheque_status || '').toUpperCase())).map(p => ({
+    payment_timeline: payments.filter(commissionPaymentMovesMoney).map(p => ({
       date: p.date,
       amount: parseFloat(p.amount)
     })).reverse() // Chronological order
@@ -636,6 +673,32 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   }
 
   if (fields.length === 0) return res.status(400).json({ message: 'Nothing to update' });
+
+  // Same cap as create: the edited amount plus every other live row must stay within the decided commission.
+  if (amount !== undefined && parseFloat(amount) > 0) {
+    const { rows: capRows } = await pool.query(
+      `SELECT pc.total_commission,
+              COALESCE(SUM(p.amount) FILTER (
+                WHERE p.id <> $2
+                  AND LOWER(COALESCE(p.status, 'approved')) <> 'rejected'
+                  AND (p.cheque_status IS NULL OR p.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+              ), 0) AS committed
+         FROM plot_commissions_v2 pc
+         LEFT JOIN plot_commission_payments p ON p.plot_commission_id = pc.id
+        WHERE pc.id = $1
+        GROUP BY pc.id`,
+      [existing.plot_commission_id, numId]
+    );
+    const decided = parseFloat(capRows[0]?.total_commission) || 0;
+    const committed = parseFloat(capRows[0]?.committed) || 0;
+    if (committed + parseFloat(amount) > decided + 0.005) {
+      return res.status(400).json({
+        code: 'COMMISSION_EXCEEDED',
+        decided, committed, remaining: Math.max(decided - committed, 0),
+        message: `This amount would exceed the decided commission — decided ₹${decided.toLocaleString('en-IN')}, other payouts ₹${committed.toLocaleString('en-IN')}, room left ₹${Math.max(decided - committed, 0).toLocaleString('en-IN')}.`,
+      });
+    }
+  }
 
   fields.push(`status = 'pending'`, `approved_by = NULL`, `approved_at = NULL`);
   fields.push(`updated_at = NOW()`);

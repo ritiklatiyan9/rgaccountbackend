@@ -1,4 +1,5 @@
 import MasterModel from './MasterModel.js';
+import { decorateRegistryStage } from '../utils/registryStage.js';
 
 // Memoized existence check for the handover table (migration 068) so the list
 // endpoint keeps working on databases where the migration hasn't run yet —
@@ -52,7 +53,10 @@ class PlotRegistryModel extends MasterModel {
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
         ${handoverSelect}
         p.team AS plot_team,
-        p.booking_by AS agent_name
+        p.booking_by AS agent_name,
+        p.plot_tag,
+        p.status AS plot_status,
+        p.co_applicant_name, p.co_applicant_relation, p.co_applicant_phone, p.co_applicant_aadhar, p.co_applicant_pan
       FROM plot_registries pr
       LEFT JOIN plots p ON pr.plot_id = p.id
       LEFT JOIN users aa ON aa.id = pr.assigned_admin_id
@@ -79,12 +83,10 @@ class PlotRegistryModel extends MasterModel {
           )
           AND (
             (prp.source_plot_payment_id IS NULL
-              AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
-              AND (prp.cheque_status IS NULL OR prp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+              AND financial_transaction_posts('credit', prp.status, prp.payment_mode, prp.cheque_status))
             OR
             (prp.source_plot_payment_id IS NOT NULL
-              AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+              AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status))
           )
       ) agg ON TRUE
       LEFT JOIN LATERAL (
@@ -99,7 +101,7 @@ class PlotRegistryModel extends MasterModel {
       ORDER BY pr.plot_no ASC
     `;
     const result = await pool.query(query, [siteId, creatorId]);
-    return result.rows;
+    return result.rows.map(decorateRegistryStage);
   }
 
   /** Check for duplicate plot_no within a site */
@@ -111,11 +113,18 @@ class PlotRegistryModel extends MasterModel {
 
   /** Get single registry with aggregates (same LATERAL pattern) */
   async findByIdWithTotals(id, pool, creatorId = null) {
+    const hasHandovers = await _resolveHandoverTableOnce(pool);
     const query = `
       SELECT pr.*,
         COALESCE(agg.total_paid,    0) AS total_paid,
-        COALESCE(agg.payment_count, 0) AS payment_count
+        COALESCE(agg.payment_count, 0) AS payment_count,
+        COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
+        ${hasHandovers ? 'COALESCE(ho.handover_count, 0) AS handover_count, ho.last_handover_at,' : '0 AS handover_count, NULL::timestamp AS last_handover_at,'}
+        p.plot_tag,
+        p.status AS plot_status,
+        p.co_applicant_name, p.co_applicant_relation, p.co_applicant_phone, p.co_applicant_aadhar, p.co_applicant_pan
       FROM plot_registries pr
+      LEFT JOIN plots p ON pr.plot_id = p.id
       LEFT JOIN LATERAL (
         SELECT
           SUM(prp.amount)::numeric AS total_paid,
@@ -139,18 +148,28 @@ class PlotRegistryModel extends MasterModel {
           )
           AND (
             (prp.source_plot_payment_id IS NULL
-              AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
-              AND (prp.cheque_status IS NULL OR prp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+              AND financial_transaction_posts('credit', prp.status, prp.payment_mode, prp.cheque_status))
             OR
             (prp.source_plot_payment_id IS NOT NULL
-              AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-              AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+              AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status))
           )
       ) agg ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS registry_doc_count
+        FROM documents d
+        WHERE d.plot_id = pr.plot_id
+          AND UPPER(COALESCE(d.category, '')) = 'REGISTRY'
+          AND COALESCE(d.uploaded_source, 'BOOKING') <> 'DMS'
+      ) docs ON TRUE
+      ${hasHandovers ? `LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS handover_count, MAX(h.given_at) AS last_handover_at
+        FROM registry_document_handovers h
+        WHERE h.registry_id = pr.id
+      ) ho ON TRUE` : ''}
       WHERE pr.id = $1
     `;
     const result = await pool.query(query, [id, creatorId]);
-    return result.rows[0];
+    return decorateRegistryStage(result.rows[0]);
   }
 }
 
@@ -245,8 +264,7 @@ class PlotRegistryPaymentModel extends MasterModel {
         WHERE pp.site_id = $1
           AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
           AND (pp.amount IS NOT NULL AND pp.amount > 0)
-          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
         ORDER BY pp.date DESC, pp.created_at DESC
       `
       : `
@@ -269,8 +287,7 @@ class PlotRegistryPaymentModel extends MasterModel {
         WHERE pp.site_id = $1
           AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
           AND (pp.amount IS NOT NULL AND pp.amount > 0)
-          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
         ORDER BY pp.date DESC, pp.created_at DESC
       `;
 
@@ -287,6 +304,7 @@ class PlotRegistryPaymentModel extends MasterModel {
           p.circle_rate, p.to_receive_bank, p.registry_area
         FROM plots p
         WHERE p.site_id = $1
+          AND UPPER(TRIM(COALESCE(p.plot_tag, ''))) <> 'OLD'
         ORDER BY p.plot_no ASC
       `, [siteId]),
       pool.query(`

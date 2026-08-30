@@ -500,10 +500,17 @@ const getLiveDashboardSnapshot = async (siteId, request, user) => {
     filters: request.filters,
     metrics: {
       siteBalance: componentVisible(visibility, 'kpi_siteBalance') ? finiteNumber(kpis.siteBalance) : null,
-      totalIncoming: componentVisible(visibility, 'kpi_totalIncoming') ? finiteNumber(kpis.totalRevenue) : null,
+      expectedProfit: componentVisible(visibility, 'kpi_totalIncoming') ? finiteNumber(kpis.expectedProfit) : null,
+      currentProfit: componentVisible(visibility, 'kpi_profit') ? finiteNumber(kpis.currentProfit) : null,
+      plotReceived: componentVisible(visibility, 'kpi_plotPayments') ? finiteNumber(kpis.plotIncoming?.received) : null,
+      plotRemaining: componentVisible(visibility, 'kpi_plotPayments') ? finiteNumber(kpis.plotIncoming?.remaining) : null,
+      landProfit: componentVisible(visibility, 'kpi_landProfit') ? finiteNumber(kpis.landProfitDetail?.bookProfit) : null,
+      landReceived: componentVisible(visibility, 'kpi_landProfit') ? finiteNumber(kpis.landProfitDetail?.received) : null,
+      totalIncoming: componentVisible(visibility, 'kpi_plotPayments') ? finiteNumber(kpis.plotIncoming?.received) + finiteNumber(kpis.landProfitDetail?.received) : null,
       totalExpense: componentVisible(visibility, 'kpi_totalExpense') ? finiteNumber(kpis.totalExpense) : null,
-      netProfit: componentVisible(visibility, 'kpi_profit') ? finiteNumber(kpis.netProfit) : null,
-      profitMargin: componentVisible(visibility, 'kpi_profit') ? finiteNumber(kpis.profitMargin) : null,
+      runningExpense: componentVisible(visibility, 'kpi_totalExpense') ? finiteNumber(kpis.runningExpense) : null,
+      netProfit: componentVisible(visibility, 'kpi_profit') ? finiteNumber(kpis.currentProfit) : null,
+      profitMargin: componentVisible(visibility, 'kpi_profit') ? finiteNumber(kpis.currentProfitMargin) : null,
       outstanding: componentVisible(visibility, 'kpi_personalLedger') ? finiteNumber(kpis.outstanding) : null,
       cashflow: componentVisible(visibility, 'site_cashflow') ? finiteNumber(kpis.cashflow) : null,
       personalLedgerCredit: componentVisible(visibility, 'kpi_personalLedger') ? finiteNumber(kpis.personalLedgerCredit) : null,
@@ -742,7 +749,7 @@ export const buildLocalDashboardAnswer = (question, snapshot, actions, visibleMo
   const transactionActivity = isTransactionActivityIntent(normalized);
   if (transactionActivity || /(data|summary|kpi|incoming|income|revenue|expense|profit|balance|outstanding|pending|ledger|aaj|today)/.test(normalized)) {
     const incoming = Number(metrics.totalIncoming) || 0;
-    const expense = Number(metrics.totalExpense) || 0;
+    const expense = Number(metrics.runningExpense) || 0;
     const hasActivity = incoming !== 0 || expense !== 0;
     const asksForWeek = /(week|weekly|hafte|hafta)/.test(normalized);
     const isWeeklySnapshot = /(week|weekly|this_week|current_week)/.test(String(snapshot.preset || '').toLowerCase());
@@ -754,16 +761,17 @@ export const buildLocalDashboardAnswer = (question, snapshot, actions, visibleMo
       return [
         '### Seedha jawab',
         hasActivity
-          ? `**Haan**, ${site.name} ke current Dashboard period mein len-den recorded hai.`
-          : `**Nahi**, ${site.name} ke current Dashboard period mein koi incoming ya expense recorded nahi hai.`,
+          ? `**Haan**, ${site.name} ke Dashboard financial position mein len-den recorded hai.`
+          : `**Nahi**, ${site.name} ke Dashboard financial position mein koi incoming ya expense recorded nahi hai.`,
         '',
         `- **Paisa aaya:** ${formatINR(metrics.totalIncoming)}`,
-        `- **Paisa gaya:** ${formatINR(metrics.totalExpense)}`,
-        `- **Net result:** ${formatINR(metrics.netProfit)}`,
+        `- **Running expense:** ${formatINR(expense)}`,
+        `- **Current profit:** ${formatINR(metrics.currentProfit)}`,
+        `- **Expected profit:** ${formatINR(metrics.expectedProfit)}`,
         '',
         asksForWeek && !isWeeklySnapshot
           ? `> Aapne is hafte ka poocha hai, lekin Dashboard abhi **${snapshot.preset || 'custom'}** filter (${dateLabel}) par hai. Exact weekly entries ke liye **Main Day Book** mein Week filter lagayein.`
-          : `> Yeh figures Dashboard ke **${snapshot.preset || 'selected'}** filter (${dateLabel}) ke recorded data par based hain.`,
+          : `> Yeh financial-position figures ${snapshot.dateRange?.end || 'selected end date'} tak cumulative hain; activity charts **${snapshot.preset || 'selected'}** period use karte hain.`,
       ].join('\n');
     }
 
@@ -771,16 +779,17 @@ export const buildLocalDashboardAnswer = (question, snapshot, actions, visibleMo
       return [
         '### Direct answer',
         hasActivity
-          ? `**Yes**, transactions are recorded for ${site.name} in the current Dashboard period.`
-          : `**No**, no incoming or expense is recorded for ${site.name} in the current Dashboard period.`,
+          ? `**Yes**, transactions are recorded in ${site.name}'s Dashboard financial position.`
+          : `**No**, no incoming or expense is recorded in ${site.name}'s Dashboard financial position.`,
         '',
         `- **Incoming:** ${formatINR(metrics.totalIncoming)}`,
-        `- **Expense:** ${formatINR(metrics.totalExpense)}`,
-        `- **Net result:** ${formatINR(metrics.netProfit)}`,
+        `- **Running expense:** ${formatINR(expense)}`,
+        `- **Current profit:** ${formatINR(metrics.currentProfit)}`,
+        `- **Expected profit:** ${formatINR(metrics.expectedProfit)}`,
         '',
         asksForWeek && !isWeeklySnapshot
           ? `> You asked about this week, but Dashboard is currently using the **${snapshot.preset || 'custom'}** filter (${dateLabel}). Use the Week filter in **Main Day Book** for exact weekly entries.`
-          : `> These figures use the Dashboard's **${snapshot.preset || 'selected'}** filter (${dateLabel}) and recorded data.`,
+          : `> These financial-position figures are cumulative through ${snapshot.dateRange?.end || 'the selected end date'}; activity charts use the **${snapshot.preset || 'selected'}** period.`,
       ].join('\n');
     }
 
@@ -791,8 +800,9 @@ export const buildLocalDashboardAnswer = (question, snapshot, actions, visibleMo
       direct,
       '',
       `- **Incoming:** ${formatINR(metrics.totalIncoming)}`,
-      `- **Expense:** ${formatINR(metrics.totalExpense)}`,
-      `- **Net profit:** ${formatINR(metrics.netProfit)}`,
+      `- **Running expense:** ${formatINR(expense)}`,
+      `- **Current profit:** ${formatINR(metrics.currentProfit)}`,
+      `- **Expected profit:** ${formatINR(metrics.expectedProfit)}`,
       `- **Site balance:** ${formatINR(metrics.siteBalance)}`,
       '',
       looksLikeHinglish(question)

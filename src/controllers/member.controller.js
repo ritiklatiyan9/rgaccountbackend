@@ -35,7 +35,16 @@ export const MEMBER_FIELDS = [
   'business_name', 'service_type', 'payment_terms',
   // Team (for broker/member/employee/partner)
   'team',
+  // Location (migration 108) — geocode_source/precision/geocoded_at are set server-side, never from the client
+  'latitude', 'longitude', 'village', 'district',
 ];
+
+const GEO_COORD = { latitude: 90, longitude: 180 };
+const coerceCoord = (val, max) => {
+  if (val === '' || val == null) return null;
+  const n = Number(val);
+  return Number.isFinite(n) && Math.abs(n) <= max ? n : null;
+};
 
 const sanitize = (body) => {
   const data = {};
@@ -51,14 +60,24 @@ const sanitize = (body) => {
         'marital_status', 'qualification', 'passport_no', 'driving_license_no',
         'gst_no', 'tin_no', 'emergency_contact_name', 'emergency_contact_relation',
         'nominee_name', 'nominee_relation', 'designation', 'department',
-        'employment_type', 'team',
+        'employment_type', 'team', 'village', 'district',
         'co_applicant_name', 'co_applicant_relation', 'co_applicant_gender',
         'co_applicant_aadhar', 'co_applicant_pan'].includes(f) && val) {
         val = val.toUpperCase();
       }
+      if (GEO_COORD[f]) { data[f] = coerceCoord(val, GEO_COORD[f]); return; }
       data[f] = val || null;
     }
   });
+  if (data.latitude != null && data.longitude != null) {
+    data.geocode_source = 'manual';
+    data.geocode_precision = 'manual';
+    data.geocoded_at = new Date();
+  } else if ('latitude' in data || 'longitude' in data) {
+    // Explicit clear from the location picker (or a half/invalid pair): never leave a lone coordinate.
+    data.latitude = null; data.longitude = null;
+    data.geocode_source = null; data.geocode_precision = null; data.geocoded_at = null;
+  }
   return data;
 };
 
@@ -334,7 +353,7 @@ export const updateMember = asyncHandler(async (req, res) => {
   const data = sanitize(req.body);
 
   const existingPromise = pool.query(
-    `SELECT id, site_id FROM members WHERE id = $1`,
+    `SELECT id, site_id, latitude, longitude FROM members WHERE id = $1`,
     [memberId]
   );
   const phoneCheckPromise = data.phone
@@ -360,6 +379,11 @@ export const updateMember = asyncHandler(async (req, res) => {
 
   if (phoneCheck.rows.length > 0) {
     return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name}` });
+  }
+
+  // Unchanged pin echoed back by the edit form: leave geo columns (and their nominatim/pincode source) alone.
+  if (data.latitude != null && Number(existing.latitude) === data.latitude && Number(existing.longitude) === data.longitude) {
+    for (const k of ['latitude', 'longitude', 'geocode_source', 'geocode_precision', 'geocoded_at']) delete data[k];
   }
 
   Object.assign(data, docUrls);

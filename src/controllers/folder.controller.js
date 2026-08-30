@@ -1,6 +1,5 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { folderModel } from '../models/Folder.model.js';
-import { deleteFromS3 } from '../utils/s3.js';
 import pool from '../config/db.js';
 
 /**
@@ -62,13 +61,9 @@ export const moveFolder = asyncHandler(async (req, res) => {
  * Delete a folder and all contents
  */
 export const deleteFolder = asyncHandler(async (req, res) => {
-    const { folder, deletedS3Keys } = await folderModel.deleteFolder(parseInt(req.params.id), pool);
+    const { folder } = await folderModel.deleteFolder(parseInt(req.params.id), pool);
     if (!folder) return res.status(404).json({ message: 'Folder not found' });
-
-    // Clean up S3 files
-    for (const key of deletedS3Keys) {
-        try { await deleteFromS3(key); } catch (e) { console.error('S3 cleanup error:', e); }
-    }
-
+    // Folder workbooks remain in storage until this recycle transaction is
+    // permanently purged, allowing the complete tree to be restored.
     res.json({ message: 'Folder deleted successfully' });
 });

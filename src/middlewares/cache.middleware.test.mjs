@@ -60,3 +60,27 @@ test('an uninterrupted read is cached normally', async () => {
 
   assert.deepEqual((await cacheGet(key))?.payload, { entries: ['fresh'] });
 });
+
+test('large responses can opt out of the in-process cache', async () => {
+  const namespace = `balance-sheet-large-${Date.now()}`;
+  const key = `${namespace}|u:9|/|site_id=8`;
+  const middleware = cacheResponse({
+    ttlSeconds: 30,
+    namespace,
+    shouldCache: (payload) => (payload?.transactions?.length || 0) <= 2,
+  });
+  const req = {
+    method: 'GET',
+    path: '/',
+    query: { site_id: 8 },
+    headers: {},
+    user: { id: 9 },
+  };
+  const res = makeResponse();
+
+  await new Promise((resolve) => middleware(req, res, resolve));
+  res.json({ transactions: [{ id: 1 }, { id: 2 }, { id: 3 }] });
+
+  assert.equal(await cacheGet(key), null);
+  assert.equal(res.headers['X-Cache'], 'MISS');
+});

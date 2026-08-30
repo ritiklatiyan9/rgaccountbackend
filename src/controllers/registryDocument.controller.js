@@ -63,6 +63,7 @@ export const listRegistryDocumentPlots = asyncHandler(async (req, res) => {
               )::int AS doc_count
          FROM plots p
         WHERE p.site_id = $1
+          AND UPPER(TRIM(COALESCE(p.plot_tag, ''))) <> 'OLD'
         ORDER BY p.site_id, p.plot_no, p.block, p.created_at DESC NULLS LAST, p.id DESC
      ) latest
      ORDER BY block ASC NULLS LAST,
@@ -315,11 +316,6 @@ export const deleteRegistryDocument = asyncHandler(async (req, res) => {
   const document = rows[0];
   if (!document) return res.status(404).json({ message: 'Registry document not found' });
 
-  try {
-    await deletePlotDoc(document.file_path);
-  } catch (error) {
-    console.error(`Registry document ${documentId} storage cleanup failed:`, error.message);
-  }
-
+  // Retain the object while this record is recoverable from Recycle Bin.
   res.json({ message: 'Document deleted', documentId });
 });

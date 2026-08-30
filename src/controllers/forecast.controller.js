@@ -51,7 +51,7 @@ const INFLOW_SQL = `
     SELECT pip.installment_id, SUM(pip.amount) AS direct_paid
     FROM plot_installment_payments pip
     JOIN plots p ON p.id = pip.plot_id
-    WHERE p.site_id = $1 AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+    WHERE p.site_id = $1 AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
     GROUP BY pip.installment_id
   ),
   generic AS (            -- non-earmarked money waterfalls across the residual need, earliest-first:
@@ -59,12 +59,12 @@ const INFLOW_SQL = `
     SELECT plot_id, SUM(amount) AS generic_pool FROM (
       SELECT pp.plot_id, pp.amount FROM plot_payments pp
         JOIN plots p ON p.id = pp.plot_id
-        WHERE p.site_id = $1 AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+        WHERE p.site_id = $1 AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
       UNION ALL
       SELECT pip.plot_id, pip.amount FROM plot_installment_payments pip
         JOIN plots p ON p.id = pip.plot_id
         WHERE p.site_id = $1 AND pip.installment_id IS NULL
-          AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+          AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
     ) g GROUP BY plot_id
   ),
   sched AS (
@@ -95,7 +95,7 @@ const INFLOW_SQL = `
 const VENDOR_SQL = `
   WITH paid AS (
     SELECT commitment_id, SUM(amount) AS paid_amount FROM vendor_payments
-     WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+     WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY commitment_id
   )
   SELECT to_char(date_trunc('month', vc.due_date), 'YYYY-MM') AS month,
@@ -111,7 +111,7 @@ const VENDOR_SQL = `
 const VENDOR_UNSCHEDULED_SQL = `
   WITH paid AS (
     SELECT commitment_id, SUM(amount) AS paid_amount FROM vendor_payments
-     WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+     WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY commitment_id
   )
   SELECT COALESCE(SUM(GREATEST(0, vc.contract_amount - COALESCE(p.paid_amount, 0))), 0)::float8 AS amount
@@ -123,7 +123,7 @@ const VENDOR_UNSCHEDULED_SQL = `
 const VENDOR_OVERDUE_SQL = `
   WITH paid AS (
     SELECT commitment_id, SUM(amount) AS paid_amount FROM vendor_payments
-     WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+     WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY commitment_id
   )
   SELECT COALESCE(SUM(GREATEST(0, vc.contract_amount - COALESCE(p.paid_amount, 0))), 0)::float8 AS amount
@@ -137,7 +137,7 @@ const FARMER_SQL = `
   FROM farmers f
   LEFT JOIN (
     SELECT farmer_id, SUM(amount) AS paid FROM farmer_payments
-     WHERE (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status <> 'rejected'
+     WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY farmer_id
   ) pd ON pd.farmer_id = f.id
   WHERE f.site_id = $1 AND f.status = 'active'`;
@@ -152,35 +152,38 @@ const RUN_RATE_INFLOW_SQL = `
   SELECT COALESCE(SUM(amount), 0)::float8 AS total FROM (
     SELECT pp.amount FROM plot_payments pp
      WHERE pp.site_id = $1 AND pp.date >= ${WINDOW.replace('%COL%', 'pp.date')}
-       AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
     UNION ALL
     SELECT pip.amount FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id
      WHERE p.site_id = $1 AND pip.payment_date >= ${WINDOW.replace('%COL%', 'pip.payment_date')}
-       AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
   ) u`;
 
 const RUN_RATE_OUTFLOW_SQL = `
   SELECT COALESCE(SUM(debit), 0)::float8 AS total FROM (
     SELECT fp.amount AS debit FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
      WHERE f.site_id = $1 AND fp.date >= ${WINDOW.replace('%COL%', 'fp.date')}
-       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED','RETURNED')) AND fp.status != 'rejected'
+       AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
     UNION ALL
     SELECT debit FROM expenses
      WHERE site_id = $1 AND date >= ${WINDOW.replace('%COL%', 'date')}
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status != 'rejected'
+       AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
     UNION ALL
     SELECT amount AS debit FROM plot_commission_payments
      WHERE site_id = $1 AND date >= ${WINDOW.replace('%COL%', 'date')}
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status != 'rejected'
+       AND financial_transaction_posts(
+         CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END,
+         status, payment_mode, cheque_status
+       )
     UNION ALL
     SELECT amount AS debit FROM vendor_payments
      WHERE site_id = $1 AND payment_date >= ${WINDOW.replace('%COL%', 'payment_date')}
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status != 'rejected'
+       AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
     UNION ALL
     SELECT debit FROM day_book
      WHERE site_id = $1 AND date >= ${WINDOW.replace('%COL%', 'date')}
        AND entry_type = 'EXPENSE' AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED')) AND status != 'rejected'
+       AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
   ) u`;
 
 /** GET /forecast?site_id=&months=6&lookback=6 */

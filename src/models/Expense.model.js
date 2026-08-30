@@ -275,12 +275,11 @@ class ExpenseModel extends MasterModel {
   async getSummary(siteId, pool) {
     const query = `
       SELECT
-        COALESCE(SUM(debit),  0)::numeric AS total_debit,
-        COALESCE(SUM(credit), 0)::numeric AS total_credit,
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric AS total_credit,
         COUNT(*)::int AS total_count
       FROM expenses
-      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
+      WHERE site_id = $1
     `;
     const result = await pool.query(query, [siteId]);
     return result.rows[0];
@@ -293,12 +292,11 @@ class ExpenseModel extends MasterModel {
     const query = `
       SELECT
         COALESCE(payment_mode, 'UNSPECIFIED') AS payment_mode,
-        COALESCE(SUM(debit), 0)::numeric  AS total_debit,
-        COALESCE(SUM(credit), 0)::numeric AS total_credit,
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric  AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM expenses
-      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
+      WHERE site_id = $1
       GROUP BY COALESCE(payment_mode, 'UNSPECIFIED')
       ORDER BY total_debit DESC
     `;
@@ -313,12 +311,11 @@ class ExpenseModel extends MasterModel {
     const query = `
       SELECT
         COALESCE(category, 'UNCATEGORIZED') AS category,
-        COALESCE(SUM(debit), 0)::numeric  AS total_debit,
-        COALESCE(SUM(credit), 0)::numeric AS total_credit,
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric  AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM expenses
-      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
+      WHERE site_id = $1
       GROUP BY COALESCE(category, 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;
@@ -552,17 +549,15 @@ class ExpenseModel extends MasterModel {
     const summaryQuery = `
       ${unifiedCTE}
       SELECT
-        COALESCE(SUM(debit), 0)::numeric as total_debit,
-        COALESCE(SUM(credit), 0)::numeric as total_credit,
-        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN debit ELSE 0 END), 0)::numeric as cash_debit,
-        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN credit ELSE 0 END), 0)::numeric as cash_credit,
-        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN debit ELSE 0 END), 0)::numeric as bank_debit,
-        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') THEN credit ELSE 0 END), 0)::numeric as bank_credit,
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric as total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric as total_credit,
+        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') AND financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END), 0)::numeric as cash_debit,
+        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') AND financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END), 0)::numeric as cash_credit,
+        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') AND financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END), 0)::numeric as bank_debit,
+        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') AND financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END), 0)::numeric as bank_credit,
         COUNT(*)::int as total_count
       FROM unified u
       WHERE 1=1 ${whereClause}
-        AND LOWER(COALESCE(u.status, 'approved')) = 'approved'
-        AND (u.cheque_status IS NULL OR u.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     `;
 
     // ── Run all 3 in parallel ──
@@ -621,9 +616,11 @@ class ExpenseModel extends MasterModel {
           COALESCE(SUM(credit), 0)::numeric as total_credit,
           COUNT(*)::int as entries
         FROM (
-          SELECT payment_mode, debit, credit, date, from_entity, to_entity, remark, account_no, branch, category, created_by, status
+          SELECT payment_mode,
+                 CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
+                 CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
+                 date, from_entity, to_entity, remark, account_no, branch, category, created_by, status
           FROM expenses WHERE site_id = $1
-            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND LOWER(COALESCE(status, 'approved')) = 'approved'
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(payment_mode, 'UNSPECIFIED') ORDER BY total_debit DESC`;
       const catQ = `
@@ -632,9 +629,11 @@ class ExpenseModel extends MasterModel {
           COALESCE(SUM(credit), 0)::numeric as total_credit,
           COUNT(*)::int as entries
         FROM (
-          SELECT payment_mode, debit, credit, date, from_entity, to_entity, remark, account_no, branch, category, created_by, status
+          SELECT payment_mode,
+                 CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
+                 CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
+                 date, from_entity, to_entity, remark, account_no, branch, category, created_by, status
           FROM expenses WHERE site_id = $1
-            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND LOWER(COALESCE(status, 'approved')) = 'approved'
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY category ASC`;
       const [modeRes, catRes] = await Promise.all([
@@ -650,25 +649,34 @@ class ExpenseModel extends MasterModel {
     // computes both groupings using GROUPING SETS.
     const combinedQuery = `
       WITH unified AS (
-        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch, debit, credit, created_by, status
-        FROM expenses WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND LOWER(COALESCE(status, 'approved')) = 'approved'
+        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch,
+          CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
+          CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
+          created_by, status
+        FROM expenses WHERE site_id = $1
         UNION ALL
         SELECT fp.date, fp.payment_mode, 'FARMER PAYMENT' as category, UPPER(f.name) as to_entity, NULL as from_entity,
           UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit, fp.created_by, fp.status
         FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
-        WHERE f.site_id = $1 AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND LOWER(COALESCE(fp.status, 'approved')) = 'approved'
+        WHERE f.site_id = $1 AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
         UNION ALL
         SELECT pcp.date, pcp.payment_mode, 'COMMISSION' as category, UPPER(ag.full_name) as to_entity, NULL as from_entity,
-          UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch, pcp.amount as debit, 0::numeric as credit, pcp.created_by, pcp.status
+          UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch,
+          CASE WHEN pcp.amount > 0 THEN pcp.amount ELSE 0 END as debit,
+          CASE WHEN pcp.amount < 0 THEN ABS(pcp.amount) ELSE 0 END as credit,
+          pcp.created_by, pcp.status
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
         JOIN members ag ON pcm.agent_id = ag.id
-        WHERE pcp.site_id = $1 AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND LOWER(COALESCE(pcp.status, 'approved')) = 'approved'
+        WHERE pcp.site_id = $1 AND financial_transaction_posts(
+          CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END,
+          pcp.status, pcp.payment_mode, pcp.cheque_status
+        )
         UNION ALL
         SELECT vp.payment_date as date, UPPER(vp.payment_mode) as payment_mode, 'VENDOR PAYMENT' as category, UPPER(vc.vendor_name) as to_entity, NULL as from_entity,
           UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' as remark, NULL as account_no, NULL as branch, vp.amount as debit, 0::numeric as credit, vp.created_by, vp.status
         FROM vendor_payments vp JOIN vendor_commitments vc ON vp.commitment_id = vc.id
-        WHERE vp.site_id = $1 AND (vp.cheque_status IS NULL OR vp.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND LOWER(COALESCE(vp.status, 'approved')) = 'approved'
+        WHERE vp.site_id = $1 AND financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)
         UNION ALL
         SELECT cfe.date, UPPER(cfe.cash_type) as payment_mode, 'PERSONAL LEDGER' as category, cfe.to_name as to_entity, NULL as from_entity,
           COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit, cfe.created_by, 'approved'::varchar as status
@@ -676,13 +684,15 @@ class ExpenseModel extends MasterModel {
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
-          AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-          AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+          AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
         UNION ALL
         SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit, d.created_by, d.status
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
-          AND (d.cheque_status IS NULL OR d.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND LOWER(COALESCE(d.status, 'approved')) = 'approved'
+          AND (
+            financial_transaction_posts('debit', d.status, d.payment_mode, d.cheque_status)
+            OR financial_transaction_posts('credit', d.status, d.payment_mode, d.cheque_status)
+          )
       ),
       filtered AS (
         SELECT

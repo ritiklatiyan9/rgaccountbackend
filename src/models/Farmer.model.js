@@ -6,7 +6,7 @@ class FarmerModel extends MasterModel {
   }
 
   /** All farmers for a specific site.
-   *  `total_paid` = sum of every approved, non-returned/bounced farmer_payment.
+   *  `total_paid` = sum of every posted farmer debit (approved, and cleared for cheques).
    *  `cash_paid` / `bank_paid` split that same total via ledger_bucket() — the
    *  single mode→book rule the Day Book, Balance Sheet and dashboard also use,
    *  so this page's cash figure equals the Day Book's Farmer Payments figure.
@@ -36,8 +36,7 @@ class FarmerModel extends MasterModel {
         COUNT(fp.id) AS payment_count
       FROM farmers f
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
-        AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-        AND LOWER(COALESCE(fp.status, 'approved')) = 'approved'
+        AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
         -- Same sanity window the ledger applies, so a typo'd year cannot make
         -- this page disagree with the Day Book.
         AND fp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
@@ -58,8 +57,7 @@ class FarmerModel extends MasterModel {
         COUNT(fp.id) AS payment_count
       FROM farmers f
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
-        AND LOWER(COALESCE(fp.status, 'approved')) = 'approved'
-        AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
       WHERE f.id = $1
       GROUP BY f.id
     `;
@@ -75,8 +73,7 @@ class FarmerModel extends MasterModel {
         COUNT(fp.id) AS payment_count
       FROM farmers f
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
-        AND LOWER(COALESCE(fp.status, 'approved')) = 'approved'
-        AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
       WHERE f.created_by = $1
       GROUP BY f.id
       ORDER BY f.created_at DESC
@@ -109,14 +106,14 @@ class FarmerPaymentModel extends MasterModel {
 
   /** Sum of all payments for a farmer */
   async getTotalPaid(farmerId, pool) {
-    const query = `SELECT COALESCE(SUM(amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND LOWER(COALESCE(status, 'approved')) = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`;
+    const query = `SELECT COALESCE(SUM(amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`;
     const result = await pool.query(query, [farmerId]);
     return parseFloat(result.rows[0].total);
   }
 
   /** Sum of all interest for a farmer */
   async getTotalInterest(farmerId, pool) {
-    const query = `SELECT COALESCE(SUM(interest_amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND LOWER(COALESCE(status, 'approved')) = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`;
+    const query = `SELECT COALESCE(SUM(interest_amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`;
     const result = await pool.query(query, [farmerId]);
     return parseFloat(result.rows[0].total);
   }

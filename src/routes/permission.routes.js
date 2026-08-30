@@ -14,7 +14,7 @@ const permissionReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'permissi
 const bustPermissionCache = invalidateCacheOnSuccess([
   'permissions|', 'dash-perms-me|', 'expenses|', 'daybook|', 'cashflow|',
   'commissions|', 'plot-commissions|', 'plots|', 'farmers|', 'firms|',
-  'registries|', 'vendors|',
+  'registries|', 'vendors|', 'management-analytics|',
 ]);
 
 // All permission routes require authentication + admin role

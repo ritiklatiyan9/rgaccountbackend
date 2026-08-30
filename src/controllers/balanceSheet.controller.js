@@ -6,6 +6,8 @@ import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const VALID_SCOPES = new Set(['all', 'cash', 'bank']);
 const VALID_DIRECTIONS = new Set(['all', 'credit', 'debit']);
+const MAX_STATEMENT_ROWS = 12000;
+const inFlightReports = new Map();
 // Buckets are cash/bank, but `raw_mode` keeps the mode the user actually
 // picked (CHEQUE, UPI, IMPS, NEFT, RTGS…). The model matches either, so any
 // of them is a legal filter value — don't whitelist to the two buckets or
@@ -39,6 +41,17 @@ const presetRange = (preset) => {
     return { dateFrom: isoDate(from), dateTo: isoDate(to) };
   }
   return { dateFrom: null, dateTo: null };
+};
+
+const getReportSingleFlight = (key, args) => {
+  const existing = inFlightReports.get(key);
+  if (existing) return existing;
+
+  const pending = balanceSheetModel.getReport(args).finally(() => {
+    if (inFlightReports.get(key) === pending) inFlightReports.delete(key);
+  });
+  inFlightReports.set(key, pending);
+  return pending;
 };
 
 export const getBalanceSheet = asyncHandler(async (req, res) => {
@@ -79,30 +92,34 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
   }
 
   // Statements are also used by Day Book's Overall print and Excel exports.
-  // Keep a generous safety ceiling while allowing those exports to include all
-  // normal accounting history rather than a truncated on-screen subset.
-  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 2500, 1), 100000);
+  // 12k covers the complete history of every current site (largest: <9k) while
+  // preventing an accidental `limit=100000` request from exhausting PostgreSQL
+  // and Node memory. `quality.is_truncated` reports when a site grows beyond it.
+  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 2500, 1), MAX_STATEMENT_ROWS);
   const rangeDays = dateFrom && dateTo
     ? Math.ceil((new Date(`${dateTo}T00:00:00`) - new Date(`${dateFrom}T00:00:00`)) / 86400000) + 1
     : null;
   const grain = rangeDays !== null && rangeDays <= 62 ? 'day' : 'month';
 
+  const reportArgs = {
+    siteId,
+    dateFrom,
+    dateTo,
+    scope,
+    source,
+    paymentMode,
+    direction,
+    search,
+    limit,
+    grain,
+    plotId,
+    creatorId: entryVisibility.creatorId,
+  };
+  const reportKey = JSON.stringify(reportArgs);
+
   const [siteResult, report, orderStateResult] = await Promise.all([
     pool.query('SELECT id, name, code, address, city, state FROM sites WHERE id = $1', [siteId]),
-    balanceSheetModel.getReport({
-      siteId,
-      dateFrom,
-      dateTo,
-      scope,
-      source,
-      paymentMode,
-      direction,
-      search,
-      limit,
-      grain,
-      plotId,
-      creatorId: entryVisibility.creatorId,
-    }),
+    getReportSingleFlight(reportKey, reportArgs),
     pool.query(
       `SELECT revision
          FROM daybook_global_order_state
@@ -119,6 +136,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     scope,
     order_revision: Number(orderStateResult.rows[0]?.revision) || 0,
     period: { preset, date_from: dateFrom, date_to: dateTo, grain },
+    row_limit: limit,
     filters: { source, payment_mode: paymentMode, direction, q: search, plot_id: plotId, created_by: entryVisibility.creatorId },
     entryVisibility,
     ...report,

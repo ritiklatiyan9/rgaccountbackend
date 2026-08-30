@@ -8,6 +8,8 @@ const SOURCE_CONFIG = Object.freeze({
   vendor_payment: { table: 'vendor_payments', mirror: 'vendor_payments' },
   vendor_inventory_payment: { table: 'vendor_inventory_payments', mirror: 'vendor_inventory_payments' },
   plot_registry_payment: { table: 'plot_registry_payments', mirror: 'plot_registry_payments' },
+  land_deal_payment: { table: 'land_deal_payments', mirror: 'land_deal_payments' },
+  misc_income_entry: { table: 'misc_income_entries', mirror: 'misc_income_entries' },
   daybook: { table: 'day_book', mirror: 'day_book' },
   cash_flow_entry: { table: 'cash_flow_entries', mirror: null },
 });
@@ -65,10 +67,12 @@ async function reconcilePlotCommission(db, paymentId) {
         updated_at = NOW()
        FROM (
          SELECT COALESCE(SUM(amount), 0)::numeric AS total
-           FROM plot_commission_payments
+          FROM plot_commission_payments
           WHERE plot_commission_id = $1
-            AND status = 'approved'
-            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            AND financial_transaction_posts(
+              CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END,
+              status, payment_mode, cheque_status
+            )
        ) paid
       WHERE pc.id = $1`,
     [commissionId]
@@ -94,10 +98,9 @@ async function reconcileInstallment(db, paymentId) {
             updated_at = NOW()
        FROM (
          SELECT COALESCE(SUM(amount), 0)::numeric AS total
-           FROM plot_installment_payments
+          FROM plot_installment_payments
           WHERE installment_id = $1
-            AND LOWER(COALESCE(status, 'approved')) = 'approved'
-            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            AND financial_transaction_posts('credit', status, payment_mode, cheque_status)
        ) paid
       WHERE pi.id = $1`,
     [installmentId]

@@ -21,7 +21,7 @@ const buildKey = (req, namespace = 'api') => {
   return `${namespace}|${userPart}|${req.path}|${queryPart}`;
 };
 
-export const cacheResponse = ({ ttlSeconds, namespace = 'api' } = {}) => {
+export const cacheResponse = ({ ttlSeconds, namespace = 'api', shouldCache } = {}) => {
   const ttl = ttlSeconds ?? getDefaultTTL();
   return async (req, res, next) => {
     if (!cacheEnabled() || req.method !== 'GET') return next();
@@ -47,7 +47,8 @@ export const cacheResponse = ({ ttlSeconds, namespace = 'api' } = {}) => {
 
     const originalJson = res.json.bind(res);
     res.json = (payload) => {
-      if (res.statusCode >= 200 && res.statusCode < 300) {
+      const payloadIsCacheable = typeof shouldCache !== 'function' || shouldCache(payload, req);
+      if (res.statusCode >= 200 && res.statusCode < 300 && payloadIsCacheable) {
         // A mutation may have invalidated this read while its database work
         // was still running. Never let that old response refill the cache.
         if (requestGeneration === getCacheGeneration()) {
@@ -66,10 +67,11 @@ export const invalidateCacheOnSuccess = (prefixes = []) => {
   return (_req, res, next) => {
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
-        // Every successful financial mutation can change the consolidated
-        // Balance Sheet. Keeping this namespace here prevents individual
-        // transaction modules from accidentally serving a stale statement.
-        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|'])];
+        // A successful write can alter a source used by the consolidated
+        // Balance Sheet or Dashboard position cards (plots and land deals also
+        // change expected value without creating a ledger row). Invalidate both
+        // centrally so a new module cannot accidentally leave stale KPIs.
+        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|', 'dashboard:'])];
         clearCacheByPrefixes(effectivePrefixes).catch(() => {});
       }
     });

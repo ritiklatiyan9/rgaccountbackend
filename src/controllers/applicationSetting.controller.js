@@ -71,6 +71,42 @@ export const updatePlotRegistryWorkflow = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * PUT /settings/features
+ * Body: { site_id, key, enabled } — one endpoint for every control-panel switch.
+ */
+const FEATURE_MESSAGES = {
+  [FEATURE_KEYS.PLOT_REGISTRY_WORKFLOW_UNLOCKED]: {
+    on: 'Plot Registry flexible navigation enabled',
+    off: 'Plot Registry sequential workflow restored',
+  },
+  [FEATURE_KEYS.NOC_KYC_REQUIRED]: {
+    on: 'KYC is required before a NOC can be generated',
+    off: 'NOCs can now be generated without KYC — every issue is still recorded',
+  },
+};
+
+export const updateFeature = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.body.site_id);
+  if (!siteId) return;
+
+  const key = String(req.body.key || '').trim();
+  if (!Object.values(FEATURE_KEYS).includes(key)) {
+    return res.status(400).json({ message: `Unknown setting: ${key || '(missing)'}` });
+  }
+  if (typeof req.body.enabled !== 'boolean') {
+    return res.status(400).json({ message: 'enabled must be a boolean' });
+  }
+
+  const enabled = await applicationSettingModel.setFeature(siteId, key, req.body.enabled, req.user.id);
+  const copy = FEATURE_MESSAGES[key];
+  res.json({
+    site_id: siteId,
+    features: await applicationSettingModel.getFeatures(siteId),
+    message: copy ? (enabled ? copy.on : copy.off) : 'Setting updated',
+  });
+});
+
 const SIDEBAR_ORDER_KEY = 'sidebar_order';
 
 /**

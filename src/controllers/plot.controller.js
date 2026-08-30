@@ -81,8 +81,7 @@ const checkFreeToSaleStatus = async (siteId) => {
             AND free_to_sale_days > 0
             AND status NOT IN ('UNDER CANCELLATION', 'CANCELLED', 'RESALE', 'TRANSFERRED', 'COMPANY')
        )
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-         AND LOWER(COALESCE(status, 'approved')) = 'approved'
+         AND financial_transaction_posts('credit', status, payment_type, cheque_status)
          AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
        GROUP BY plot_id
     `, [siteId]);
@@ -295,6 +294,11 @@ export const createPlot = asyncHandler(async (req, res) => {
     plot_no: trimmedPlotNo,
     block: block ? block.trim().toUpperCase() : null,
     buyer_name: buyer_name ? buyer_name.trim().toUpperCase() : null,
+    co_applicant_name: req.body.co_applicant_name ? String(req.body.co_applicant_name).trim().toUpperCase() : null,
+    co_applicant_relation: req.body.co_applicant_relation ? String(req.body.co_applicant_relation).trim() : null,
+    co_applicant_phone: req.body.co_applicant_phone ? String(req.body.co_applicant_phone).trim() : null,
+    co_applicant_aadhar: req.body.co_applicant_aadhar ? String(req.body.co_applicant_aadhar).trim() : null,
+    co_applicant_pan: req.body.co_applicant_pan ? String(req.body.co_applicant_pan).trim().toUpperCase() : null,
     plot_size: parseFloat(plot_size) || null,
     plot_size_mtr: parseFloat(plot_size_mtr) || null,
     plot_rate: parseFloat(plot_rate) || null,
@@ -384,13 +388,15 @@ export const listPlots = asyncHandler(async (req, res) => {
   res.json({ plots });
 });
 
-/** GET /plots/search?site_id=X&q=A67 — lightweight plot-number lookup for the
- *  dashboard quick-search. Returns minimal rows (id, plot_no, buyer_name, …)
- *  so the client can jump straight to /plot-payments/:id. */
+/** GET /plots/search?site_id=X&q=A67 — exact plot lookup plus module summary. */
 export const searchPlots = asyncHandler(async (req, res) => {
   const { site_id, q } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
-  const plots = await plotModel.searchByPlotNo(parseInt(site_id), q || '', pool);
+  const normalizedQuery = String(q || '').trim().toUpperCase();
+  if (normalizedQuery.length < 1 || normalizedQuery.length > 50) {
+    return res.json({ plots: [] });
+  }
+  const plots = await plotModel.searchByPlotNo(parseInt(site_id), normalizedQuery, pool);
   res.json({ plots });
 });
 
@@ -427,6 +433,11 @@ export const updatePlot = asyncHandler(async (req, res) => {
   }
   if (block !== undefined) updateData.block = block ? block.trim().toUpperCase() : null;
   if (buyer_name !== undefined) updateData.buyer_name = buyer_name ? buyer_name.trim().toUpperCase() : null;
+  for (const f of ['co_applicant_name', 'co_applicant_relation', 'co_applicant_phone', 'co_applicant_aadhar', 'co_applicant_pan']) {
+    if (req.body[f] === undefined) continue;
+    const v = req.body[f] === null ? '' : String(req.body[f]).trim();
+    updateData[f] = v ? (f === 'co_applicant_name' || f === 'co_applicant_pan' ? v.toUpperCase() : v) : null;
+  }
   if (plot_size !== undefined) updateData.plot_size = parseFloat(plot_size) || null;
   if (plot_size_mtr !== undefined) updateData.plot_size_mtr = parseFloat(plot_size_mtr) || null;
   if (plot_rate !== undefined) updateData.plot_rate = parseFloat(plot_rate) || null;
@@ -860,6 +871,12 @@ export const getPlotNocRegistry = asyncHandler(async (req, res) => {
   const plotId = parseInt(req.params.id);
   if (!Number.isInteger(plotId)) return res.status(400).json({ message: 'Invalid plot ID' });
 
+  // Resold (OLD) plots never enter the registry flow — the NOC belongs to the current record.
+  const { rows: tagRows } = await pool.query('SELECT plot_tag FROM plots WHERE id = $1', [plotId]);
+  if (tagRows[0] && String(tagRows[0].plot_tag || '').trim().toUpperCase() === 'OLD') {
+    return res.status(400).json({ code: 'OLD_PLOT', message: 'Resold (OLD) plots stay out of the registry flow — open the NOC from the current plot record' });
+  }
+
   const result = await pool.query(
     `WITH target_plot AS (
        SELECT id, site_id, plot_no FROM plots WHERE id = $1
@@ -905,7 +922,7 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
     // Lock the plot so two simultaneous NOC opens cannot create two drafts.
     const plotResult = await client.query(
       `SELECT id, site_id, plot_no, buyer_name, plot_size, plot_size_mtr,
-              circle_rate, to_receive_bank, assigned_admin_id, status
+              circle_rate, to_receive_bank, assigned_admin_id, status, plot_tag
          FROM plots
         WHERE id = $1
         FOR UPDATE`,
@@ -915,6 +932,10 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
     if (!plot) {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Plot not found' });
+    }
+    if (String(plot.plot_tag || '').trim().toUpperCase() === 'OLD') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Resold (OLD) plots stay out of the registry flow — open the NOC from the current plot record' });
     }
 
     const existingResult = await client.query(
@@ -939,8 +960,7 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
               pp.status, pp.approved_by, pp.approved_at
          FROM plot_payments pp
         WHERE pp.plot_id = $1
-          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
           AND pp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
         ORDER BY pp.date ASC, pp.created_at ASC`,
       [plot.id]

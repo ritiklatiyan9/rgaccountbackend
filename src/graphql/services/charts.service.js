@@ -26,6 +26,8 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          UNION ALL
          SELECT MIN(pip.payment_date) FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id WHERE p.site_id = $1 AND pip.payment_date >= $2 AND pip.payment_date < $3 ${oldFilterP}
          UNION ALL
+         SELECT MIN(ldp.date) FROM land_deal_payments ldp JOIN land_deals ld ON ld.id = ldp.land_deal_id WHERE ld.site_id = $1 AND ld.status IN ('open', 'completed') AND ldp.date >= $2 AND ldp.date < $3
+         UNION ALL
          SELECT MIN(fp.date) FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id WHERE f.site_id = $1 AND fp.date >= $2 AND fp.date < $3
          UNION ALL
          SELECT MIN(date)    AS d FROM expenses                 WHERE site_id = $1 AND date >= $2 AND date < $3
@@ -45,6 +47,8 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          SELECT MAX(pp.date) AS d FROM plot_payments pp JOIN plots plt ON plt.id = pp.plot_id WHERE pp.site_id = $1 AND pp.date >= $2 AND pp.date < $3 ${oldFilter}
          UNION ALL
          SELECT MAX(pip.payment_date) FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id WHERE p.site_id = $1 AND pip.payment_date >= $2 AND pip.payment_date < $3 ${oldFilterP}
+         UNION ALL
+         SELECT MAX(ldp.date) FROM land_deal_payments ldp JOIN land_deals ld ON ld.id = ldp.land_deal_id WHERE ld.site_id = $1 AND ld.status IN ('open', 'completed') AND ldp.date >= $2 AND ldp.date < $3
          UNION ALL
          SELECT MAX(fp.date) FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id WHERE f.site_id = $1 AND fp.date >= $2 AND fp.date < $3
          UNION ALL
@@ -70,50 +74,29 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
        )::date AS bucket
      ),
      earn AS (
-       SELECT date_trunc($4::text, date)::date AS bucket, COALESCE(SUM(amount), 0)::numeric AS total
-       FROM (
-         SELECT pp.date, pp.amount FROM plot_payments pp
-         JOIN plots plt ON plt.id = pp.plot_id
-         WHERE pp.site_id = $1 AND pp.date >= $2 AND pp.date < $3
-           AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
-           ${oldFilter}
-         UNION ALL
-         SELECT pip.payment_date AS date, pip.amount FROM plot_installment_payments pip
-         JOIN plots p ON p.id = pip.plot_id
-         WHERE p.site_id = $1 AND pip.payment_date >= $2 AND pip.payment_date < $3
-           AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
-           ${oldFilterP}
-       ) u
+       SELECT date_trunc($4::text, entry_date)::date AS bucket, COALESCE(SUM(credit), 0)::numeric AS total
+       FROM ledger_entries le
+       WHERE le.site_id = $1 AND le.entry_date >= $2 AND le.entry_date < $3
+         AND le.source_key IN ('plot_payments', 'plot_installment_payments', 'land_deal_payments')
+         AND ($5::boolean = FALSE OR le.plot_tag <> 'OLD')
+         AND (
+           le.source_key <> 'land_deal_payments'
+           OR EXISTS (
+             SELECT 1
+             FROM land_deal_payments ldp
+             JOIN land_deals ld ON ld.id = ldp.land_deal_id
+             WHERE ldp.id = le.source_id AND ld.status IN ('open', 'completed')
+           )
+         )
        GROUP BY 1
      ),
      exp AS (
-       SELECT date_trunc($4::text, date)::date AS bucket, COALESCE(SUM(debit), 0)::numeric AS total
-       FROM (
-         SELECT fp.date, fp.amount AS debit FROM farmer_payments fp
-         JOIN farmers f ON f.id = fp.farmer_id
-         WHERE f.site_id = $1 AND fp.date >= $2 AND fp.date < $3
-           AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED','RETURNED'))
-         UNION ALL
-         SELECT date, debit FROM expenses
-         WHERE site_id = $1 AND date >= $2 AND date < $3
-           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         UNION ALL
-         SELECT date, amount AS debit FROM plot_commission_payments
-         WHERE site_id = $1 AND date >= $2 AND date < $3
-           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         UNION ALL
-         SELECT payment_date AS date, amount AS debit FROM vendor_payments
-         WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
-           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
-         UNION ALL
-         SELECT cfe.date, cfe.debit FROM cash_flow_entries cfe
-         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
-         WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
-           AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
-           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
-           AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED','RETURNED'))
-           AND (cfe.status IS NULL OR cfe.status != 'rejected')
-       ) u
+       SELECT date_trunc($4::text, entry_date)::date AS bucket, COALESCE(SUM(debit), 0)::numeric AS total
+       FROM ledger_entries
+       WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
+         AND debit <> 0
+         AND source_key NOT IN ('plot_payments', 'plot_installment_payments', 'day_book', 'misc_income_entries', 'firm_transactions')
+         AND ledger_type <> 'person'
        GROUP BY 1
      )
      SELECT rs.bucket AS date,
@@ -130,7 +113,7 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
      LEFT JOIN earn e ON e.bucket = rs.bucket
      LEFT JOIN exp  x ON x.bucket = rs.bucket
      ORDER BY rs.bucket`,
-    [siteId, start, end, truncFn]
+    [siteId, start, end, truncFn, excludeOldPlots]
   );
 
   return rows.map(r => ({
@@ -161,7 +144,7 @@ export async function getExpenseByCategory(siteId, start, end, top = 8) {
     `SELECT category, COALESCE(SUM(debit), 0)::numeric AS total
      FROM expenses
      WHERE site_id = $1 AND date >= $2 AND date < $3
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
        AND debit > 0
      GROUP BY category
      ORDER BY total DESC

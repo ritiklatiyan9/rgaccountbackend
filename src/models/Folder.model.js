@@ -54,6 +54,10 @@ class FolderModel extends MasterModel {
      * Delete a folder and all its contents (cascade via FK)
      */
     async deleteFolder(id, pool) {
+        const client = typeof pool.connect === 'function' ? await pool.connect() : pool;
+        const ownsTransaction = client !== pool;
+        if (ownsTransaction) await client.query('BEGIN');
+        try {
         // First delete all files in this folder (and sub-folders recursively)
         // The FK cascade on file_folders handles sub-folders,
         // but we need to handle excel_files manually (they SET NULL on folder delete)
@@ -68,13 +72,20 @@ class FolderModel extends MasterModel {
             DELETE FROM excel_files WHERE folder_id IN (SELECT id FROM folder_tree)
             RETURNING s3_key
         `;
-        const deletedFiles = await pool.query(deleteFilesQuery, [id]);
+        const deletedFiles = await client.query(deleteFilesQuery, [id]);
 
         // Then delete the folder (cascades to sub-folders)
         const query = `DELETE FROM file_folders WHERE id = $1 RETURNING *`;
-        const result = await pool.query(query, [id]);
+        const result = await client.query(query, [id]);
 
+        if (ownsTransaction) await client.query('COMMIT');
         return { folder: result.rows[0], deletedS3Keys: deletedFiles.rows.map(r => r.s3_key).filter(Boolean) };
+        } catch (error) {
+            if (ownsTransaction) await client.query('ROLLBACK').catch(() => {});
+            throw error;
+        } finally {
+            if (ownsTransaction) client.release();
+        }
     }
 
     /**

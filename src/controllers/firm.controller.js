@@ -242,12 +242,14 @@ export const createTransaction = asyncHandler(async (req, res) => {
          ),
          prev_close AS (
            SELECT cfm.opening_balance
-                    + COALESCE(SUM(cfe.credit), 0)
-                    - COALESCE(SUM(cfe.debit),  0) AS closing_balance
+                    + COALESCE(SUM(cfe.credit) FILTER (
+                        WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
+                      ), 0)
+                    - COALESCE(SUM(cfe.debit) FILTER (
+                        WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
+                      ), 0) AS closing_balance
              FROM cash_flow_months cfm
              LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND (cfe.status IS NULL OR cfe.status != 'rejected')
             WHERE cfm.site_id = $1 AND cfm.month = $5 AND cfm.year = $6 AND cfm.ledger_name = $4
             GROUP BY cfm.id, cfm.opening_balance
             LIMIT 1
@@ -971,10 +973,10 @@ export const getFirmHistoryAnalytics = asyncHandler(async (req, res) => {
       `
       SELECT
         COUNT(*)::int AS total_entries,
-        COALESCE(SUM(debit), 0) AS total_debit,
-        COALESCE(SUM(credit), 0) AS total_credit
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0) AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0) AS total_credit
       FROM firm_transactions
-      WHERE site_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE site_id = $1
       `,
       [siteId]
     ),
@@ -984,10 +986,10 @@ export const getFirmHistoryAnalytics = asyncHandler(async (req, res) => {
         f.id AS firm_id,
         f.name AS firm_name,
         COUNT(ft.id)::int AS entries,
-        COALESCE(SUM(ft.debit), 0) AS total_debit,
-        COALESCE(SUM(ft.credit), 0) AS total_credit
+        COALESCE(SUM(ft.debit) FILTER (WHERE financial_transaction_posts('debit', ft.status, ft.payment_mode, ft.cheque_status)), 0) AS total_debit,
+        COALESCE(SUM(ft.credit) FILTER (WHERE financial_transaction_posts('credit', ft.status, ft.payment_mode, ft.cheque_status)), 0) AS total_credit
       FROM firms f
-      LEFT JOIN firm_transactions ft ON ft.firm_id = f.id AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      LEFT JOIN firm_transactions ft ON ft.firm_id = f.id
       WHERE f.site_id = $1
       GROUP BY f.id, f.name
       ORDER BY f.name ASC
@@ -1000,12 +1002,12 @@ export const getFirmHistoryAnalytics = asyncHandler(async (req, res) => {
         f.name AS from_firm,
         f2.name AS to_firm,
         COUNT(ft.id)::int AS entries,
-        COALESCE(SUM(ft.debit), 0) AS total_debit,
-        COALESCE(SUM(ft.credit), 0) AS total_credit
+        COALESCE(SUM(ft.debit) FILTER (WHERE financial_transaction_posts('debit', ft.status, ft.payment_mode, ft.cheque_status)), 0) AS total_debit,
+        COALESCE(SUM(ft.credit) FILTER (WHERE financial_transaction_posts('credit', ft.status, ft.payment_mode, ft.cheque_status)), 0) AS total_credit
       FROM firm_transactions ft
       JOIN firms f ON f.id = ft.firm_id
       JOIN firms f2 ON f2.site_id = ft.site_id AND UPPER(f2.name) = UPPER(COALESCE(ft.name, ''))
-      WHERE ft.site_id = $1 AND (ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE ft.site_id = $1
       GROUP BY f.name, f2.name
       ORDER BY entries DESC, f.name ASC
       `,

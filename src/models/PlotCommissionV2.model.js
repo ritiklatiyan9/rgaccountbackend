@@ -1,5 +1,12 @@
 import MasterModel from './MasterModel.js';
 
+// Positive commission payments are debits; negative corrections are credits.
+// The shared function therefore applies approval only to the outgoing side.
+const PCP_POSTED = `financial_transaction_posts(
+  CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END,
+  pcp.status, pcp.payment_mode, pcp.cheque_status
+)`;
+
 class PlotCommissionV2Model extends MasterModel {
   constructor() {
     super('plot_commissions_v2');
@@ -21,8 +28,7 @@ class PlotCommissionV2Model extends MasterModel {
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id
       LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id
-        AND LOWER(COALESCE(pcp.status, 'approved')) = 'approved'
-        AND UPPER(COALESCE(pcp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
+        AND ${PCP_POSTED}
       WHERE pc.site_id = $1
       GROUP BY pc.id, p.id, m.id
       ORDER BY pc.created_at DESC
@@ -40,13 +46,13 @@ class PlotCommissionV2Model extends MasterModel {
         pc.*,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.commission_rate,
         m.full_name AS agent_name, m.phone AS agent_phone,
-        COALESCE(SUM(pcp.amount) FILTER (WHERE LOWER(COALESCE(pcp.status, 'approved')) = 'approved'), 0) AS total_paid,
-        COALESCE(SUM(pcp.amount) FILTER (WHERE LOWER(COALESCE(pcp.status, 'approved')) = 'approved'), 0) AS total_paid_all,
-        (pc.total_commission - COALESCE(SUM(pcp.amount) FILTER (WHERE LOWER(COALESCE(pcp.status, 'approved')) = 'approved'), 0)) AS balance
+        COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid,
+        COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
+        (pc.total_commission - COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
       FROM plot_commissions_v2 pc
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id
-      LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id
       WHERE pc.id = $1
       GROUP BY pc.id, p.id, m.id
     `;
@@ -102,8 +108,7 @@ class PlotCommissionV2Model extends MasterModel {
         JOIN members m ON pc.agent_id = m.id
         LEFT JOIN plot_commission_payments pcp
           ON pc.id = pcp.plot_commission_id
-          AND LOWER(COALESCE(pcp.status, 'approved')) = 'approved'
-          AND UPPER(COALESCE(pcp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
+          AND ${PCP_POSTED}
           -- Same sanity window the ledger applies. A typo'd year (e.g. 20222)
           -- used to be counted here but nowhere else, which is what made this
           -- page read ₹89,05,458 while the Day Book read ₹88,49,858.
@@ -159,9 +164,9 @@ class PlotCommissionV2Model extends MasterModel {
         COALESCE(p.plot_commission, 0) AS plot_commission,
         s.name AS site_name,
         m.full_name AS agent_name, m.phone AS agent_phone,
-        COALESCE(SUM(pcp.amount) FILTER (WHERE LOWER(COALESCE(pcp.status, 'approved')) = 'approved' AND UPPER(COALESCE(pcp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')), 0) AS total_paid,
-        COALESCE(SUM(pcp.amount) FILTER (WHERE LOWER(COALESCE(pcp.status, 'approved')) = 'approved' AND UPPER(COALESCE(pcp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')), 0) AS total_paid_all,
-        (pc.total_commission - COALESCE(SUM(pcp.amount) FILTER (WHERE LOWER(COALESCE(pcp.status, 'approved')) = 'approved' AND UPPER(COALESCE(pcp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')), 0)) AS balance
+        COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid,
+        COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
+        (pc.total_commission - COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
       FROM plot_commissions_v2 pc
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id

@@ -23,7 +23,6 @@ const ENTITY = Object.freeze({
   INSPECTION: { table: 'compliance_inspections', module: 'compliance' },
 });
 const SITE_SCOPED_ENTITY_TYPES = new Set([]);
-const HISTORICAL_EVIDENCE_TYPES = new Set([]);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SOURCE_TYPES = new Set(['USER_UPLOADED', 'OFFICIAL_PORTAL', 'AUTHORITY_DOCUMENT', 'IMPORTED', 'OTHER']);
 const REVIEW_STATUSES = new Set(['NOT_REVIEWED', 'PENDING', 'ACCEPTED', 'REJECTED']);
@@ -510,10 +509,6 @@ export const deleteComplianceDocument = asyncHandler(async (req, res) => {
   } finally {
     client.release();
   }
-  // Regulatory evidence is retained in private storage after logical removal
-  // so an audited correction cannot erase the historical file.
-  if (!HISTORICAL_EVIDENCE_TYPES.has(deletedDocument.entity_type)) {
-    await deletePlotDoc(deletedDocument.storage_key).catch(() => {});
-  }
+  // Keep every attachment while its soft-deleted row remains recoverable.
   res.json({ success: true });
 });

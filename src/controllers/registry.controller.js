@@ -28,6 +28,21 @@ const readRegistryWorkflowUnlocked = async (db, siteId) => {
   if (value && typeof value === 'object' && 'enabled' in value) return Boolean(value.enabled);
   return false;
 };
+/** Settings → Control panel → "Require KYC before a NOC". Defaults to ON when unset. */
+const readNocKycRequired = async (db, siteId) => {
+  const { rows } = await db.query(
+    `SELECT setting_value
+       FROM application_settings
+      WHERE site_id = $1 AND setting_key = $2
+      LIMIT 1`,
+    [siteId, FEATURE_KEYS.NOC_KYC_REQUIRED]
+  );
+  const value = rows[0]?.setting_value;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.toLowerCase() !== 'false';
+  if (value && typeof value === 'object' && 'enabled' in value) return Boolean(value.enabled);
+  return true;
+};
 
 /** Bank-clearance snapshot for a plot: what the plot expects in bank
  *  (plots.to_receive_bank) vs what has actually landed — bank/cheque plot
@@ -40,14 +55,13 @@ export async function getPlotBankClearance(plotId) {
               SELECT SUM(pp.amount) FROM plot_payments pp
                WHERE pp.plot_id = p.id
                  AND pp.payment_type IN ('BANK', 'CHEQUE')
-                 AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-                 AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+                 AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
             ), 0)::numeric
           + COALESCE((
               SELECT SUM(pip.amount) FROM plot_installment_payments pip
                WHERE pip.plot_id = p.id
                  AND UPPER(COALESCE(pip.payment_mode, '')) IN ('BANK', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER')
-                 AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+                 AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
             ), 0)::numeric AS received_bank
        FROM plots p WHERE p.id = $1`,
     [plotId]
@@ -155,10 +169,13 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
     return { status: 400, body: { message: 'A valid plot is required' } };
   }
   const { rows: plotRows } = await db.query(
-    'SELECT site_id, plot_no FROM plots WHERE id = $1 LIMIT 1',
+    'SELECT site_id, plot_no, plot_tag FROM plots WHERE id = $1 LIMIT 1',
     [plotIdInt]
   );
   if (!plotRows[0]) return { status: 404, body: { message: 'Plot not found' } };
+  if (String(plotRows[0].plot_tag || '').trim().toUpperCase() === 'OLD') {
+    return { status: 400, body: { message: 'Resold (OLD) plots stay out of the registry flow — select the current plot record instead' } };
+  }
   if (parseInt(plotRows[0].site_id) !== siteIdInt) {
     return { status: 400, body: { message: 'Selected plot does not belong to the registry site' } };
   }
@@ -346,6 +363,8 @@ export const updateRegistry = asyncHandler(async (req, res) => {
     plot_no, customer_name, size_meter, size_sqyard, registry_date, farmer_name,
     registry_payment, notes, plot_id, circle_rate, firm_name, seller_name, created_entry_date, bank_amount,
   } = req.body;
+  // Co-applicant lives on the plot; the registry modal edits it in place (may be the only change).
+  const coApplicantPatch = cleanCoApplicant(req.body);
 
   const existing = await plotRegistryModel.findById(registryId, pool);
   if (!existing) return res.status(404).json({ message: 'Registry not found' });
@@ -381,7 +400,10 @@ export const updateRegistry = asyncHandler(async (req, res) => {
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
   if (req.body.assigned_admin_id !== undefined) updateData.assigned_admin_id = req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null;
 
-  if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
+  if (Object.keys(updateData).length === 0) {
+    if (!Object.keys(coApplicantPatch).length) return res.status(400).json({ message: 'Nothing to update' });
+    updateData.updated_at = new Date();
+  }
 
   const prospectivePlotId = updateData.plot_id !== undefined ? updateData.plot_id : existing.plot_id;
   const prospectivePlotNo = updateData.plot_no !== undefined ? updateData.plot_no : existing.plot_no;
@@ -458,6 +480,9 @@ export const updateRegistry = asyncHandler(async (req, res) => {
     throw error;
   } finally {
     client.release();
+  }
+  if (Object.keys(coApplicantPatch).length && (updateData.plot_id || existing.plot_id)) {
+    await applyCoApplicantToPlot(pool, updateData.plot_id || existing.plot_id, coApplicantPatch);
   }
   res.json({ registry: updated, plot_status_updated: (plotBumpRes.rows?.length || 0) > 0 });
 });
@@ -719,6 +744,103 @@ export const getRegistryAutocomplete = asyncHandler(async (req, res) => {
  *  registry, resolved plot, site, letterhead (booking module's shared
  *  project_settings, if present), every plot payment with its NOC link
  *  state, and the NOC-only inline payments. */
+/**
+ * Who signs the NOC and whether their KYC is done. The purchaser is resolved from the
+ * plot's booking (client member) or, for legacy plots without a booking, by an exact
+ * name match on the site's clients. KYC = a VERIFIED kyc_case (or the booking's own
+ * VERIFIED flag). The co-applicant comes from the client's profile; when the NOC is
+ * set to include them, their Aadhaar or PAN must be on record.
+ */
+const CO_APPLICANT_FIELDS = ['co_applicant_name', 'co_applicant_relation', 'co_applicant_phone', 'co_applicant_aadhar', 'co_applicant_pan'];
+const cleanCoApplicant = (body) => {
+  const out = {};
+  for (const f of CO_APPLICANT_FIELDS) {
+    if (body[f] === undefined) continue;
+    const v = body[f] === null ? '' : String(body[f]).trim();
+    out[f] = v ? (f === 'co_applicant_name' || f === 'co_applicant_pan' ? v.toUpperCase() : v).slice(0, f === 'co_applicant_name' ? 255 : f === 'co_applicant_relation' ? 100 : 20) : null;
+  }
+  return out;
+};
+/** The plot row is the one home of the co-applicant; both edit modals write here. */
+const applyCoApplicantToPlot = async (db, plotId, body) => {
+  const data = cleanCoApplicant(body);
+  const keys = Object.keys(data);
+  if (!plotId || !keys.length) return;
+  await db.query(`UPDATE plots SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = NOW() WHERE id = $1`, [plotId, ...keys.map((k) => data[k])]);
+};
+
+const resolveNocPeople = async (db, registry, plot) => {
+  const siteId = registry.site_id;
+  const plotId = plot?.id || registry.plot_id || null;
+  const buyerName = String(registry.customer_name || plot?.buyer_name || '').trim().toUpperCase();
+  const memberCols = `m.id, m.full_name, m.phone, m.co_applicant_name, m.co_applicant_relation, m.co_applicant_phone,
+              NULLIF(BTRIM(COALESCE(m.co_applicant_aadhar, '')), '') AS co_aadhar,
+              NULLIF(BTRIM(COALESCE(m.co_applicant_pan, '')), '') AS co_pan`;
+  let row = null;
+  if (plotId) {
+    const r = await db.query(
+      `SELECT ${memberCols}, b.id AS booking_id, b.booking_no, b.kyc_status AS booking_kyc_status, 'booking'::text AS source
+         FROM bookings b JOIN members m ON m.id = b.client_member_id
+        WHERE b.plot_id = $1 AND COALESCE(b.status, '') NOT ILIKE 'cancel%'
+        ORDER BY b.created_at DESC NULLS LAST, b.id DESC LIMIT 1`,
+      [plotId]
+    );
+    row = r.rows[0] || null;
+  }
+  if (!row && buyerName) {
+    const r = await db.query(
+      `SELECT ${memberCols}, NULL::int AS booking_id, NULL::text AS booking_no, NULL::text AS booking_kyc_status, 'name_match'::text AS source
+         FROM members m
+        WHERE m.site_id = $1 AND UPPER(BTRIM(COALESCE(m.full_name, ''))) = $2
+        ORDER BY m.id DESC LIMIT 1`,
+      [siteId, buyerName]
+    );
+    row = r.rows[0] || null;
+  }
+  let kyc = { status: 'NONE', verified: false, case_id: null, verified_at: null };
+  if (row) {
+    const k = await db.query(
+      `SELECT id, status, verified_at FROM kyc_cases WHERE client_member_id = $1
+        ORDER BY CASE WHEN status = 'VERIFIED' THEN 0 ELSE 1 END, updated_at DESC NULLS LAST, id DESC LIMIT 1`,
+      [row.id]
+    );
+    const c = k.rows[0];
+    const verified = c?.status === 'VERIFIED' || String(row.booking_kyc_status || '').toUpperCase() === 'VERIFIED';
+    kyc = { status: verified ? 'VERIFIED' : (c?.status || row.booking_kyc_status || 'NOT_STARTED'), verified, case_id: c?.id || null, verified_at: c?.verified_at || null };
+  }
+  // Co-applicant: the plot record first (unified across booking → plot → NOC → registry), the client profile as fallback.
+  let plotCo = null;
+  if (plotId) {
+    const pr = await db.query('SELECT co_applicant_name, co_applicant_relation, co_applicant_phone, co_applicant_aadhar, co_applicant_pan FROM plots WHERE id = $1', [plotId]);
+    plotCo = pr.rows[0] || null;
+  }
+  const coApplicant = plotCo?.co_applicant_name
+    ? { name: plotCo.co_applicant_name, relation: plotCo.co_applicant_relation || null, phone: plotCo.co_applicant_phone || null, id_ready: Boolean((plotCo.co_applicant_aadhar || '').trim() || (plotCo.co_applicant_pan || '').trim()), source: 'plot' }
+    : row?.co_applicant_name
+      ? { name: row.co_applicant_name, relation: row.co_applicant_relation || null, phone: row.co_applicant_phone || null, id_ready: Boolean(row.co_aadhar || row.co_pan), source: 'client' }
+      : null;
+  // Tri-state toggle: NULL = include automatically whenever a co-applicant exists.
+  const includeCo = registry.noc_include_co_applicant === null || registry.noc_include_co_applicant === undefined
+    ? Boolean(coApplicant)
+    : Boolean(registry.noc_include_co_applicant);
+  const blockers = [];
+  if (!row) blockers.push(`No client record found for "${buyerName || 'the purchaser'}" — link the buyer to a client whose KYC is complete`);
+  else if (!kyc.verified) blockers.push(`${row.full_name}: KYC not verified (${kyc.status})`);
+  if (includeCo && !coApplicant) blockers.push('Co-applicant is switched on, but there is no co-applicant on the plot or client record');
+  if (includeCo && coApplicant && !coApplicant.id_ready) blockers.push(`${coApplicant.name}: add the co-applicant's Aadhaar or PAN in the client profile`);
+  return {
+    member: row ? {
+      id: row.id, full_name: row.full_name, phone: row.phone, source: row.source,
+      booking_id: row.booking_id, booking_no: row.booking_no,
+      kyc_status: kyc.status, kyc_verified: kyc.verified, kyc_case_id: kyc.case_id, kyc_verified_at: kyc.verified_at,
+    } : null,
+    co_applicant: coApplicant,
+    include_co_applicant: includeCo,
+    kyc_ready: blockers.length === 0,
+    blockers,
+  };
+};
+
 const buildNocPayload = async (registryId) => {
   const registry = await plotRegistryModel.findByIdWithTotals(registryId, pool);
   if (!registry) return null;
@@ -788,6 +910,10 @@ const buildNocPayload = async (registryId) => {
     plotPayments = payRes.rows;
   }
   const inlinePayments = inlineRes.rows;
+  const people = await resolveNocPeople(pool, registry, plot);
+  people.kyc_required = await readNocKycRequired(pool, registry.site_id);
+  // Gate is bypassed when KYC is not required for this site, or the workflow override is on.
+  people.kyc_gate_active = people.kyc_required && !workflowUnlocked;
 
   const includedPlot = plotPayments.filter((p) => p.included
     && String(p.status || 'approved').toLowerCase() === 'approved'
@@ -827,6 +953,7 @@ const buildNocPayload = async (registryId) => {
     plotPayments,
     inlinePayments,
     nocHistory: historyRes.rows,
+    people,
     workflow_unlocked: workflowUnlocked,
     suggested_noc_no: suggestedNocNo,
     verifyUrl,
@@ -862,12 +989,10 @@ export const approveRegistryNoc = asyncHandler(async (req, res) => {
                  WHERE prp.registry_id = pr.id
                    AND (
                      (prp.source_plot_payment_id IS NULL
-                       AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
-                       AND (prp.cheque_status IS NULL OR prp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+                       AND financial_transaction_posts('credit', prp.status, prp.payment_mode, prp.cheque_status))
                      OR
                      (prp.source_plot_payment_id IS NOT NULL
-                       AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-                       AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED')))
+                       AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status))
                    )
                    AND (
                      prp.source_plot_payment_id IS NULL
@@ -970,7 +1095,7 @@ export const getRegistryNoc = asyncHandler(async (req, res) => {
 export const saveRegistryNoc = asyncHandler(async (req, res) => {
   const registryId = parseInt(req.params.id);
   const {
-    noc_no, noc_date, noc_place, noc_notes, noc_show_payments,
+    noc_no, noc_date, noc_place, noc_notes, noc_show_payments, noc_include_co_applicant,
     included_plot_payment_ids, inline_payments, change_note,
   } = req.body;
 
@@ -997,6 +1122,25 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
       return res.status(404).json({ message: 'Registry not found' });
     }
     workflowUnlocked = await readRegistryWorkflowUnlocked(client, registry.site_id);
+
+    // KYC gate: every person named on the NOC must have KYC done (override in Settings bypasses).
+    const includeCo = noc_include_co_applicant === undefined || noc_include_co_applicant === null
+      ? (registry.noc_include_co_applicant === null || registry.noc_include_co_applicant === undefined ? null : Boolean(registry.noc_include_co_applicant))
+      : Boolean(noc_include_co_applicant);
+    const kycRequired = await readNocKycRequired(client, registry.site_id);
+    if (!workflowUnlocked && kycRequired) {
+      const plotRow = registry.plot_id ? (await client.query('SELECT id, buyer_name FROM plots WHERE id = $1', [registry.plot_id])).rows[0] : null;
+      const people = await resolveNocPeople(client, { ...registry, noc_include_co_applicant: includeCo }, plotRow);
+      if (!people.kyc_ready) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          code: 'KYC_REQUIRED',
+          message: `KYC must be complete before the NOC is generated — ${people.blockers.join('; ')}`,
+          blockers: people.blockers,
+          people,
+        });
+      }
+    }
 
     const wasGenerated = Boolean(registry.noc_generated_at);
     const requestedRef = noc_no === undefined || noc_no === null
@@ -1038,6 +1182,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
               noc_ack_no = $7,
               noc_revision = $8,
               noc_generated_by = $9,
+              noc_include_co_applicant = $11::boolean,
               noc_generated_at = NOW(),
               noc_approved_at = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_at END,
               noc_approved_by = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_by END,
@@ -1054,6 +1199,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
         revisionNo,
         req.user.id,
         wasGenerated,
+        includeCo,
       ]
     );
 
@@ -1076,8 +1222,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
           WHERE prp.registry_id = $1
             AND prp.source_plot_payment_id = pp.id
             AND prp.source_plot_payment_id = ANY($2::int[])
-            AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-            AND UPPER(COALESCE(pp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING')
+            AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
             AND (
               ($3::integer IS NOT NULL AND pp.plot_id = $3)
               OR (
@@ -1108,8 +1253,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
            FROM plot_payments pp
           WHERE pp.id = ANY($2::int[])
             AND pp.site_id = $4
-            AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-            AND UPPER(COALESCE(pp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING')
+            AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
             AND (
               ($5::integer IS NOT NULL AND pp.plot_id = $5)
               OR (
@@ -1180,12 +1324,10 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
         WHERE prp.registry_id = $1
           AND (
             (prp.source_plot_payment_id IS NULL
-              AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
-              AND UPPER(COALESCE(prp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING'))
+              AND financial_transaction_posts('credit', prp.status, prp.payment_mode, prp.cheque_status))
             OR
             (prp.source_plot_payment_id IS NOT NULL
-              AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-              AND UPPER(COALESCE(pp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING'))
+              AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status))
           )
           AND (
             prp.source_plot_payment_id IS NULL
@@ -1238,8 +1380,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
          JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
          WHERE prp.registry_id = $1
            AND COALESCE(prp.include_in_noc, FALSE)
-           AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-           AND UPPER(COALESCE(pp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING')
+           AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
          UNION ALL
          SELECT
            prp.id AS payment_id,
@@ -1258,8 +1399,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
          WHERE prp.registry_id = $1
            AND prp.source_plot_payment_id IS NULL
            AND COALESCE(prp.include_in_noc, FALSE)
-           AND LOWER(COALESCE(prp.status, 'approved')) = 'approved'
-           AND UPPER(COALESCE(prp.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED', 'PENDING')
+           AND financial_transaction_posts('credit', prp.status, prp.payment_mode, prp.cheque_status)
        ) x`,
       [registryId]
     );
@@ -1363,10 +1503,18 @@ export const listRegistryHandovers = asyncHandler(async (req, res) => {
  *  photo_url comes from the client-side /upload/single?provider=s3 flow. */
 export const createRegistryHandover = asyncHandler(async (req, res) => {
   const registryId = parseInt(req.params.id);
-  const { given_to, notes, photo_url, given_at } = req.body;
+  const { given_to, notes, photo_url, signature_url, receiver_phone, given_at } = req.body;
 
   if (!given_to || !String(given_to).trim()) {
     return res.status(400).json({ message: 'Recipient name is required' });
+  }
+  // A handover is proof of delivery: the photo taken at the moment of handover and the
+  // client's signature are both mandatory (captured in the handover dialog).
+  if (!photo_url || !String(photo_url).trim()) {
+    return res.status(400).json({ code: 'HANDOVER_PHOTO_REQUIRED', message: 'Capture a photo at the moment of handover' });
+  }
+  if (!signature_url || !String(signature_url).trim()) {
+    return res.status(400).json({ code: 'HANDOVER_SIGNATURE_REQUIRED', message: "Capture the client's signature to record the handover" });
   }
 
   const registry = await plotRegistryModel.findById(registryId, pool);
@@ -1394,16 +1542,18 @@ export const createRegistryHandover = asyncHandler(async (req, res) => {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO registry_document_handovers (registry_id, site_id, given_to, notes, photo_url, given_by, given_at)
-     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamp, NOW()))
+    `INSERT INTO registry_document_handovers (registry_id, site_id, given_to, notes, photo_url, given_by, given_at, signature_url, receiver_phone)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamp, NOW()), $8, $9)
      RETURNING *`,
     [
       registryId, registry.site_id,
       String(given_to).trim().toUpperCase(),
       notes ? String(notes).trim() : null,
-      photo_url ? String(photo_url).trim() : null,
+      String(photo_url).trim(),
       req.user.id,
       given_at || null,
+      String(signature_url).trim(),
+      receiver_phone ? String(receiver_phone).trim().slice(0, 20) : null,
     ]
   );
   const handover = rows[0];

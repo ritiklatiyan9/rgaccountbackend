@@ -2,10 +2,14 @@ import pool from '../config/db.js';
 
 export const FEATURE_KEYS = Object.freeze({
   PLOT_REGISTRY_WORKFLOW_UNLOCKED: 'plot_registry_workflow_unlocked',
+  // ON by default: every person named on a NOC must have KYC verified. An admin can
+  // switch it off from the Settings control panel to issue NOCs without KYC.
+  NOC_KYC_REQUIRED: 'noc_kyc_required',
 });
 
 const FEATURE_DEFAULTS = Object.freeze({
   [FEATURE_KEYS.PLOT_REGISTRY_WORKFLOW_UNLOCKED]: false,
+  [FEATURE_KEYS.NOC_KYC_REQUIRED]: true,
 });
 
 const parseStoredBoolean = (value, fallback = false) => {

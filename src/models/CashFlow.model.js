@@ -38,32 +38,26 @@ class CashFlowMonthModel extends MasterModel {
       LEFT JOIN LATERAL (
         SELECT
           SUM(cfe.debit) FILTER (
-            WHERE (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+            WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS total_debit,
           SUM(cfe.credit) FILTER (
-            WHERE (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+            WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS total_credit,
           SUM(cfe.debit) FILTER (
             WHERE cfe.cash_type = 'cash'
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+              AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS cash_given,
           SUM(cfe.credit) FILTER (
             WHERE cfe.cash_type = 'cash'
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+              AND financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS cash_received,
           SUM(cfe.debit) FILTER (
             WHERE cfe.cash_type = 'bank'
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+              AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS bank_given,
           SUM(cfe.credit) FILTER (
             WHERE cfe.cash_type = 'bank'
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+              AND financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS bank_received,
           COUNT(*)::int AS entry_count
         FROM cash_flow_entries cfe
@@ -106,12 +100,10 @@ class CashFlowMonthModel extends MasterModel {
       LEFT JOIN LATERAL (
         SELECT
           SUM(cfe.debit)  FILTER (
-            WHERE (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+            WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS total_debit,
           SUM(cfe.credit) FILTER (
-            WHERE (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved'
+            WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS total_credit,
           COUNT(*)::int AS entry_count
         FROM cash_flow_entries cfe
@@ -130,11 +122,14 @@ class CashFlowMonthModel extends MasterModel {
     const query = `
       SELECT
         cfm.opening_balance,
-        COALESCE(SUM(cfe.credit), 0) AS total_credit,
-        COALESCE(SUM(cfe.debit), 0) AS total_debit,
-        cfm.opening_balance + COALESCE(SUM(cfe.credit), 0) - COALESCE(SUM(cfe.debit), 0) AS closing_balance
+        COALESCE(SUM(cfe.credit) FILTER (WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)), 0) AS total_credit,
+        COALESCE(SUM(cfe.debit) FILTER (WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)), 0) AS total_debit,
+        cfm.opening_balance
+          + COALESCE(SUM(cfe.credit) FILTER (WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)), 0)
+          - COALESCE(SUM(cfe.debit) FILTER (WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)), 0) AS closing_balance
       FROM cash_flow_months cfm
-      LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AND LOWER(COALESCE(cfe.status, 'approved')) = 'approved' AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
+      LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
+        AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       WHERE cfm.id = $1
       GROUP BY cfm.id
     `;
@@ -190,8 +185,8 @@ class CashFlowEntryModel extends MasterModel {
     const query = `
       SELECT
         COUNT(*)::int AS total_entries,
-        COALESCE(SUM(debit) FILTER (WHERE LOWER(COALESCE(status, 'approved')) = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_debit,
-        COALESCE(SUM(credit) FILTER (WHERE LOWER(COALESCE(status, 'approved')) = 'approved' AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))), 0) AS total_credit
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, cash_type, cheque_status)), 0) AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, cash_type, cheque_status)), 0) AS total_credit
       FROM cash_flow_entries
       WHERE cash_flow_month_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
@@ -218,13 +213,11 @@ class CashFlowEntryModel extends MasterModel {
       SELECT
         particular,
         COUNT(*)::int AS entries,
-        COALESCE(SUM(debit), 0) AS total_debit,
-        COALESCE(SUM(credit), 0) AS total_credit
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, cash_type, cheque_status)), 0) AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, cash_type, cheque_status)), 0) AS total_credit
       FROM cash_flow_entries
       WHERE cash_flow_month_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
         AND (source_module IS NULL OR source_module !~ '_person$')
       GROUP BY particular
       ORDER BY total_debit DESC

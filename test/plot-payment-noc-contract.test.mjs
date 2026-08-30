@@ -48,7 +48,7 @@ test('Registry deed upload becomes an emerald ready state after NOC generation',
   assert.match(documents, /registryDeedReady/);
   assert.match(documents, /border-emerald-200/);
   assert.match(registry, /NOC in Plot Payments/);
-  assert.match(registry, /NOC → Registry/);
+  assert.match(registry, /NOC → Details → Deed/);
 });
 
 test('NOC issuance keeps a permanent REF and appends immutable ACK revisions', () => {
@@ -80,5 +80,5 @@ test('NOC workspace controls payment visibility and the print follows the issued
   assert.match(print, /REF No\.:/);
   assert.match(print, /ACK No\.:/);
   assert.match(print, /\{showPayments && \(/);
-  assert.match(print, /String\(p\.cheque_status \|\| ''\)\.toUpperCase\(\) !== 'PENDING'/);
+  assert.match(print, /transactionMovesMoney\(payment, 'credit'\)/);
 });

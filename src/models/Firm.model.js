@@ -22,8 +22,8 @@ class FirmModel extends MasterModel {
       FROM firms f
       LEFT JOIN LATERAL (
         SELECT
-          SUM(ft.debit)  FILTER (WHERE ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AS ft_debit,
-          SUM(ft.credit) FILTER (WHERE ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AS ft_credit,
+          SUM(ft.debit)  FILTER (WHERE financial_transaction_posts('debit', ft.status, ft.payment_mode, ft.cheque_status)) AS ft_debit,
+          SUM(ft.credit) FILTER (WHERE financial_transaction_posts('credit', ft.status, ft.payment_mode, ft.cheque_status)) AS ft_credit,
           COUNT(*)::int AS ft_count
         FROM firm_transactions ft
         WHERE ft.firm_id = f.id
@@ -33,14 +33,12 @@ class FirmModel extends MasterModel {
           SUM(COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)) FILTER (
             WHERE cfe.from_firm_id = f.id
               AND cfe.is_firm_transaction = TRUE
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+              AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS cf_debit,
           SUM(COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)) FILTER (
             WHERE cfe.to_firm_id = f.id
               AND cfe.is_firm_transaction = TRUE
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+              AND financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS cf_credit,
           COUNT(*) FILTER (
             WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id)
@@ -74,8 +72,8 @@ class FirmModel extends MasterModel {
       FROM firms f
       LEFT JOIN LATERAL (
         SELECT
-          SUM(ft.debit)  FILTER (WHERE ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AS ft_debit,
-          SUM(ft.credit) FILTER (WHERE ft.cheque_status IS NULL OR ft.cheque_status NOT IN ('BOUNCED', 'RETURNED')) AS ft_credit,
+          SUM(ft.debit)  FILTER (WHERE financial_transaction_posts('debit', ft.status, ft.payment_mode, ft.cheque_status)) AS ft_debit,
+          SUM(ft.credit) FILTER (WHERE financial_transaction_posts('credit', ft.status, ft.payment_mode, ft.cheque_status)) AS ft_credit,
           COUNT(*)::int AS ft_count
         FROM firm_transactions ft
         WHERE ft.firm_id = f.id
@@ -85,14 +83,12 @@ class FirmModel extends MasterModel {
           SUM(COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)) FILTER (
             WHERE cfe.from_firm_id = f.id
               AND cfe.is_firm_transaction = TRUE
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+              AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS cf_debit,
           SUM(COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0)) FILTER (
             WHERE cfe.to_firm_id = f.id
               AND cfe.is_firm_transaction = TRUE
-              AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-              AND (cfe.status IS NULL OR cfe.status != 'rejected')
+              AND financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
           ) AS cf_credit,
           COUNT(*) FILTER (
             WHERE (cfe.from_firm_id = f.id OR cfe.to_firm_id = f.id)
@@ -135,23 +131,21 @@ class FirmTransactionModel extends MasterModel {
       WITH ft_agg AS (
         SELECT
           COUNT(*)::int AS ft_count,
-          COALESCE(SUM(debit), 0)  AS ft_debit,
-          COALESCE(SUM(credit), 0) AS ft_credit
+          COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)  AS ft_debit,
+          COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0) AS ft_credit
         FROM firm_transactions
         WHERE firm_id = $1
           AND ($2::int IS NULL OR created_by = $2::int)
-          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       ),
       cf_agg AS (
         SELECT
           COUNT(*)::int AS cf_count,
-          COALESCE(SUM(CASE WHEN from_firm_id = $1 THEN COALESCE(debit, 0) + COALESCE(credit, 0) ELSE 0 END), 0) AS cf_debit,
-          COALESCE(SUM(CASE WHEN to_firm_id   = $1 THEN COALESCE(debit, 0) + COALESCE(credit, 0) ELSE 0 END), 0) AS cf_credit
+          COALESCE(SUM(CASE WHEN from_firm_id = $1 AND financial_transaction_posts('debit', status, cash_type, cheque_status) THEN COALESCE(debit, 0) + COALESCE(credit, 0) ELSE 0 END), 0) AS cf_debit,
+          COALESCE(SUM(CASE WHEN to_firm_id   = $1 AND financial_transaction_posts('credit', status, cash_type, cheque_status) THEN COALESCE(debit, 0) + COALESCE(credit, 0) ELSE 0 END), 0) AS cf_credit
         FROM cash_flow_entries
         WHERE (from_firm_id = $1 OR to_firm_id = $1)
           AND ($2::int IS NULL OR created_by = $2::int)
           AND is_firm_transaction = TRUE
-          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       )
       SELECT
         (ft_agg.ft_count + cf_agg.cf_count)::int AS total_entries,
@@ -176,12 +170,11 @@ class FirmTransactionModel extends MasterModel {
       SELECT
         COALESCE(NULLIF(remark, ''), 'UNCATEGORIZED') AS remark,
         COUNT(*)::int AS entries,
-        COALESCE(SUM(debit), 0) AS total_debit,
-        COALESCE(SUM(credit), 0) AS total_credit
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0) AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0) AS total_credit
       FROM firm_transactions
       WHERE firm_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(remark, ''), 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;
@@ -195,12 +188,11 @@ class FirmTransactionModel extends MasterModel {
       SELECT
         COALESCE(NULLIF(name, ''), 'UNKNOWN') AS name,
         COUNT(*)::int AS entries,
-        COALESCE(SUM(debit), 0) AS total_debit,
-        COALESCE(SUM(credit), 0) AS total_credit
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0) AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0) AS total_credit
       FROM firm_transactions
       WHERE firm_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(NULLIF(name, ''), 'UNKNOWN')
       ORDER BY total_debit DESC
     `;
@@ -229,10 +221,10 @@ class FirmTransactionModel extends MasterModel {
         EXTRACT(YEAR FROM date)::int AS year,
         EXTRACT(MONTH FROM date)::int AS month,
         COUNT(*)::int AS entries,
-        COALESCE(SUM(debit), 0) AS total_debit,
-        COALESCE(SUM(credit), 0) AS total_credit
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0) AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0) AS total_credit
       FROM firm_transactions
-      WHERE firm_id = $1 AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+      WHERE firm_id = $1
       GROUP BY EXTRACT(YEAR FROM date), EXTRACT(MONTH FROM date)
       ORDER BY year DESC, month DESC
     `;

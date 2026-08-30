@@ -11,6 +11,10 @@ const dbPort = process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : undefin
 const dbName = process.env.DB_NAME;
 const dbUser = process.env.DB_USER;
 const dbPassword = process.env.DB_PASSWORD != null ? String(process.env.DB_PASSWORD) : '';
+const configuredPoolMax = Number.parseInt(process.env.DB_POOL_MAX || '10', 10);
+const poolMax = Number.isInteger(configuredPoolMax) && configuredPoolMax > 0
+  ? Math.min(configuredPoolMax, 20)
+  : 10;
 
 const pool = new Pool({
   host: dbHost,
@@ -19,7 +23,11 @@ const pool = new Pool({
   user: dbUser,
   password: dbPassword,
   ssl: sslOption,
-  max: 20,
+  // A page can issue several independent reads at once. Keeping the default at
+  // 10 prevents a small managed PostgreSQL instance from running 20 reporting
+  // queries concurrently and exhausting database memory; deployments can tune
+  // it with DB_POOL_MAX (hard-capped at 20).
+  max: poolMax,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });

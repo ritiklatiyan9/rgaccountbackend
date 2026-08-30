@@ -242,7 +242,7 @@ export const updateDocumentImprest = asyncHandler(async (req, res) => {
 
 /**
  * DELETE /document-imprest/:id
- * Remove a record and its proof photos (best-effort S3 cleanup).
+ * Remove a record while retaining its proof photos for recycle recovery.
  * Gated by the document_imprest `delete` permission at the route —
  * admins only unless a sub-admin is explicitly granted delete.
  */
@@ -254,8 +254,6 @@ export const deleteDocumentImprest = asyncHandler(async (req, res) => {
   if (!record) return;
 
   await pool.query('DELETE FROM document_imprest WHERE id = $1', [id]);
-  try { await deletePlotDoc(record.photo_key); } catch { /* best-effort */ }
-  try { await deletePlotDoc(record.return_photo_key); } catch { /* best-effort */ }
 
   res.json({ message: 'Record deleted' });
 });

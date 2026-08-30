@@ -71,20 +71,19 @@ const INFLOW_SQL = `
       FROM plot_installment_payments pip
       JOIN plots p ON p.id = pip.plot_id
      WHERE p.site_id = $1
-       AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
      GROUP BY pip.installment_id
   ), generic AS (
     SELECT plot_id, SUM(amount) AS generic_pool FROM (
       SELECT pp.plot_id, pp.amount
         FROM plot_payments pp JOIN plots p ON p.id = pp.plot_id
        WHERE p.site_id = $1
-         AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-         AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
       UNION ALL
       SELECT pip.plot_id, pip.amount
         FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id
        WHERE p.site_id = $1 AND pip.installment_id IS NULL
-         AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
     ) g GROUP BY plot_id
   ), schedule AS (
     SELECT pi.plot_id, pi.due_date,
@@ -116,8 +115,7 @@ const VENDOR_SQL = `
     SELECT commitment_id, SUM(amount) AS paid_amount
       FROM vendor_payments
      WHERE site_id = $1
-       AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY commitment_id
   )
   SELECT to_char(date_trunc('month', vc.due_date), 'YYYY-MM') AS month,
@@ -132,8 +130,7 @@ const VENDOR_SQL = `
 const VENDOR_UNSCHEDULED_SQL = `
   WITH paid AS (
     SELECT commitment_id, SUM(amount) AS paid_amount FROM vendor_payments
-     WHERE site_id = $1 AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+     WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY commitment_id
   )
   SELECT COALESCE(SUM(GREATEST(0, vc.contract_amount - COALESCE(p.paid_amount, 0))), 0)::float8 AS amount
@@ -143,8 +140,7 @@ const VENDOR_UNSCHEDULED_SQL = `
 const VENDOR_OVERDUE_SQL = `
   WITH paid AS (
     SELECT commitment_id, SUM(amount) AS paid_amount FROM vendor_payments
-     WHERE site_id = $1 AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+     WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY commitment_id
   )
   SELECT COALESCE(SUM(GREATEST(0, vc.contract_amount - COALESCE(p.paid_amount, 0))), 0)::float8 AS amount
@@ -157,8 +153,7 @@ const FARMER_SQL = `
     FROM farmers f
     LEFT JOIN (
       SELECT farmer_id, SUM(amount) AS paid FROM farmer_payments
-       WHERE LOWER(COALESCE(status, 'approved')) = 'approved'
-         AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+       WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)
        GROUP BY farmer_id
     ) pd ON pd.farmer_id = f.id
    WHERE f.site_id = $1 AND f.status = 'active'`;
@@ -167,10 +162,12 @@ const POSITION_SQL = `
   WITH imprest AS (
     SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS amount
       FROM (
-        SELECT user_id, SUM(amount) AS user_balance
-          FROM imprest_ledger
-         WHERE site_id = $1 AND created_at::date <= CURRENT_DATE
-         GROUP BY user_id
+        SELECT il.user_id, SUM(il.amount) AS user_balance
+          FROM imprest_ledger il
+          JOIN users u ON u.id = il.user_id
+         WHERE il.site_id = $1 AND il.created_at::date <= CURRENT_DATE
+           AND u.role NOT IN ('admin', 'super_admin')
+         GROUP BY il.user_id
       ) balances
   )
   SELECT to_char(date_trunc('month', CURRENT_DATE), 'YYYY-MM') AS current_month,
@@ -217,17 +214,16 @@ const DUE_ITEMS_SQL = `
     SELECT pip.installment_id, SUM(pip.amount) AS direct_paid
       FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id
      WHERE p.site_id = $1
-       AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
      GROUP BY pip.installment_id
   ), generic AS (
     SELECT plot_id, SUM(amount) AS generic_pool FROM (
       SELECT pp.plot_id, pp.amount FROM plot_payments pp JOIN plots p ON p.id = pp.plot_id
-       WHERE p.site_id = $1 AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-         AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED','RETURNED'))
+       WHERE p.site_id = $1 AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
       UNION ALL
       SELECT pip.plot_id, pip.amount FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id
        WHERE p.site_id = $1 AND pip.installment_id IS NULL
-         AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED','RETURNED'))
+         AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
     ) x GROUP BY plot_id
   ), schedule AS (
     SELECT pi.id, pi.plot_id, pi.installment_name, pi.due_date, p.plot_no, p.buyer_name,
@@ -247,13 +243,11 @@ const DUE_ITEMS_SQL = `
       FROM schedule s LEFT JOIN generic g ON g.plot_id = s.plot_id
   ), vendor_paid AS (
     SELECT commitment_id, SUM(amount) AS paid_amount FROM vendor_payments
-     WHERE site_id = $1 AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+     WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY commitment_id
   ), farmer_paid AS (
     SELECT farmer_id, SUM(amount) AS paid_amount FROM farmer_payments
-     WHERE LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED','RETURNED'))
+     WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)
      GROUP BY farmer_id
   ), items AS (
     SELECT CONCAT('installment:', id) AS id, 'RECEIVABLE'::text AS type,

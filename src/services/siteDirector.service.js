@@ -112,10 +112,12 @@ const OVERVIEW_SQL = `
   imprest AS (
     SELECT site_id, COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS imprest_float
     FROM (
-      SELECT site_id, user_id, SUM(amount) AS user_balance
-      FROM imprest_ledger
-      WHERE site_id IS NOT NULL AND created_at::date <= $2::date
-      GROUP BY site_id, user_id
+      SELECT il.site_id, il.user_id, SUM(il.amount) AS user_balance
+      FROM imprest_ledger il
+      JOIN users u ON u.id = il.user_id
+      WHERE il.site_id IS NOT NULL AND il.created_at::date <= $2::date
+        AND u.role NOT IN ('admin', 'super_admin')
+      GROUP BY il.site_id, il.user_id
     ) balances
     GROUP BY site_id
   )
@@ -164,9 +166,10 @@ const IMPREST_HOLDERS_SQL = `
          SUM(il.amount)::float8 AS balance,
          MAX(il.created_at) AS last_activity_at
     FROM imprest_ledger il
-    LEFT JOIN users u ON u.id = il.user_id
+    JOIN users u ON u.id = il.user_id
    WHERE il.site_id IS NOT NULL
      AND il.created_at::date <= $1::date
+     AND u.role NOT IN ('admin', 'super_admin')
    GROUP BY il.site_id, il.user_id, u.name, u.role
   HAVING SUM(il.amount) <> 0
    ORDER BY il.site_id, balance DESC
@@ -253,15 +256,13 @@ const PERSON_SEARCH_SQL = `
     pl.site_name,
     pl.site_code,
     COALESCE(cfe.source_module, 'personal_ledger') AS source_module,
-    COALESCE(SUM(cfe.debit), 0)::float8 AS total_debit,
-    COALESCE(SUM(cfe.credit), 0)::float8 AS total_credit,
+    COALESCE(SUM(cfe.debit) FILTER (WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)), 0)::float8 AS total_debit,
+    COALESCE(SUM(cfe.credit) FILTER (WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)), 0)::float8 AS total_credit,
     COUNT(cfe.id)::int AS transaction_count,
     MAX(cfe.date) AS latest_activity
   FROM person_ledgers pl
   LEFT JOIN cash_flow_entries cfe
     ON cfe.cash_flow_month_id = pl.id
-   AND LOWER(COALESCE(cfe.status, 'approved')) <> 'rejected'
-   AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
   GROUP BY
     pl.identity_key, pl.person_name, pl.phone, pl.person_type,
     pl.site_id, pl.site_name, pl.site_code, COALESCE(cfe.source_module, 'personal_ledger')
@@ -581,13 +582,11 @@ export async function getSiteDirectorPerson(identityKey) {
       to_char(date_trunc('month', cfe.date), 'Mon YY') AS period_label,
       COALESCE(cfe.source_module, 'personal_ledger') AS source_module,
       LOWER(COALESCE(NULLIF(cfe.cash_type, ''), 'bank')) AS payment_mode,
-      COALESCE(SUM(cfe.debit), 0)::float8 AS total_debit,
-      COALESCE(SUM(cfe.credit), 0)::float8 AS total_credit,
+      COALESCE(SUM(cfe.debit) FILTER (WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)), 0)::float8 AS total_debit,
+      COALESCE(SUM(cfe.credit) FILTER (WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)), 0)::float8 AS total_credit,
       COUNT(*)::int AS transaction_count
     FROM target_ledgers tl
     JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = tl.id
-    WHERE LOWER(COALESCE(cfe.status, 'approved')) <> 'rejected'
-      AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
     GROUP BY
       tl.site_id, tl.site_name, tl.site_code,
       date_trunc('month', cfe.date),
@@ -617,8 +616,6 @@ export async function getSiteDirectorPerson(identityKey) {
       cfe.created_at
     FROM target_ledgers tl
     JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = tl.id
-    WHERE LOWER(COALESCE(cfe.status, 'approved')) <> 'rejected'
-      AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
     ORDER BY cfe.date DESC, cfe.created_at DESC, cfe.id DESC
   `;
 

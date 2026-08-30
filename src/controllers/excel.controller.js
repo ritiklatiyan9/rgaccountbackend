@@ -1,7 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { excelModel } from '../models/excel.model.js';
 import pool from '../config/db.js';
-import { uploadToS3, deleteFromS3, generateSignedGetUrl } from '../utils/s3.js';
+import { uploadToS3, generateSignedGetUrl } from '../utils/s3.js';
 
 /**
  * POST /excel
@@ -169,20 +169,8 @@ export const deleteFile = asyncHandler(async (req, res) => {
     const existing = await excelModel.findById(parseInt(req.params.id), pool);
     if (!existing) return res.status(404).json({ message: 'File not found' });
 
-    if (existing.s3_key) {
-        // Caution: If duplicate() creates references to the same object, 
-        // deleting here deletes it for duplicates too!
-        // To be safe, we let S3 bucket lifecycle rules clean up orphaned files,
-        // or we check if count of files sharing this s3_key == 1.
-        // For now, we will delete it to prevent storage leaks.
-        try {
-            const countQuery = await pool.query(`SELECT COUNT(*) as count FROM excel_files WHERE s3_key = $1`, [existing.s3_key]);
-            if (parseInt(countQuery.rows[0].count) <= 1) {
-                await deleteFromS3(existing.s3_key);
-            }
-        } catch (e) { console.error("Could not delete from S3"); }
-    }
-
+    // Retain the workbook object while the row remains recoverable. Recycle
+    // Bin performs unreferenced storage cleanup on permanent deletion.
     await excelModel.delete(parseInt(req.params.id), pool);
     res.json({ message: 'File deleted successfully' });
 });

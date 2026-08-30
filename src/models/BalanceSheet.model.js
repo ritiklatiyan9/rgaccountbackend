@@ -101,11 +101,13 @@ const SCOPED = `
   imprest AS (
     SELECT COALESCE(SUM(GREATEST(user_balance, 0)), 0)::numeric AS float_amount
     FROM (
-      SELECT user_id, COALESCE(SUM(amount), 0) AS user_balance
-      FROM imprest_ledger
-      WHERE site_id IS NOT NULL AND site_id = $1
-        AND ($3::date IS NULL OR created_at::date <= $3::date)
-      GROUP BY user_id
+      SELECT il.user_id, COALESCE(SUM(il.amount), 0) AS user_balance
+      FROM imprest_ledger il
+      JOIN users u ON u.id = il.user_id
+      WHERE il.site_id IS NOT NULL AND il.site_id = $1
+        AND ($3::date IS NULL OR il.created_at::date <= $3::date)
+        AND u.role NOT IN ('admin', 'super_admin')
+      GROUP BY il.user_id
     ) u
   ),
   quarantine AS (
@@ -114,7 +116,13 @@ const SCOPED = `
   )
 `;
 
-const REPORT_QUERY = `${SCOPED}
+// Keep aggregate metadata separate from transaction rows. The old query built
+// one JSONB array for as many as 100,000 wide rows while PostgreSQL was
+// also retaining the scoped ledger for four aggregate passes. On the larger
+// sites that made the database construct one enormous in-memory JSON value and
+// could terminate with "out of memory". Returning ordinary rows lets node-postgres
+// consume the result set directly and keeps the aggregate query small.
+const REPORT_META_QUERY = `${SCOPED}
   SELECT jsonb_build_object(
     'summary', jsonb_build_object(
       'opening_balance', opening.amount,
@@ -126,40 +134,6 @@ const REPORT_QUERY = `${SCOPED}
       'balance_in_hand', opening.amount + summary.net_movement - imprest.float_amount,
       'total_entries', summary.total_entries
     ),
-    'transactions', COALESCE((
-      SELECT jsonb_agg(
-        to_jsonb(tx)
-        -- Date order always wins; saved manual positions only arrange rows
-        -- WITHIN a date. A saved sequence outranking entry_date left the
-        -- statement jumbled and sank never-positioned (new) entries to the
-        -- bottom regardless of their date.
-        ORDER BY tx.entry_date DESC,
-                 tx.global_display_position ASC NULLS LAST,
-                 tx.display_position ASC NULLS LAST,
-                 tx.created_at DESC,
-                 tx.id DESC
-      )
-      FROM (
-        SELECT
-          id,
-          TO_CHAR(entry_date, 'YYYY-MM-DD') AS entry_date,
-          particular, remarks, debit, credit,
-          raw_mode AS payment_mode,
-          bucket, source_key, source_id, status, cheque_status, cheque_no,
-          voucher_url, entity_name, linked_detail, created_by_name, created_at,
-          bank_account_id, bank_account_name,
-          plot_id, plot_no, plot_block,
-          assigned_admin_id, approval_assignee_name,
-          display_position, global_display_position
-        FROM period_entries
-        ORDER BY entry_date DESC,
-                 global_display_position ASC NULLS LAST,
-                 display_position ASC NULLS LAST,
-                 created_at DESC,
-                 id DESC
-        LIMIT $9::int
-      ) tx
-    ), '[]'::jsonb),
     'by_source', COALESCE((
       SELECT jsonb_agg(to_jsonb(s) ORDER BY s.total_credit + s.total_debit DESC)
       FROM (
@@ -200,7 +174,15 @@ const REPORT_QUERY = `${SCOPED}
       'invalid_date_amount', quarantine.amount,
       'excluded_unapproved', (
         SELECT COUNT(*)::int FROM cash_flow_entries
-        WHERE site_id = $1 AND LOWER(COALESCE(status, 'approved')) <> 'approved'
+        WHERE site_id = $1
+          AND COALESCE(debit, 0) <> 0
+          AND NOT financial_transaction_posts('debit', status, cash_type, cheque_status)
+      ),
+      'excluded_uncleared_cheques', (
+        SELECT COUNT(*)::int FROM cash_flow_entries
+        WHERE site_id = $1
+          AND NULLIF(TRIM(COALESCE(cheque_status, '')), '') IS NOT NULL
+          AND UPPER(TRIM(cheque_status)) <> 'CLEARED'
       ),
       'excluded_bounced', (
         SELECT COUNT(*)::int FROM cash_flow_entries
@@ -224,6 +206,33 @@ const REPORT_QUERY = `${SCOPED}
   FROM summary CROSS JOIN opening CROSS JOIN imprest CROSS JOIN quarantine
 `;
 
+const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
+  SELECT
+    id,
+    TO_CHAR(entry_date, 'YYYY-MM-DD') AS entry_date,
+    particular, remarks, debit, credit,
+    raw_mode AS payment_mode,
+    bucket, source_key, source_id, status, cheque_status, cheque_no,
+    voucher_url, entity_name, linked_detail, created_by_name, created_at,
+    bank_account_id, bank_account_name,
+    plot_id, plot_no, plot_block,
+    assigned_admin_id, approval_assignee_name,
+    display_position, global_display_position
+  FROM period_entries
+  -- Parameter 10 is the timeline grain used by the metadata query. Keep its type
+  -- explicit here because this query shares the same 12-parameter contract.
+  WHERE $10::text IS NOT NULL
+  -- Date order always wins; saved manual positions only arrange rows WITHIN a
+  -- date. Apply LIMIT before data reaches Node instead of aggregating rows into
+  -- a monolithic JSONB value inside PostgreSQL.
+  ORDER BY entry_date DESC,
+           global_display_position ASC NULLS LAST,
+           display_position ASC NULLS LAST,
+           created_at DESC,
+           id DESC
+  LIMIT $9::int
+`;
+
 class BalanceSheetModel {
   async getReport({
     siteId,
@@ -239,10 +248,19 @@ class BalanceSheetModel {
     plotId = null,
     creatorId = null,
   }) {
-    const result = await pool.query(REPORT_QUERY, [
+    const params = [
       siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain, plotId, creatorId,
-    ]);
-    return result.rows[0]?.report || null;
+    ];
+
+    // Run sequentially so one API call cannot reserve two large ledger working
+    // sets on the database at the same time. Metadata stays exact for all
+    // matching entries; only the returned transaction list observes `limit`.
+    const metaResult = await pool.query(REPORT_META_QUERY, params);
+    const report = metaResult.rows[0]?.report || null;
+    if (!report) return null;
+
+    const transactionResult = await pool.query(REPORT_TRANSACTIONS_QUERY, params);
+    return { ...report, transactions: transactionResult.rows };
   }
 }
 

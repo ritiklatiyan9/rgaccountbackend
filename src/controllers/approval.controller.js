@@ -26,6 +26,8 @@ const ALLOWED_TABLES = {
   vendor_payment: 'vendor_payments',
   vendor_inventory_payment: 'vendor_inventory_payments',
   plot_registry_payment: 'plot_registry_payments',
+  land_deal_payment: 'land_deal_payments', // Land Profit receipts (sub-module of farmers)
+  misc_income_entry: 'misc_income_entries',
   daybook: 'day_book',
 };
 
@@ -133,10 +135,9 @@ async function reconcileInstallmentPayment(paymentId) {
             updated_at = NOW()
        FROM (
          SELECT COALESCE(SUM(amount), 0)::numeric AS total
-           FROM plot_installment_payments
+          FROM plot_installment_payments
           WHERE installment_id = $1
-            AND LOWER(COALESCE(status, 'approved')) = 'approved'
-            AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+            AND financial_transaction_posts('credit', status, payment_mode, cheque_status)
        ) paid
       WHERE pi.id = $1`,
     [installmentId]
@@ -183,6 +184,7 @@ function isModuleAllowed(allowed, moduleKey) {
     return allowed.has('daybook');
   }
   if (moduleKey === 'vendor_inventory_payment') return allowed.has('vendor_payment') || allowed.has('vendors');
+  if (moduleKey === 'land_deal_payment') return allowed.has('farmer_payment');
   return allowed.has(moduleKey);
 }
 
@@ -270,7 +272,66 @@ export const listAllPending = asyncHandler(async (req, res) => {
     results.push(...r.rows.map(row => ({
       ...row,
       entry_label: `${row.farmer_name} - ₹${row.amount}`,
-      module_label: 'Farmer Payment',
+      module_label: 'Lands Payment',
+    })));
+  }
+
+  // 1b. Land sale receipts (Land Profit — sub-module of farmers, shares its grant and tab)
+  const visLdp = moduleVisibility(req.user, allowedModules, 'land_deal_payment');
+  if ((!module || module === 'farmer_payment' || module === 'land_deal_payment') && visLdp.include) {
+    const { where, params } = buildWhere('ldp', 'ldp', [], visLdp.scoped ? req.user.id : null);
+    const q = `
+      SELECT ldp.*, d.buyer_name, d.deal_no, d.farmer_id,
+             d.buyer_name AS entity_name, 'Land buyer'::text AS entity_type,
+             d.buyer_phone AS entity_phone, NULL::text AS entity_address,
+             NULL::text AS entity_plot_no,
+             s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+             COALESCE(aa.name, aa.email) AS assigned_admin_name,
+             'land_deal_payment' AS source
+      FROM land_deal_payments ldp
+      JOIN land_deals d ON d.id = ldp.land_deal_id
+      JOIN sites s ON s.id = ldp.site_id
+      LEFT JOIN users u ON ldp.created_by = u.id
+      LEFT JOIN users aa ON ldp.assigned_admin_id = aa.id
+      WHERE ${where}
+      ORDER BY ldp.date DESC, ldp.id DESC
+    `;
+    const r = await pool.query(q, params);
+    results.push(...r.rows.map(row => ({
+      ...row,
+      entry_label: `LAND SALE - ${row.buyer_name} - ₹${row.amount}`,
+      module_label: 'Land Sale Receipt',
+    })));
+  }
+
+  // 1c. Miscellaneous income (its own approval module key: misc_income_entry)
+  const visMie = moduleVisibility(req.user, allowedModules, 'misc_income_entry');
+  if ((!module || module === 'misc_income_entry') && visMie.include) {
+    const { where, params } = buildWhere('mie', 'mie', [], visMie.scoped ? req.user.id : null);
+    const q = `
+      SELECT mie.*, c.name AS category_name, c.color AS category_color,
+             COALESCE(mie.party_name, c.name) AS entity_name,
+             ('Misc income · ' || c.name)::text AS entity_type,
+             NULL::text AS entity_phone, NULL::text AS entity_address, NULL::text AS entity_plot_no,
+             s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+             COALESCE(aa.name, aa.email) AS assigned_admin_name,
+             'misc_income_entry' AS source
+      FROM misc_income_entries mie
+      JOIN misc_income_categories c ON c.id = mie.category_id
+      JOIN sites s ON s.id = mie.site_id
+      LEFT JOIN users u ON mie.created_by = u.id
+      LEFT JOIN users aa ON mie.assigned_admin_id = aa.id
+      WHERE ${where}
+      ORDER BY mie.date DESC, mie.id DESC
+    `;
+    const r = await pool.query(q, params);
+    results.push(...r.rows.map(row => ({
+      ...row,
+      // Debits are refunds: surface them as money out so the reviewer sees the direction.
+      debit: row.direction === 'debit' ? row.amount : 0,
+      credit: row.direction === 'debit' ? 0 : row.amount,
+      entry_label: `${row.direction === 'debit' ? 'MISC INCOME REFUND' : 'MISC INCOME'} - ${row.category_name}${row.party_name ? ' - ' + row.party_name : ''} - ₹${row.amount}`,
+      module_label: 'Misc Income',
     })));
   }
 
@@ -749,9 +810,12 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     // Linked farmer-payment Day Book rows are accounting mirrors, not separate
     // approval requests. Keep the count consistent with /approvals/pending.
     pool.query(`SELECT entry_type, COUNT(*)::int AS count FROM day_book d WHERE d.status = 'pending' AND d.entry_type NOT IN ('CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT', 'VENDOR PAYMENT') AND (d.entry_type <> 'FARMER PAYMENT' OR d.farmer_payment_id IS NULL) ${site_id ? 'AND d.site_id = $1' : ''}${scopeClauseFor('d', 'daybook')} GROUP BY entry_type`, params),
+    // Land sale receipts share the farmer tab (same grant), see fpCount below.
+    pool.query(`SELECT COUNT(*)::int AS count FROM land_deal_payments ldp WHERE ldp.status = 'pending' ${site_id ? 'AND ldp.site_id = $1' : ''}${scopeClauseFor('ldp', 'land_deal_payment')}`, params),
+    pool.query(`SELECT COUNT(*)::int AS count FROM misc_income_entries mie WHERE mie.status = 'pending' ${site_id ? 'AND mie.site_id = $1' : ''}${scopeClauseFor('mie', 'misc_income_entry')}`, params),
   ];
 
-  const [fp, pc, pcp, cf, ft, pp, pip, ex, vp, vip, prp, db] = await Promise.all(queries);
+  const [fp, pc, pcp, cf, ft, pp, pip, ex, vp, vip, prp, db, ldp, mie] = await Promise.all(queries);
 
   // Day book counts by entry_type
   const dbMap = {};
@@ -761,7 +825,7 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   // Scoped queries above already restricted to assigned-to-me rows, so their raw count is safe.
   const a = (mod) => !allowedModules || isModuleAllowed(allowedModules, mod) || isSubAdmin;
 
-  const fpCount = a('farmer_payment') ? fp.rows[0].count + (a('daybook') ? (dbMap['FARMER PAYMENT'] || 0) : 0) : 0;
+  const fpCount = a('farmer_payment') ? fp.rows[0].count + ldp.rows[0].count + (a('daybook') ? (dbMap['FARMER PAYMENT'] || 0) : 0) : 0;
   const pcCount = a('plot_commission') || a('plot_commission_payment')
     ? (a('plot_commission') ? pc.rows[0].count : 0) + (a('plot_commission_payment') ? pcp.rows[0].count : 0) + (a('daybook') ? (dbMap['PLOT COMMISSION'] || 0) : 0)
     : 0;
@@ -775,6 +839,7 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   const vpCount = a('vendor_payment') ? vp.rows[0].count : 0;
   const vipCount = a('vendor_inventory_payment') ? vip.rows[0].count : 0;
   const prpCount = a('plot_registry_payment') ? prp.rows[0].count : 0;
+  const mieCount = a('misc_income_entry') ? mie.rows[0].count : 0;
 
   const counts = {
     farmer_payment: fpCount,
@@ -787,7 +852,8 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     vendor_payment: vpCount,
     vendor_inventory_payment: vipCount,
     plot_registry_payment: prpCount,
-    total: fpCount + pcCount + cfCount + ftCount + ppCount + pipCount + exCount + vpCount + vipCount + prpCount,
+    misc_income_entry: mieCount,
+    total: fpCount + pcCount + cfCount + ftCount + ppCount + pipCount + exCount + vpCount + vipCount + prpCount + mieCount,
   };
 
   res.json({ ...counts, allowed_modules: allowedModules ? Array.from(allowedModules) : null });
@@ -922,7 +988,8 @@ export const approveEntry = asyncHandler(async (req, res) => {
                 pcm.id, pcm.total_commission, 
                 COALESCE(SUM(pcp.amount), 0) as total_paid
              FROM plot_commissions_v2 pcm
-             LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+             LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
+               AND financial_transaction_posts(CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END, pcp.status, pcp.payment_mode, pcp.cheque_status)
              WHERE pcm.id = $1
              GROUP BY pcm.id
           `;
@@ -1021,7 +1088,8 @@ export const rejectEntry = asyncHandler(async (req, res) => {
             pcm.id, pcm.total_commission, 
             COALESCE(SUM(pcp.amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
-          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
+            AND financial_transaction_posts(CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END, pcp.status, pcp.payment_mode, pcp.cheque_status)
           WHERE pcm.id = $1
           GROUP BY pcm.id
         `;
@@ -1191,7 +1259,8 @@ export const bulkApprove = asyncHandler(async (req, res) => {
             pcm.id, pcm.total_commission, 
             COALESCE(SUM(pcp.amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
-          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
+            AND financial_transaction_posts(CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END, pcp.status, pcp.payment_mode, pcp.cheque_status)
           WHERE pcm.id = $1
           GROUP BY pcm.id
         `;
@@ -1286,7 +1355,8 @@ export const bulkReject = asyncHandler(async (req, res) => {
             pcm.id, pcm.total_commission, 
             COALESCE(SUM(pcp.amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
-          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id AND pcp.status = 'approved' AND (pcp.cheque_status IS NULL OR pcp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
+            AND financial_transaction_posts(CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END, pcp.status, pcp.payment_mode, pcp.cheque_status)
           WHERE pcm.id = $1
           GROUP BY pcm.id
         `;
@@ -1480,6 +1550,24 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
     LEFT JOIN plot_registries r ON r.id = t.registry_id
     LEFT JOIN sites s ON s.id = r.site_id
     WHERE UPPER(COALESCE(t.cheque_status, '')) <> ''${site_id ? ` AND r.site_id = $1` : ''}${statusFilter ? ` AND UPPER(COALESCE(t.cheque_status, '')) = $${site_id ? 2 : 1}` : ''}`,
+
+    `SELECT t.id, 'land_deal_payment' AS source, 'Land Sale - ' || COALESCE(d.buyer_name, '') AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      t.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
+    FROM land_deal_payments t
+    LEFT JOIN land_deals d ON d.id = t.land_deal_id
+    LEFT JOIN sites s ON s.id = t.site_id
+    WHERE ${whereParts()}`,
+
+    `SELECT t.id, 'misc_income_entry' AS source, 'Misc Income - ' || COALESCE(c.name, '') || COALESCE(' - ' || t.party_name, '') AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      t.site_id, s.name AS site_name, t.created_at,
+      NULL::text AS plot_no, NULL::text AS booked_by
+    FROM misc_income_entries t
+    LEFT JOIN misc_income_categories c ON c.id = t.category_id
+    LEFT JOIN sites s ON s.id = t.site_id
+    WHERE ${whereParts()}`,
 
     `SELECT t.id, 'daybook' AS source, COALESCE(t.particular, '') AS entry_label,
       COALESCE(GREATEST(t.debit, t.credit), 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,

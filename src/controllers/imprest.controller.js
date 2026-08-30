@@ -11,6 +11,7 @@ import { expenseModel } from '../models/Expense.model.js';
 import { findEligibleImprestParticipant } from '../middlewares/imprestSiteAccess.middleware.js';
 import { uploadPlotDoc, getPlotDocUrl, deletePlotDoc } from '../utils/plotDocStorage.js';
 import pool from '../config/db.js';
+import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 
 // ── Camera-proof helpers (same S3/local store as document imprest) ──
 const IMPREST_PROOF_PREFIX = 'imprest';
@@ -46,6 +47,59 @@ const lockImprestAccounts = async (db, ...userIds) => {
  *    Recipient confirmation atomically debits the giver and credits the recipient. No day-book entry is created —
  *    the money never leaves the sub-admin pool, so site-level debit/credit is unaffected.
  */
+// ── Site Balance governs distribution ──────────────────────────────────────────
+// Site Balance (cash + bank − floats held by staff) is the ADMIN's custody. Only an
+// Admin distributes it; a Super Admin observes. Pending handovers and money earmarked in
+// the Admin's own imprest remain in that custody, but are reserved from further distribution.
+const DISTRIBUTOR_ROLES = new Set(['admin']);
+const FUNDING_HINT = 'Bring money into the site first — a plot payment, misc income, land sale receipt, firm transaction or an accepted imprest return — then distribute.';
+const lockSiteDistribution = (client, siteId) => client.query(`SELECT pg_advisory_xact_lock(hashtext('imprest-site-' || $1::text))`, [siteId]);
+const indiaTomorrow = () => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date()).filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + 1))
+    .toISOString().slice(0, 10);
+};
+/** What the Admin can hand out right now, after every custody reservation. */
+const siteDistributable = async (db, siteId) => {
+  // Use the caller's connection so the advisory lock, ledger snapshot and
+  // reservations are all observed inside the same transaction. Stop after
+  // today in the business timezone so future-dated transactions cannot fund
+  // (or block) an imprest distribution prematurely.
+  const detail = await getSiteBalanceDetail(siteId, '1900-01-01', indiaTomorrow(), db);
+  const round2 = (v) => Math.round(v * 100) / 100;
+  const pendingReservations = round2(detail.pendingImprestReservations);
+  const adminReserved = round2(detail.adminImprestReserved);
+  const distributableBalance = round2(detail.distributableBalance);
+  return {
+    site_balance: round2(detail.siteBalance),
+    cash_balance: round2(detail.cashBalance),
+    bank_balance: round2(detail.bankBalance),
+    imprest_held: round2(detail.imprestHeld),
+    admin_imprest_reserved: adminReserved,
+    pending_imprest_reservations: pendingReservations,
+    distributable_balance: distributableBalance,
+    // Preserve the established API aliases used by both imprest screens.
+    pending_receipt_total: pendingReservations,
+    available: distributableBalance,
+  };
+};
+const overrideReasonOf = (body) => String(body?.override_reason || '').trim();
+
+/** GET /imprest/site-balance?site_id=X — the pool imprest is distributed from. */
+export const getSiteBalance = asyncHandler(async (req, res) => {
+  const siteId = req.imprestSiteId || parseInt(req.query.site_id);
+  if (!siteId) return res.status(400).json({ message: 'Site is required' });
+  const numbers = await siteDistributable(pool, siteId);
+  res.json({
+    ...numbers,
+    can_distribute: DISTRIBUTOR_ROLES.has(req.user.role),
+    observer: req.user.role === 'super_admin',
+    funding_hint: numbers.available <= 0 ? FUNDING_HINT : null,
+  });
+});
+
 export const createAllocation = asyncHandler(async (req, res) => {
   const { sub_admin_id, amount, remark, date, payment_mode, site_id, assigned_admin_id, from_own_float } = req.body;
 
@@ -70,11 +124,39 @@ export const createAllocation = asyncHandler(async (req, res) => {
   }
 
   const parsedSiteId = req.imprestSiteId || parseInt(site_id);
+  // Site-funded distribution is the Admin's call alone; the Super Admin observes.
+  if (!escrowFromGiver && !DISTRIBUTOR_ROLES.has(req.user.role)) {
+    return res.status(403).json({ code: 'OBSERVER_ROLE', message: 'The Site Balance is distributed by the Admin. Super Admin observes it.' });
+  }
   const proofKey = await uploadProof(req.file);
 
   const client = await pool.connect();
+  let distributable = null;
+  let overrideReason = null;
   try {
     await client.query('BEGIN');
+
+    // Site-funded: never hand out more than the Site Balance without a stated reason.
+    if (!escrowFromGiver && allocationAmount > 0) {
+      await lockSiteDistribution(client, parsedSiteId);
+      distributable = await siteDistributable(client, parsedSiteId);
+      if (allocationAmount > distributable.available + 0.005) {
+        overrideReason = overrideReasonOf(req.body);
+        if (overrideReason.length < 5) {
+          await client.query('ROLLBACK');
+          if (proofKey) await deletePlotDoc(proofKey).catch(() => {});
+          const shortfall = Math.round((allocationAmount - Math.max(distributable.available, 0)) * 100) / 100;
+          return res.status(400).json({
+            code: 'INSUFFICIENT_SITE_BALANCE',
+            ...distributable,
+            shortfall,
+            message: distributable.available <= 0
+              ? `Site Balance is ₹${distributable.available.toLocaleString('en-IN')} — there is nothing in hand to distribute. ${FUNDING_HINT} To allocate anyway, give a reason.`
+              : `Only ₹${distributable.available.toLocaleString('en-IN')} is in hand (₹${shortfall.toLocaleString('en-IN')} short). Fund the site first, or give a reason to allocate anyway.`,
+          });
+        }
+      }
+    }
 
     // Validate the balance now for quick feedback. The same check is repeated
     // under account locks at confirmation, which is when money actually moves.
@@ -102,6 +184,8 @@ export const createAllocation = asyncHandler(async (req, res) => {
       site_id: parsedSiteId,
       proof_key: proofKey,
       from_own_float: escrowFromGiver,
+      site_balance_at_allocation: distributable ? distributable.available : null,
+      override_reason: overrideReason || null,
       status: isSelfDraw ? 'RECEIVED' : 'PENDING_RECEIPT',
       ...(isSelfDraw ? { confirmed_at: new Date(), confirmation_remark: 'Self-draw approved by admin' } : {}),
     }, client);
@@ -865,12 +949,37 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       return res.status(409).json({ message: 'The requester is no longer active or assigned to this site' });
     }
 
-    await lockImprestAccounts(client, request.sub_admin_id);
     const requestType = request.request_type || 'EXPENSE';
     const requestAmount = parseFloat(request.amount);
 
     // ── IMPREST type: just allocate cash to sub-admin (no expense, no daybook expense) ──
     if (requestType === 'IMPREST') {
+      // A requested allocation is still a distribution of Admin Site Balance.
+      // Serialize it with direct allocations, and use the same transaction for
+      // the custody snapshot so concurrent approvals cannot mint staff float.
+      await lockSiteDistribution(client, request.site_id);
+      const distributable = await siteDistributable(client, request.site_id);
+      let overrideReason = null;
+      if (requestAmount > distributable.available + 0.005) {
+        const explicitOverride = overrideReasonOf(req.body);
+        const explicitReview = String(review_remark || '').trim();
+        overrideReason = explicitOverride || explicitReview;
+        if (overrideReason.length < 5) {
+          await client.query('ROLLBACK');
+          const shortfall = Math.round((requestAmount - Math.max(distributable.available, 0)) * 100) / 100;
+          return res.status(400).json({
+            code: 'INSUFFICIENT_SITE_BALANCE',
+            ...distributable,
+            shortfall,
+            message: distributable.available <= 0
+              ? `Site Balance is ₹${distributable.available.toLocaleString('en-IN')} — there is nothing available to distribute. ${FUNDING_HINT} To approve anyway, provide an override reason.`
+              : `Only ₹${distributable.available.toLocaleString('en-IN')} is available (₹${shortfall.toLocaleString('en-IN')} short). Fund the site first, or provide an override reason.`,
+          });
+        }
+      }
+
+      await lockImprestAccounts(client, request.sub_admin_id);
+
       // 2a. Create allocation record
       const allocation = await imprestAllocationModel.create({
         admin_id: req.user.id,
@@ -879,6 +988,9 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
         remark: request.reason || 'Imprest request approved',
         assigned_admin_id: request.assigned_admin_id || null,
         site_id: request.site_id,
+        from_own_float: false,
+        site_balance_at_allocation: distributable.available,
+        override_reason: overrideReason,
         status: 'RECEIVED', // auto-confirmed since sub-admin requested it
         confirmed_at: new Date(),
         confirmation_remark: 'Auto-confirmed (requested by sub-admin)',
@@ -905,6 +1017,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     }
 
     // ── EXPENSE type: overdraft expense flow (original behavior) ──
+    await lockImprestAccounts(client, request.sub_admin_id);
     const storedExpenseData = typeof request.expense_data === 'string'
       ? JSON.parse(request.expense_data)
       : request.expense_data;
@@ -1005,12 +1118,36 @@ export const adjustBalance = asyncHandler(async (req, res) => {
 
   if (!user_id) return res.status(400).json({ message: 'User ID is required' });
   if (amount === undefined || amount === null) return res.status(400).json({ message: 'Amount is required' });
+  if (!DISTRIBUTOR_ROLES.has(req.user.role)) {
+    return res.status(403).json({ code: 'OBSERVER_ROLE', message: 'Imprest balances are adjusted by the Admin. Super Admin observes.' });
+  }
   const parsedSiteId = req.imprestSiteId || parseInt(site_id);
+  const adjustAmount = parseFloat(amount);
+  if (!Number.isFinite(adjustAmount) || adjustAmount === 0) return res.status(400).json({ message: 'Amount must be a non-zero number' });
   const proofKey = await uploadProof(req.file);
 
   const client = await pool.connect();
+  let overrideNote = '';
   try {
     await client.query('BEGIN');
+    // A positive adjustment puts site money into someone's float — same rule as an allocation.
+    if (adjustAmount > 0) {
+      await lockSiteDistribution(client, parsedSiteId);
+      const distributable = await siteDistributable(client, parsedSiteId);
+      if (adjustAmount > distributable.available + 0.005) {
+        const reason = overrideReasonOf(req.body);
+        if (reason.length < 5) {
+          await client.query('ROLLBACK');
+          if (proofKey) await deletePlotDoc(proofKey).catch(() => {});
+          return res.status(400).json({
+            code: 'INSUFFICIENT_SITE_BALANCE', ...distributable,
+            shortfall: Math.round((adjustAmount - Math.max(distributable.available, 0)) * 100) / 100,
+            message: `Only ₹${distributable.available.toLocaleString('en-IN')} is in hand. ${FUNDING_HINT} To adjust anyway, give a reason.`,
+          });
+        }
+        overrideNote = ` | OVERRIDE: ${reason.toUpperCase()}`;
+      }
+    }
     await lockImprestAccounts(client, parseInt(user_id));
 
     // Create ledger adjustment
@@ -1019,7 +1156,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
       type: 'ADJUSTMENT',
       reference_id: null,
       amount: parseFloat(amount),
-      remarks: remarks ? remarks.trim().toUpperCase() : 'ADMIN ADJUSTMENT',
+      remarks: `${remarks ? remarks.trim().toUpperCase() : 'ADMIN ADJUSTMENT'}${overrideNote}`,
       created_by: req.user.id,
       site_id: parsedSiteId,
       proof_key: proofKey,

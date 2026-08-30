@@ -73,13 +73,11 @@ class DayBookModel extends MasterModel {
   async getSummary(siteId, pool) {
     const query = `
       SELECT
-        COALESCE(SUM(debit),  0)::numeric AS total_debit,
-        COALESCE(SUM(credit), 0)::numeric AS total_credit,
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric AS total_credit,
         COUNT(*)::int AS total_count
       FROM day_book
       WHERE site_id = $1
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
     `;
     const result = await pool.query(query, [siteId]);
     return result.rows[0];
@@ -92,13 +90,11 @@ class DayBookModel extends MasterModel {
     const query = `
       SELECT
         entry_type,
-        COALESCE(SUM(debit), 0)::numeric  AS total_debit,
-        COALESCE(SUM(credit), 0)::numeric AS total_credit,
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric  AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM day_book
       WHERE site_id = $1
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY entry_type
       ORDER BY total_debit DESC
     `;
@@ -113,13 +109,11 @@ class DayBookModel extends MasterModel {
     const query = `
       SELECT
         COALESCE(payment_mode, 'UNSPECIFIED') AS payment_mode,
-        COALESCE(SUM(debit), 0)::numeric  AS total_debit,
-        COALESCE(SUM(credit), 0)::numeric AS total_credit,
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric  AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM day_book
       WHERE site_id = $1
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(payment_mode, 'UNSPECIFIED')
       ORDER BY total_debit DESC
     `;
@@ -134,13 +128,11 @@ class DayBookModel extends MasterModel {
     const query = `
       SELECT
         COALESCE(category, 'UNCATEGORIZED') AS category,
-        COALESCE(SUM(debit), 0)::numeric  AS total_debit,
-        COALESCE(SUM(credit), 0)::numeric AS total_credit,
+        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric  AS total_debit,
+        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric AS total_credit,
         COUNT(*)::int AS entries
       FROM day_book
       WHERE site_id = $1
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
       GROUP BY COALESCE(category, 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;

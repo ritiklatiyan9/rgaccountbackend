@@ -12,7 +12,13 @@ router.get(
   '/',
   requireRole('admin', 'sub_admin'),
   requirePermission('balance_sheet', 'read'),
-  cacheResponse({ ttlSeconds: 30, namespace: 'balance-sheet' }),
+  // Avoid retaining multi-megabyte full-history payloads in the in-process
+  // cache. Small/date-filtered statements still benefit from the 30s cache.
+  cacheResponse({
+    ttlSeconds: 30,
+    namespace: 'balance-sheet',
+    shouldCache: (payload) => (payload?.transactions?.length || 0) <= 1000,
+  }),
   getBalanceSheet,
 );
 

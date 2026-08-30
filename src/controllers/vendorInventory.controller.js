@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
+import { transactionMovesMoney } from '../utils/transactionPosting.js';
 
 // Vendor inventory module — transactions-only (no deliveries / stock-in/out).
 // An "order" is: item + qty_ordered * rate - discount = net value.
@@ -27,8 +28,9 @@ const RECEIVED_QTY_SQL = `COALESCE((
   SELECT SUM(mv.qty) FROM inventory_movements mv
    WHERE mv.ref_type = 'VENDOR_ORDER' AND mv.ref_id = o.id AND mv.movement_type = 'RECEIPT'
 ), 0)`;
-const POSTED_INVENTORY_PAYMENT_SQL = (alias) => `LOWER(COALESCE(${alias}.status, 'approved')) = 'approved'
-  AND UPPER(COALESCE(${alias}.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')`;
+const POSTED_INVENTORY_PAYMENT_SQL = (alias) => `financial_transaction_posts(
+  'debit', ${alias}.status, ${alias}.payment_mode, ${alias}.cheque_status
+)`;
 
 export const listInventoryOrders = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
@@ -183,8 +185,12 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
   );
 
   const visiblePaid = paymentsRes.rows.reduce((sum, payment) => {
-    const posted = String(payment.status || 'approved').toLowerCase() === 'approved'
-      && !['BOUNCED', 'RETURNED'].includes(String(payment.cheque_status || '').toUpperCase());
+    const posted = transactionMovesMoney({
+      direction: 'debit',
+      status: payment.status,
+      paymentMode: payment.payment_mode,
+      chequeStatus: payment.cheque_status,
+    });
     return sum + (posted ? (Number(payment.amount) || 0) : 0);
   }, 0);
   order.total_paid = visiblePaid;

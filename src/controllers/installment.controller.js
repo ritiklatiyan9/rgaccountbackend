@@ -4,6 +4,15 @@ import { plotModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 
+const plotPaymentPosts = (alias = '') => {
+  const p = alias ? `${alias}.` : '';
+  return `financial_transaction_posts('credit', ${p}status, ${p}payment_type, ${p}cheque_status)`;
+};
+const installmentPaymentPosts = (alias = '') => {
+  const p = alias ? `${alias}.` : '';
+  return `financial_transaction_posts('credit', ${p}status, ${p}payment_mode, ${p}cheque_status)`;
+};
+
 let hasGracePeriodColumnCache = null;
 const hasGracePeriodColumn = async () => {
   if (hasGracePeriodColumnCache !== null) return hasGracePeriodColumnCache;
@@ -90,8 +99,7 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
      FROM plot_payments WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
-       AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
+       AND ${plotPaymentPosts()} GROUP BY plot_id`,
     [plotIds, creatorId]
   );
   const receivedMap = {};
@@ -102,8 +110,7 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
     `SELECT plot_id, MAX(date) AS last_payment_date
      FROM plot_payments WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
-       AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) GROUP BY plot_id`,
+       AND ${plotPaymentPosts()} GROUP BY plot_id`,
     [plotIds, creatorId]
   );
   const lastPayMap = {};
@@ -114,8 +121,7 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
     `SELECT plot_id, date, amount FROM plot_payments
      WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
-       AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED')) ORDER BY plot_id, date ASC`,
+       AND ${plotPaymentPosts()} ORDER BY plot_id, date ASC`,
     [plotIds, creatorId]
   );
   const paymentsByPlot = {};
@@ -453,8 +459,7 @@ export const listInstallments = asyncHandler(async (req, res) => {
     `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments
       WHERE plot_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))`,
+        AND ${plotPaymentPosts()}`,
     [parseInt(id), visibility.creatorId]
   );
   let remaining_pool = parseFloat(totalRes.rows[0].total_received) || 0;
@@ -757,13 +762,11 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
      FROM (
        SELECT pp.plot_id, pp.amount FROM plot_payments pp
         WHERE pp.plot_id = ANY($1) AND ($2::int IS NULL OR pp.created_by = $2::int)
-          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND ${plotPaymentPosts('pp')}
        UNION ALL
        SELECT pip.plot_id, pip.amount FROM plot_installment_payments pip
         WHERE pip.plot_id = ANY($1) AND ($2::int IS NULL OR pip.created_by = $2::int)
-          AND LOWER(COALESCE(pip.status, 'approved')) = 'approved'
-          AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND ${installmentPaymentPosts('pip')}
      ) u
      GROUP BY plot_id`,
     [plotIds, creatorId]
@@ -778,15 +781,13 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
        SELECT pp.date AS d, pp.amount FROM plot_payments pp
         WHERE pp.site_id = $1 AND pp.date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
           AND ($2::int IS NULL OR pp.created_by = $2::int)
-          AND LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-          AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND ${plotPaymentPosts('pp')}
        UNION ALL
        SELECT pip.payment_date AS d, pip.amount FROM plot_installment_payments pip
         JOIN plots p ON p.id = pip.plot_id
         WHERE p.site_id = $1 AND pip.payment_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
           AND ($2::int IS NULL OR pip.created_by = $2::int)
-          AND LOWER(COALESCE(pip.status, 'approved')) = 'approved'
-          AND (pip.cheque_status IS NULL OR pip.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND ${installmentPaymentPosts('pip')}
      ) u
      GROUP BY 1 ORDER BY 1`,
     [parseInt(site_id), creatorId]
@@ -1046,14 +1047,12 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
         SELECT plot_id, amount FROM plot_payments
          WHERE plot_id = ANY($1)
            AND ($2::int IS NULL OR created_by = $2::int)
-           AND LOWER(COALESCE(status, 'approved')) = 'approved'
-           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+           AND ${plotPaymentPosts()}
         UNION ALL
         SELECT plot_id, amount FROM plot_installment_payments
          WHERE plot_id = ANY($1)
            AND ($2::int IS NULL OR created_by = $2::int)
-           AND LOWER(COALESCE(status, 'approved')) = 'approved'
-           AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+           AND ${installmentPaymentPosts()}
      ) combined
      GROUP BY plot_id`,
     [plotIds, creatorId]
@@ -1067,8 +1066,7 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
      FROM plot_installment_payments
      WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
-       AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND ${installmentPaymentPosts()}
      GROUP BY installment_id`,
     [plotIds, creatorId]
   );
@@ -1080,13 +1078,11 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     `SELECT plot_id, MAX(d) AS last_payment_date FROM (
         SELECT plot_id, date AS d FROM plot_payments WHERE plot_id = ANY($1)
           AND ($2::int IS NULL OR created_by = $2::int)
-          AND LOWER(COALESCE(status, 'approved')) = 'approved'
-          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND ${plotPaymentPosts()}
         UNION ALL
         SELECT plot_id, payment_date AS d FROM plot_installment_payments WHERE plot_id = ANY($1)
           AND ($2::int IS NULL OR created_by = $2::int)
-          AND LOWER(COALESCE(status, 'approved')) = 'approved'
-          AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+          AND ${installmentPaymentPosts()}
      ) combined
      GROUP BY plot_id`,
     [plotIds, creatorId]
@@ -1098,13 +1094,11 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   const allPayRes = await pool.query(
     `SELECT plot_id, date, amount FROM plot_payments WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
-       AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND ${plotPaymentPosts()}
      UNION ALL
      SELECT plot_id, payment_date AS date, amount FROM plot_installment_payments WHERE plot_id = ANY($1)
        AND ($2::int IS NULL OR created_by = $2::int)
-       AND LOWER(COALESCE(status, 'approved')) = 'approved'
-       AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+       AND ${installmentPaymentPosts()}
      ORDER BY plot_id, date ASC`,
     [plotIds, creatorId]
   );

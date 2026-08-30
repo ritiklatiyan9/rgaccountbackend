@@ -51,12 +51,14 @@ export const createMonth = asyncHandler(async (req, res) => {
      prev_close AS (
        SELECT cfm.id,
               cfm.opening_balance
-                + COALESCE(SUM(cfe.credit), 0)
-                - COALESCE(SUM(cfe.debit),  0) AS closing_balance
+                + COALESCE(SUM(cfe.credit) FILTER (
+                    WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
+                  ), 0)
+                - COALESCE(SUM(cfe.debit) FILTER (
+                    WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
+                  ), 0) AS closing_balance
          FROM cash_flow_months cfm
          LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
-          AND (cfe.cheque_status IS NULL OR cfe.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-          AND (cfe.status IS NULL OR cfe.status != 'rejected')
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
         WHERE cfm.site_id = $1 AND cfm.month = $9 AND cfm.year = $10 AND cfm.ledger_name = $4
         GROUP BY cfm.id, cfm.opening_balance

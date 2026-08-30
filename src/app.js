@@ -42,7 +42,7 @@ app.all(
 
       const [permissionResult, siteResult] = await Promise.all([
         pool.query(
-          `SELECT module, can_read, can_write, can_update, can_delete, can_view_all
+          `SELECT module, can_read, can_write, can_update, can_delete, can_restore, can_view_all
              FROM user_permissions
             WHERE user_id = $1`,
           [user.id]

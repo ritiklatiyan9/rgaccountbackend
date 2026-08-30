@@ -200,6 +200,67 @@ const ImprestPairType = new GraphQLObjectType({
   },
 });
 
+const MiscIncomeDetailType = new GraphQLObjectType({
+  name: 'MiscIncomeDetail',
+  fields: {
+    credit: { type: new GraphQLNonNull(GraphQLFloat) },
+    debit:  { type: new GraphQLNonNull(GraphQLFloat) },
+    net:    { type: new GraphQLNonNull(GraphQLFloat) },
+    count:  { type: new GraphQLNonNull(GraphQLInt) },
+  },
+});
+
+const PlotIncomingType = new GraphQLObjectType({
+  name: 'PlotIncoming',
+  fields: {
+    finalSaleValue:{ type: new GraphQLNonNull(GraphQLFloat) },
+    saleValue:     { type: new GraphQLNonNull(GraphQLFloat) },
+    received:      { type: new GraphQLNonNull(GraphQLFloat) },
+    matchedReceived: { type: new GraphQLNonNull(GraphQLFloat) },
+    unmatchedReceived: { type: new GraphQLNonNull(GraphQLFloat) },
+    remaining:     { type: new GraphQLNonNull(GraphQLFloat) },
+    overpaid:      { type: new GraphQLNonNull(GraphQLFloat) },
+    collectionPct: { type: new GraphQLNonNull(GraphQLFloat) },
+    plotCount:     { type: new GraphQLNonNull(GraphQLInt) },
+  },
+});
+
+const LandProfitDetailType = new GraphQLObjectType({
+  name: 'LandProfitDetail',
+  fields: {
+    saleValue:     { type: new GraphQLNonNull(GraphQLFloat) },
+    purchaseCost:  { type: new GraphQLNonNull(GraphQLFloat) },
+    otherCost:     { type: new GraphQLNonNull(GraphQLFloat) },
+    bookProfit:    { type: new GraphQLNonNull(GraphQLFloat) },
+    received:      { type: new GraphQLNonNull(GraphQLFloat) },
+    remaining:     { type: new GraphQLNonNull(GraphQLFloat) },
+    cashReceived:  { type: new GraphQLNonNull(GraphQLFloat) },
+    bankReceived:  { type: new GraphQLNonNull(GraphQLFloat) },
+    purchaseCostAlreadyExpensed: { type: new GraphQLNonNull(GraphQLFloat) },
+    collectionPct: { type: new GraphQLNonNull(GraphQLFloat) },
+    marginPct:     { type: new GraphQLNonNull(GraphQLFloat) },
+    dealCount:     { type: new GraphQLNonNull(GraphQLInt) },
+  },
+});
+
+const RegistryPaymentDetailType = new GraphQLObjectType({
+  name: 'RegistryPaymentDetail',
+  fields: {
+    total:    { type: new GraphQLNonNull(GraphQLFloat) },
+    cash:     { type: new GraphQLNonNull(GraphQLFloat) },
+    bank:     { type: new GraphQLNonNull(GraphQLFloat) },
+    newTotal: { type: new GraphQLNonNull(GraphQLFloat) },
+    oldTotal: { type: new GraphQLNonNull(GraphQLFloat) },
+    newCash:  { type: new GraphQLNonNull(GraphQLFloat) },
+    newBank:  { type: new GraphQLNonNull(GraphQLFloat) },
+    oldCash:  { type: new GraphQLNonNull(GraphQLFloat) },
+    oldBank:  { type: new GraphQLNonNull(GraphQLFloat) },
+    count:    { type: new GraphQLNonNull(GraphQLInt) },
+    newCount: { type: new GraphQLNonNull(GraphQLInt) },
+    oldCount: { type: new GraphQLNonNull(GraphQLInt) },
+  },
+});
+
 const SiteBalanceDetailType = new GraphQLObjectType({
   name: 'SiteBalanceDetail',
   fields: {
@@ -209,7 +270,13 @@ const SiteBalanceDetailType = new GraphQLObjectType({
     bankBalance:          { type: new GraphQLNonNull(GraphQLFloat) },
     balanceBeforeImprest: { type: new GraphQLNonNull(GraphQLFloat) },
     imprestHeld:          { type: new GraphQLNonNull(GraphQLFloat) },
+    adminImprestReserved: { type: new GraphQLNonNull(GraphQLFloat) },
+    pendingImprestReservations: { type: new GraphQLNonNull(GraphQLFloat) },
+    distributableBalance: { type: new GraphQLNonNull(GraphQLFloat) },
     siteBalance:          { type: new GraphQLNonNull(GraphQLFloat) },
+    periodMoneyIn:        { type: new GraphQLNonNull(GraphQLFloat) },
+    periodMoneyOut:       { type: new GraphQLNonNull(GraphQLFloat) },
+    periodNet:            { type: new GraphQLNonNull(GraphQLFloat) },
   },
 });
 
@@ -221,13 +288,23 @@ const KpiCardsType = new GraphQLObjectType({
     // of re-deriving it from revenue/expense/outstanding components.
     siteBalance:           { type: new GraphQLNonNull(GraphQLFloat) },
     siteBalanceDetail:     { type: new GraphQLNonNull(SiteBalanceDetailType) },
+    plotIncoming:          { type: new GraphQLNonNull(PlotIncomingType) },
+    landProfitDetail:      { type: new GraphQLNonNull(LandProfitDetailType) },
+    registryPaymentDetail: { type: new GraphQLNonNull(RegistryPaymentDetailType) },
+    runningExpense:        { type: new GraphQLNonNull(GraphQLFloat) },
+    expectedProfit:        { type: new GraphQLNonNull(GraphQLFloat) },
+    currentProfit:         { type: new GraphQLNonNull(GraphQLFloat) },
     totalRevenue:          { type: new GraphQLNonNull(GraphQLFloat) },
     totalExpense:          { type: new GraphQLNonNull(GraphQLFloat) },
     netProfit:             { type: new GraphQLNonNull(GraphQLFloat) },
     profitMargin:          { type: new GraphQLNonNull(GraphQLFloat) },
+    currentProfitMargin:   { type: new GraphQLNonNull(GraphQLFloat) },
     outstanding:           { type: new GraphQLNonNull(GraphQLFloat) },
     cashflow:              { type: new GraphQLNonNull(GraphQLFloat) },
     personalLedgerCredit:  { type: new GraphQLNonNull(GraphQLFloat) },
+    // Nullable on purpose: KPI payloads cached before this field existed must not error.
+    miscIncome:            { type: GraphQLFloat },
+    miscIncomeDetail:      { type: MiscIncomeDetailType },
     imprestGiven:          { type: new GraphQLNonNull(GraphQLFloat) },
     registryPayments:      { type: new GraphQLNonNull(GraphQLFloat) },
     registryPaymentsCount: { type: new GraphQLNonNull(GraphQLInt) },
@@ -406,6 +483,12 @@ const PlotType = new GraphQLObjectType({
     status:              { type: GraphQLString },
     notes:               { type: GraphQLString },
     plot_tag:            { type: GraphQLString },
+    // Co-applicant — one home on the plot row, shared by booking → plot → NOC → registry.
+    co_applicant_name:     { type: GraphQLString },
+    co_applicant_relation: { type: GraphQLString },
+    co_applicant_phone:    { type: GraphQLString },
+    co_applicant_aadhar:   { type: GraphQLString },
+    co_applicant_pan:      { type: GraphQLString },
     team:                { type: GraphQLString },
     plot_commission:     { type: GraphQLFloat },
     commission_enabled:  { type: GraphQLBoolean },
@@ -827,9 +910,12 @@ const QueryType = new GraphQLObjectType({
         // single biggest perf win on the dashboard. Mutations on any of
         // the 6 source modules already call clearCacheByPrefixes(['dashboard:'])
         // (see e.g. cashflow.controller.js), so cached values stay fresh.
-        // v2 includes the exact Site Balance reconciliation fields. Versioning
-        // prevents an older cached payload from returning a blank detail.
-        const key = cacheKey(`kpi-cards-v3-range${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
+        // v7 aligns final plot sale value with Plot Payments > Pricing,
+        // in addition to cumulative receipt reconciliation and the land-cost overlap
+        // guard alongside the exact Admin
+        // custody snapshot. Versioning prevents an older payload from failing
+        // the new non-null GraphQL contract.
+        const key = cacheKey(`kpi-cards-v7-plot-pricing-sale${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);

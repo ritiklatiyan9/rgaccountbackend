@@ -1,13 +1,9 @@
 import MasterModel from './MasterModel.js';
 
-// A plot_payments row counts toward "Received" under the same three guards
-// ledger_entries applies (migration 079): approved, not bounced/returned, and
-// a sane date. Shared so every LATERAL aggregate below stays in lockstep with
-// the Dashboard and Day Book instead of drifting the way `total_received`
-// used to (it summed the raw table with none of these).
+// Plot payments are credits: pending rows count immediately, but cheque rows
+// wait until CLEARED. The sane-date guard stays aligned with the ledger.
 const PP_COUNTABLE = `
-  LOWER(COALESCE(pp.status, 'approved')) = 'approved'
-  AND (pp.cheque_status IS NULL OR pp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+  financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
   AND pp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
 `;
 
@@ -64,6 +60,27 @@ class PlotModel extends MasterModel {
     return result.rows;
   }
 
+  /** Lightweight options for the Day Book plot picker.
+   *  The full Plot model includes KYC, pricing, commission and installment
+   *  fields plus multiple string aggregates. The picker needs only identity,
+   *  price and received total, so keep this high-frequency response compact. */
+  async findOptionsBySiteId(siteId, pool) {
+    const query = `
+      SELECT p.id, p.plot_no, p.block, p.buyer_name, p.sale_price,
+             COALESCE(agg.total_received, 0) AS total_received
+      FROM plots p
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(pp.amount) FILTER (WHERE ${PP_COUNTABLE}), 0) AS total_received
+        FROM plot_payments pp
+        WHERE pp.plot_id = p.id
+      ) agg ON TRUE
+      WHERE p.site_id = $1
+      ORDER BY p.plot_no ASC
+    `;
+    const result = await pool.query(query, [siteId]);
+    return result.rows;
+  }
+
   /** Check for duplicate plot_no within a site — returns ALL matches */
   async findAllByPlotNo(siteId, plotNo, pool) {
     const query = `SELECT * FROM plots WHERE site_id = $1 AND UPPER(plot_no) = UPPER($2) ORDER BY id`;
@@ -71,30 +88,78 @@ class PlotModel extends MasterModel {
     return result.rows;
   }
 
-  /** Lightweight plot-number search for the dashboard quick-search.
-   *  Matches plot_no (case-insensitive, contains) and returns only the
-   *  fields needed to render a result row + navigate to the detail page.
-   *  Ordering: exact match → prefix match → current (non-RESALE) booking →
-   *  natural plot_no → newest row. So a resale plot's CURRENT owner row
-   *  surfaces before the older RESALE-tagged rows that share its number. */
-  async searchByPlotNo(siteId, q, pool, limit = 12) {
+  /**
+   * Exact plot-number search for the Dashboard command bar.
+   *
+   * A query for A2 must never return A22/A20. One indexed equality lookup
+   * resolves every booking/resale row for that exact plot number, selects the
+   * current row for navigation, and aggregates its module footprint in the
+   * same database round-trip.
+   */
+  async searchByPlotNo(siteId, q, pool) {
     const term = String(q || '').trim();
     if (!term) return [];
-    // Escape LIKE wildcards so a stray % / _ in the query can't broaden the match.
-    const escaped = term.replace(/[\\%_]/g, (c) => `\\${c}`);
     const query = `
-      SELECT id, plot_no, block, buyer_name, booking_by, status
-      FROM plots
-      WHERE site_id = $1 AND plot_no ILIKE $2 ESCAPE '\\'
-      ORDER BY
-        (UPPER(plot_no) = UPPER($3)) DESC,
-        (UPPER(plot_no) LIKE UPPER($3) || '%') DESC,
-        (status = 'RESALE') ASC,
-        plot_no ASC,
-        id DESC
-      LIMIT $4
+      WITH matched_plots AS (
+        SELECT id, site_id, plot_no, block, buyer_name, booking_by, status, plot_tag
+          FROM plots
+         WHERE site_id = $1
+           AND UPPER(plot_no) = UPPER($2)
+      ),
+      selected_plot AS (
+        SELECT *
+          FROM matched_plots
+         ORDER BY
+           (UPPER(TRIM(COALESCE(plot_tag, ''))) = 'OLD') ASC,
+           (UPPER(COALESCE(status, '')) = 'RESALE') ASC,
+           id DESC
+         LIMIT 1
+      ),
+      registry_matches AS (
+        SELECT pr.id, pr.plot_id, pr.noc_generated_at, pr.noc_approved_at
+          FROM plot_registries pr
+         WHERE pr.site_id = $1
+           AND (
+             pr.plot_id IN (SELECT id FROM matched_plots)
+             OR (pr.plot_id IS NULL AND UPPER(pr.plot_no) = UPPER($2))
+           )
+      ),
+      module_summary AS (
+        SELECT
+          (SELECT COUNT(*)::int FROM matched_plots) AS booking_count,
+          (SELECT COUNT(*)::int FROM plot_payments pp
+            WHERE pp.plot_id IN (SELECT id FROM matched_plots)) AS payment_count,
+          (SELECT COUNT(*)::int FROM plot_installments pi
+            WHERE pi.plot_id IN (SELECT id FROM matched_plots)) AS installment_count,
+          (SELECT COUNT(*)::int FROM plot_installment_payments pip
+            WHERE pip.plot_id IN (SELECT id FROM matched_plots)) AS installment_payment_count,
+          (SELECT COUNT(*)::int FROM plot_commissions_v2 pc
+            WHERE pc.plot_id IN (SELECT id FROM matched_plots)) AS commission_count,
+          (SELECT COUNT(*)::int
+             FROM plot_commission_payments pcp
+             JOIN plot_commissions_v2 pc ON pc.id = pcp.plot_commission_id
+            WHERE pc.plot_id IN (SELECT id FROM matched_plots)) AS commission_payment_count,
+          (SELECT COUNT(*)::int FROM registry_matches) AS registry_count,
+          (SELECT COUNT(*)::int
+             FROM plot_registry_payments prp
+            WHERE prp.registry_id IN (SELECT id FROM registry_matches)) AS registry_payment_count,
+          (SELECT COUNT(*)::int
+             FROM documents d
+             LEFT JOIN kyc_cases k ON k.id = d.kyc_case_id
+             LEFT JOIN bookings b ON b.id = k.booking_id
+            WHERE (d.plot_id IN (SELECT id FROM matched_plots)
+                   OR b.plot_id IN (SELECT id FROM matched_plots))
+              AND COALESCE(d.uploaded_source, 'BOOKING') <> 'DMS'
+              AND UPPER(COALESCE(d.category, '')) IN ('REGISTRY', 'NOC')) AS document_count,
+          (SELECT id FROM registry_matches ORDER BY id DESC LIMIT 1) AS registry_id,
+          COALESCE((SELECT BOOL_OR(noc_generated_at IS NOT NULL OR noc_approved_at IS NOT NULL)
+                      FROM registry_matches), false) AS has_noc
+      )
+      SELECT selected_plot.*, module_summary.*
+        FROM selected_plot
+        CROSS JOIN module_summary
     `;
-    const result = await pool.query(query, [siteId, `%${escaped}%`, term, limit]);
+    const result = await pool.query(query, [siteId, term]);
     return result.rows;
   }
 
@@ -184,8 +249,7 @@ class PlotPaymentModel extends MasterModel {
       FROM plot_payments
       WHERE plot_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND financial_transaction_posts('credit', status, payment_type, cheque_status)
         AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
       GROUP BY COALESCE(NULLIF(payment_from, ''), 'OTHER')
       ORDER BY total_amount DESC
@@ -204,8 +268,7 @@ class PlotPaymentModel extends MasterModel {
       FROM plot_payments
       WHERE plot_id = $1
         AND ($2::int IS NULL OR created_by = $2::int)
-        AND LOWER(COALESCE(status, 'approved')) = 'approved'
-        AND (cheque_status IS NULL OR cheque_status NOT IN ('BOUNCED', 'RETURNED'))
+        AND financial_transaction_posts('credit', status, payment_type, cheque_status)
         AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
       GROUP BY COALESCE(NULLIF(received_by, ''), 'UNKNOWN')
       ORDER BY total_amount DESC

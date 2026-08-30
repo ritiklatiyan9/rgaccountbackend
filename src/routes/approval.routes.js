@@ -19,7 +19,7 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 
 const approvalReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'approvals' });
 // Approval mutations affect all modules (expenses, farmers, plots, cashflow, daybook, etc.)
-const bustApprovalCache = invalidateCacheOnSuccess(['/approvals', '/expenses', '/farmers', '/plots', '/cashflow', '/daybook', '/firms', '/registries']);
+const bustApprovalCache = invalidateCacheOnSuccess(['/approvals', '/expenses', '/farmers', '/plots', '/cashflow', '/daybook', '/firms', '/registries', 'land-deals|', '/land-deals', 'misc-income|']);
 
 // All approval routes require auth + admin role or sub-admin with expense_approval permission
 router.use(authMiddleware);

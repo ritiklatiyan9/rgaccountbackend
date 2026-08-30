@@ -10,7 +10,7 @@ const ACTION_WORDS = new Map([
 ]);
 const MODULE_MAP = {
   auth: 'authentication', admin: 'administration', sites: 'sites', farmers: 'farmers',
-  commissions: 'commissions', 'plot-commission': 'plot_commission', cashflow: 'cashflow',
+  commissions: 'commissions', 'land-deals': 'land_deals', 'misc-income': 'misc_income', 'plot-commission': 'plot_commission', cashflow: 'cashflow',
   firms: 'firm_transactions', plots: 'plot_payments', 'plot-documents': 'plot_payments',
   documents: 'document_search', 'record-documents': 'document_search', forecast: 'finance_forecast',
   expenses: 'expenses', registries: 'plot_registry', members: 'clients', 'member-kyc': 'clients',
@@ -22,7 +22,8 @@ const MODULE_MAP = {
   compliance: 'compliance', 'compliance-documents': 'compliance', construction: 'construction',
   inventory: 'inventory', reports: 'reports', 'pending-lookout': 'approvals',
   'transaction-transfers': 'transaction_transfers', upload: 'uploads',
-  'bank-reconciliation': 'bank_reconciliation',
+  'bank-reconciliation': 'bank_reconciliation', 'management-analytics': 'management_analytics',
+  'recycle-bin': 'recycle_bin',
 };
 
 const labelize = (value) => String(value || '')
@@ -100,7 +101,7 @@ const resolveAmount = (requestBody, responseBody) => {
 export default function auditRequestMiddleware(req, res, next) {
   const method = String(req.method || '').toUpperCase();
   const segments = segmentsOf(req);
-  if (!METHOD_ACTION[method] || segments[0] === 'audit-logs') return next();
+  if (!METHOD_ACTION[method] || segments[0] === 'audit-logs' || segments[0] === 'receipt-history') return next();
   if (segments[0] === 'graphql' && !/^\s*mutation\b/i.test(String(req.body?.query || ''))) return next();
 
   const startedAt = Date.now();

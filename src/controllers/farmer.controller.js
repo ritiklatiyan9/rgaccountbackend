@@ -388,8 +388,7 @@ export const listPayments = asyncHandler(async (req, res) => {
        s.state AS site_state
      FROM farmers f
      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
-       AND (fp.cheque_status IS NULL OR fp.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
-       AND LOWER(COALESCE(fp.status, 'approved')) = 'approved'
+       AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
        AND ($2::int IS NULL OR fp.created_by = $2::int)
      LEFT JOIN sites s ON s.id = f.site_id
      WHERE f.id = $1
@@ -452,6 +451,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
   const paymentId = parseInt(req.params.paymentId);
   const entryVisibility = await resolveEntryVisibility(req.user, 'farmers', null);
   const {
+    cheque_no, assigned_admin_id,
     date, particular, amount, by_note, remarks,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
     voucher_url,
@@ -471,6 +471,9 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (bank_reference !== undefined) updateData.bank_reference = bank_reference;
   if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
+  if (cheque_no !== undefined) updateData.cheque_no = cheque_no ? String(cheque_no).trim() : null;
+  if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+  if (payment_mode !== undefined) updateData.cheque_status = String(payment_mode).toUpperCase() === 'CHEQUE' ? 'PENDING' : null;
 
   if (Object.keys(updateData).length === 0) {
     return res.status(400).json({ message: 'Nothing to update' });

@@ -6,7 +6,7 @@ import crypto from 'crypto';
  * Override via env: PUBLIC_VERIFY_URL=https://www.your-site.com/verify-receipt
  */
 const PUBLIC_VERIFY_URL =
-  process.env.PUBLIC_VERIFY_URL || 'http://localhost:5173/verify-receipt';
+  process.env.PUBLIC_VERIFY_URL || 'https://defencegarden.com/verify-receipt';
 
 /**
  * Receipt-type codes. Short strings keep the QR payload small.

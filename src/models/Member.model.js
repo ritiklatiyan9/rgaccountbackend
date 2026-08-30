@@ -25,6 +25,7 @@ class MemberModel extends MasterModel {
       m.aadhar_no, m.pan_no, m.voter_id, m.passport_no, m.driving_license_no,
       m.aadhar_front_url, m.aadhar_back_url, m.pan_card_url, m.voter_id_url,
       m.passport_url, m.driving_license_url, m.cheque_url, m.other_kyc_url, m.team,
+      m.occupation, m.latitude, m.longitude, m.village, m.district, m.geocode_source,
       shared_kyc.id AS shared_kyc_case_id,
       shared_kyc.status AS shared_kyc_status,
       shared_kyc.document_count AS shared_kyc_document_count

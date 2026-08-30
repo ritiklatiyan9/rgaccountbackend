@@ -10,6 +10,7 @@ import {
   updateSmsReminderSettings,
   getReceiptDesign,
   updateReceiptDesign,
+  updateFeature,
 } from '../controllers/applicationSetting.controller.js';
 import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
@@ -19,6 +20,9 @@ const bustRegistryCache = invalidateCacheOnSuccess(['registries|']);
 // Every authenticated user may read flags for an assigned site because feature
 // consumers (such as Plot Registry) need them. Only admins may change them.
 router.get('/features', authMiddleware, getFeatures);
+// One endpoint for every control-panel switch (validated against FEATURE_KEYS).
+router.put('/features', authMiddleware, requireRole('admin'), bustRegistryCache, updateFeature);
+
 router.put(
   '/features/plot-registry-workflow-unlocked',
   authMiddleware,

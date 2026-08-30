@@ -161,14 +161,18 @@ export const deleteCommission = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const existing = await plotCommissionModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Commission entry not found' });
-
-  // ── Delete linked DayBook entry first ──
+  const client = await pool.connect();
   try {
-    await pool.query(`DELETE FROM day_book WHERE commission_id = $1`, [parseInt(id)]);
-  } catch (err) {
-    console.error('[Commission] Failed to delete DayBook entry:', err.message);
+    await client.query('BEGIN');
+    // The module row and linked ledger mirror must be one restorable unit.
+    await client.query(`DELETE FROM day_book WHERE commission_id = $1`, [parseInt(id)]);
+    await plotCommissionModel.delete(parseInt(id), client);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
   }
-
-  await plotCommissionModel.delete(parseInt(id), pool);
   res.json({ message: 'Commission entry deleted' });
 });
