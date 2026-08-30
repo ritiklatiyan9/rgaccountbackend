@@ -1,5 +1,7 @@
 import crypto from 'crypto';
-import { sanitizeAuditValue, writeAuditLog } from '../services/auditLog.service.js';
+import {
+  attributeRecycleBinDeletion, sanitizeAuditValue, writeAuditLog,
+} from '../services/auditLog.service.js';
 
 const METHOD_ACTION = { POST: 'CREATE', PUT: 'UPDATE', PATCH: 'UPDATE', DELETE: 'DELETE' };
 const ACTION_WORDS = new Map([
@@ -128,9 +130,10 @@ export default function auditRequestMiddleware(req, res, next) {
     const description = `${labelize(actor.email || `User ${actor.id}`)} ${verb} ${labelize(entityType)}${entityId != null ? ` #${entityId}` : ''}`;
     const transactionName = resolveTransactionName(req.body, responseBody);
     const amount = resolveAmount(req.body, responseBody);
+    const finishedAt = Date.now();
 
     setImmediate(() => {
-      writeAuditLog({
+      const auditEntry = {
         organizationId: actor.organization_id,
         siteId,
         userId: actor.id,
@@ -158,7 +161,19 @@ export default function auditRequestMiddleware(req, res, next) {
         ipAddress: req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress,
         userAgent: req.get('user-agent'),
         requestId,
-      }).catch((error) => console.error('[audit] write failed:', error.message));
+      };
+      const writes = [writeAuditLog(auditEntry)];
+      if (action === 'DELETE' && outcome === 'SUCCESS') {
+        writes.push(attributeRecycleBinDeletion({
+          organizationId: actor.organization_id,
+          userId: actor.id,
+          module,
+          entityId,
+          startedAt,
+          finishedAt,
+        }));
+      }
+      Promise.all(writes).catch((error) => console.error('[audit] write failed:', error.message));
     });
   });
 

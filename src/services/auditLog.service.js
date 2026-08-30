@@ -82,3 +82,41 @@ export async function writeAuditLog(entry, db = pool) {
   );
   return result.rows[0];
 }
+
+/**
+ * Associate the recycle-bin batch created by a successful authenticated delete
+ * with its actor. The database trigger captures the rows atomically; this
+ * post-response attribution covers controllers that use pooled one-shot queries
+ * and therefore cannot set a transaction-local PostgreSQL user context.
+ */
+export async function attributeRecycleBinDeletion(entry, db = pool) {
+  const userId = Number(entry.userId);
+  const organizationId = Number(entry.organizationId) || 1;
+  const module = String(entry.module || '').trim();
+  if (!Number.isInteger(userId) || userId <= 0 || !module) return { attributed: 0 };
+
+  const entityId = entry.entityId == null ? null : String(entry.entityId);
+  const startedAt = new Date((Number(entry.startedAt) || Date.now()) - 1500);
+  const finishedAt = new Date((Number(entry.finishedAt) || Date.now()) + 1500);
+  const result = await db.query(
+    `WITH candidate_batches AS (
+       SELECT deletion_batch,
+              BOOL_OR(source_module = $4 AND ($5::text IS NULL OR record_id = $5)) AS request_match
+         FROM recycle_bin_entries
+        WHERE organization_id = $2
+          AND deleted_by IS NULL
+          AND deleted_at BETWEEN $3 AND $6
+        GROUP BY deletion_batch
+     ), matched_batches AS (
+       SELECT deletion_batch FROM candidate_batches WHERE request_match
+     )
+     UPDATE recycle_bin_entries e
+        SET deleted_by = $1
+      WHERE e.organization_id = $2
+        AND e.deleted_by IS NULL
+        AND e.deletion_batch IN (SELECT deletion_batch FROM matched_batches)
+     RETURNING e.id`,
+    [userId, organizationId, startedAt, module, entityId, finishedAt]
+  );
+  return { attributed: result.rowCount };
+}

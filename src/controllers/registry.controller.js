@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
+import { withRegistryPaymentVerifyUrl } from '../utils/registryPaymentReceipt.js';
 import pool from '../config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
@@ -396,6 +397,18 @@ export const updateRegistry = asyncHandler(async (req, res) => {
   if (seller_name !== undefined) updateData.seller_name = seller_name ? seller_name.trim().toUpperCase() : null;
   if (created_entry_date !== undefined) updateData.created_entry_date = created_entry_date || null;
   if (bank_amount !== undefined) updateData.bank_amount = bank_amount === '' ? null : (parseFloat(bank_amount) || 0);
+  // Registry Value RO (manual, rounded, cash + bank). Empty string clears; negatives rejected.
+  for (const f of ['ro_cash_amount', 'ro_bank_amount']) {
+    if (req.body[f] === undefined) continue;
+    if (req.body[f] === '' || req.body[f] === null) { updateData[f] = null; continue; }
+    const v = Number(req.body[f]);
+    if (!Number.isFinite(v) || v < 0) return res.status(400).json({ message: 'Registry Value RO must be zero or more' });
+    updateData[f] = Math.round(v * 100) / 100;
+  }
+  if (updateData.ro_cash_amount !== undefined || updateData.ro_bank_amount !== undefined) {
+    updateData.ro_updated_at = new Date();
+    updateData.ro_updated_by = req.user.id;
+  }
   if (registry_payment !== undefined) updateData.registry_payment = parseFloat(registry_payment) || 0;
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
   if (req.body.assigned_admin_id !== undefined) updateData.assigned_admin_id = req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null;
@@ -658,13 +671,28 @@ export const listRegistryPayments = asyncHandler(async (req, res) => {
   const { registry_id } = req.query;
   if (!registry_id) return res.status(400).json({ message: 'registry_id is required' });
   const entryVisibility = await resolveEntryVisibility(req.user, 'plot_registry', req.query.created_by);
+  const registryId = parseInt(registry_id);
 
-  const [payments, registry] = await Promise.all([
-    plotRegistryPaymentModel.findByRegistryId(parseInt(registry_id), pool, entryVisibility.creatorId),
-    plotRegistryModel.findByIdWithTotals(parseInt(registry_id), pool, entryVisibility.creatorId),
+  const [payments, registry, contextResult] = await Promise.all([
+    plotRegistryPaymentModel.findByRegistryId(registryId, pool, entryVisibility.creatorId),
+    plotRegistryModel.findByIdWithTotals(registryId, pool, entryVisibility.creatorId),
+    pool.query(
+      `SELECT pr.customer_name, pr.plot_no, p.buyer_name,
+              s.name AS site_name, s.city AS site_city, s.state AS site_state
+         FROM plot_registries pr
+         LEFT JOIN plots p ON p.id = pr.plot_id
+         LEFT JOIN sites s ON s.id = pr.site_id
+        WHERE pr.id = $1`,
+      [registryId]
+    ),
   ]);
 
-  res.json({ payments, registry, entryVisibility });
+  const receiptContext = contextResult.rows[0] || registry || {};
+  res.json({
+    payments: payments.map((payment) => withRegistryPaymentVerifyUrl(payment, receiptContext)),
+    registry,
+    entryVisibility,
+  });
 });
 
 /** GET /registries/payments/:id */
@@ -675,7 +703,16 @@ export const getRegistryPayment = asyncHandler(async (req, res) => {
   if (!(await canUserViewEntry(req.user, 'plot_registry', payment.created_by))) {
     return res.status(404).json({ message: 'Payment not found' });
   }
-  res.json({ payment });
+  const { rows } = await pool.query(
+    `SELECT pr.customer_name, pr.plot_no, p.buyer_name,
+            s.name AS site_name, s.city AS site_city, s.state AS site_state
+       FROM plot_registries pr
+       LEFT JOIN plots p ON p.id = pr.plot_id
+       LEFT JOIN sites s ON s.id = pr.site_id
+      WHERE pr.id = $1`,
+    [payment.registry_id]
+  );
+  res.json({ payment: withRegistryPaymentVerifyUrl(payment, rows[0] || {}) });
 });
 
 /** PUT /registries/payments/:id */

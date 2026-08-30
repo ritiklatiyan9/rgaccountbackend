@@ -2,17 +2,17 @@ import pool from '../config/db.js';
 import { cacheEnabled, cacheGet, cacheSet } from '../config/cache.js';
 import { getAllKpis } from '../graphql/services/kpi.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
+import {
+  aiProvider, defaultModel, resolveModels, sendEvent, startSse, streamOpenRouterToSse,
+} from '../services/openRouterStream.service.js';
 
-const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
-const DEFAULT_OPENROUTER_MODEL = 'openrouter/free';
 const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT = 24;
 const userWindows = new Map();
-const openRouterModel = () => (
-  process.env.OPENROUTER_DASHBOARD_MODEL
-  || process.env.OPENROUTER_MODEL
-  || DEFAULT_OPENROUTER_MODEL
-);
+const dashboardPreferredModels = () => String(process.env.OPENROUTER_DASHBOARD_MODEL || '')
+  .split(',')
+  .map((model) => model.trim())
+  .filter(Boolean);
 
 const ADMIN_ROLES = ['admin', 'super_admin'];
 
@@ -872,49 +872,6 @@ Available sidebar modules:
 ${JSON.stringify(modules.map(({ key, label, path, description }) => ({ key, label, path, description })))}
 `.trim();
 
-const sendEvent = (res, event, data) => {
-  if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-};
-
-const relayOpenRouterStream = async (response, res) => {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let tokenCount = 0;
-  let providerError = null;
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line.startsWith('data:')) continue;
-      const payload = line.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
-      try {
-        const parsed = JSON.parse(payload);
-        if (parsed.error?.message) {
-          providerError = parsed.error.message;
-          continue;
-        }
-        const token = parsed.choices?.[0]?.delta?.content;
-        if (token) {
-          tokenCount += 1;
-          sendEvent(res, 'token', { token });
-        }
-      } catch {
-        // Provider keep-alives and partial lines are safe to ignore.
-      }
-    }
-  }
-
-  return { tokenCount, providerError };
-};
-
 export const streamDashboardAssistant = asyncHandler(async (req, res) => {
   const siteId = Number(req.body?.siteId);
   if (!Number.isInteger(siteId) || siteId <= 0) {
@@ -963,105 +920,31 @@ export const streamDashboardAssistant = asyncHandler(async (req, res) => {
   });
   const generatedAt = new Date().toISOString();
 
-  res.status(200);
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders?.();
+  startSse(res);
+
+  const preferredModels = dashboardPreferredModels();
 
   sendEvent(res, 'meta', {
     generatedAt,
-    provider: process.env.OPENROUTER_API_KEY ? 'openrouter' : 'local',
-    model: openRouterModel(),
+    provider: aiProvider(),
+    model: preferredModels[0] || defaultModel(),
     moduleCount: visibleModules.length,
   });
   actions.forEach((action) => sendEvent(res, 'action', action));
 
-  const fallback = () => sendEvent(res, 'token', {
-    token: buildLocalDashboardAnswer(question, snapshot, actions, visibleModules, site),
+  const models = process.env.OPENROUTER_API_KEY
+    ? await resolveModels(preferredModels)
+    : [];
+
+  return streamOpenRouterToSse({
+    res,
+    systemPrompt: buildSystemPrompt({ site, snapshot, compliance, modules: visibleModules }),
+    messages,
+    fallback: () => buildLocalDashboardAnswer(question, snapshot, actions, visibleModules, site),
+    temperature: 0.08,
+    maxTokens: 900,
+    models,
+    title: 'DG Accounts Dashboard AI',
+    logTag: '[DashboardAI]',
   });
-
-  if (!process.env.OPENROUTER_API_KEY) {
-    fallback();
-    sendEvent(res, 'done', { ok: true, fallback: true });
-    return res.end();
-  }
-
-  const abortController = new AbortController();
-  let upstreamTimedOut = false;
-  const upstreamTimeout = setTimeout(() => {
-    upstreamTimedOut = true;
-    abortController.abort();
-  }, 45_000);
-  res.on('close', () => {
-    if (!res.writableEnded) abortController.abort();
-  });
-
-  try {
-    const openRouterResponse = await fetch(OPENROUTER_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': process.env.OPENROUTER_SITE_URL || `http://localhost:${process.env.PORT || 8000}`,
-        'X-OpenRouter-Title': process.env.OPENROUTER_APP_NAME || 'DG Accounts Dashboard AI',
-      },
-      body: JSON.stringify({
-        model: openRouterModel(),
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              site,
-              snapshot,
-              compliance,
-              modules: visibleModules,
-            }),
-          },
-          ...messages,
-        ],
-        temperature: 0.08,
-        max_tokens: 650,
-        stream: true,
-      }),
-      signal: abortController.signal,
-    });
-
-    if (!openRouterResponse.ok || !openRouterResponse.body) {
-      const errorText = await openRouterResponse.text().catch(() => '');
-      console.error(`[DashboardAI] upstream request failed with status ${openRouterResponse.status}${errorText ? `: ${errorText.slice(0, 280)}` : ''}`);
-      fallback();
-      sendEvent(res, 'done', { ok: true, fallback: true });
-      return res.end();
-    }
-
-    const { tokenCount, providerError } = await relayOpenRouterStream(openRouterResponse, res);
-    if (tokenCount === 0) {
-      console.error(`[DashboardAI] upstream stream returned no answer${providerError ? `: ${providerError}` : ''}`);
-      fallback();
-      sendEvent(res, 'done', { ok: true, fallback: true });
-      return res.end();
-    }
-    if (providerError) {
-      sendEvent(res, 'error', { message: 'The AI response was interrupted. Please ask again for a complete answer.' });
-    }
-    sendEvent(res, 'done', { ok: true, fallback: false, partial: Boolean(providerError) });
-    return res.end();
-  } catch (error) {
-    if (error?.name === 'AbortError' && upstreamTimedOut && !res.writableEnded) {
-      console.error('[DashboardAI] OpenRouter request timed out');
-      fallback();
-      sendEvent(res, 'done', { ok: true, fallback: true, timeout: true });
-      return res.end();
-    }
-    if (error?.name !== 'AbortError') {
-      console.error('[DashboardAI] request failed:', error.message);
-      fallback();
-      sendEvent(res, 'done', { ok: true, fallback: true });
-      return res.end();
-    }
-  } finally {
-    clearTimeout(upstreamTimeout);
-  }
 });

@@ -105,14 +105,29 @@ export const listRecycleBin = asyncHandler(async (req, res) => {
     pool.query(
       `${batchListSql}
        SELECT v.*,
+              COALESCE(v.deleted_by, inferred_deleter.user_id) AS effective_deleted_by,
               deleter.name AS deleted_by_name,
+              CASE WHEN v.deleted_by IS NOT NULL THEN 'recorded' WHEN inferred_deleter.user_id IS NOT NULL THEN 'audit' ELSE 'unknown' END AS deleted_by_source,
               restorer.name AS restored_by_name,
               COALESCE(
                 (SELECT string_agg(s.name, ', ' ORDER BY s.name) FROM sites s WHERE s.id = ANY(v.site_ids)),
                 CASE WHEN COALESCE(cardinality(v.site_ids), 0) = 0 THEN 'Organisation-wide' ELSE 'Deleted site' END
               ) AS site_name
          FROM visible v
-         LEFT JOIN users deleter ON deleter.id = v.deleted_by
+         LEFT JOIN LATERAL (
+           SELECT a.user_id
+             FROM audit_logs a
+            WHERE v.deleted_by IS NULL
+              AND a.organization_id = $1
+              AND a.action = 'DELETE'
+              AND a.outcome = 'SUCCESS'
+              AND a.created_at BETWEEN v.deleted_at - INTERVAL '5 seconds' AND v.deleted_at + INTERVAL '90 seconds'
+              AND (a.entity_id = v.record_id OR a.module = v.primary_module)
+            ORDER BY (a.entity_id = v.record_id) DESC,
+                     ABS(EXTRACT(EPOCH FROM (a.created_at - v.deleted_at))) ASC
+            LIMIT 1
+         ) inferred_deleter ON TRUE
+         LEFT JOIN users deleter ON deleter.id = COALESCE(v.deleted_by, inferred_deleter.user_id)
          LEFT JOIN users restorer ON restorer.id = v.restored_by
         ORDER BY CASE WHEN $4 = 'active' THEN v.deleted_at ELSE v.restored_at END DESC, v.deletion_batch DESC
         LIMIT $8 OFFSET $9`,
@@ -200,9 +215,11 @@ export const getRecycleBinBatch = asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT e.id, e.deletion_batch, e.source_module, e.source_table, e.record_id,
             e.display_name, e.delete_kind, e.deleted_at, e.restored_at,
+            e.deleted_by, deleter.name AS deleted_by_name,
             e.row_data, e.site_id, s.name AS site_name
        FROM recycle_bin_entries e
        LEFT JOIN sites s ON s.id=e.site_id
+       LEFT JOIN users deleter ON deleter.id=e.deleted_by
       WHERE e.deletion_batch=$1
       ORDER BY e.id
       LIMIT $2`,

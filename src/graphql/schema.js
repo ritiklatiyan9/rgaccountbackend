@@ -312,6 +312,13 @@ const KpiCardsType = new GraphQLObjectType({
     registryPaymentsOld:      { type: GraphQLFloat },
     registryPaymentsNewCount: { type: GraphQLInt },
     registryPaymentsOldCount: { type: GraphQLInt },
+    // Registry Value RO (manual rounded receipts) — nullable so cached payloads predating them never error.
+    registryRoTotal:          { type: GraphQLFloat },
+    registryRoCash:           { type: GraphQLFloat },
+    registryRoBank:           { type: GraphQLFloat },
+    registryRoCount:          { type: GraphQLInt },
+    registryRoDiff:           { type: GraphQLFloat },
+    registryRoExact:          { type: GraphQLFloat },
     imprestDistribution:   { type: new GraphQLList(ImprestDistributionType) },
     imprestPairs:          { type: new GraphQLList(ImprestPairType) },
     breakdown:             { type: new GraphQLList(BreakdownItemType) },

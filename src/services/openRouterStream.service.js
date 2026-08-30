@@ -47,8 +47,9 @@ export const getLiveModelIds = async () => {
  * Ordered candidate models. OPENROUTER_ANALYTICS_MODEL may be a comma-separated list; OPENROUTER_MODEL
  * is appended when it is a real slug (the auto-router is only used as a last resort).
  */
-export const resolveModels = async () => {
-  const configured = [...envList(process.env.OPENROUTER_ANALYTICS_MODEL), ...envList(process.env.OPENROUTER_MODEL)]
+export const resolveModels = async (preferred = []) => {
+  const preferredModels = Array.isArray(preferred) ? preferred : envList(preferred);
+  const configured = [...preferredModels, ...envList(process.env.OPENROUTER_ANALYTICS_MODEL), ...envList(process.env.OPENROUTER_MODEL)]
     .filter((m) => m !== AUTO_ROUTER);
   let list = [...new Set([...configured, ...DEFAULT_MODELS])].filter((m) => !BLOCKED_MODEL_RE.test(m));
   const live = await getLiveModelIds();
@@ -108,61 +109,92 @@ export const looksLikeAnswer = (head, ended = false) => {
 };
 
 /** Reads an upstream SSE stream, forwarding tokens; `onToken(token)` may return false to stop early. */
-export const relayOpenRouterStream = async (response, res, onToken) => {
+export const relayOpenRouterStream = async (response, res, onToken, onActivity) => {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let tokenCount = 0;
   let providerError = null;
   let stopped = false;
+  let sawDone = false;
+  let finishReason = null;
+
+  const consumeLine = (rawLine) => {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) return;
+    const payload = line.slice(5).trim();
+    if (!payload) return;
+    if (payload === '[DONE]') {
+      sawDone = true;
+      return;
+    }
+    try {
+      const parsed = JSON.parse(payload);
+      if (parsed.error?.message) {
+        providerError = parsed.error.message;
+        return;
+      }
+      const choice = parsed.choices?.[0];
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      const token = choice?.delta?.content;
+      if (token) {
+        tokenCount += 1;
+        if (onToken) {
+          if (onToken(token) === false) stopped = true;
+        } else {
+          sendEvent(res, 'token', { token });
+        }
+      }
+    } catch {
+      // Provider keep-alives and malformed partial lines are safe to ignore.
+    }
+  };
 
   while (!stopped) {
     const { value, done } = await reader.read();
     if (done) break;
+    onActivity?.();
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
-
     for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line.startsWith('data:')) continue;
-      const payload = line.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
-      try {
-        const parsed = JSON.parse(payload);
-        if (parsed.error?.message) {
-          providerError = parsed.error.message;
-          continue;
-        }
-        const token = parsed.choices?.[0]?.delta?.content;
-        if (token) {
-          tokenCount += 1;
-          if (onToken) {
-            if (onToken(token) === false) { stopped = true; break; }
-          } else {
-            sendEvent(res, 'token', { token });
-          }
-        }
-      } catch {
-        // Provider keep-alives and partial lines are safe to ignore.
-      }
+      consumeLine(rawLine);
+      if (stopped) break;
     }
   }
+  buffer += decoder.decode();
+  if (!stopped && buffer.trim()) consumeLine(buffer);
   if (stopped) reader.cancel().catch(() => {});
-  return { tokenCount, providerError, stopped };
+  return {
+    tokenCount,
+    providerError,
+    stopped,
+    finishReason,
+    completed: sawDone || Boolean(finishReason),
+  };
 };
 
-const HEAD_CHARS = 200;
+const HEAD_CHARS = 320;
 
 /**
  * One streaming attempt against one model. Tokens are held back until HEAD_CHARS arrive (or the
  * stream ends) and validated; a rejected head aborts the attempt without anything reaching the client.
  * @returns {{status:'ok'|'rejected'|'empty'|'error'|'timeout'|'aborted', providerError?:string}}
  */
-const streamOnce = async ({ res, model, systemPrompt, messages, temperature, maxTokens, timeoutMs, title, logTag, clientAbort }) => {
+const streamOnce = async ({ res, model, systemPrompt, messages, temperature, maxTokens, timeoutMs, streamIdleTimeoutMs, title, logTag, clientAbort }) => {
   const controller = new AbortController();
   let timedOut = false;
+  let idleTimedOut = false;
+  let idleTimer = null;
+  let released = false;
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  const armIdleTimeout = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      idleTimedOut = true;
+      controller.abort();
+    }, streamIdleTimeoutMs);
+  };
   const onClientClose = () => controller.abort();
   clientAbort.add(onClientClose);
   try {
@@ -188,9 +220,9 @@ const streamOnce = async ({ res, model, systemPrompt, messages, temperature, max
     }
 
     let head = '';
-    let released = false;
     let rejected = false;
-    const { tokenCount, providerError } = await relayOpenRouterStream(response, res, (token) => {
+    armIdleTimeout();
+    const relay = await relayOpenRouterStream(response, res, (token) => {
       if (released) { sendEvent(res, 'token', { token }); return true; }
       head += token;
       if (head.length >= HEAD_CHARS) {
@@ -199,26 +231,38 @@ const streamOnce = async ({ res, model, systemPrompt, messages, temperature, max
         sendEvent(res, 'token', { token: head });
       }
       return true;
-    });
+    }, armIdleTimeout);
+    clearTimeout(idleTimer);
+    let providerError = relay.providerError;
+    if (!relay.completed) providerError ||= 'The provider stream ended before completion.';
+    if (relay.finishReason === 'length') providerError ||= 'The response reached its output limit.';
     if (rejected) {
       console.error(`${logTag} ${model} rejected — reply did not look like an answer: ${cleanText(head, 80)}`);
       return { status: 'rejected' };
     }
+    if (!released && providerError) {
+      console.error(`${logTag} ${model} ended before a usable answer was complete: ${cleanText(providerError, 120)}`);
+      return { status: 'error', providerError };
+    }
     if (!released) {
       // Short reply: validate the whole thing before releasing it.
       if (!looksLikeAnswer(head, true)) {
-        console.error(`${logTag} ${model} ${tokenCount ? 'rejected short reply' : 'returned no answer'}: ${cleanText(head, 80)}${providerError ? ` (${providerError})` : ''}`);
-        return { status: tokenCount ? 'rejected' : 'empty', providerError };
+        console.error(`${logTag} ${model} ${relay.tokenCount ? 'rejected short reply' : 'returned no answer'}: ${cleanText(head, 80)}${providerError ? ` (${providerError})` : ''}`);
+        return { status: relay.tokenCount ? 'rejected' : 'empty', providerError };
       }
       sendEvent(res, 'token', { token: head });
     }
     return { status: 'ok', providerError };
   } catch (error) {
-    if (error?.name === 'AbortError') return { status: timedOut ? 'timeout' : 'aborted' };
+    if (error?.name === 'AbortError') {
+      if (idleTimedOut && released) return { status: 'partial', providerError: 'The provider stopped sending data before completing the answer.' };
+      return { status: (timedOut || idleTimedOut) ? 'timeout' : 'aborted' };
+    }
     console.error(`${logTag} ${model} request failed:`, error.message);
     return { status: 'error' };
   } finally {
     clearTimeout(timer);
+    clearTimeout(idleTimer);
     clientAbort.delete(onClientClose);
   }
 };
@@ -236,6 +280,7 @@ export async function streamOpenRouterToSse({
   temperature = 0.08,
   maxTokens = 650,
   timeoutMs = Number(process.env.OPENROUTER_TIMEOUT_MS) || 45_000,
+  streamIdleTimeoutMs = Number(process.env.OPENROUTER_STREAM_IDLE_TIMEOUT_MS) || 20_000,
   model,
   models,
   title = 'DG Accounts AI',
@@ -260,11 +305,15 @@ export async function streamOpenRouterToSse({
 
   let lastTimeout = false;
   for (const m of list) {
-    const result = await streamOnce({ res, model: m, systemPrompt, messages, temperature, maxTokens, timeoutMs, title, logTag, clientAbort });
+    const result = await streamOnce({ res, model: m, systemPrompt, messages, temperature, maxTokens, timeoutMs, streamIdleTimeoutMs, title, logTag, clientAbort });
     if (result.status === 'ok') {
       if (result.providerError) sendEvent(res, 'error', { message: 'The AI response was interrupted. Please ask again for a complete answer.' });
       sendEvent(res, 'meta', { model: m });
       return finish({ ok: true, fallback: false, partial: Boolean(result.providerError), model: m });
+    }
+    if (result.status === 'partial') {
+      sendEvent(res, 'error', { message: 'The AI response was interrupted. Please retry for a complete answer.' });
+      return finish({ ok: true, fallback: false, partial: true, model: m });
     }
     if (result.status === 'aborted' || res.writableEnded) { if (!res.writableEnded) res.end(); return; }
     lastTimeout = result.status === 'timeout';

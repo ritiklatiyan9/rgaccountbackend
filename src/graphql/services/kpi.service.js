@@ -492,7 +492,28 @@ export async function getRegistryPayments(siteId, start, end) {
     [siteId, start, end]
   );
   const r = rows[0];
+  // Registry Value RO — the rounded amounts the office actually received, entered manually per
+  // registry (cash + bank). Reported beside the exact receipts, never instead of them. The
+  // round-off is like-for-like: RO minus the exact amount paid on THOSE SAME registries, using
+  // the registry rows' own total_paid so there is one definition of "exact paid" app-wide.
+  const { plotRegistryModel } = await import('../../models/PlotRegistry.model.js');
+  const registryRows = await plotRegistryModel.findBySiteId(siteId, pool);
+  const inWindow = (row) => {
+    const d = row.registry_date || row.created_entry_date || row.created_at;
+    const iso = d ? new Date(d).toISOString().slice(0, 10) : null;
+    return iso && iso >= String(start).slice(0, 10) && iso < String(end).slice(0, 10);
+  };
+  const roRows = registryRows.filter((row) => row.ro_set && inWindow(row));
+  const roCash = roundMoney(roRows.reduce((sum, row) => sum + (parseFloat(row.ro_cash_amount) || 0), 0));
+  const roBank = roundMoney(roRows.reduce((sum, row) => sum + (parseFloat(row.ro_bank_amount) || 0), 0));
+  const roExact = roundMoney(roRows.reduce((sum, row) => sum + (parseFloat(row.total_paid) || 0), 0));
   return {
+    roCash,
+    roBank,
+    roTotal: roundMoney(roCash + roBank),
+    roExact,
+    roDiff: roundMoney(roCash + roBank - roExact),
+    roCount: roRows.length,
     total: roundMoney(r.total),
     cash: roundMoney(r.cash_total),
     bank: roundMoney(r.bank_total),
@@ -681,6 +702,12 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     registryPaymentsOld: registryPayments.oldTotal,
     registryPaymentsNewCount: registryPayments.newCount,
     registryPaymentsOldCount: registryPayments.oldCount,
+    registryRoTotal: registryPayments.roTotal,
+    registryRoCash: registryPayments.roCash,
+    registryRoBank: registryPayments.roBank,
+    registryRoCount: registryPayments.roCount,
+    registryRoExact: registryPayments.roExact,
+    registryRoDiff: registryPayments.roDiff,
     breakdown: {
       ...expData.breakdown,
       plot_payments: { credit: revenue, debit: 0, count: 0 },
