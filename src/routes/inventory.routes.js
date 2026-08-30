@@ -3,7 +3,7 @@ const router = express.Router();
 
 import {
   listMaterials, createMaterial, updateMaterial, deleteMaterial, getMaterial,
-  listMovements, createMovement, inventorySummary, receiveVendorOrder,
+  listMovements, createMovement, inventorySummary, receiveVendorOrder, expiringLots,
 } from '../controllers/inventory.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
@@ -17,6 +17,7 @@ router.post('/vendor-orders/:orderId/receive', requirePermission('inventory', 'w
 
 // Dashboard summary + stock history
 router.get('/summary', requirePermission('inventory', 'read'), inventorySummary);
+router.get('/expiring', requirePermission('inventory', 'read'), expiringLots);
 router.get('/movements', requirePermission('inventory', 'read'), listMovements);
 router.post('/movements', requirePermission('inventory', 'write'), createMovement);
 

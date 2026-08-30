@@ -3,6 +3,7 @@ import pool from '../config/db.js';
 import { inventoryModel } from '../models/Inventory.model.js';
 
 const num = (v) => (v === undefined || v === null || v === '' ? null : Number(v));
+const isoDate = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
 const requireSite = (req, res) => {
   const siteId = parseInt(req.query.site_id || req.body.site_id, 10);
   if (!siteId) { res.status(400).json({ message: 'site_id is required' }); return null; }
@@ -15,6 +16,8 @@ const ALL_TYPES = new Set([
   'RECEIPT', 'ISSUE', 'CONSUMPTION', 'ADJUSTMENT',
   'RESERVE', 'UNRESERVE', 'TRANSFER_IN', 'TRANSFER_OUT', 'RETURN',
 ]);
+// Movements that open a lot and may therefore carry an expiry date.
+const STOCK_IN = new Set(['RECEIPT', 'RETURN', 'TRANSFER_IN']);
 
 // ── Material master ─────────────────────────────────────────
 
@@ -23,6 +26,7 @@ export const listMaterials = asyncHandler(async (req, res) => {
   const materials = await inventoryModel.listMaterials(siteId, {
     search: req.query.search?.trim() || undefined,
     lowStock: req.query.low_stock === 'true',
+    expiring: req.query.expiring === 'true',
   });
   res.json({ materials });
 });
@@ -101,7 +105,7 @@ export const listMovements = asyncHandler(async (req, res) => {
 
 export const createMovement = asyncHandler(async (req, res) => {
   const siteId = requireSite(req, res); if (!siteId) return;
-  const { material_id, movement_type, qty, rate, project_id, task_id, ref_type, ref_id, note } = req.body;
+  const { material_id, movement_type, qty, rate, project_id, task_id, ref_type, ref_id, note, expiry_date } = req.body;
   const type = String(movement_type || '').toUpperCase();
   if (!material_id) return res.status(400).json({ message: 'material_id is required' });
   if (!ALL_TYPES.has(type)) return res.status(400).json({ message: 'Invalid movement_type' });
@@ -109,6 +113,7 @@ export const createMovement = asyncHandler(async (req, res) => {
   if (!Number.isFinite(q) || q === 0) return res.status(400).json({ message: 'qty must be a non-zero number' });
   // Only ADJUSTMENT may be negative; everything else is a positive magnitude.
   if (type !== 'ADJUSTMENT' && q < 0) return res.status(400).json({ message: 'qty must be positive for this movement type' });
+  if (expiry_date && !isoDate(expiry_date)) return res.status(400).json({ message: 'expiry_date must be YYYY-MM-DD' });
 
   const mat = await pool.query('SELECT id, rate FROM inventory_materials WHERE id = $1 AND site_id = $2', [material_id, siteId]);
   if (!mat.rows[0]) return res.status(404).json({ message: 'Material not found for this site' });
@@ -124,6 +129,7 @@ export const createMovement = asyncHandler(async (req, res) => {
     site_id: siteId, material_id, movement_type: type, qty: q,
     rate: rate !== undefined ? Number(rate) : parseFloat(mat.rows[0].rate) || 0,
     project_id, task_id, ref_type, ref_id, note, created_by: req.user.id,
+    expiry_date: (STOCK_IN.has(type) || (type === 'ADJUSTMENT' && q > 0)) ? isoDate(expiry_date) : null,
   });
   res.status(201).json({ movement });
 });
@@ -141,6 +147,7 @@ export const receiveVendorOrder = asyncHandler(async (req, res) => {
   if (!Number.isInteger(orderId)) return res.status(400).json({ message: 'Invalid order id' });
   const qty = Number(req.body.qty);
   if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ message: 'qty must be greater than 0' });
+  if (req.body.expiry_date && !isoDate(req.body.expiry_date)) return res.status(400).json({ message: 'expiry_date must be YYYY-MM-DD' });
 
   const client = await pool.connect();
   try {
@@ -186,6 +193,7 @@ export const receiveVendorOrder = asyncHandler(async (req, res) => {
       ref_type: 'VENDOR_ORDER', ref_id: orderId,
       note: (req.body.note || '').trim() || `Vendor order #${orderId} — ${order.vendor_name}`,
       created_by: req.user.id,
+      expiry_date: isoDate(req.body.expiry_date),
     }, client);
 
     await client.query('COMMIT');
@@ -196,6 +204,15 @@ export const receiveVendorOrder = asyncHandler(async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// ── Expiring lots (live FIFO stock with an expiry date) ─────
+
+export const expiringLots = asyncHandler(async (req, res) => {
+  const siteId = requireSite(req, res); if (!siteId) return;
+  const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 0), 3650);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 500);
+  res.json({ days, lots: await inventoryModel.expiringLots(siteId, { days, limit }) });
 });
 
 // ── Dashboard summary ───────────────────────────────────────

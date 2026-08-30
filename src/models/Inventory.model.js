@@ -6,6 +6,9 @@ import pool from '../config/db.js';
  * math, reused by both the inventory and construction controllers.
  */
 
+// Materials whose earliest live lot expires inside this window count as "expiring".
+export const EXPIRY_WINDOW_DAYS = 30;
+
 // Signed on-hand + reserved aggregation over the movement ledger.
 // on-hand: physical stock; reserved: soft-held (doesn't reduce on-hand).
 const STOCK_AGG = `
@@ -23,27 +26,74 @@ const STOCK_AGG = `
   GROUP BY material_id
 `;
 
+// Lots = every stock-in movement, FIFO-depleted by the material's total
+// stock-out: the oldest lots are consumed first, so qty_remaining is what is
+// still on the shelf from that receipt and an expiry date only matters while
+// its lot has stock left. $1 = site_id.
+// ponytail: FIFO by created_at, no lot picking on issue — add lot_id to
+// movements if a site ever needs batch-level traceability.
+const LOT_BALANCE = `
+  WITH lots AS (
+    SELECT mv.id, mv.material_id, mv.qty, mv.rate, mv.expiry_date, mv.created_at,
+           mv.note, mv.ref_type, mv.ref_id,
+           SUM(mv.qty) OVER (PARTITION BY mv.material_id ORDER BY mv.created_at, mv.id) AS cum_in
+      FROM inventory_movements mv
+     WHERE mv.site_id = $1
+       AND (mv.movement_type IN ('RECEIPT','RETURN','TRANSFER_IN')
+            OR (mv.movement_type = 'ADJUSTMENT' AND mv.qty > 0))
+  ), outs AS (
+    SELECT material_id,
+           SUM(CASE WHEN movement_type IN ('ISSUE','CONSUMPTION','TRANSFER_OUT') THEN qty
+                    WHEN movement_type = 'ADJUSTMENT' AND qty < 0 THEN -qty
+                    ELSE 0 END) AS total_out
+      FROM inventory_movements
+     WHERE site_id = $1
+     GROUP BY material_id
+  ), lot_balance AS (
+    SELECT l.*, LEAST(l.qty, GREATEST(l.cum_in - COALESCE(o.total_out, 0), 0)) AS qty_remaining
+      FROM lots l
+      LEFT JOIN outs o ON o.material_id = l.material_id
+  )`;
+
+// Per-material expiry roll-up over live lots (continues the LOT_BALANCE CTE chain).
+const EXPIRY_AGG = `
+  expiry AS (
+    SELECT material_id,
+           MIN(expiry_date) FILTER (WHERE qty_remaining > 0) AS next_expiry,
+           COALESCE(SUM(qty_remaining) FILTER (WHERE expiry_date <= CURRENT_DATE + ${EXPIRY_WINDOW_DAYS}), 0) AS expiring_qty,
+           COALESCE(SUM(qty_remaining) FILTER (WHERE expiry_date < CURRENT_DATE), 0) AS expired_qty
+      FROM lot_balance
+     WHERE expiry_date IS NOT NULL
+     GROUP BY material_id
+  )`;
+
 export const inventoryModel = {
-  /** Materials for a site, each with live on_hand / reserved / available / value. */
-  async listMaterials(siteId, { search, lowStock } = {}) {
+  /** Materials for a site, each with live on_hand / reserved / available / value / expiry. */
+  async listMaterials(siteId, { search, lowStock, expiring } = {}, client = pool) {
     const params = [siteId];
     let where = 'WHERE m.site_id = $1';
     if (search) {
       params.push(`%${search}%`);
       where += ` AND (m.name ILIKE $${params.length} OR m.code ILIKE $${params.length} OR m.category ILIKE $${params.length})`;
     }
-    // Low-stock filter is applied after aggregation (references derived on_hand).
-    const having = lowStock ? `AND m.min_stock > 0 AND COALESCE(s.on_hand, 0) < m.min_stock` : '';
-    const { rows } = await pool.query(
-      `SELECT m.*,
+    // Derived-column filters (reference the joined aggregates).
+    if (lowStock) where += ` AND m.min_stock > 0 AND COALESCE(s.on_hand, 0) < m.min_stock`;
+    if (expiring) where += ` AND COALESCE(e.expiring_qty, 0) > 0`;
+    const { rows } = await client.query(
+      `${LOT_BALANCE}, ${EXPIRY_AGG}
+       SELECT m.*,
          COALESCE(s.on_hand, 0)  AS on_hand,
          COALESCE(s.reserved, 0) AS reserved,
          COALESCE(s.on_hand, 0) - COALESCE(s.reserved, 0) AS available,
          COALESCE(s.on_hand, 0) * m.rate AS stock_value,
-         (m.min_stock > 0 AND COALESCE(s.on_hand, 0) < m.min_stock) AS is_low_stock
+         (m.min_stock > 0 AND COALESCE(s.on_hand, 0) < m.min_stock) AS is_low_stock,
+         e.next_expiry,
+         COALESCE(e.expiring_qty, 0) AS expiring_qty,
+         COALESCE(e.expired_qty, 0)  AS expired_qty
        FROM inventory_materials m
        LEFT JOIN (${STOCK_AGG}) s ON s.material_id = m.id
-       ${where} ${having}
+       LEFT JOIN expiry e ON e.material_id = m.id
+       ${where}
        ORDER BY m.name ASC`,
       params
     );
@@ -73,13 +123,14 @@ export const inventoryModel = {
   async insertMovement(m, client = pool) {
     const { rows } = await client.query(
       `INSERT INTO inventory_movements
-         (site_id, material_id, movement_type, qty, rate, project_id, task_id, request_id, ref_type, ref_id, note, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         (site_id, material_id, movement_type, qty, rate, project_id, task_id, request_id, ref_type, ref_id, note, created_by, expiry_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING *`,
       [
         m.site_id, m.material_id, m.movement_type, m.qty, m.rate || 0,
         m.project_id || null, m.task_id || null, m.request_id || null,
         m.ref_type || null, m.ref_id || null, m.note || null, m.created_by || null,
+        m.expiry_date || null,
       ]
     );
     return rows[0];
@@ -106,20 +157,68 @@ export const inventoryModel = {
     return rows;
   },
 
-  /** Dashboard-card numbers for a site's inventory. */
-  async summary(siteId) {
-    const { rows } = await pool.query(
-      `WITH stock AS (
+  /** Live lots with stock left whose expiry falls inside `days` (already-expired first). */
+  async expiringLots(siteId, { days = EXPIRY_WINDOW_DAYS, limit = 50 } = {}, client = pool) {
+    const { rows } = await client.query(
+      `${LOT_BALANCE}
+       SELECT lb.id, lb.material_id, m.name AS material_name, m.unit,
+              lb.qty AS qty_received, lb.qty_remaining, lb.rate, lb.expiry_date, lb.created_at,
+              lb.note, lb.ref_type, lb.ref_id,
+              (lb.expiry_date - CURRENT_DATE)::int AS days_left
+         FROM lot_balance lb
+         JOIN inventory_materials m ON m.id = lb.material_id
+        WHERE lb.expiry_date IS NOT NULL
+          AND lb.qty_remaining > 0
+          AND lb.expiry_date <= CURRENT_DATE + $2::int
+        ORDER BY lb.expiry_date ASC, m.name ASC
+        LIMIT $3`,
+      [siteId, days, limit]
+    );
+    return rows;
+  },
+
+  /** Dashboard / pipeline numbers for a site's inventory. */
+  async summary(siteId, client = pool) {
+    const { rows } = await client.query(
+      `${LOT_BALANCE}, ${EXPIRY_AGG},
+       stock AS (
          SELECT m.id, m.rate, m.min_stock,
-           COALESCE(s.on_hand, 0) AS on_hand
+           COALESCE(s.on_hand, 0) AS on_hand,
+           COALESCE(e.expiring_qty, 0) AS expiring_qty,
+           COALESCE(e.expired_qty, 0) AS expired_qty
          FROM inventory_materials m
          LEFT JOIN (${STOCK_AGG}) s ON s.material_id = m.id
+         LEFT JOIN expiry e ON e.material_id = m.id
          WHERE m.site_id = $1
+       ),
+       receipts AS (
+         -- Purchase orders not yet fully booked into the ledger (goods-receipt queue).
+         SELECT o.id, o.rate,
+           GREATEST(o.qty_ordered - COALESCE((
+             SELECT SUM(mv.qty) FROM inventory_movements mv
+              WHERE mv.ref_type = 'VENDOR_ORDER' AND mv.ref_id = o.id AND mv.movement_type = 'RECEIPT'), 0), 0) AS pending_qty
+         FROM vendor_inventory_orders o
+         WHERE o.site_id = $1 AND o.status <> 'cancelled'
+       ),
+       recent AS (
+         SELECT
+           COALESCE(SUM(qty * rate) FILTER (WHERE movement_type = 'RECEIPT'), 0)     AS received_30d_value,
+           COALESCE(SUM(qty * rate) FILTER (WHERE movement_type = 'ISSUE'), 0)       AS issued_30d_value,
+           COALESCE(SUM(qty * rate) FILTER (WHERE movement_type = 'CONSUMPTION'), 0) AS consumed_30d_value
+         FROM inventory_movements
+         WHERE site_id = $1 AND created_at >= NOW() - INTERVAL '30 days'
        )
        SELECT
          COUNT(*)::int AS material_count,
          COALESCE(SUM(on_hand * rate), 0) AS total_value,
-         COUNT(*) FILTER (WHERE min_stock > 0 AND on_hand < min_stock)::int AS low_stock_count
+         COUNT(*) FILTER (WHERE min_stock > 0 AND on_hand < min_stock)::int AS low_stock_count,
+         COUNT(*) FILTER (WHERE expiring_qty > 0)::int AS expiring_count,
+         COUNT(*) FILTER (WHERE expired_qty > 0)::int AS expired_count,
+         (SELECT COUNT(*)::int FROM receipts WHERE pending_qty > 0) AS pending_receipt_orders,
+         (SELECT COALESCE(SUM(pending_qty * rate), 0) FROM receipts) AS pending_receipt_value,
+         (SELECT received_30d_value FROM recent) AS received_30d_value,
+         (SELECT issued_30d_value FROM recent) AS issued_30d_value,
+         (SELECT consumed_30d_value FROM recent) AS consumed_30d_value
        FROM stock`,
       [siteId]
     );

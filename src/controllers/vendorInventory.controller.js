@@ -71,6 +71,10 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
     values.push(category.toLowerCase());
     idx++;
   }
+  // Goods-receipt queue: ordered qty not yet booked into the stock ledger.
+  if (req.query.pending_receipt === 'true') {
+    conditions.push(`o.status <> 'cancelled' AND o.qty_ordered > ${RECEIVED_QTY_SQL}`);
+  }
 
   const where = conditions.join(' AND ');
   const creatorIdx = idx;
