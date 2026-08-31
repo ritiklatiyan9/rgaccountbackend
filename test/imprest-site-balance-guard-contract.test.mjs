@@ -22,6 +22,35 @@ test('site distributable uses the transaction-scoped KPI custody snapshot and pr
   assert.match(implementation, /available:\s*distributableBalance/);
 });
 
+test('Admin Imprest exposes Site Balance distribution and site-eligible recipients', async () => {
+  const controller = await readController();
+  const access = await readFile(
+    new URL('../src/middlewares/imprestSiteAccess.middleware.js', import.meta.url),
+    'utf8'
+  );
+
+  const balanceStart = controller.indexOf('export const getSiteBalance');
+  const allocationStart = controller.indexOf('export const createAllocation');
+  const peersStart = controller.indexOf('export const listTransferPeers');
+  const transferStart = controller.indexOf('export const createTransfer');
+  const getSiteBalance = controller.slice(balanceStart, allocationStart);
+  const createAllocation = controller.slice(allocationStart, controller.indexOf('export const listAllocations'));
+  const listPeers = controller.slice(peersStart, transferStart);
+
+  assert.match(getSiteBalance, /can_distribute:\s*DISTRIBUTOR_ROLES\.has\(req\.user\.role\)/);
+  assert.match(createAllocation, /const escrowFromGiver = !isSelfDraw && \(!giverIsAdmin \|\| fromOwnFloat\)/);
+  assert.match(createAllocation, /await siteDistributable\(client, parsedSiteId\)/);
+  assert.match(createAllocation, /from_own_float:\s*escrowFromGiver/);
+  assert.match(createAllocation, /status:\s*isSelfDraw \? 'RECEIVED' : 'PENDING_RECEIPT'/);
+
+  assert.match(listPeers, /u\.is_active = true/);
+  assert.match(listPeers, /u\.role IN \('admin', 'super_admin'\)/);
+  assert.match(listPeers, /u\.role = 'sub_admin'/);
+  assert.match(listPeers, /us\.site_id = \$2/);
+  assert.match(access, /findEligibleImprestParticipant/);
+  assert.match(access, /us\.site_id = \$2/);
+});
+
 test('approving an imprest request cannot bypass Admin Site Balance custody', async () => {
   const controller = await readController();
   const start = controller.indexOf('export const approveExpenseRequest');
