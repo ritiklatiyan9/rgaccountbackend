@@ -17,6 +17,12 @@ import {
   listPendingCheques,
   matchUpload,
 } from '../controllers/bankReconciliation.controller.js';
+import {
+  createTransactionUpload,
+  getLatestTransactionUpload,
+  getTransactionUpload,
+  linkTransactionPosting,
+} from '../controllers/transactionReconciliation.controller.js';
 
 const router = express.Router();
 const allowedExtensions = new Set(['.xlsx', '.xls', '.csv']);
@@ -54,6 +60,31 @@ router.post(
   requireAllEntryVisibility('daybook'),
   upload.single('statement'),
   applyBankDaybookReconciliation
+);
+
+// General transaction reconciliation has its own workflow namespace and
+// persists one verified module link per statement row. Target module writes
+// are still authorised by each module's existing create endpoint.
+router.get(
+  '/transaction-uploads/latest',
+  requirePermission('daybook', 'read'),
+  getLatestTransactionUpload
+);
+router.get(
+  '/transaction-uploads/:uploadId',
+  requirePermission('daybook', 'read'),
+  getTransactionUpload
+);
+router.post(
+  '/transaction-uploads',
+  requirePermission('daybook', 'write'),
+  upload.single('statement'),
+  createTransactionUpload
+);
+router.post(
+  '/transaction-postings/:transactionId',
+  requirePermission('daybook', 'write'),
+  linkTransactionPosting
 );
 
 router.use(requirePermission('expense_approval', 'read'));

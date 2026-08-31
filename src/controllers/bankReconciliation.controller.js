@@ -100,7 +100,7 @@ async function loadUpload(db, user, uploadId, { includeTransactions = true } = {
     `SELECT u.*, s.name AS site_name
        FROM bank_statement_uploads u
        JOIN sites s ON s.id = u.site_id
-      WHERE u.id = $1 AND u.organization_id = $2`,
+      WHERE u.id = $1 AND u.organization_id = $2 AND u.workflow = 'CHEQUE'`,
     [id, Number(user.organization_id) || 1]
   );
   const upload = result.rows[0];
@@ -135,6 +135,7 @@ function uploadDto(upload) {
     parse_error_count: Number(upload.parse_error_count),
     created_at: upload.created_at,
     updated_at: upload.updated_at,
+    workflow: upload.workflow || 'CHEQUE',
   };
 }
 
@@ -291,7 +292,7 @@ export async function createUpload(req, res) {
     const existing = await client.query(
       `SELECT u.*, s.name AS site_name
          FROM bank_statement_uploads u JOIN sites s ON s.id = u.site_id
-        WHERE u.organization_id = $1 AND u.site_id = $2 AND u.file_hash = $3
+        WHERE u.organization_id = $1 AND u.site_id = $2 AND u.file_hash = $3 AND u.workflow = 'CHEQUE'
         FOR UPDATE`,
       [site.organization_id, site.id, parsed.fileHash]
     );
@@ -326,8 +327,8 @@ export async function createUpload(req, res) {
         `INSERT INTO bank_statement_uploads (
          organization_id, site_id, uploaded_by, original_filename, content_type,
          file_size, file_hash, parser_version, statement_sheet, mapped_headers,
-         row_count, parse_error_count
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         row_count, parse_error_count, workflow
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'CHEQUE')
        RETURNING *`,
       [site.organization_id, site.id, req.user.id, req.file.originalname, req.file.mimetype,
         req.file.size, parsed.fileHash, parsed.parserVersion, parsed.sheetName,

@@ -35,6 +35,22 @@ test('parses common statement headers, dates, exact decimals, and string cheque 
   assert.match(parsed.fileHash, /^[a-f0-9]{64}$/);
 });
 
+test('accepts the exact Firm Transactions import-template columns', () => {
+  const buffer = workbookBuffer([
+    ['No', 'Value Date', 'Txn Posted Date', 'Cheque Number', 'Description', 'Debit Amount', 'Credit Amount', 'Available Balance', 'Name', 'Purpose', 'Remark', 'Remark 2'],
+    [1, '06/07/2023', '06/07/2023', '123456', 'Sample bank transaction description', '', 1000, 10000, 'CUSTOMER NAME', 'TRANSACTION PURPOSE', 'BANK CHARGES', 'Optional secondary note'],
+  ], 'Template');
+  const parsed = parseBankStatement(buffer, 'FirmTransactions_ImportTemplate.xlsx');
+  assert.equal(parsed.rows.length, 1);
+  assert.equal(parsed.parseErrorCount, 0);
+  assert.equal(parsed.rows[0].normalized.transaction_date, '2023-07-06');
+  assert.equal(parsed.rows[0].normalized.value_date, '2023-07-06');
+  assert.equal(parsed.rows[0].normalized.cheque_reference, '123456');
+  assert.equal(parsed.rows[0].normalized.narration, 'Sample bank transaction description');
+  assert.equal(parsed.rows[0].normalized.credit, '1000.00');
+  assert.equal(parsed.rows[0].normalized.balance, '10000.00');
+});
+
 test('parses the exact Mount Valley Bank_Statement sheet with punctuation headers and correct Excel dates', (t) => {
   const fixturePath = process.env.MOUNT_VALLEY_FIXTURE_PATH
     || path.join(os.homedir(), 'Downloads', 'Mount_Valley_Residency_AI_Reconciliation_10_Cases.xlsx');
