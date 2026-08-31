@@ -7,15 +7,15 @@ const readController = () => readFile(
   'utf8'
 );
 
-test('site distributable uses the transaction-scoped KPI custody snapshot and preserves API aliases', async () => {
+test('site distributable exposes cash-only availability and no Admin personal float', async () => {
   const controller = await readController();
   const start = controller.indexOf('const siteDistributable');
-  const end = controller.indexOf('const overrideReasonOf');
+  const end = controller.indexOf('/** GET /imprest/site-balance');
   const implementation = controller.slice(start, end);
 
   assert.match(implementation, /getSiteBalanceDetail\(siteId, '1900-01-01', indiaTomorrow\(\), db\)/);
   assert.doesNotMatch(implementation, /FROM imprest_allocations/);
-  assert.match(implementation, /admin_imprest_reserved:\s*adminReserved/);
+  assert.match(implementation, /admin_imprest_reserved:\s*0/);
   assert.match(implementation, /pending_imprest_reservations:\s*pendingReservations/);
   assert.match(implementation, /pending_receipt_total:\s*pendingReservations/);
   assert.match(implementation, /distributable_balance:\s*distributableBalance/);
@@ -38,20 +38,23 @@ test('Admin Imprest exposes Site Balance distribution and site-eligible recipien
   const listPeers = controller.slice(peersStart, transferStart);
 
   assert.match(getSiteBalance, /can_distribute:\s*DISTRIBUTOR_ROLES\.has\(req\.user\.role\)/);
-  assert.match(createAllocation, /const escrowFromGiver = !isSelfDraw && \(!giverIsAdmin \|\| fromOwnFloat\)/);
+  assert.match(createAllocation, /const escrowFromGiver = !giverIsAdmin/);
   assert.match(createAllocation, /await siteDistributable\(client, parsedSiteId\)/);
   assert.match(createAllocation, /from_own_float:\s*escrowFromGiver/);
-  assert.match(createAllocation, /status:\s*isSelfDraw \? 'RECEIVED' : 'PENDING_RECEIPT'/);
+  assert.match(createAllocation, /const allocationPaymentMode = 'CASH'/);
+  assert.match(createAllocation, /status:\s*'PENDING_RECEIPT'/);
+  assert.doesNotMatch(createAllocation, /isSelfDraw|overrideReasonOf/);
 
   assert.match(listPeers, /u\.is_active = true/);
-  assert.match(listPeers, /u\.role IN \('admin', 'super_admin'\)/);
+  assert.match(listPeers, /u\.role = 'admin'/);
+  assert.doesNotMatch(listPeers, /u\.role IN \('admin', 'super_admin'\)/);
   assert.match(listPeers, /u\.role = 'sub_admin'/);
   assert.match(listPeers, /us\.site_id = \$2/);
   assert.match(access, /findEligibleImprestParticipant/);
   assert.match(access, /us\.site_id = \$2/);
 });
 
-test('approving an imprest request cannot bypass Admin Site Balance custody', async () => {
+test('approving an imprest request cannot bypass available site cash', async () => {
   const controller = await readController();
   const start = controller.indexOf('export const approveExpenseRequest');
   const end = controller.indexOf('export const rejectExpenseRequest');
@@ -67,8 +70,8 @@ test('approving an imprest request cannot bypass Admin Site Balance custody', as
   assert.ok(accountLock > snapshot, 'account lock follows the common site-to-account lock order');
   assert.match(approval, /requestAmount > distributable\.available \+ 0\.005/);
   assert.match(approval, /code:\s*'INSUFFICIENT_SITE_BALANCE'/);
-  assert.match(approval, /overrideReason\.length < 5/);
+  assert.doesNotMatch(approval, /overrideReasonOf|overrideReason\.length/);
   assert.match(approval, /from_own_float:\s*false/);
   assert.match(approval, /site_balance_at_allocation:\s*distributable\.available/);
-  assert.match(approval, /override_reason:\s*overrideReason/);
+  assert.match(approval, /override_reason:\s*null/);
 });

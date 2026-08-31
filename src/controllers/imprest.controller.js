@@ -48,11 +48,12 @@ const lockImprestAccounts = async (db, ...userIds) => {
  *    the money never leaves the sub-admin pool, so site-level debit/credit is unaffected.
  */
 // ── Site Balance governs distribution ──────────────────────────────────────────
-// Site Balance (cash + bank − floats held by staff) is the ADMIN's custody. Only an
-// Admin distributes it; a Super Admin observes. Pending handovers and money earmarked in
-// the Admin's own imprest remain in that custody, but are reserved from further distribution.
+// Site Balance is the ADMIN's custody, but only CASH can be distributed as
+// imprest. Staff floats and pending cash handovers reduce that available cash.
+// Admins never have a separate personal imprest float; Super Admin observes.
 const DISTRIBUTOR_ROLES = new Set(['admin']);
-const FUNDING_HINT = 'Bring money into the site first — a plot payment, misc income, land sale receipt, firm transaction or an accepted imprest return — then distribute.';
+const ADMIN_ROLES = new Set(['admin', 'super_admin']);
+const FUNDING_HINT = 'Bring cash into the site first — or accept a staff imprest return — then distribute.';
 const lockSiteDistribution = (client, siteId) => client.query(`SELECT pg_advisory_xact_lock(hashtext('imprest-site-' || $1::text))`, [siteId]);
 const indiaTomorrow = () => {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
@@ -70,14 +71,14 @@ const siteDistributable = async (db, siteId) => {
   const detail = await getSiteBalanceDetail(siteId, '1900-01-01', indiaTomorrow(), db);
   const round2 = (v) => Math.round(v * 100) / 100;
   const pendingReservations = round2(detail.pendingImprestReservations);
-  const adminReserved = round2(detail.adminImprestReserved);
   const distributableBalance = round2(detail.distributableBalance);
   return {
     site_balance: round2(detail.siteBalance),
     cash_balance: round2(detail.cashBalance),
     bank_balance: round2(detail.bankBalance),
     imprest_held: round2(detail.imprestHeld),
-    admin_imprest_reserved: adminReserved,
+    // Compatibility field for older clients. Admin personal float is retired.
+    admin_imprest_reserved: 0,
     pending_imprest_reservations: pendingReservations,
     distributable_balance: distributableBalance,
     // Preserve the established API aliases used by both imprest screens.
@@ -85,7 +86,6 @@ const siteDistributable = async (db, siteId) => {
     available: distributableBalance,
   };
 };
-const overrideReasonOf = (body) => String(body?.override_reason || '').trim();
 
 /** GET /imprest/site-balance?site_id=X — the pool imprest is distributed from. */
 export const getSiteBalance = asyncHandler(async (req, res) => {
@@ -101,16 +101,13 @@ export const getSiteBalance = asyncHandler(async (req, res) => {
 });
 
 export const createAllocation = asyncHandler(async (req, res) => {
-  const { sub_admin_id, amount, remark, date, payment_mode, site_id, assigned_admin_id, from_own_float } = req.body;
+  const { sub_admin_id, amount, remark, date, site_id, assigned_admin_id } = req.body;
 
-  const giverIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
-  const isSelfDraw = giverIsAdmin && parseInt(sub_admin_id) === req.user.id;
-  // Who funds this? A sub-admin can only ever give from their own float. An admin
-  // does either: the personal "Give money" screen passes on their own float
-  // (from_own_float), the admin console injects fresh cash from the site balance.
-  // Multipart bodies arrive as strings, so accept both.
-  const fromOwnFloat = from_own_float === true || from_own_float === 'true' || from_own_float === '1';
-  const escrowFromGiver = !isSelfDraw && (!giverIsAdmin || fromOwnFloat);
+  const giverIsAdmin = ADMIN_ROLES.has(req.user.role);
+  // Admin handovers always come from site CASH. Non-admin handovers come from
+  // the giver's own float and move only when the recipient confirms receipt.
+  const escrowFromGiver = !giverIsAdmin;
+  const recipientRole = req.imprestParticipants?.sub_admin_id?.role;
 
   if (!sub_admin_id) return res.status(400).json({ message: 'Recipient is required' });
   const allocationAmount = parseFloat(amount);
@@ -119,8 +116,14 @@ export const createAllocation = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: giverIsAdmin ? 'Amount must be zero or more' : 'Amount must be positive' });
   }
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
-  if (!giverIsAdmin && parseInt(sub_admin_id) === req.user.id) {
+  if (parseInt(sub_admin_id) === req.user.id) {
     return res.status(400).json({ message: 'Cannot send imprest to yourself' });
+  }
+  if (giverIsAdmin && recipientRole !== 'sub_admin') {
+    return res.status(400).json({ message: 'Site cash can only be issued to a staff imprest account' });
+  }
+  if (!giverIsAdmin && recipientRole === 'super_admin') {
+    return res.status(400).json({ message: 'Super Admin observes imprest and cannot receive a float handover' });
   }
 
   const parsedSiteId = req.imprestSiteId || parseInt(site_id);
@@ -132,29 +135,26 @@ export const createAllocation = asyncHandler(async (req, res) => {
 
   const client = await pool.connect();
   let distributable = null;
-  let overrideReason = null;
   try {
     await client.query('BEGIN');
 
-    // Site-funded: never hand out more than the Site Balance without a stated reason.
+    // Site-funded: cash is a hard ceiling. Bank balance and override remarks
+    // can never be used to mint an imprest handover.
     if (!escrowFromGiver && allocationAmount > 0) {
       await lockSiteDistribution(client, parsedSiteId);
       distributable = await siteDistributable(client, parsedSiteId);
       if (allocationAmount > distributable.available + 0.005) {
-        overrideReason = overrideReasonOf(req.body);
-        if (overrideReason.length < 5) {
-          await client.query('ROLLBACK');
-          if (proofKey) await deletePlotDoc(proofKey).catch(() => {});
-          const shortfall = Math.round((allocationAmount - Math.max(distributable.available, 0)) * 100) / 100;
-          return res.status(400).json({
-            code: 'INSUFFICIENT_SITE_BALANCE',
-            ...distributable,
-            shortfall,
-            message: distributable.available <= 0
-              ? `Site Balance is ₹${distributable.available.toLocaleString('en-IN')} — there is nothing in hand to distribute. ${FUNDING_HINT} To allocate anyway, give a reason.`
-              : `Only ₹${distributable.available.toLocaleString('en-IN')} is in hand (₹${shortfall.toLocaleString('en-IN')} short). Fund the site first, or give a reason to allocate anyway.`,
-          });
-        }
+        await client.query('ROLLBACK');
+        if (proofKey) await deletePlotDoc(proofKey).catch(() => {});
+        const shortfall = Math.round((allocationAmount - Math.max(distributable.available, 0)) * 100) / 100;
+        return res.status(400).json({
+          code: 'INSUFFICIENT_SITE_BALANCE',
+          ...distributable,
+          shortfall,
+          message: distributable.available <= 0
+            ? `No site cash is available to distribute. ${FUNDING_HINT}`
+            : `Only ₹${distributable.available.toLocaleString('en-IN')} cash is available (₹${shortfall.toLocaleString('en-IN')} short).`,
+        });
       }
     }
 
@@ -173,7 +173,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
     }
 
     const allocationDate = date || new Date().toISOString().split('T')[0];
-    const allocationPaymentMode = String(payment_mode || 'CASH').trim().toUpperCase() || 'CASH';
+    const allocationPaymentMode = 'CASH';
 
     const allocation = await imprestAllocationModel.create({
       admin_id: req.user.id,
@@ -185,9 +185,8 @@ export const createAllocation = asyncHandler(async (req, res) => {
       proof_key: proofKey,
       from_own_float: escrowFromGiver,
       site_balance_at_allocation: distributable ? distributable.available : null,
-      override_reason: overrideReason || null,
-      status: isSelfDraw ? 'RECEIVED' : 'PENDING_RECEIPT',
-      ...(isSelfDraw ? { confirmed_at: new Date(), confirmation_remark: 'Self-draw approved by admin' } : {}),
+      override_reason: null,
+      status: 'PENDING_RECEIPT',
     }, client);
 
     if (!escrowFromGiver) {
@@ -207,37 +206,21 @@ export const createAllocation = asyncHandler(async (req, res) => {
         category: 'IMPREST',
         from_entity: 'ADMIN',
         to_entity: subAdminName.toUpperCase(),
-        status: isSelfDraw ? 'approved' : 'pending',
+        status: 'pending',
         created_by: req.user.id,
         imprest_allocation_id: allocation.id,
         is_imprest_internal: true,
       }, client);
 
-      if (isSelfDraw) {
-        // Admin draws imprest from the site balance under their own authority —
-        // credit the float immediately, no receipt-confirmation round-trip.
-        await lockImprestAccounts(client, req.user.id);
-        await imprestLedgerModel.createEntry({
-          user_id: req.user.id,
-          type: 'ALLOCATION',
-          reference_id: allocation.id,
-          amount: allocationAmount,
-          remarks: `Self-drawn imprest from site balance. ${remark || ''}`.trim(),
-          created_by: req.user.id,
-          site_id: parsedSiteId,
-        }, client);
-      }
     }
 
     await client.query('COMMIT');
 
     res.status(201).json({
       allocation,
-      message: isSelfDraw
-        ? 'Imprest drawn from site balance.'
-        : escrowFromGiver
-          ? 'Sent for acceptance. Both balances stay unchanged until the recipient accepts.'
-          : 'Imprest allocated successfully. Pending receipt confirmation.',
+      message: escrowFromGiver
+        ? 'Sent for acceptance. Both balances stay unchanged until the recipient accepts.'
+        : 'Cash handover created. The recipient must confirm receipt.',
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -255,7 +238,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
 export const listAllocations = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
-  const callerIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+  const callerIsAdmin = ADMIN_ROLES.has(req.user.role);
 
   if (callerIsAdmin) {
     const allocations = await imprestAllocationModel.findAllWithDetails(parsedSiteId, pool);
@@ -326,13 +309,15 @@ export const cancelAllocation = asyncHandler(async (req, res) => {
     // New pending handovers never change either balance. Only legacy rows that
     // already contain an escrow debit need a compensating refund.
     const escrow = await client.query(
-      `SELECT id FROM imprest_ledger
-        WHERE user_id = $1 AND site_id = $2 AND reference_id = $3
-          AND type = 'TRANSFER_OUT' AND amount < 0
+      `SELECT il.id, u.role
+         FROM imprest_ledger il
+         JOIN users u ON u.id = il.user_id
+        WHERE il.user_id = $1 AND il.site_id = $2 AND il.reference_id = $3
+          AND il.type = 'TRANSFER_OUT' AND il.amount < 0
         LIMIT 1`,
       [existing.admin_id, existing.site_id, allocation.id]
     );
-    if (escrow.rows[0]) {
+    if (escrow.rows[0] && !ADMIN_ROLES.has(escrow.rows[0].role)) {
       await lockImprestAccounts(client, existing.admin_id);
       await imprestLedgerModel.createEntry({
         user_id: existing.admin_id,
@@ -385,6 +370,10 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { confirmation_remark } = req.body;
 
+  if (req.user.role === 'super_admin') {
+    return res.status(403).json({ code: 'OBSERVER_ROLE', message: 'Super Admin observes imprest and cannot receive float' });
+  }
+
   if (!confirmation_remark || !confirmation_remark.trim()) {
     return res.status(400).json({ message: 'Confirmation remark is required' });
   }
@@ -410,7 +399,10 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
 
     const giverResult = await client.query('SELECT name, role FROM users WHERE id = $1', [existing.admin_id]);
     const giverName = giverResult.rows[0]?.name || 'Giver';
-    const fundedByGiverFloat = existing.from_own_float === true || giverResult.rows[0]?.role === 'sub_admin';
+    // Only staff can own a personal float. Legacy Admin rows may still carry
+    // from_own_float=true, but must never debit the retired Admin ledger again.
+    const fundedByGiverFloat = giverResult.rows[0]?.role === 'sub_admin';
+    const recipientIsAdmin = ADMIN_ROLES.has(req.user.role);
 
     if (fundedByGiverFloat) {
       await lockImprestAccounts(client, existing.admin_id, req.user.id);
@@ -456,18 +448,20 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
       return res.status(409).json({ message: 'This handover was already confirmed or cancelled' });
     }
 
-    // 3. This is the first point where the recipient's balance may change.
-    // Creating a pending allocation never writes to their ledger; confirmation
-    // atomically adds the positive credit to the exact recipient account.
-    await imprestLedgerModel.createEntry({
-      user_id: req.user.id,
-      type: fundedByGiverFloat ? 'TRANSFER_IN' : 'ALLOCATION',
-      reference_id: allocation.id,
-      amount: parseFloat(allocation.amount),
-      remarks: `Imprest received from ${giverName}. ${confirmation_remark.trim()}`,
-      created_by: req.user.id,
-      site_id: existing.site_id,
-    }, client);
+    // 3. Staff recipients receive a personal float credit. An Admin recipient
+    // has no personal float: debiting the staff giver automatically releases
+    // the same cash back into the site's distributable custody.
+    if (!recipientIsAdmin) {
+      await imprestLedgerModel.createEntry({
+        user_id: req.user.id,
+        type: fundedByGiverFloat ? 'TRANSFER_IN' : 'ALLOCATION',
+        reference_id: allocation.id,
+        amount: parseFloat(allocation.amount),
+        remarks: `Imprest received from ${giverName}. ${confirmation_remark.trim()}`,
+        created_by: req.user.id,
+        site_id: existing.site_id,
+      }, client);
+    }
 
     await client.query(
       `UPDATE day_book
@@ -478,13 +472,16 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Get updated balance
-    const balance = await imprestLedgerModel.getBalance(req.user.id, existing.site_id, pool);
+    const balance = recipientIsAdmin
+      ? (await siteDistributable(pool, existing.site_id)).available
+      : await imprestLedgerModel.getBalance(req.user.id, existing.site_id, pool);
 
     res.json({
       allocation,
       balance,
-      message: 'Imprest receipt confirmed successfully',
+      message: recipientIsAdmin
+        ? 'Receipt confirmed — cash returned to the Site Balance.'
+        : 'Imprest receipt confirmed successfully',
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -511,6 +508,19 @@ export const getBalance = asyncHandler(async (req, res) => {
   }
 
   const siteId = req.imprestSiteId || (req.query.site_id ? parseInt(req.query.site_id) : null);
+  const target = await pool.query('SELECT role FROM users WHERE id = $1', [userId]);
+  if (siteId && ADMIN_ROLES.has(target.rows[0]?.role)) {
+    const cash = await siteDistributable(pool, siteId);
+    const reserved = Math.max(cash.cash_balance - cash.available, 0);
+    return res.json({
+      balance: cash.available,
+      posted_balance: cash.cash_balance,
+      reserved_amount: reserved,
+      available_balance: cash.available,
+      user_id: userId,
+      balance_source: 'SITE_CASH',
+    });
+  }
   const balanceState = await imprestLedgerModel.getBalanceState(userId, siteId, pool);
   res.json({
     balance: balanceState.available_balance,
@@ -546,13 +556,24 @@ export const getLedger = asyncHandler(async (req, res) => {
   const totalItems = await imprestLedgerModel.countByUserIdAndDateRange(userId, parsedSiteId, date_from, date_to, pool);
   const totalPages = Math.ceil(totalItems / parsedLimit);
 
-  const balanceState = await imprestLedgerModel.getBalanceState(userId, parsedSiteId, pool);
+  const target = await pool.query('SELECT role FROM users WHERE id = $1', [userId]);
+  const balanceState = parsedSiteId && ADMIN_ROLES.has(target.rows[0]?.role)
+    ? await (async () => {
+      const cash = await siteDistributable(pool, parsedSiteId);
+      return {
+        posted_balance: cash.cash_balance,
+        reserved_amount: Math.max(cash.cash_balance - cash.available, 0),
+        available_balance: cash.available,
+      };
+    })()
+    : await imprestLedgerModel.getBalanceState(userId, parsedSiteId, pool);
   const monthly = await imprestLedgerModel.getMonthlySummary(userId, parsedSiteId, pool);
 
   res.json({
     entries,
     balance: balanceState.available_balance,
     ...balanceState,
+    ...(parsedSiteId && ADMIN_ROLES.has(target.rows[0]?.role) ? { balance_source: 'SITE_CASH' } : {}),
     monthly,
     pagination: {
       totalItems,
@@ -565,7 +586,7 @@ export const getLedger = asyncHandler(async (req, res) => {
 
 /**
  * GET /imprest/peers
- * List potential imprest transfer recipients (active sub-admins + admins) excluding the caller.
+ * List potential imprest transfer recipients (active staff + Admin) excluding the caller.
  * Allows a sub-admin to pick another user for a peer transfer.
  */
 export const listTransferPeers = asyncHandler(async (req, res) => {
@@ -576,7 +597,7 @@ export const listTransferPeers = asyncHandler(async (req, res) => {
       WHERE u.is_active = true
         AND u.id != $1
         AND (
-          u.role IN ('admin', 'super_admin')
+          u.role = 'admin'
           OR (
             $2::integer IS NOT NULL
             AND u.role = 'sub_admin'
@@ -588,7 +609,7 @@ export const listTransferPeers = asyncHandler(async (req, res) => {
             )
           )
         )
-      ORDER BY CASE u.role WHEN 'super_admin' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+      ORDER BY CASE u.role WHEN 'admin' THEN 0 ELSE 1 END,
                u.name ASC,
                u.email ASC`,
     [req.user.id, siteId]
@@ -607,9 +628,8 @@ export const createTransfer = asyncHandler(async (req, res) => {
   const siteId = req.imprestSiteId;
   const callerIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
   // Sub-admins can only ever spend their own float — the body is ignored for them.
-  // Admins may name a source (the management console moves money between two
-  // people); when they don't — the personal /imprest "Give money" form — the
-  // source is themselves. Admins hold imprest too, so defaulting is correct.
+  // Admins may name a source in the management console. If the source is an
+  // Admin account, the transfer is funded from site cash—not a personal float.
   const explicitSource = from_user_id !== undefined && from_user_id !== null && String(from_user_id).trim() !== '';
   const fromUserId = callerIsAdmin && explicitSource ? parseInt(from_user_id, 10) : req.user.id;
   const toUserId = parseInt(to_user_id, 10);
@@ -646,15 +666,44 @@ export const createTransfer = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'Recipient is not available for this site' });
     }
 
-    // Lock both user rows in a stable order so simultaneous transfers touching
-    // the same account cannot both spend the same opening balance.
-    await lockImprestAccounts(client, fromUserId, toUserId);
+    const sourceIsAdmin = ADMIN_ROLES.has(source.role);
+    const recipientIsAdmin = ADMIN_ROLES.has(recipient.role);
+    if (source.role === 'super_admin' || recipient.role === 'super_admin') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Super Admin observes imprest and cannot send or receive float' });
+    }
+    if (sourceIsAdmin && recipientIsAdmin) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Admins share the Site Balance; there is no Admin-to-Admin float transfer' });
+    }
+    if (sourceIsAdmin && !DISTRIBUTOR_ROLES.has(req.user.role)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ code: 'OBSERVER_ROLE', message: 'Only the Admin can distribute site cash' });
+    }
 
-    const sourceBalance = await imprestLedgerModel.getBalance(fromUserId, siteId, client);
+    // Site-funded transfers always take the site lock first. Personal accounts
+    // then use the shared stable user-lock order.
+    let siteCash = null;
+    if (sourceIsAdmin) {
+      await lockSiteDistribution(client, siteId);
+      siteCash = await siteDistributable(client, siteId);
+    }
+    await lockImprestAccounts(
+      client,
+      ...(sourceIsAdmin ? [] : [fromUserId]),
+      ...(recipientIsAdmin ? [] : [toUserId])
+    );
+
+    const sourceBalance = sourceIsAdmin
+      ? siteCash.available
+      : await imprestLedgerModel.getBalance(fromUserId, siteId, client);
     if (sourceBalance < transferAmount) {
       await client.query('ROLLBACK');
       return res.status(400).json({
-        message: `Insufficient imprest balance. Available ₹${sourceBalance}, needed ₹${transferAmount}`,
+        code: sourceIsAdmin ? 'INSUFFICIENT_SITE_BALANCE' : 'INSUFFICIENT_IMPREST',
+        message: sourceIsAdmin
+          ? `Only ₹${sourceBalance} site cash is available, needed ₹${transferAmount}`
+          : `Insufficient imprest balance. Available ₹${sourceBalance}, needed ₹${transferAmount}`,
         balance: sourceBalance,
       });
     }
@@ -670,26 +719,32 @@ export const createTransfer = asyncHandler(async (req, res) => {
     }, client);
 
     const narration = cleanRemark ? ` — ${cleanRemark}` : '';
-    await imprestLedgerModel.createEntry({
-      user_id: fromUserId,
-      type: 'TRANSFER_OUT',
-      reference_id: transfer.id,
-      amount: -transferAmount,
-      remarks: `Transferred to ${recipient.name || recipient.email}${narration}`,
-      created_by: req.user.id,
-      site_id: siteId,
-    }, client);
-    await imprestLedgerModel.createEntry({
-      user_id: toUserId,
-      type: 'TRANSFER_IN',
-      reference_id: transfer.id,
-      amount: transferAmount,
-      remarks: `Received from ${source.name || source.email}${narration}`,
-      created_by: req.user.id,
-      site_id: siteId,
-    }, client);
+    if (!sourceIsAdmin) {
+      await imprestLedgerModel.createEntry({
+        user_id: fromUserId,
+        type: 'TRANSFER_OUT',
+        reference_id: transfer.id,
+        amount: -transferAmount,
+        remarks: `Transferred to ${recipient.name || recipient.email}${narration}`,
+        created_by: req.user.id,
+        site_id: siteId,
+      }, client);
+    }
+    if (!recipientIsAdmin) {
+      await imprestLedgerModel.createEntry({
+        user_id: toUserId,
+        type: 'TRANSFER_IN',
+        reference_id: transfer.id,
+        amount: transferAmount,
+        remarks: `Received from ${source.name || source.email}${narration}`,
+        created_by: req.user.id,
+        site_id: siteId,
+      }, client);
+    }
 
-    const recipientBalance = await imprestLedgerModel.getBalance(toUserId, siteId, client);
+    const recipientBalance = recipientIsAdmin
+      ? (await siteDistributable(client, siteId)).available
+      : await imprestLedgerModel.getBalance(toUserId, siteId, client);
     await client.query('COMMIT');
 
     res.status(201).json({
@@ -701,7 +756,11 @@ export const createTransfer = asyncHandler(async (req, res) => {
       },
       source_balance: sourceBalance - transferAmount,
       recipient_balance: recipientBalance,
-      message: 'Funds transferred successfully',
+      message: recipientIsAdmin
+        ? 'Funds returned to the Site Balance.'
+        : sourceIsAdmin
+          ? 'Site cash transferred successfully.'
+          : 'Funds transferred successfully',
     });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -769,6 +828,12 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
+  if (ADMIN_ROLES.has(req.user.role)) {
+    return res.status(400).json({
+      code: 'ADMIN_USES_SITE_BALANCE',
+      message: 'Admins do not have a personal imprest float. Record site expenses in the Expenses module.',
+    });
+  }
 
   const expenseAmount = parseFloat(debit) || 0;
   if (expenseAmount <= 0) return res.status(400).json({ message: 'Expense amount must be positive' });
@@ -851,6 +916,12 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
+  if (ADMIN_ROLES.has(req.user.role)) {
+    return res.status(400).json({
+      code: 'ADMIN_USES_SITE_BALANCE',
+      message: 'Admins use the Site Balance directly and cannot request a personal imprest float.',
+    });
+  }
   const parsedSiteId = req.imprestSiteId || parseInt(site_id);
   const requestAmount = parseFloat(amount || debit) || 0;
   if (requestAmount <= 0) return res.status(400).json({ message: 'Amount must be positive' });
@@ -967,23 +1038,17 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       // the custody snapshot so concurrent approvals cannot mint staff float.
       await lockSiteDistribution(client, request.site_id);
       const distributable = await siteDistributable(client, request.site_id);
-      let overrideReason = null;
       if (requestAmount > distributable.available + 0.005) {
-        const explicitOverride = overrideReasonOf(req.body);
-        const explicitReview = String(review_remark || '').trim();
-        overrideReason = explicitOverride || explicitReview;
-        if (overrideReason.length < 5) {
-          await client.query('ROLLBACK');
-          const shortfall = Math.round((requestAmount - Math.max(distributable.available, 0)) * 100) / 100;
-          return res.status(400).json({
-            code: 'INSUFFICIENT_SITE_BALANCE',
-            ...distributable,
-            shortfall,
-            message: distributable.available <= 0
-              ? `Site Balance is ₹${distributable.available.toLocaleString('en-IN')} — there is nothing available to distribute. ${FUNDING_HINT} To approve anyway, provide an override reason.`
-              : `Only ₹${distributable.available.toLocaleString('en-IN')} is available (₹${shortfall.toLocaleString('en-IN')} short). Fund the site first, or provide an override reason.`,
-          });
-        }
+        await client.query('ROLLBACK');
+        const shortfall = Math.round((requestAmount - Math.max(distributable.available, 0)) * 100) / 100;
+        return res.status(400).json({
+          code: 'INSUFFICIENT_SITE_BALANCE',
+          ...distributable,
+          shortfall,
+          message: distributable.available <= 0
+            ? `No site cash is available to approve this request. ${FUNDING_HINT}`
+            : `Only ₹${distributable.available.toLocaleString('en-IN')} cash is available (₹${shortfall.toLocaleString('en-IN')} short).`,
+        });
       }
 
       await lockImprestAccounts(client, request.sub_admin_id);
@@ -998,7 +1063,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
         site_id: request.site_id,
         from_own_float: false,
         site_balance_at_allocation: distributable.available,
-        override_reason: overrideReason,
+        override_reason: null,
         status: 'RECEIVED', // auto-confirmed since sub-admin requested it
         confirmed_at: new Date(),
         confirmation_remark: 'Auto-confirmed (requested by sub-admin)',
@@ -1113,12 +1178,15 @@ export const rejectExpenseRequest = asyncHandler(async (req, res) => {
  * Admin manually adjusts a sub-admin's imprest balance
  */
 export const adjustBalance = asyncHandler(async (req, res) => {
-  const { user_id, amount, remarks, date, payment_mode, site_id } = req.body;
+  const { user_id, amount, remarks, date, site_id } = req.body;
 
   if (!user_id) return res.status(400).json({ message: 'User ID is required' });
   if (amount === undefined || amount === null) return res.status(400).json({ message: 'Amount is required' });
   if (!DISTRIBUTOR_ROLES.has(req.user.role)) {
     return res.status(403).json({ code: 'OBSERVER_ROLE', message: 'Imprest balances are adjusted by the Admin. Super Admin observes.' });
+  }
+  if (ADMIN_ROLES.has(req.imprestParticipants?.user_id?.role)) {
+    return res.status(400).json({ message: 'Admins use the Site Balance and do not have an adjustable personal float' });
   }
   const parsedSiteId = req.imprestSiteId || parseInt(site_id);
   const adjustAmount = parseFloat(amount);
@@ -1126,7 +1194,6 @@ export const adjustBalance = asyncHandler(async (req, res) => {
   const proofKey = await uploadProof(req.file);
 
   const client = await pool.connect();
-  let overrideNote = '';
   try {
     await client.query('BEGIN');
     // A positive adjustment puts site money into someone's float — same rule as an allocation.
@@ -1134,17 +1201,13 @@ export const adjustBalance = asyncHandler(async (req, res) => {
       await lockSiteDistribution(client, parsedSiteId);
       const distributable = await siteDistributable(client, parsedSiteId);
       if (adjustAmount > distributable.available + 0.005) {
-        const reason = overrideReasonOf(req.body);
-        if (reason.length < 5) {
-          await client.query('ROLLBACK');
-          if (proofKey) await deletePlotDoc(proofKey).catch(() => {});
-          return res.status(400).json({
-            code: 'INSUFFICIENT_SITE_BALANCE', ...distributable,
-            shortfall: Math.round((adjustAmount - Math.max(distributable.available, 0)) * 100) / 100,
-            message: `Only ₹${distributable.available.toLocaleString('en-IN')} is in hand. ${FUNDING_HINT} To adjust anyway, give a reason.`,
-          });
-        }
-        overrideNote = ` | OVERRIDE: ${reason.toUpperCase()}`;
+        await client.query('ROLLBACK');
+        if (proofKey) await deletePlotDoc(proofKey).catch(() => {});
+        return res.status(400).json({
+          code: 'INSUFFICIENT_SITE_BALANCE', ...distributable,
+          shortfall: Math.round((adjustAmount - Math.max(distributable.available, 0)) * 100) / 100,
+          message: `Only ₹${distributable.available.toLocaleString('en-IN')} site cash is available. ${FUNDING_HINT}`,
+        });
       }
     }
     await lockImprestAccounts(client, parseInt(user_id));
@@ -1173,7 +1236,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
       type: 'ADJUSTMENT',
       reference_id: null,
       amount: parseFloat(amount),
-      remarks: `${remarks ? remarks.trim().toUpperCase() : 'ADMIN ADJUSTMENT'}${overrideNote}`,
+      remarks: remarks ? remarks.trim().toUpperCase() : 'ADMIN ADJUSTMENT',
       created_by: req.user.id,
       site_id: parsedSiteId,
       proof_key: proofKey,
@@ -1191,7 +1254,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
       debit: parseFloat(amount) < 0 ? Math.abs(parseFloat(amount)) : 0,
       credit: parseFloat(amount) > 0 ? parseFloat(amount) : 0,
       remarks: remarks ? remarks.trim().toUpperCase() : 'MANUAL IMPREST ADJUSTMENT',
-      payment_mode: String(payment_mode || 'CASH').trim().toUpperCase() || 'CASH',
+      payment_mode: 'CASH',
       category: 'IMPREST',
       status: 'approved',
       created_by: req.user.id,
@@ -1223,7 +1286,14 @@ export const adjustBalance = asyncHandler(async (req, res) => {
  * Sub-admin initiates returning money back to admin
  */
 export const createReturn = asyncHandler(async (req, res) => {
-  const { amount, reason, payment_mode, site_id, assigned_admin_id } = req.body;
+  const { amount, reason, site_id, assigned_admin_id } = req.body;
+
+  if (ADMIN_ROLES.has(req.user.role)) {
+    return res.status(400).json({
+      code: 'ADMIN_USES_SITE_BALANCE',
+      message: 'Admins do not return imprest because they already hold the Site Balance.',
+    });
+  }
 
   const returnAmount = parseFloat(amount);
   if (!returnAmount || returnAmount <= 0) {
@@ -1252,7 +1322,7 @@ export const createReturn = asyncHandler(async (req, res) => {
       sub_admin_id: req.user.id,
       amount: returnAmount,
       reason: reason ? reason.trim() : null,
-      payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : 'CASH',
+      payment_mode: 'CASH',
       site_id: parsedSiteId,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       proof_key: proofKey,

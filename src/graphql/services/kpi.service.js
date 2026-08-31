@@ -314,9 +314,9 @@ export async function getMiscIncome(siteId, start, end) {
 }
 
 // ── Site Balance stock as at the selected range end ──
-// Site Balance is the Admin's money in hand. Staff float is outside that hand,
-// while Admin float and pending site-funded allocations are reservations that
-// reduce what can be distributed without changing the authoritative balance.
+// Site Balance is the Admin's custody. Only its CASH portion can be distributed
+// as imprest. Staff float and pending site-funded cash handovers reduce that
+// distributable cash; Admins do not have a separate personal imprest float.
 // Period movement is returned separately; a time filter must never turn a
 // stock balance into only today's movement.
 export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
@@ -348,9 +348,7 @@ export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
      imprest AS (
        SELECT
          COALESCE(SUM(GREATEST(user_balance, 0))
-           FILTER (WHERE role NOT IN ('admin', 'super_admin')), 0)::numeric AS imprest_held,
-         COALESCE(SUM(GREATEST(user_balance, 0))
-           FILTER (WHERE role IN ('admin', 'super_admin')), 0)::numeric AS admin_imprest_reserved
+           FILTER (WHERE role NOT IN ('admin', 'super_admin')), 0)::numeric AS imprest_held
        FROM user_imprest
      ),
      pending AS (
@@ -364,11 +362,11 @@ export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
      SELECT
        ledger.*,
        imprest.imprest_held,
-       imprest.admin_imprest_reserved,
+       0::numeric AS admin_imprest_reserved,
        pending.pending_imprest_reservations,
        ledger.balance_before_imprest - imprest.imprest_held AS site_balance,
-       ledger.balance_before_imprest - imprest.imprest_held
-         - imprest.admin_imprest_reserved - pending.pending_imprest_reservations AS distributable_balance
+       ledger.cash_balance - imprest.imprest_held
+         - pending.pending_imprest_reservations AS distributable_balance
      FROM ledger CROSS JOIN imprest CROSS JOIN pending`,
     [siteId, start, end]
   );

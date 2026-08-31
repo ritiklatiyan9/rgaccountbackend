@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const readSource = (relativePath) => readFile(new URL(`../${relativePath}`, import.meta.url), 'utf8');
 
-test('imprest transfers keep sub-admin source ownership and update both ledgers atomically', async () => {
+test('imprest transfers keep staff ledgers atomic and route Admin sides through site cash', async () => {
   const controller = await readSource('src/controllers/imprest.controller.js');
 
   // A sub-admin can never name a source: only an admin WITH an explicit
@@ -12,10 +12,12 @@ test('imprest transfers keep sub-admin source ownership and update both ledgers 
   assert.match(controller, /const fromUserId = callerIsAdmin && explicitSource\s*\?\s*parseInt\(from_user_id, 10\)\s*:\s*req\.user\.id/);
   assert.match(controller, /const explicitSource = from_user_id !== undefined/);
   assert.match(controller, /await client\.query\('BEGIN'\)/);
-  assert.match(controller, /await lockImprestAccounts\(client, fromUserId, toUserId\)/);
+  assert.match(controller, /const sourceIsAdmin = ADMIN_ROLES\.has\(source\.role\)/);
+  assert.match(controller, /const recipientIsAdmin = ADMIN_ROLES\.has\(recipient\.role\)/);
+  assert.match(controller, /await lockSiteDistribution\(client, siteId\)/);
   assert.match(controller, /sourceBalance < transferAmount/);
-  assert.match(controller, /type:\s*'TRANSFER_OUT'/);
-  assert.match(controller, /type:\s*'TRANSFER_IN'/);
+  assert.match(controller, /if \(!sourceIsAdmin\)[\s\S]*?type:\s*'TRANSFER_OUT'/);
+  assert.match(controller, /if \(!recipientIsAdmin\)[\s\S]*?type:\s*'TRANSFER_IN'/);
   assert.match(controller, /await client\.query\('COMMIT'\)/);
   assert.match(controller, /await client\.query\('ROLLBACK'\)/);
 });
@@ -44,12 +46,12 @@ test('pending allocation is ledger-neutral for both parties until the recipient 
   const createAllocation = controller.slice(createStart, confirmStart);
   const confirmReceipt = controller.slice(confirmStart, balanceStart);
 
-  assert.match(createAllocation, /status: isSelfDraw \? 'RECEIVED' : 'PENDING_RECEIPT'/);
+  assert.match(createAllocation, /status:\s*'PENDING_RECEIPT'/);
   assert.doesNotMatch(createAllocation, /user_id:\s*parseInt\(sub_admin_id/);
   assert.doesNotMatch(createAllocation, /type:\s*'TRANSFER_OUT'/);
   assert.match(confirmReceipt, /existing\.sub_admin_id !== req\.user\.id/);
-  assert.match(confirmReceipt, /user_id:\s*req\.user\.id/);
-  assert.match(confirmReceipt, /amount:\s*parseFloat\(allocation\.amount\)/);
+  assert.match(confirmReceipt, /if \(!recipientIsAdmin\)[\s\S]*?user_id:\s*req\.user\.id/);
+  assert.match(confirmReceipt, /recipientIsAdmin[\s\S]*?cash returned to the Site Balance/i);
   assert.match(confirmReceipt, /type:\s*'TRANSFER_OUT'/);
   assert.match(confirmReceipt, /'This handover was already confirmed or cancelled'/);
 });

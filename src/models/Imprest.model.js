@@ -389,17 +389,15 @@ class ImprestLedgerModel extends MasterModel {
       FROM users u
       LEFT JOIN ledger_totals lt ON lt.user_id = u.id
       LEFT JOIN reservation_totals rt ON rt.user_id = u.id
-      WHERE u.role IN ('sub_admin', 'admin', 'super_admin')
+      WHERE u.role = 'sub_admin'
         AND u.is_active = true
         ${siteId ? `AND (
-          u.role IN ('admin', 'super_admin')
-          OR EXISTS (
+          EXISTS (
             SELECT 1 FROM user_sites us
             WHERE us.user_id = u.id AND us.site_id = $1
           )
         )` : ''}
-      ORDER BY CASE u.role WHEN 'super_admin' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
-               u.name ASC
+      ORDER BY u.name ASC
     `;
     const params = siteId ? [siteId] : [];
     const result = await pool.query(query, params);

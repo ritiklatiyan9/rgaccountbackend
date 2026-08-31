@@ -23,16 +23,17 @@ test('dashboard profit cards use cumulative plot and land positions with one run
   assert.match(service, /LOWER\(TRIM\(COALESCE\(d\.status, ''\)\)\) IN \('open', 'completed'\)/);
 });
 
-test('Admin Site Balance is an as-of custody stock with staff and distribution reservations separated', async () => {
+test('Admin Site Balance keeps full custody while only uncommitted cash is distributable', async () => {
   const service = await readBackend('src/graphql/services/kpi.service.js');
   const start = service.indexOf('export async function getSiteBalanceDetail');
   const end = service.indexOf('export async function getSiteBalance(', start);
   const implementation = service.slice(start, end);
 
   assert.match(implementation, /ledger\.balance_before_imprest - imprest\.imprest_held AS site_balance/);
-  assert.match(implementation, /- imprest\.admin_imprest_reserved - pending\.pending_imprest_reservations AS distributable_balance/);
+  assert.match(implementation, /ledger\.cash_balance - imprest\.imprest_held[\s\S]*?- pending\.pending_imprest_reservations AS distributable_balance/);
+  assert.match(implementation, /0::numeric AS admin_imprest_reserved/);
+  assert.doesNotMatch(implementation, /- imprest\.admin_imprest_reserved/);
   assert.match(implementation, /role NOT IN \('admin', 'super_admin'\)/);
-  assert.match(implementation, /role IN \('admin', 'super_admin'\)/);
   assert.match(implementation, /status = 'PENDING_RECEIPT'/);
   assert.match(implementation, /entry_date >= \$2::date AND entry_date < \$3::date/);
 });

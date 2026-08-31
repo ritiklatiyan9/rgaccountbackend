@@ -331,7 +331,8 @@ const migrate = async () => {
         v_wants_posted BOOLEAN := v_required > 0 AND COALESCE(p_posted, FALSE);
         v_group RECORD;
         v_lock_user INTEGER;
-        v_user_exists BOOLEAN;
+        v_user_exists BOOLEAN := FALSE;
+        v_user_role TEXT;
         v_current NUMERIC(15,2);
         v_source_net NUMERIC(15,2);
         v_other_reserved NUMERIC(15,2);
@@ -380,15 +381,25 @@ const migrate = async () => {
         END LOOP;
 
         IF v_required > 0 THEN
-          SELECT EXISTS(
-            SELECT 1 FROM users u
-             WHERE u.id = p_user_id AND COALESCE(u.is_active, TRUE)
-          ) INTO v_user_exists;
-          IF NOT v_user_exists THEN
+          SELECT COALESCE(u.is_active, TRUE), LOWER(COALESCE(u.role, ''))
+            INTO v_user_exists, v_user_role
+            FROM users u
+           WHERE u.id = p_user_id;
+          IF NOT COALESCE(v_user_exists, FALSE) THEN
             RAISE EXCEPTION USING
               ERRCODE = 'P0001',
               CONSTRAINT = 'imprest_debit_owner_required',
               MESSAGE = 'The user responsible for this debit is inactive or missing.';
+          END IF;
+
+          -- Admins spend from the site's own books and distribute only its
+          -- cash balance. They never own a separate personal imprest float.
+          -- Treat an Admin-owned debit as site activity and release any old
+          -- source-qualified personal posting/reservation left by migration
+          -- 125's earlier model.
+          IF v_user_role IN ('admin', 'super_admin') THEN
+            v_required := 0;
+            v_wants_posted := FALSE;
           END IF;
         END IF;
 
