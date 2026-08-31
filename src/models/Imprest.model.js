@@ -128,21 +128,54 @@ class ImprestLedgerModel extends MasterModel {
   }
 
   /**
-   * Get current balance for a user (SUM of all ledger amounts)
+   * Get posted, reserved and available imprest for one user account.
+   *
+   * Posted balance is physical/accounted float. Reservations are active debit
+   * rows still waiting for approval or cheque clearance. Callers that decide
+   * whether money can be spent must use available = posted - reserved.
    */
-  async getBalance(userId, siteId, pool) {
-    let query = `
-      SELECT COALESCE(SUM(amount), 0)::numeric AS balance
-      FROM imprest_ledger
-      WHERE user_id = $1
-    `;
+  async getBalanceState(userId, siteId, pool) {
     const params = [userId];
+    let ledgerSite = '';
+    let reservationSite = '';
     if (siteId) {
-      query += ` AND site_id = $2`;
+      ledgerSite = ' AND il.site_id = $2';
+      reservationSite = ' AND r.site_id = $2';
       params.push(siteId);
     }
+    const query = `
+      SELECT
+        COALESCE((
+          SELECT SUM(il.amount)
+            FROM imprest_ledger il
+           WHERE il.user_id = $1${ledgerSite}
+        ), 0)::numeric AS posted_balance,
+        COALESCE((
+          SELECT SUM(r.amount)
+            FROM imprest_debit_reservations r
+           WHERE r.user_id = $1${reservationSite}
+        ), 0)::numeric AS reserved_amount
+    `;
     const result = await pool.query(query, params);
-    return parseFloat(result.rows[0].balance);
+    const postedBalance = parseFloat(result.rows[0].posted_balance) || 0;
+    const reservedAmount = parseFloat(result.rows[0].reserved_amount) || 0;
+    return {
+      posted_balance: postedBalance,
+      reserved_amount: reservedAmount,
+      available_balance: postedBalance - reservedAmount,
+    };
+  }
+
+  /** Compatibility balance used by every spend/transfer guard: AVAILABLE. */
+  async getBalance(userId, siteId, pool) {
+    const state = await this.getBalanceState(userId, siteId, pool);
+    return state.available_balance;
+  }
+
+  /** Physical/accounted float, excluding pending debit reservations. */
+  async getPostedBalance(userId, siteId, pool) {
+    const state = await this.getBalanceState(userId, siteId, pool);
+    return state.posted_balance;
   }
 
   /**
@@ -289,8 +322,9 @@ class ImprestLedgerModel extends MasterModel {
    * Create a ledger entry with computed balance_after
    */
   async createEntry(data, pool) {
-    // Get current balance
-    const currentBalance = await this.getBalance(data.user_id, data.site_id || null, pool);
+    // balance_after is posted accounting history. Pending debit reservations
+    // live outside the ledger and therefore must not be baked into snapshots.
+    const currentBalance = await this.getPostedBalance(data.user_id, data.site_id || null, pool);
     const newBalance = currentBalance + parseFloat(data.amount);
 
     const entryData = {
@@ -320,17 +354,41 @@ class ImprestLedgerModel extends MasterModel {
    * Get all sub-admin balances (admin overview)
    */
   async getAllBalances(siteId, pool) {
+    const ledgerFilter = siteId ? 'WHERE site_id = $1' : '';
+    const reservationFilter = siteId ? 'WHERE site_id = $1' : '';
     const query = `
+      WITH ledger_totals AS (
+        SELECT user_id,
+               COALESCE(SUM(amount), 0)::numeric AS posted_balance,
+               COUNT(*)::int AS total_transactions,
+               MAX(created_at) AS last_transaction_at
+          FROM imprest_ledger
+          ${ledgerFilter}
+         GROUP BY user_id
+      ), reservation_totals AS (
+        SELECT user_id,
+               COALESCE(SUM(amount), 0)::numeric AS reserved_amount,
+               COUNT(*)::int AS reserved_transactions,
+               MAX(updated_at) AS last_reservation_at
+          FROM imprest_debit_reservations
+          ${reservationFilter}
+         GROUP BY user_id
+      )
       SELECT
         u.id as user_id,
         u.name,
         u.email,
         u.role,
-        COALESCE(SUM(il.amount), 0)::numeric AS balance,
-        COUNT(il.id)::int AS total_transactions,
-        MAX(il.created_at) AS last_transaction_at
+        COALESCE(lt.posted_balance, 0)::numeric AS posted_balance,
+        COALESCE(rt.reserved_amount, 0)::numeric AS reserved_amount,
+        (COALESCE(lt.posted_balance, 0) - COALESCE(rt.reserved_amount, 0))::numeric AS available_balance,
+        (COALESCE(lt.posted_balance, 0) - COALESCE(rt.reserved_amount, 0))::numeric AS balance,
+        COALESCE(lt.total_transactions, 0)::int AS total_transactions,
+        COALESCE(rt.reserved_transactions, 0)::int AS reserved_transactions,
+        GREATEST(lt.last_transaction_at, rt.last_reservation_at) AS last_transaction_at
       FROM users u
-      LEFT JOIN imprest_ledger il ON u.id = il.user_id${siteId ? ' AND il.site_id = $1' : ''}
+      LEFT JOIN ledger_totals lt ON lt.user_id = u.id
+      LEFT JOIN reservation_totals rt ON rt.user_id = u.id
       WHERE u.role IN ('sub_admin', 'admin', 'super_admin')
         AND u.is_active = true
         ${siteId ? `AND (
@@ -340,7 +398,6 @@ class ImprestLedgerModel extends MasterModel {
             WHERE us.user_id = u.id AND us.site_id = $1
           )
         )` : ''}
-      GROUP BY u.id, u.name, u.email, u.role
       ORDER BY CASE u.role WHEN 'super_admin' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
                u.name ASC
     `;

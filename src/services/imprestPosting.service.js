@@ -1,105 +1,43 @@
 import pool from '../config/db.js';
 
-const normalizedAmount = (value) => {
-  const amount = Number(value);
-  return Number.isFinite(amount) && amount > 0 ? amount : 0;
-};
-
 /**
- * Post a sub-admin's approved debit to their imprest exactly once.
- * sourceModule is part of the identity because ids can overlap across tables.
+ * Compatibility lookup for callers that used to post approved debits here.
+ *
+ * Imprest expense rows are now reconciled atomically by the database from the
+ * owning cash-flow row. Keeping this function read-only lets older controller
+ * paths observe that posting without racing or double-posting it.
  */
-export async function postApprovedImprestDebit({
+async function findDbOwnedPosting({
   createdBy,
-  amount,
   referenceId,
   sourceModule,
-  remarks,
-  approvedBy,
   siteId,
-  proofKey,
-}, db = pool) {
-  const debit = normalizedAmount(amount);
-  if (!createdBy || !referenceId || !sourceModule || !siteId || debit === 0) return null;
+}, type, db) {
+  if (!createdBy || !referenceId || !sourceModule || !siteId) return null;
 
   const result = await db.query(
-    `WITH removed_reversal AS (
-       DELETE FROM imprest_ledger
-        WHERE user_id = $1
-          AND site_id = $6
-          AND source_module = $7
-          AND reference_id = $2
-          AND type = 'ADJUSTMENT'
-       RETURNING id
-     )
-     INSERT INTO imprest_ledger (
-       user_id, type, reference_id, amount, remarks, created_by,
-       site_id, source_module, proof_key, balance_after
-     )
-     SELECT $1, 'EXPENSE', $2, -$3::numeric, UPPER($4), $5, $6, $7, $8,
-            COALESCE((
-              SELECT SUM(il.amount)
-                FROM imprest_ledger il
-               WHERE il.user_id = $1 AND il.site_id = $6
-            ), 0) - $3::numeric
-       FROM users u
-      WHERE u.id = $1 AND u.role = 'sub_admin'
-     ON CONFLICT (user_id, site_id, source_module, reference_id, type)
-       WHERE source_module IS NOT NULL
-     DO NOTHING
-     RETURNING *`,
-    [
-      Number(createdBy), Number(referenceId), debit,
-      remarks || `${sourceModule} #${referenceId}`, approvedBy || null,
-      Number(siteId), sourceModule, proofKey || null,
-    ]
+    `SELECT *
+       FROM imprest_ledger
+      WHERE user_id = $1
+        AND site_id = $2
+        AND source_module = $3
+        AND reference_id = $4
+        AND type = $5
+      ORDER BY id DESC
+      LIMIT 1`,
+    [Number(createdBy), Number(siteId), sourceModule, Number(referenceId), type]
   );
   return result.rows[0] || null;
 }
 
-/** Reverse a previously posted imprest debit exactly once. */
-export async function reverseApprovedImprestDebit({
-  createdBy,
-  amount,
-  referenceId,
-  sourceModule,
-  remarks,
-  reversedBy,
-  siteId,
-}, db = pool) {
-  const debit = normalizedAmount(amount);
-  if (!createdBy || !referenceId || !sourceModule || !siteId || debit === 0) return null;
+export async function postApprovedImprestDebit(identity, db = pool) {
+  return findDbOwnedPosting(identity, 'EXPENSE', db);
+}
 
-  const result = await db.query(
-    `INSERT INTO imprest_ledger (
-       user_id, type, reference_id, amount, remarks, created_by,
-       site_id, source_module, balance_after
-     )
-     SELECT $1, 'ADJUSTMENT', $2, $3::numeric, UPPER($4), $5, $6, $7,
-            COALESCE((
-              SELECT SUM(il.amount)
-                FROM imprest_ledger il
-               WHERE il.user_id = $1 AND il.site_id = $6
-            ), 0) + $3::numeric
-      WHERE EXISTS (
-        SELECT 1
-          FROM imprest_ledger posted
-         WHERE posted.user_id = $1
-           AND posted.site_id = $6
-           AND posted.source_module = $7
-           AND posted.reference_id = $2
-           AND posted.type = 'EXPENSE'
-           AND posted.amount < 0
-      )
-     ON CONFLICT (user_id, site_id, source_module, reference_id, type)
-       WHERE source_module IS NOT NULL
-     DO NOTHING
-     RETURNING *`,
-    [
-      Number(createdBy), Number(referenceId), debit,
-      `REVERSED (REJECTED): ${remarks || `${sourceModule} #${referenceId}`}`,
-      reversedBy || null, Number(siteId), sourceModule,
-    ]
-  );
-  return result.rows[0] || null;
+/**
+ * Compatibility lookup after a rejection, edit, or delete. The database owns
+ * the restoring adjustment; this function only observes it.
+ */
+export async function reverseApprovedImprestDebit(identity, db = pool) {
+  return findDbOwnedPosting(identity, 'ADJUSTMENT', db);
 }

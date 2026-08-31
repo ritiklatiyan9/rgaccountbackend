@@ -34,7 +34,7 @@ test('unified approvals cover every newly gated payment source and preserve boun
   assert.doesNotMatch(controller, /normalizedStatus === 'BOUNCED'[\s\S]{0,200}(debit|credit)\s*=\s*0/);
 });
 
-test('pending imprest submissions and handovers do not mutate balances before approval', async () => {
+test('pending handovers wait for receipt while a submitted expense reserves available imprest immediately', async () => {
   const controller = await readSource('src/controllers/imprest.controller.js');
   const allocationCreate = controller.slice(
     controller.indexOf('export const createAllocation'),
@@ -54,17 +54,48 @@ test('pending imprest submissions and handovers do not mutate balances before ap
   assert.match(confirmation, /type:\s*fundedByGiverFloat \? 'TRANSFER_IN' : 'ALLOCATION'/);
   assert.match(expenseCreate, /status:\s*'pending'/);
   assert.doesNotMatch(expenseCreate, /createEntry\(/);
-  assert.match(expenseCreate, /balance is unchanged until approval/);
+  assert.doesNotMatch(expenseCreate, /balance is unchanged until approval/i);
+  assert.match(expenseCreate, /const deductedBalance = await imprestLedgerModel\.getBalance/);
+  assert.match(expenseCreate, /balance:\s*deductedBalance/);
+  assert.match(expenseCreate, /(?:debited|deducted|reserved)[^.]*(?:imprest|balance)|(?:imprest|balance)[^.]*(?:debited|deducted|reserved)/i);
 });
 
-test('imprest approval posting is source-qualified and idempotent', async () => {
-  const service = await readSource('src/services/imprestPosting.service.js');
-  const migration = await readSource('src/migrations/104_approved_transaction_posting.js');
+test('approved imprest expense marks only its Day Book memo as internal', async () => {
+  const controller = await readSource('src/controllers/imprest.controller.js');
+  const approval = controller.slice(
+    controller.indexOf('// 2b. Create the expense'),
+    controller.indexOf("message: 'Expense request approved and deducted from imprest'")
+  );
+  const expenseWrite = approval.slice(
+    approval.indexOf('const expense = await expenseModel.create'),
+    approval.indexOf('const dayBookData')
+  );
+  const daybookWrite = approval.slice(approval.indexOf('const dayBookData'));
 
-  assert.match(service, /source_module/);
-  assert.match(service, /ON CONFLICT \(user_id, site_id, source_module, reference_id, type\)/);
-  assert.match(service, /u\.role = 'sub_admin'/);
-  assert.match(migration, /CREATE UNIQUE INDEX IF NOT EXISTS uq_imprest_posting_source/);
+  assert.doesNotMatch(expenseWrite, /is_imprest_internal/);
+  assert.match(daybookWrite, /entry_type:\s*'IMPREST'/);
+  assert.match(daybookWrite, /is_imprest_internal:\s*true/);
+});
+
+test('single plot commission approval relies on its canonical ledger projection', async () => {
+  const controller = await readSource('src/controllers/approval.controller.js');
+  const approveEntry = controller.slice(
+    controller.indexOf('export const approveEntry'),
+    controller.indexOf('export const rejectEntry')
+  );
+
+  assert.doesNotMatch(approveEntry, /INSERT INTO day_book/);
+  assert.doesNotMatch(approveEntry, /Auto-generate DayBook entry for new V2 commission payments/);
+});
+
+test('universal imprest posting replaces the sub-admin-only approval hook', async () => {
+  const service = await readSource('src/services/imprestPosting.service.js');
+  const migration = await readSource('src/migrations/125_universal_imprest_enforcement.js');
+
+  assert.match(migration, /source_module/);
+  assert.match(migration, /reference_id/);
+  assert.match(migration, /ON CONFLICT/);
+  assert.doesNotMatch(service, /u\.role\s*=\s*'sub_admin'/);
 });
 
 test('plot commission writes reject malformed accounting dates before they can be omitted from list rollups', async () => {

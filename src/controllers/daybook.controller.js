@@ -16,6 +16,13 @@ import { emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { transactionMovesMoney } from '../utils/transactionPosting.js';
 import {
+  FarmerPaymentValidationError,
+  canonicalFarmerPaymentModeFromDayBook,
+  farmerPaymentFieldsTouched,
+  normalizeFarmerPaymentInput,
+  rebuildFarmerPaymentDayBook,
+} from '../services/farmerPayment.service.js';
+import {
   loadDayBookAuxiliaryData,
   loadDayBookModeBalanceData,
   loadSiteBalanceAsOf,
@@ -137,63 +144,142 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
   if (!particular) return res.status(400).json({ message: 'Particular is required' });
 
   const normalizedType = entry_type ? entry_type.trim().toUpperCase() : 'GENERAL';
+  if (normalizedType === 'IMPREST') {
+    return res.status(400).json({
+      message: 'Imprest audit entries can only be created from the Imprest module',
+    });
+  }
 
   // ── FARMER PAYMENT: dual-write to day_book + farmer_payments ──
   if (normalizedType === 'FARMER PAYMENT') {
     if (!farmer_id) return res.status(400).json({ message: 'Farmer is required for farmer payment' });
+    const farmerId = parseInt(farmer_id);
+    const siteId = parseInt(site_id);
+    if (!Number.isInteger(farmerId) || farmerId <= 0 || !Number.isInteger(siteId) || siteId <= 0) {
+      return res.status(400).json({ message: 'A valid farmer and site are required' });
+    }
 
-    // Validate farmer exists and belongs to this site
-    const farmer = await farmerModel.findById(parseInt(farmer_id), pool);
-    if (!farmer) return res.status(404).json({ message: 'Farmer not found' });
-    if (farmer.site_id !== parseInt(site_id)) {
-      return res.status(400).json({ message: 'Farmer does not belong to this site' });
+    const detailedPaymentMode = String(payment_mode || 'CASH').trim().toUpperCase() || 'CASH';
+    // Day Book exposes settlement labels such as RTGS/NEFT/UPI. Keep that
+    // detail in `particular`, but store the coupled owner tuple in one of the
+    // four canonical farmer-payment modes.
+    let canonicalPaymentMode;
+    try {
+      canonicalPaymentMode = canonicalFarmerPaymentModeFromDayBook(detailedPaymentMode, 'CASH');
+    } catch (error) {
+      if (error instanceof FarmerPaymentValidationError) {
+        return res.status(400).json({ code: error.code, message: error.message });
+      }
+      throw error;
+    }
+    const debitNumber = debit === undefined || debit === null || debit === '' ? 0 : Number(debit);
+    const creditNumber = credit === undefined || credit === null || credit === '' ? 0 : Number(credit);
+    if (Number.isFinite(debitNumber) && Number.isFinite(creditNumber)
+        && debitNumber > 0 && creditNumber > 0) {
+      return res.status(400).json({
+        code: 'INVALID_FARMER_PAYMENT',
+        message: 'A farmer payment cannot contain both a debit and a credit',
+      });
+    }
+
+    const accountingInput = {
+      payment_mode: canonicalPaymentMode,
+      cash_amount: req.body.cash_amount,
+      bank_amount: req.body.bank_amount,
+      transaction_type: req.body.transaction_type,
+    };
+    if (debit !== undefined && !Number.isFinite(debitNumber)) {
+      accountingInput.amount = debit;
+      accountingInput.transaction_type = 'debit';
+    } else if (credit !== undefined && !Number.isFinite(creditNumber)) {
+      accountingInput.amount = credit;
+      accountingInput.transaction_type = 'credit';
+    } else if (creditNumber > 0 && debitNumber <= 0) {
+      accountingInput.amount = creditNumber;
+      accountingInput.transaction_type = 'credit';
+    } else {
+      accountingInput.amount = debit;
+      accountingInput.transaction_type = accountingInput.transaction_type || 'debit';
+    }
+    Object.keys(accountingInput).forEach((key) => {
+      if (accountingInput[key] === undefined) delete accountingInput[key];
+    });
+
+    let normalizedPayment;
+    try {
+      normalizedPayment = normalizeFarmerPaymentInput(accountingInput);
+    } catch (error) {
+      if (error instanceof FarmerPaymentValidationError) {
+        return res.status(400).json({ code: error.code, message: error.message });
+      }
+      throw error;
     }
 
     const paymentDate = date || new Date().toISOString().split('T')[0];
-    const paymentAmount = parseFloat(debit) || 0;
-
-    // Create the farmer payment record
+    const farmerChequeNo = req.body.cheque_no
+      ? String(req.body.cheque_no).trim().toUpperCase()
+      : null;
+    const farmerChequeStatus = normalizedPayment.payment_mode === 'CHEQUE' ? 'PENDING' : null;
     const fpData = {
-      farmer_id: parseInt(farmer_id),
+      farmer_id: farmerId,
       date: paymentDate,
-      particular: payment_mode ? payment_mode.trim().toUpperCase() : 'CASH',
-      amount: paymentAmount,
+      particular: detailedPaymentMode,
+      ...normalizedPayment,
       by_note: by_note ? by_note.trim() : null,
       interest_rate: parseFloat(interest_rate) || 0,
       interest_amount: parseFloat(interest_amount) || 0,
       remarks: remarks ? remarks.trim() : null,
-      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    };
-
-    const farmerPayment = await farmerPaymentModel.create(fpData, pool);
-
-    // Also create the day book entry (linked via farmer_payment_id)
-    const dbData = {
-      site_id: parseInt(site_id),
-      date: paymentDate,
-      particular: particular.trim().toUpperCase(),
-      entry_type: 'FARMER PAYMENT',
-      debit: paymentAmount,
-      credit: parseFloat(credit) || 0,
-      remarks: remarks ? remarks.trim() : null,
-      payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : null,
-      category: category ? category.trim().toUpperCase() : null,
-      from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
-      to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
-      account_no: account_no ? account_no.trim().toUpperCase() : null,
-      branch: branch ? branch.trim().toUpperCase() : null,
+      bank_name: req.body.bank_name || from_entity || null,
+      bank_account_no: req.body.bank_account_no || account_no || null,
+      bank_reference: req.body.bank_reference || null,
+      bank_ifsc: req.body.bank_ifsc || branch || null,
+      status: 'pending',
+      cheque_no: farmerChequeNo,
+      cheque_status: farmerChequeStatus,
       created_by: req.user.id,
       voucher_url: voucher_url || null,
-      farmer_payment_id: farmerPayment.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     };
 
-    const dayBookEntry = await dayBookModel.create(dbData, pool);
-    return res.status(201).json({
-      entry: dayBookEntry,
-      farmer_payment: farmerPayment,
-      message: 'Farmer payment recorded in Day Book and Farmer Payments',
-    });
+    const client = await pool.connect();
+    let transactionStarted = false;
+    try {
+      await client.query('BEGIN');
+      transactionStarted = true;
+
+      const { rows: farmerRows } = await client.query(
+        'SELECT id, site_id FROM farmers WHERE id = $1 FOR SHARE',
+        [farmerId]
+      );
+      const farmer = farmerRows[0];
+      if (!farmer) {
+        await client.query('ROLLBACK');
+        transactionStarted = false;
+        return res.status(404).json({ message: 'Farmer not found' });
+      }
+      if (Number(farmer.site_id) !== siteId) {
+        await client.query('ROLLBACK');
+        transactionStarted = false;
+        return res.status(400).json({ message: 'Farmer does not belong to this site' });
+      }
+
+      const farmerPayment = await farmerPaymentModel.create(fpData, client);
+      const daybookEntries = await rebuildFarmerPaymentDayBook(client, farmerPayment.id);
+
+      await client.query('COMMIT');
+      transactionStarted = false;
+      return res.status(201).json({
+        entry: daybookEntries[0] || null,
+        daybook_entries: daybookEntries,
+        farmer_payment: farmerPayment,
+        message: 'Farmer payment recorded in Day Book and Farmer Payments',
+      });
+    } catch (error) {
+      if (transactionStarted) await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   // ── Standard day book entry ──
@@ -432,7 +518,18 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
     }
 
     const ppDate = date || new Date().toISOString().split('T')[0];
-    const ppAmount = parseFloat(credit) || parseFloat(debit) || 0;
+    const ppDebit = debit === undefined || debit === '' ? 0 : Number(debit);
+    const ppCredit = credit === undefined || credit === '' ? 0 : Number(credit);
+    if (!Number.isFinite(ppDebit) || !Number.isFinite(ppCredit) || ppDebit < 0 || ppCredit < 0) {
+      return res.status(400).json({ message: 'Plot payment debit and credit must be valid non-negative amounts' });
+    }
+    if ((ppDebit > 0) === (ppCredit > 0)) {
+      return res.status(400).json({ message: 'Enter exactly one plot receipt (credit) or refund (debit) amount' });
+    }
+    // Plot receipts are positive source amounts. A debit is a real refund and
+    // is stored as a negative source amount, which the universal imprest guard
+    // owns as money-out. Never turn a debit-looking form row into a receipt.
+    const ppAmount = ppCredit > 0 ? ppCredit : -ppDebit;
     const ppPaymentFrom = req.body.pp_payment_from ? req.body.pp_payment_from.trim().toUpperCase() : null;
     const ppPaymentType = req.body.pp_payment_type === 'BANK' ? 'BANK' : req.body.pp_payment_type === 'CHEQUE' ? 'CHEQUE' : 'CASH';
     const ppBankDetails = req.body.pp_bank_details ? req.body.pp_bank_details.trim().toUpperCase() : null;
@@ -466,8 +563,8 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
       date: ppDate,
       particular: particular.trim().toUpperCase(),
       entry_type: 'PLOT PAYMENT',
-      debit: parseFloat(debit) || 0,
-      credit: parseFloat(credit) || 0,
+      debit: Math.max(-ppAmount, 0),
+      credit: Math.max(ppAmount, 0),
       remarks: remarks ? remarks.trim() : null,
       payment_mode: ppMode,
       category: category ? category.trim().toUpperCase() : 'PLOT PAYMENT',
@@ -1813,7 +1910,15 @@ export const updateDayBookEntry = asyncHandler(async (req, res) => {
   const data = {};
   if (date) data.date = date;
   if (particular !== undefined) data.particular = particular.trim().toUpperCase();
-  if (entry_type !== undefined) data.entry_type = entry_type.trim().toUpperCase();
+  if (entry_type !== undefined) {
+    const normalizedEntryType = entry_type.trim().toUpperCase();
+    if (normalizedEntryType === 'IMPREST') {
+      return res.status(400).json({
+        message: 'Imprest audit entries can only be managed from the Imprest module',
+      });
+    }
+    data.entry_type = normalizedEntryType;
+  }
   if (debit !== undefined) data.debit = parseFloat(debit) || 0;
   if (credit !== undefined) data.credit = parseFloat(credit) || 0;
   if (remarks !== undefined) data.remarks = remarks ? remarks.trim() : null;
@@ -2088,55 +2193,166 @@ export const listFarmersForDayBook = asyncHandler(async (req, res) => {
  * Updates both the farmer_payment record and any linked day_book entry
  */
 export const updateFarmerPaymentFromDayBook = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const existing = await farmerPaymentModel.findById(parseInt(id), pool);
-  if (!existing) return res.status(404).json({ message: 'Farmer payment not found' });
-
+  const paymentId = parseInt(req.params.id);
+  if (!Number.isInteger(paymentId) || paymentId <= 0) {
+    return res.status(400).json({ message: 'A valid farmer payment id is required' });
+  }
   const {
-    date, particular, debit, payment_mode, remarks,
+    date, particular, debit, credit, payment_mode, remarks,
     farmer_id, interest_rate, interest_amount, by_note,
     from_entity, to_entity, account_no, branch, category,
+    voucher_url, assigned_admin_id, cheque_no,
+    cash_amount, bank_amount, transaction_type,
   } = req.body;
+  const hasRequestedUpdate = [
+    date, particular, debit, credit, payment_mode, remarks, farmer_id,
+    interest_rate, interest_amount, by_note, from_entity, to_entity,
+    account_no, branch, category, voucher_url, assigned_admin_id, cheque_no,
+    cash_amount, bank_amount, transaction_type,
+  ].some((value) => value !== undefined);
+  if (!hasRequestedUpdate) return res.status(400).json({ message: 'Nothing to update' });
 
-  // Update farmer_payment record
-  const fpUpdate = {
-    date: date || existing.date,
-    particular: payment_mode !== undefined ? (payment_mode ? payment_mode.trim().toUpperCase() : existing.particular) : existing.particular,
-    amount: debit !== undefined ? (parseFloat(debit) || 0) : existing.amount,
-    by_note: by_note !== undefined ? (by_note ? by_note.trim() : null) : existing.by_note,
-    interest_rate: interest_rate !== undefined ? (parseFloat(interest_rate) || 0) : existing.interest_rate,
-    interest_amount: interest_amount !== undefined ? (parseFloat(interest_amount) || 0) : existing.interest_amount,
-    remarks: remarks !== undefined ? (remarks ? remarks.trim() : null) : existing.remarks,
-  };
+  const client = await pool.connect();
+  let transactionStarted = false;
+  try {
+    await client.query('BEGIN');
+    transactionStarted = true;
 
-  const updatedFp = await farmerPaymentModel.update(parseInt(id), fpUpdate, pool);
+    const locked = await client.query(
+      `SELECT fp.*
+         FROM farmer_payments fp
+        WHERE fp.id = $1
+        FOR UPDATE`,
+      [paymentId]
+    );
+    const existing = locked.rows[0];
+    if (!existing) {
+      await client.query('ROLLBACK');
+      transactionStarted = false;
+      return res.status(404).json({ message: 'Farmer payment not found' });
+    }
 
-  // Also update any linked day_book entry
-  const linkedDbQuery = await pool.query(
-    'SELECT id FROM day_book WHERE farmer_payment_id = $1',
-    [parseInt(id)]
-  );
-  if (linkedDbQuery.rows.length > 0) {
-    const dbId = linkedDbQuery.rows[0].id;
-    const dbUpdate = {
-      date: date || existing.date,
-      particular: particular !== undefined ? particular.trim().toUpperCase() : undefined,
-      entry_type: 'FARMER PAYMENT',
-      debit: debit !== undefined ? (parseFloat(debit) || 0) : existing.amount,
-      remarks: remarks !== undefined ? (remarks ? remarks.trim() : null) : existing.remarks,
-      payment_mode: payment_mode !== undefined ? (payment_mode ? payment_mode.trim().toUpperCase() : null) : undefined,
-      from_entity: from_entity !== undefined ? (from_entity ? from_entity.trim().toUpperCase() : null) : undefined,
-      to_entity: to_entity !== undefined ? (to_entity ? to_entity.trim().toUpperCase() : null) : undefined,
-      account_no: account_no !== undefined ? (account_no ? account_no.trim().toUpperCase() : null) : undefined,
-      branch: branch !== undefined ? (branch ? branch.trim().toUpperCase() : null) : undefined,
-      category: category !== undefined ? (category ? category.trim().toUpperCase() : null) : undefined,
-    };
-    // Remove undefined keys
-    Object.keys(dbUpdate).forEach(k => dbUpdate[k] === undefined && delete dbUpdate[k]);
-    await dayBookModel.update(dbId, dbUpdate, pool);
+    const fpUpdate = {};
+    if (date !== undefined) fpUpdate.date = date;
+    if (payment_mode !== undefined) {
+      fpUpdate.particular = payment_mode
+        ? String(payment_mode).trim().toUpperCase()
+        : existing.particular;
+    }
+    if (by_note !== undefined) fpUpdate.by_note = by_note ? String(by_note).trim() : null;
+    if (interest_rate !== undefined) fpUpdate.interest_rate = parseFloat(interest_rate) || 0;
+    if (interest_amount !== undefined) fpUpdate.interest_amount = parseFloat(interest_amount) || 0;
+    if (remarks !== undefined) fpUpdate.remarks = remarks ? String(remarks).trim() : null;
+    if (farmer_id !== undefined) fpUpdate.farmer_id = parseInt(farmer_id);
+    if (from_entity !== undefined) fpUpdate.bank_name = from_entity ? String(from_entity).trim() : null;
+    if (account_no !== undefined) fpUpdate.bank_account_no = account_no ? String(account_no).trim() : null;
+    if (branch !== undefined) fpUpdate.bank_ifsc = branch ? String(branch).trim() : null;
+    if (voucher_url !== undefined) fpUpdate.voucher_url = voucher_url || null;
+    if (assigned_admin_id !== undefined) {
+      fpUpdate.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+    }
+    if (cheque_no !== undefined) fpUpdate.cheque_no = cheque_no ? String(cheque_no).trim() : null;
+
+    const canonicalInput = { cash_amount, bank_amount, transaction_type };
+    const requestedMode = payment_mode === undefined
+      ? undefined
+      : String(payment_mode || '').trim().toUpperCase();
+    if (requestedMode !== undefined) {
+      try {
+        canonicalInput.payment_mode = canonicalFarmerPaymentModeFromDayBook(requestedMode);
+      } catch (error) {
+        if (error instanceof FarmerPaymentValidationError) {
+          await client.query('ROLLBACK');
+          transactionStarted = false;
+          return res.status(400).json({ code: error.code, message: error.message });
+        }
+        throw error;
+      }
+    }
+
+    const debitSupplied = debit !== undefined;
+    const creditSupplied = credit !== undefined;
+    const debitNumber = debit === undefined || debit === null || debit === '' ? 0 : Number(debit);
+    const creditNumber = credit === undefined || credit === null || credit === '' ? 0 : Number(credit);
+    if (Number.isFinite(debitNumber) && Number.isFinite(creditNumber)
+        && debitNumber > 0 && creditNumber > 0) {
+      await client.query('ROLLBACK');
+      transactionStarted = false;
+      return res.status(400).json({
+        code: 'INVALID_FARMER_PAYMENT',
+        message: 'A farmer payment cannot contain both a debit and a credit',
+      });
+    }
+    if (debitSupplied && !Number.isFinite(debitNumber)) {
+      canonicalInput.amount = debit;
+      canonicalInput.transaction_type = 'debit';
+    } else if (creditSupplied && !Number.isFinite(creditNumber)) {
+      canonicalInput.amount = credit;
+      canonicalInput.transaction_type = 'credit';
+    } else if (creditNumber > 0 && debitNumber <= 0) {
+      canonicalInput.transaction_type = 'credit';
+      canonicalInput.amount = creditNumber;
+    } else if (debitSupplied) {
+      canonicalInput.transaction_type = canonicalInput.transaction_type || 'debit';
+      canonicalInput.amount = debit;
+    } else if (creditSupplied) {
+      canonicalInput.transaction_type = canonicalInput.transaction_type || 'credit';
+      canonicalInput.amount = credit;
+    }
+
+    // Remove absent proxy fields so a metadata-only edit does not validate an
+    // untouched legacy negative correction.
+    Object.keys(canonicalInput).forEach((key) => canonicalInput[key] === undefined && delete canonicalInput[key]);
+    const tupleTouched = farmerPaymentFieldsTouched(canonicalInput);
+    let effectiveMode = String(existing.payment_mode || 'CASH').trim().toUpperCase();
+    if (tupleTouched) {
+      let normalized;
+      try {
+        normalized = normalizeFarmerPaymentInput(canonicalInput, existing);
+      } catch (error) {
+        if (error instanceof FarmerPaymentValidationError) {
+          await client.query('ROLLBACK');
+          transactionStarted = false;
+          return res.status(400).json({ code: error.code, message: error.message });
+        }
+        throw error;
+      }
+      Object.assign(fpUpdate, normalized);
+      effectiveMode = normalized.payment_mode;
+    }
+
+    fpUpdate.status = 'pending';
+    fpUpdate.approved_by = null;
+    fpUpdate.approved_at = null;
+    if (tupleTouched || cheque_no !== undefined) {
+      fpUpdate.cheque_status = effectiveMode === 'CHEQUE' ? 'PENDING' : null;
+    }
+
+    const keys = Object.keys(fpUpdate);
+    const result = await client.query(
+      `UPDATE farmer_payments
+          SET ${keys.map((key, index) => `${key} = $${index + 1}`).join(', ')},
+              updated_at = NOW()
+        WHERE id = $${keys.length + 1}
+        RETURNING *`,
+      [...Object.values(fpUpdate), paymentId]
+    );
+    const updatedFp = result.rows[0];
+    const daybookEntries = await rebuildFarmerPaymentDayBook(client, paymentId);
+
+    await client.query('COMMIT');
+    transactionStarted = false;
+    return res.json({
+      entry: updatedFp,
+      daybook_entries: daybookEntries,
+      message: 'Farmer payment updated',
+    });
+  } catch (error) {
+    if (transactionStarted) await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
   }
-
-  res.json({ entry: updatedFp, message: 'Farmer payment updated' });
 });
 
 /**
@@ -2514,7 +2730,19 @@ export const updatePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
     payment_mode, from_entity, to_entity, account_no, branch, category,
   } = req.body;
 
-  const ppAmount = parseFloat(credit) || parseFloat(debit) || 0;
+  const hasDirectionalAmount = debit !== undefined || credit !== undefined;
+  let ppAmount = Number(existing.amount) || 0;
+  if (hasDirectionalAmount) {
+    const ppDebit = debit === undefined || debit === '' ? 0 : Number(debit);
+    const ppCredit = credit === undefined || credit === '' ? 0 : Number(credit);
+    if (!Number.isFinite(ppDebit) || !Number.isFinite(ppCredit) || ppDebit < 0 || ppCredit < 0) {
+      return res.status(400).json({ message: 'Plot payment debit and credit must be valid non-negative amounts' });
+    }
+    if ((ppDebit > 0) === (ppCredit > 0)) {
+      return res.status(400).json({ message: 'Enter exactly one plot receipt (credit) or refund (debit) amount' });
+    }
+    ppAmount = ppCredit > 0 ? ppCredit : -ppDebit;
+  }
   const ppPaymentFrom = req.body.pp_payment_from !== undefined ? (req.body.pp_payment_from ? req.body.pp_payment_from.trim().toUpperCase() : null) : existing.payment_from;
   const ppPaymentType = req.body.pp_payment_type !== undefined ? (req.body.pp_payment_type === 'BANK' ? 'BANK' : 'CASH') : existing.payment_type;
   const ppBankDetails = req.body.pp_bank_details !== undefined ? (req.body.pp_bank_details ? req.body.pp_bank_details.trim().toUpperCase() : null) : existing.bank_details;
@@ -2529,7 +2757,7 @@ export const updatePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
     bank_details: ppBankDetails,
     narration: ppNarration,
     received_by: ppReceivedBy,
-    amount: ppAmount || existing.amount,
+    amount: ppAmount,
   };
 
   const updatedPp = await plotPaymentModel.update(parseInt(id), ppUpdate, pool);
@@ -2545,8 +2773,8 @@ export const updatePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
       date: date || existing.date,
       particular: particular !== undefined ? particular.trim().toUpperCase() : undefined,
       entry_type: 'PLOT PAYMENT',
-      debit: debit !== undefined ? (parseFloat(debit) || 0) : undefined,
-      credit: credit !== undefined ? (parseFloat(credit) || 0) : undefined,
+      debit: hasDirectionalAmount ? Math.max(-ppAmount, 0) : undefined,
+      credit: hasDirectionalAmount ? Math.max(ppAmount, 0) : undefined,
       remarks: remarks !== undefined ? (remarks ? remarks.trim() : null) : undefined,
       payment_mode: payment_mode !== undefined ? (payment_mode ? payment_mode.trim().toUpperCase() : null) : undefined,
       from_entity: from_entity !== undefined ? (from_entity ? from_entity.trim().toUpperCase() : null) : undefined,

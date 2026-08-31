@@ -447,6 +447,11 @@ export const transferEntry = asyncHandler(async (req, res) => {
       throw new TransferError(422, 'Choose a different destination');
     }
 
+    // Release the source debit before creating its replacement. Both actions
+    // remain in this transaction, so a failed destination insert restores the
+    // source on rollback, while a valid transfer never needs double imprest.
+    await deleteSource(client, source);
+
     let target;
     if (targetType === 'personal_ledger') target = await insertPersonalLedger(client, source, targetId, req.user.id);
     else if (targetType === 'expense') target = await insertExpense(client, source, req.user.id);
@@ -454,7 +459,6 @@ export const transferEntry = asyncHandler(async (req, res) => {
     else target = await insertPlotPayment(client, source, targetId, req.user.id);
 
     await copyBankMapping(client, source, targetType, target.row.id);
-    await deleteSource(client, source);
     const { rows: auditRows } = await client.query(
       `INSERT INTO transaction_entry_transfers
        (site_id,source_type,source_record_id,source_parent_id,source_parent_name,

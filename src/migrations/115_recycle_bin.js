@@ -14,6 +14,10 @@ const EXCLUDED_TABLES = [
   'draw_events',
   'event_reminders',
   'geocode_cache',
+  // Source-qualified imprest rows are generated accounting state. Restoring
+  // the canonical debit recreates them under the sufficient-balance guard.
+  'imprest_ledger',
+  'imprest_debit_reservations',
   'login_otps',
   'recycle_bin_entries',
   'reminder_scheduler_health',
@@ -298,6 +302,19 @@ export async function up() {
              ORDER BY id DESC
           LOOP
             BEGIN
+              -- Older deletion batches may contain generated imprest rows from
+              -- before migration 125. Never replay those negative mirrors
+              -- directly; restoring their canonical source reconciles them.
+              IF v_entry.source_table = 'imprest_ledger'
+                 AND COALESCE(v_entry.row_data ->> 'source_module', '') <> '' THEN
+                UPDATE recycle_bin_entries
+                   SET restored_at = NOW(), restored_by = p_user_id
+                 WHERE id = v_entry.id;
+                v_progress := v_progress + 1;
+                v_restored := v_restored + 1;
+                CONTINUE;
+              END IF;
+
               IF to_regclass(format('%I.%I', v_entry.source_schema, v_entry.source_table)) IS NULL THEN
                 RAISE EXCEPTION 'Source table %.% no longer exists', v_entry.source_schema, v_entry.source_table;
               END IF;

@@ -194,138 +194,159 @@ export const createTransaction = asyncHandler(async (req, res) => {
   if (!description || !description.trim()) return res.status(400).json({ message: 'Description is required' });
 
   const firmIdInt = parseInt(firm_id);
-  const firm = await firmModel.findById(firmIdInt, pool);
-  if (!firm) return res.status(404).json({ message: 'Firm not found' });
-
   const txnDate = date || new Date().toISOString().split('T')[0];
   const txnDebit = parseFloat(debit) || 0;
   const txnCredit = parseFloat(credit) || 0;
   const rawMode = (payment_mode || 'cash').toLowerCase();
   const txnPaymentMode = ['cash', 'bank', 'cheque'].includes(rawMode) ? rawMode : 'cash';
 
-  let cfEntryId = null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  // ── Cash Flow dual-write (single CTE round-trip when auto-creating month) ──
-  if (cash_flow_month_id || ledger_name) {
-    const cfLedgerName = ledger_name ? ledger_name.trim().toUpperCase() : null;
-    const cfLedgerType = ledger_type || 'site';
-
-    // Resolve month from entry date
-    const d = new Date(txnDate + 'T00:00:00');
-    const cfMonth = d.getMonth() + 1;
-    const cfYear = d.getFullYear();
-    const prevMonth = cfMonth === 1 ? 12 : cfMonth - 1;
-    const prevYear  = cfMonth === 1 ? cfYear - 1 : cfYear;
-
-    // Find month record: by ID first, then by period+name, or auto-create.
-    // The "by ID" path needs a cheap existence + lock check so we keep it
-    // simple. Auto-create + period-lookup are folded into ONE CTE below.
-    let monthRecord = null;
-    if (cash_flow_month_id) {
-      const mres = await pool.query(
-        `SELECT id, is_locked, ledger_name FROM cash_flow_months WHERE id = $1`,
-        [parseInt(cash_flow_month_id)]
-      );
-      monthRecord = mres.rows[0];
-      if (!monthRecord) return res.status(404).json({ message: 'Selected cash flow month not found' });
-    } else {
-      // SINGLE round-trip: try to find existing OR insert new month with
-      // opening balance carry-forward from prev month. Replaces:
-      //   findByPeriod (1) + getPreviousMonth (1) + getClosingBalance (1)
-      //   + cashFlowMonthModel.create (1) = 4 round-trips.
-      const monthRes = await pool.query(
-        `WITH existing AS (
-           SELECT id, is_locked, ledger_name
-             FROM cash_flow_months
-            WHERE site_id = $1 AND month = $2 AND year = $3 AND ledger_name = $4
-            LIMIT 1
-         ),
-         prev_close AS (
-           SELECT cfm.opening_balance
-                    + COALESCE(SUM(cfe.credit) FILTER (
-                        WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
-                      ), 0)
-                    - COALESCE(SUM(cfe.debit) FILTER (
-                        WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
-                      ), 0) AS closing_balance
-             FROM cash_flow_months cfm
-             LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
-            WHERE cfm.site_id = $1 AND cfm.month = $5 AND cfm.year = $6 AND cfm.ledger_name = $4
-            GROUP BY cfm.id, cfm.opening_balance
-            LIMIT 1
-         ),
-         ins AS (
-           INSERT INTO cash_flow_months (site_id, month, year, opening_balance, ledger_name, ledger_type, created_by)
-           SELECT $1, $2, $3,
-                  COALESCE((SELECT closing_balance FROM prev_close), 0),
-                  $4, $7, $8
-            WHERE NOT EXISTS (SELECT 1 FROM existing)
-            RETURNING id, is_locked, ledger_name
-         )
-         SELECT id, is_locked, ledger_name FROM existing
-         UNION ALL
-         SELECT id, is_locked, ledger_name FROM ins`,
-        [
-          firm.site_id,                 // $1
-          cfMonth,                      // $2
-          cfYear,                       // $3
-          cfLedgerName || '',           // $4
-          prevMonth,                    // $5
-          prevYear,                     // $6
-          cfLedgerType,                 // $7
-          req.user.id,                  // $8
-        ]
-      );
-      monthRecord = monthRes.rows[0];
+    const firm = await firmModel.findById(firmIdInt, client);
+    if (!firm) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Firm not found' });
     }
 
-    if (!monthRecord) {
-      return res.status(500).json({ message: 'Failed to resolve cash flow month' });
-    }
-    if (monthRecord.is_locked) {
-      return res.status(403).json({ message: `Cash flow month "${monthRecord.ledger_name || 'Ledger'}" (${cfMonth}/${cfYear}) is locked` });
+    let cfEntryId = null;
+
+    // ── Cash Flow dual-write (single CTE round-trip when auto-creating month) ──
+    if (cash_flow_month_id || ledger_name) {
+      const cfLedgerName = ledger_name ? ledger_name.trim().toUpperCase() : null;
+      const cfLedgerType = ledger_type || 'site';
+
+      // Resolve month from entry date
+      const d = new Date(txnDate + 'T00:00:00');
+      const cfMonth = d.getMonth() + 1;
+      const cfYear = d.getFullYear();
+      const prevMonth = cfMonth === 1 ? 12 : cfMonth - 1;
+      const prevYear  = cfMonth === 1 ? cfYear - 1 : cfYear;
+
+      // Find month record: by ID first, then by period+name, or auto-create.
+      // The "by ID" path needs a cheap existence + lock check so we keep it
+      // simple. Auto-create + period-lookup are folded into ONE CTE below.
+      let monthRecord = null;
+      if (cash_flow_month_id) {
+        const mres = await client.query(
+          `SELECT id, is_locked, ledger_name FROM cash_flow_months WHERE id = $1`,
+          [parseInt(cash_flow_month_id)]
+        );
+        monthRecord = mres.rows[0];
+        if (!monthRecord) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ message: 'Selected cash flow month not found' });
+        }
+      } else {
+        // SINGLE round-trip: try to find existing OR insert new month with
+        // opening balance carry-forward from prev month. Replaces:
+        //   findByPeriod (1) + getPreviousMonth (1) + getClosingBalance (1)
+        //   + cashFlowMonthModel.create (1) = 4 round-trips.
+        const monthRes = await client.query(
+          `WITH existing AS (
+             SELECT id, is_locked, ledger_name
+               FROM cash_flow_months
+              WHERE site_id = $1 AND month = $2 AND year = $3 AND ledger_name = $4
+              LIMIT 1
+           ),
+           prev_close AS (
+             SELECT cfm.opening_balance
+                      + COALESCE(SUM(cfe.credit) FILTER (
+                          WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
+                        ), 0)
+                      - COALESCE(SUM(cfe.debit) FILTER (
+                          WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
+                        ), 0) AS closing_balance
+               FROM cash_flow_months cfm
+               LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
+              WHERE cfm.site_id = $1 AND cfm.month = $5 AND cfm.year = $6 AND cfm.ledger_name = $4
+              GROUP BY cfm.id, cfm.opening_balance
+              LIMIT 1
+           ),
+           ins AS (
+             INSERT INTO cash_flow_months (site_id, month, year, opening_balance, ledger_name, ledger_type, created_by)
+             SELECT $1, $2, $3,
+                    COALESCE((SELECT closing_balance FROM prev_close), 0),
+                    $4, $7, $8
+              WHERE NOT EXISTS (SELECT 1 FROM existing)
+              RETURNING id, is_locked, ledger_name
+           )
+           SELECT id, is_locked, ledger_name FROM existing
+           UNION ALL
+           SELECT id, is_locked, ledger_name FROM ins`,
+          [
+            firm.site_id,                 // $1
+            cfMonth,                      // $2
+            cfYear,                       // $3
+            cfLedgerName || '',           // $4
+            prevMonth,                    // $5
+            prevYear,                     // $6
+            cfLedgerType,                 // $7
+            req.user.id,                  // $8
+          ]
+        );
+        monthRecord = monthRes.rows[0];
+      }
+
+      if (!monthRecord) {
+        await client.query('ROLLBACK');
+        return res.status(500).json({ message: 'Failed to resolve cash flow month' });
+      }
+      if (monthRecord.is_locked) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ message: `Cash flow month "${monthRecord.ledger_name || 'Ledger'}" (${cfMonth}/${cfYear}) is locked` });
+      }
+
+      // The cash-flow row and its owning firm transaction must commit or roll
+      // back together. This also keeps universal imprest reconciliation from
+      // retaining a temporary direct cash-flow debit if the owner insert fails.
+      const cfEntry = await cashFlowEntryModel.create({
+        cash_flow_month_id: monthRecord.id,
+        site_id: firm.site_id,
+        date: txnDate,
+        particular: description.trim().toUpperCase(),
+        cash_type: txnPaymentMode,
+        debit: txnDebit,
+        credit: txnCredit,
+        remarks: [firm.name, remark, purpose, name].filter(Boolean).join(' | '),
+        created_by: req.user.id,
+        assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+      }, client);
+      cfEntryId = cfEntry.id;
     }
 
-    // Create cash_flow_entries record
-    const cfEntry = await cashFlowEntryModel.create({
-      cash_flow_month_id: monthRecord.id,
+    const data = {
+      firm_id: firmIdInt,
       site_id: firm.site_id,
       date: txnDate,
-      particular: description.trim().toUpperCase(),
-      cash_type: txnPaymentMode,
+      description: description.trim(),
+      payment_mode: txnPaymentMode,
       debit: txnDebit,
       credit: txnCredit,
-      remarks: [firm.name, remark, purpose, name].filter(Boolean).join(' | '),
+      name: name ? name.trim().toUpperCase() : null,
+      purpose: purpose ? purpose.trim().toUpperCase() : null,
+      remark: remark ? remark.trim().toUpperCase() : null,
+      remark2: remark2 ? remark2.trim() : null,
+      cheque_no: cheque_no ? cheque_no.trim() : null,
+      transaction_no: transaction_no ? transaction_no.trim() : null,
       created_by: req.user.id,
+      voucher_url: voucher_url || null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    }, pool);
-    cfEntryId = cfEntry.id;
+      status: 'pending',
+      cheque_status: txnPaymentMode === 'cheque' ? 'PENDING' : null,
+      ...(cfEntryId && { cash_flow_entry_id: cfEntryId }),
+    };
+
+    const txn = await firmTransactionModel.create(data, client);
+    await client.query('COMMIT');
+    res.status(201).json({ transaction: txn, message: cfEntryId ? 'Transaction recorded in Firm & Cash Flow' : 'Transaction added' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const data = {
-    firm_id: firmIdInt,
-    site_id: firm.site_id,
-    date: txnDate,
-    description: description.trim(),
-    payment_mode: txnPaymentMode,
-    debit: txnDebit,
-    credit: txnCredit,
-    name: name ? name.trim().toUpperCase() : null,
-    purpose: purpose ? purpose.trim().toUpperCase() : null,
-    remark: remark ? remark.trim().toUpperCase() : null,
-    remark2: remark2 ? remark2.trim() : null,
-    cheque_no: cheque_no ? cheque_no.trim() : null,
-    transaction_no: transaction_no ? transaction_no.trim() : null,
-    created_by: req.user.id,
-    voucher_url: voucher_url || null,
-    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    status: 'pending',
-    cheque_status: txnPaymentMode === 'cheque' ? 'PENDING' : null,
-    ...(cfEntryId && { cash_flow_entry_id: cfEntryId }),
-  };
-
-  const txn = await firmTransactionModel.create(data, pool);
-  res.status(201).json({ transaction: txn, message: cfEntryId ? 'Transaction recorded in Firm & Cash Flow' : 'Transaction added' });
 });
 
 /**
@@ -864,14 +885,26 @@ export const deleteTransaction = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: 'Cannot delete — linked cash flow month is locked' });
   }
 
-  // Atomic CTE delete: cf entry first (if any) then the firm transaction.
-  await pool.query(
-    `WITH del_cf AS (
-       DELETE FROM cash_flow_entries WHERE id = $2
-     )
-     DELETE FROM firm_transactions WHERE id = $1`,
-    [txnId, existing.cash_flow_entry_id || null]
-  );
+  // Keep the two trigger-visible state changes ordered as well as atomic.
+  // A data-modifying CTE uses one statement snapshot, so the firm DELETE
+  // trigger can still see the CFE deleted by its sibling CTE and temporarily
+  // reclassify that presentation row as a direct imprest debit. Two statements
+  // in one transaction make the CFE deletion visible before the firm owner is
+  // released.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (existing.cash_flow_entry_id) {
+      await client.query('DELETE FROM cash_flow_entries WHERE id = $1', [existing.cash_flow_entry_id]);
+    }
+    await client.query('DELETE FROM firm_transactions WHERE id = $1', [txnId]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 
   res.json({ message: 'Transaction deleted' });
 });
@@ -901,13 +934,20 @@ export const bulkDeleteTransactions = asyncHandler(async (req, res) => {
 
   if (deletableIds.length > 0) {
     const cfEntryIds = deletable.map((r) => r.cash_flow_entry_id).filter(Boolean);
-    await pool.query(
-      `WITH del_cf AS (
-         DELETE FROM cash_flow_entries WHERE id = ANY($2::int[])
-       )
-       DELETE FROM firm_transactions WHERE id = ANY($1::int[])`,
-      [deletableIds, cfEntryIds]
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      if (cfEntryIds.length > 0) {
+        await client.query('DELETE FROM cash_flow_entries WHERE id = ANY($1::int[])', [cfEntryIds]);
+      }
+      await client.query('DELETE FROM firm_transactions WHERE id = ANY($1::int[])', [deletableIds]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   res.json({

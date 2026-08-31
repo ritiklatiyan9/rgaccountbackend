@@ -5,6 +5,12 @@ import pool from '../config/db.js';
 import { buildVerifyUrl, verifyReceiptToken, ReceiptType } from '../utils/receiptToken.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
+import {
+  FarmerPaymentValidationError,
+  farmerPaymentFieldsTouched,
+  normalizeFarmerPaymentInput,
+  rebuildFarmerPaymentDayBook,
+} from '../services/farmerPayment.service.js';
 
 const GAZ_TO_SQ_METRE = 0.8364;
 
@@ -228,10 +234,25 @@ export const createPayment = asyncHandler(async (req, res) => {
   }
 
   const farmerIdInt = parseInt(farmerId);
-  const totalAmount = parseFloat(amount) || 0;
-  const mode = (payment_mode || 'CASH').toUpperCase();
-  const cashAmt = mode === 'BANK' || mode === 'CHEQUE' ? 0 : (mode === 'SPLIT' ? (parseFloat(cash_amount) || 0) : totalAmount);
-  const bankAmt = mode === 'CASH' ? 0 : (mode === 'SPLIT' ? (parseFloat(bank_amount) || 0) : totalAmount);
+  if (!Number.isInteger(farmerIdInt) || farmerIdInt <= 0) {
+    return res.status(400).json({ message: 'A valid farmer id is required' });
+  }
+
+  let normalizedPayment;
+  try {
+    normalizedPayment = normalizeFarmerPaymentInput(req.body);
+  } catch (error) {
+    if (error instanceof FarmerPaymentValidationError) {
+      return res.status(400).json({ code: error.code, message: error.message });
+    }
+    throw error;
+  }
+  const {
+    amount: totalAmount,
+    payment_mode: mode,
+    cash_amount: cashAmt,
+    bank_amount: bankAmt,
+  } = normalizedPayment;
   const paymentDate = date || new Date().toISOString().split('T')[0];
   const adminId = assigned_admin_id ? parseInt(assigned_admin_id) : null;
   const chequeNo = req.body.cheque_no ? String(req.body.cheque_no).trim() : null;
@@ -449,6 +470,9 @@ export const listPayments = asyncHandler(async (req, res) => {
 export const updatePayment = asyncHandler(async (req, res) => {
   const farmerId = parseInt(req.params.farmerId);
   const paymentId = parseInt(req.params.paymentId);
+  if (!Number.isInteger(farmerId) || farmerId <= 0 || !Number.isInteger(paymentId) || paymentId <= 0) {
+    return res.status(400).json({ message: 'A valid farmer and payment id are required' });
+  }
   const entryVisibility = await resolveEntryVisibility(req.user, 'farmers', null);
   const {
     cheque_no, assigned_admin_id,
@@ -457,65 +481,115 @@ export const updatePayment = asyncHandler(async (req, res) => {
     voucher_url,
   } = req.body;
 
-  const updateData = {};
-  if (date !== undefined) updateData.date = date;
-  if (particular !== undefined) updateData.particular = particular;
-  if (amount !== undefined) updateData.amount = amount;
-  if (by_note !== undefined) updateData.by_note = by_note;
-  if (remarks !== undefined) updateData.remarks = remarks;
-  if (payment_mode !== undefined) updateData.payment_mode = payment_mode;
-  if (cash_amount !== undefined) updateData.cash_amount = cash_amount;
-  if (bank_amount !== undefined) updateData.bank_amount = bank_amount;
-  if (bank_name !== undefined) updateData.bank_name = bank_name;
-  if (bank_account_no !== undefined) updateData.bank_account_no = bank_account_no;
-  if (bank_reference !== undefined) updateData.bank_reference = bank_reference;
-  if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
-  if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
-  if (cheque_no !== undefined) updateData.cheque_no = cheque_no ? String(cheque_no).trim() : null;
-  if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
-  if (payment_mode !== undefined) updateData.cheque_status = String(payment_mode).toUpperCase() === 'CHEQUE' ? 'PENDING' : null;
-
-  if (Object.keys(updateData).length === 0) {
+  const requestedFields = {
+    date, particular, amount, by_note, remarks,
+    payment_mode, cash_amount, bank_amount, bank_name, bank_account_no,
+    bank_reference, bank_ifsc, voucher_url, cheque_no, assigned_admin_id,
+    transaction_type: req.body.transaction_type,
+  };
+  const hasRequestedUpdate = Object.values(requestedFields).some((value) => value !== undefined);
+  if (!hasRequestedUpdate) {
     return res.status(400).json({ message: 'Nothing to update' });
   }
 
-  // Atomic UPDATE scoped by both id AND farmer_id so we don't need a separate
-  // SELECT round-trip to verify ownership.
-  const keys = Object.keys(updateData);
-  const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-  const values = [...Object.values(updateData), paymentId, farmerId, entryVisibility.creatorId];
-  const result = await pool.query(
-    `WITH previous AS (
-       SELECT fp.status, fp.created_by, fp.amount, f.site_id
+  const client = await pool.connect();
+  let transactionStarted = false;
+  try {
+    await client.query('BEGIN');
+    transactionStarted = true;
+
+    const lockedResult = await client.query(
+      `SELECT fp.*, f.site_id
          FROM farmer_payments fp
          JOIN farmers f ON f.id = fp.farmer_id
-        WHERE fp.id = $${keys.length + 1} AND fp.farmer_id = $${keys.length + 2}
-     )
-     UPDATE farmer_payments fp
-        SET ${setClause}
-      WHERE fp.id = $${keys.length + 1} AND fp.farmer_id = $${keys.length + 2}
-        AND ($${keys.length + 3}::int IS NULL OR fp.created_by = $${keys.length + 3}::int)
-      RETURNING fp.*,
-        (SELECT status FROM previous) AS previous_status,
-        (SELECT amount FROM previous) AS previous_amount,
-        (SELECT site_id FROM previous) AS previous_site_id`,
-    values
-  );
-  if (!result.rows[0]) {
-    return res.status(404).json({ message: 'Payment not found' });
+        WHERE fp.id = $1
+          AND fp.farmer_id = $2
+          AND ($3::int IS NULL OR fp.created_by = $3::int)
+        FOR UPDATE OF fp`,
+      [paymentId, farmerId, entryVisibility.creatorId]
+    );
+    const existing = lockedResult.rows[0];
+    if (!existing) {
+      await client.query('ROLLBACK');
+      transactionStarted = false;
+      return res.status(404).json({ message: 'Payment not found' });
+    }
+
+    const updateData = {};
+    if (date !== undefined) updateData.date = date;
+    if (particular !== undefined) updateData.particular = particular;
+    if (by_note !== undefined) updateData.by_note = by_note;
+    if (remarks !== undefined) updateData.remarks = remarks;
+    if (bank_name !== undefined) updateData.bank_name = bank_name;
+    if (bank_account_no !== undefined) updateData.bank_account_no = bank_account_no;
+    if (bank_reference !== undefined) updateData.bank_reference = bank_reference;
+    if (bank_ifsc !== undefined) updateData.bank_ifsc = bank_ifsc;
+    if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
+    if (cheque_no !== undefined) updateData.cheque_no = cheque_no ? String(cheque_no).trim() : null;
+    if (assigned_admin_id !== undefined) {
+      updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+    }
+
+    const tupleTouched = farmerPaymentFieldsTouched(req.body);
+    let effectiveMode = String(existing.payment_mode || 'CASH').trim().toUpperCase();
+    if (tupleTouched) {
+      let normalized;
+      try {
+        normalized = normalizeFarmerPaymentInput(req.body, existing);
+      } catch (error) {
+        if (error instanceof FarmerPaymentValidationError) {
+          await client.query('ROLLBACK');
+          transactionStarted = false;
+          return res.status(400).json({ code: error.code, message: error.message });
+        }
+        throw error;
+      }
+      Object.assign(updateData, normalized);
+      effectiveMode = normalized.payment_mode;
+    }
+
+    // Every direct edit returns to approval. The universal trigger converts an
+    // old posting into a reservation in the same transaction.
+    updateData.status = 'pending';
+    updateData.approved_by = null;
+    updateData.approved_at = null;
+    if (tupleTouched || cheque_no !== undefined) {
+      updateData.cheque_status = effectiveMode === 'CHEQUE' ? 'PENDING' : null;
+    }
+
+    const keys = Object.keys(updateData);
+    const setClause = keys.map((key, index) => `${key} = $${index + 1}`).join(', ');
+    const result = await client.query(
+      `UPDATE farmer_payments
+          SET ${setClause}, updated_at = NOW()
+        WHERE id = $${keys.length + 1}
+        RETURNING *`,
+      [...Object.values(updateData), paymentId]
+    );
+    const updated = result.rows[0];
+
+    // Delete stale 1/2-leg mirrors and recreate them from the now-canonical
+    // owner while both operations share this transaction.
+    const daybookEntries = await rebuildFarmerPaymentDayBook(client, paymentId);
+
+    if (existing.status === 'approved') {
+      await reverseApprovedImprestDebit({
+        createdBy: existing.created_by,
+        referenceId: existing.id,
+        sourceModule: 'farmer_payment',
+        siteId: existing.site_id,
+      }, client);
+    }
+
+    await client.query('COMMIT');
+    transactionStarted = false;
+    return res.json({ payment: updated, daybook_entries: daybookEntries });
+  } catch (error) {
+    if (transactionStarted) await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
   }
-  if (result.rows[0].previous_status === 'approved') {
-    await reverseApprovedImprestDebit({
-      createdBy: result.rows[0].created_by,
-      amount: parseFloat(result.rows[0].previous_amount) || 0,
-      referenceId: result.rows[0].id,
-      sourceModule: 'farmer_payment',
-      remarks: `FARMER PAYMENT #${result.rows[0].id}: EDITED AND RETURNED TO APPROVAL`,
-      reversedBy: req.user.id,
-      siteId: result.rows[0].previous_site_id,
-    });
-  }
-  res.json({ payment: result.rows[0] });
 });
 
 /**

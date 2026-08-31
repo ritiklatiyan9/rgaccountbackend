@@ -12,6 +12,13 @@ import { deleteCloudinaryAsset, uploadCloudinaryAsset } from '../utils/cloudinar
 import { createRegistryRecord } from './registry.controller.js';
 import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
+import {
+  FarmerPaymentValidationError,
+  canonicalFarmerPaymentModeFromDayBook,
+  farmerPaymentFieldsTouched,
+  normalizeFarmerPaymentInput,
+  rebuildFarmerPaymentDayBook,
+} from '../services/farmerPayment.service.js';
 
 // Map module name to { model, fetchOriginal }
 const MODULE_MAP = {
@@ -99,19 +106,41 @@ const MODULE_MAP = {
     model: farmerPaymentModel,
     fetchOriginal: async (id, db = pool) => farmerPaymentModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
-      // farmer_payments columns: date, particular, amount, by_note, interest_rate, interest_amount, remarks, farmer_id
+      const paymentId = parseInt(id);
+      const { rows } = await db.query(
+        'SELECT * FROM farmer_payments WHERE id = $1 FOR UPDATE',
+        [paymentId]
+      );
+      const existing = rows[0];
+      if (!existing) throw new Error('Farmer payment no longer exists');
+
       const allowed = {};
-      if (data.date !== undefined) allowed.date = data.date;
-      if (data.particular !== undefined) allowed.particular = data.particular;
-      if (data.amount !== undefined) allowed.amount = data.amount;
-      if (data.by_note !== undefined) allowed.by_note = data.by_note;
-      if (data.interest_rate !== undefined) allowed.interest_rate = data.interest_rate;
-      if (data.interest_amount !== undefined) allowed.interest_amount = data.interest_amount;
-      if (data.remarks !== undefined) allowed.remarks = data.remarks;
-      if (data.farmer_id !== undefined) allowed.farmer_id = data.farmer_id;
-      if (Object.keys(allowed).length > 0) {
-        return farmerPaymentModel.update(parseInt(id), allowed, db);
+      for (const key of [
+        'date', 'particular', 'by_note', 'interest_rate', 'interest_amount',
+        'remarks', 'farmer_id', 'bank_name', 'bank_account_no', 'bank_reference',
+        'bank_ifsc', 'voucher_url', 'assigned_admin_id', 'cheque_no',
+      ]) {
+        if (data[key] !== undefined) allowed[key] = data[key];
       }
+
+      const accountingInput = {};
+      for (const key of ['amount', 'payment_mode', 'cash_amount', 'bank_amount', 'transaction_type']) {
+        if (data[key] !== undefined) accountingInput[key] = data[key];
+      }
+      let effectiveMode = String(existing.payment_mode || 'CASH').trim().toUpperCase();
+      if (farmerPaymentFieldsTouched(accountingInput)) {
+        const normalized = normalizeFarmerPaymentInput(accountingInput, existing);
+        Object.assign(allowed, normalized);
+        effectiveMode = normalized.payment_mode;
+      }
+      if (farmerPaymentFieldsTouched(accountingInput) || data.cheque_no !== undefined) {
+        allowed.cheque_status = effectiveMode === 'CHEQUE' ? 'PENDING' : null;
+      }
+
+      if (Object.keys(allowed).length === 0) return existing;
+      const updated = await farmerPaymentModel.update(paymentId, allowed, db);
+      const daybookEntries = await rebuildFarmerPaymentDayBook(db, paymentId);
+      return { ...updated, daybook_entries: daybookEntries };
     },
   },
   plot: {
@@ -193,33 +222,91 @@ const MODULE_MAP = {
     model: farmerPaymentModel,
     fetchOriginal: async (id, db = pool) => farmerPaymentModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
-      // Map daybook form fields → farmer_payments columns
+      const paymentId = parseInt(id);
+      const { rows } = await db.query(
+        'SELECT * FROM farmer_payments WHERE id = $1 FOR UPDATE',
+        [paymentId]
+      );
+      const existing = rows[0];
+      if (!existing) throw new Error('Farmer payment no longer exists');
+
+      // Map Day Book presentation fields back to the canonical owner. Detailed
+      // bank methods (RTGS/NEFT/UPI/etc.) stay in particular while the coupled
+      // accounting tuple uses the canonical BANK bucket.
       const fpUpdate = {};
       if (data.date !== undefined) fpUpdate.date = data.date;
-      if (data.payment_mode !== undefined) fpUpdate.particular = data.payment_mode; // daybook payment_mode → fp particular
-      if (data.particular !== undefined && !data.payment_mode) fpUpdate.particular = data.particular;
-      if (data.debit !== undefined) fpUpdate.amount = parseFloat(data.debit) || 0; // daybook debit → fp amount
+      if (data.payment_mode !== undefined) {
+        fpUpdate.particular = data.payment_mode
+          ? String(data.payment_mode).trim().toUpperCase()
+          : existing.particular;
+      }
+      if (data.particular !== undefined && data.payment_mode === undefined) {
+        fpUpdate.particular = data.particular;
+      }
       if (data.by_note !== undefined) fpUpdate.by_note = data.by_note;
       if (data.farmer_id !== undefined) fpUpdate.farmer_id = data.farmer_id;
-      if (data.interest_rate !== undefined) fpUpdate.interest_rate = parseFloat(data.interest_rate) || 0;
-      if (data.interest_amount !== undefined) fpUpdate.interest_amount = parseFloat(data.interest_amount) || 0;
+      if (data.interest_rate !== undefined) fpUpdate.interest_rate = data.interest_rate;
+      if (data.interest_amount !== undefined) fpUpdate.interest_amount = data.interest_amount;
       if (data.remarks !== undefined) fpUpdate.remarks = data.remarks;
+      if (data.from_entity !== undefined) fpUpdate.bank_name = data.from_entity || null;
+      if (data.account_no !== undefined) fpUpdate.bank_account_no = data.account_no || null;
+      if (data.branch !== undefined) fpUpdate.bank_ifsc = data.branch || null;
+      if (data.voucher_url !== undefined) fpUpdate.voucher_url = data.voucher_url || null;
+      if (data.assigned_admin_id !== undefined) {
+        fpUpdate.assigned_admin_id = data.assigned_admin_id || null;
+      }
+      if (data.cheque_no !== undefined) fpUpdate.cheque_no = data.cheque_no || null;
 
-      if (Object.keys(fpUpdate).length > 0) {
-        await farmerPaymentModel.update(parseInt(id), fpUpdate, db);
+      const accountingInput = {};
+      for (const key of ['cash_amount', 'bank_amount', 'transaction_type']) {
+        if (data[key] !== undefined) accountingInput[key] = data[key];
+      }
+      if (data.payment_mode !== undefined) {
+        const requestedMode = String(data.payment_mode || '').trim().toUpperCase();
+        accountingInput.payment_mode = canonicalFarmerPaymentModeFromDayBook(requestedMode);
       }
 
-      // Sync linked daybook entry
-      const linkedDb = await db.query('SELECT id FROM day_book WHERE farmer_payment_id = $1', [parseInt(id)]);
-      if (linkedDb.rows.length > 0) {
-        const dbUpdate = {};
-        for (const key of ['date', 'particular', 'entry_type', 'debit', 'credit', 'remarks', 'payment_mode', 'category', 'from_entity', 'to_entity', 'account_no', 'branch']) {
-          if (data[key] !== undefined) dbUpdate[key] = data[key];
-        }
-        if (Object.keys(dbUpdate).length > 0) {
-          await dayBookModel.update(linkedDb.rows[0].id, dbUpdate, db);
-        }
+      const debitSupplied = data.debit !== undefined;
+      const creditSupplied = data.credit !== undefined;
+      const debitNumber = !debitSupplied || data.debit === null || data.debit === '' ? 0 : Number(data.debit);
+      const creditNumber = !creditSupplied || data.credit === null || data.credit === '' ? 0 : Number(data.credit);
+      if (Number.isFinite(debitNumber) && Number.isFinite(creditNumber)
+          && debitNumber > 0 && creditNumber > 0) {
+        throw new FarmerPaymentValidationError(
+          'A farmer payment cannot contain both a debit and a credit'
+        );
       }
+      if (debitSupplied && !Number.isFinite(debitNumber)) {
+        accountingInput.amount = data.debit;
+        accountingInput.transaction_type = 'debit';
+      } else if (creditSupplied && !Number.isFinite(creditNumber)) {
+        accountingInput.amount = data.credit;
+        accountingInput.transaction_type = 'credit';
+      } else if (creditNumber > 0 && debitNumber <= 0) {
+        accountingInput.amount = creditNumber;
+        accountingInput.transaction_type = 'credit';
+      } else if (debitSupplied) {
+        accountingInput.amount = data.debit;
+        accountingInput.transaction_type = accountingInput.transaction_type || 'debit';
+      } else if (creditSupplied) {
+        accountingInput.amount = data.credit;
+        accountingInput.transaction_type = accountingInput.transaction_type || 'credit';
+      }
+
+      let effectiveMode = String(existing.payment_mode || 'CASH').trim().toUpperCase();
+      if (farmerPaymentFieldsTouched(accountingInput)) {
+        const normalized = normalizeFarmerPaymentInput(accountingInput, existing);
+        Object.assign(fpUpdate, normalized);
+        effectiveMode = normalized.payment_mode;
+      }
+      if (farmerPaymentFieldsTouched(accountingInput) || data.cheque_no !== undefined) {
+        fpUpdate.cheque_status = effectiveMode === 'CHEQUE' ? 'PENDING' : null;
+      }
+
+      if (Object.keys(fpUpdate).length === 0) return existing;
+      const updated = await farmerPaymentModel.update(paymentId, fpUpdate, db);
+      const daybookEntries = await rebuildFarmerPaymentDayBook(db, paymentId);
+      return { ...updated, daybook_entries: daybookEntries };
     },
   },
   daybook_commission: {

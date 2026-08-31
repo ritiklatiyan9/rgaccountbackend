@@ -937,48 +937,6 @@ export const approveEntry = asyncHandler(async (req, res) => {
     });
   }
 
-  // Auto-generate DayBook entry for new V2 commission payments (pay out + money received)
-  if (source === 'plot_commission_payment' && parseFloat(entry.amount) !== 0) {
-    try {
-      const pcpQuery = `
-        SELECT pcp.*, p.plot_no, ag.full_name AS agent_name
-        FROM plot_commission_payments pcp
-        JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
-        JOIN plots p ON pcm.plot_id = p.id
-        JOIN members ag ON pcm.agent_id = ag.id
-        WHERE pcp.id = $1
-      `;
-      const pcpData = await pool.query(pcpQuery, [entryId]);
-      
-      if (pcpData.rows.length > 0) {
-        const pcpRow = pcpData.rows[0];
-        const amountNum = parseFloat(pcpRow.amount) || 0;
-        const isMoneyReceived = amountNum < 0;
-        const absAmount = Math.abs(amountNum);
-        const plotInfo = pcpRow.plot_no ? ` (Plot: ${pcpRow.plot_no})` : '';
-        const dayBookQuery = `
-          INSERT INTO day_book (site_id, date, particular, entry_type, debit, credit, remarks, payment_mode, category, to_entity, created_by, status)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'approved')
-        `;
-        await pool.query(dayBookQuery, [
-          pcpRow.site_id,
-          pcpRow.date,
-          `${pcpRow.agent_name}${plotInfo} - ${isMoneyReceived ? 'COMMISSION RECEIVED' : 'COMMISSION'}`.toUpperCase(),
-          'PLOT COMMISSION',
-          isMoneyReceived ? 0 : absAmount,
-          isMoneyReceived ? absAmount : 0,
-          pcpRow.remarks,
-          pcpRow.payment_mode ? pcpRow.payment_mode.toUpperCase() : 'CASH',
-          'COMMISSION',
-          pcpRow.agent_name,
-          req.user.id
-        ]);
-      }
-    } catch (dbErr) {
-       console.error('[Approval] Failed to sync DayBook for Commission Payment:', dbErr.message);
-    }
-  }
-
   // Update overall commission status if full amount paid
   if (source === 'plot_commission_payment') {
       try {

@@ -210,6 +210,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
         status: isSelfDraw ? 'approved' : 'pending',
         created_by: req.user.id,
         imprest_allocation_id: allocation.id,
+        is_imprest_internal: true,
       }, client);
 
       if (isSelfDraw) {
@@ -510,8 +511,12 @@ export const getBalance = asyncHandler(async (req, res) => {
   }
 
   const siteId = req.imprestSiteId || (req.query.site_id ? parseInt(req.query.site_id) : null);
-  const balance = await imprestLedgerModel.getBalance(userId, siteId, pool);
-  res.json({ balance, user_id: userId });
+  const balanceState = await imprestLedgerModel.getBalanceState(userId, siteId, pool);
+  res.json({
+    balance: balanceState.available_balance,
+    ...balanceState,
+    user_id: userId,
+  });
 });
 
 /**
@@ -541,12 +546,13 @@ export const getLedger = asyncHandler(async (req, res) => {
   const totalItems = await imprestLedgerModel.countByUserIdAndDateRange(userId, parsedSiteId, date_from, date_to, pool);
   const totalPages = Math.ceil(totalItems / parsedLimit);
 
-  const balance = await imprestLedgerModel.getBalance(userId, parsedSiteId, pool);
+  const balanceState = await imprestLedgerModel.getBalanceState(userId, parsedSiteId, pool);
   const monthly = await imprestLedgerModel.getMonthlySummary(userId, parsedSiteId, pool);
 
   res.json({
     entries,
-    balance,
+    balance: balanceState.available_balance,
+    ...balanceState,
     monthly,
     pagination: {
       totalItems,
@@ -752,8 +758,9 @@ export const getAllBalances = asyncHandler(async (req, res) => {
 
 /**
  * POST /imprest/expense
- * Sub-admin submits an imprest expense. The expense remains visible as pending
- * and does not change the imprest balance until an administrator approves it.
+ * Sub-admin submits an imprest expense. The expense remains visible as pending,
+ * while its amount is deducted from available imprest immediately so another
+ * pending debit cannot spend the same money.
  */
 export const createExpenseFromImprest = asyncHandler(async (req, res) => {
   const {
@@ -811,12 +818,12 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
-    const unchangedBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, pool);
+    const deductedBalance = await imprestLedgerModel.getBalance(req.user.id, parsedSiteId, pool);
 
     res.status(201).json({
       expense,
-      balance: unchangedBalance,
-      message: 'Expense submitted for approval. Imprest balance is unchanged until approval.',
+      balance: deductedBalance,
+      message: 'Expense submitted for approval and deducted from imprest.',
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -828,7 +835,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════
-//  OVERDRAFT / EXPENSE REQUEST (Sub-Admin → Admin)
+//  FUNDING / EXPENSE REQUEST (Sub-Admin → Admin)
 // ══════════════════════════════════════════════════
 
 /**
@@ -848,7 +855,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
   const requestAmount = parseFloat(amount || debit) || 0;
   if (requestAmount <= 0) return res.status(400).json({ message: 'Amount must be positive' });
 
-  // Determine request_type: if no expense-specific fields → IMPREST (cash flow), else EXPENSE (overdraft)
+  // Determine request_type: if no expense-specific fields → IMPREST (cash flow), else EXPENSE.
   const hasExpenseFields = from_entity || to_entity || payment_mode || account_no || branch || category || remark;
   const requestType = explicitType === 'IMPREST' || explicitType === 'EXPENSE'
     ? explicitType
@@ -913,7 +920,8 @@ export const listExpenseRequests = asyncHandler(async (req, res) => {
 
 /**
  * PUT /imprest/expense-requests/:id/approve
- * Admin approves: IMPREST type → allocation (positive cash flow), EXPENSE type → overdraft expense
+ * Admin approves: IMPREST type → allocation (positive cash flow), EXPENSE type
+ * → expense deducted from the requester's available imprest.
  */
 export const approveExpenseRequest = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -1016,7 +1024,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       });
     }
 
-    // ── EXPENSE type: overdraft expense flow (original behavior) ──
+    // ── EXPENSE type: the database atomically verifies and deducts imprest ──
     await lockImprestAccounts(client, request.sub_admin_id);
     const storedExpenseData = typeof request.expense_data === 'string'
       ? JSON.parse(request.expense_data)
@@ -1034,28 +1042,18 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       created_by: request.sub_admin_id,
     }, client);
 
-    // 3b. Record in imprest ledger (negative balance = overdraft)
-    await imprestLedgerModel.createEntry({
-      user_id: request.sub_admin_id,
-      type: 'EXPENSE',
-      reference_id: expense.id,
-      amount: -expenseAmount,
-      remarks: `OVERDRAFT EXPENSE #${expense.id} (Admin approved): ${expenseData.remark || ''}`.trim(),
-      created_by: req.user.id,
-      site_id: parseInt(request.site_id),
-    }, client);
-
-    // 4b. Create Day Book entry
+    // 3b. Create a memo Day Book entry. The approved expense is the owning
+    // financial row, so this IMPREST row stays outside universal debit posting.
     const dayBookData = {
       site_id: parseInt(request.site_id),
       date: expenseData.date || new Date().toISOString().split('T')[0],
-      particular: `OVERDRAFT EXPENSE: ${expenseData.remark || expenseData.to_entity || 'ADMIN APPROVED'}`.toUpperCase(),
+      particular: `IMPREST EXPENSE: ${expenseData.remark || expenseData.to_entity || 'ADMIN APPROVED'}`.toUpperCase(),
       // ponytail: entry_type IMPREST — the approved expenses row already reaches
       // ledger_entries; this memo row must stay excluded or the spend counts twice.
       entry_type: 'IMPREST',
       debit: expenseAmount,
       credit: parseFloat(expenseData.credit) || 0,
-      remarks: `Overdraft approved by admin. ${review_remark || ''}`.trim().toUpperCase(),
+      remarks: `Imprest expense approved by admin. ${review_remark || ''}`.trim().toUpperCase(),
       payment_mode: expenseData.payment_mode || null,
       category: expenseData.category || null,
       from_entity: expenseData.from_entity || null,
@@ -1066,6 +1064,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       approved_by: req.user.id,
       approved_at: new Date(),
       created_by: request.sub_admin_id,
+      is_imprest_internal: true,
     };
 
     await dayBookModel.create(dayBookData, client);
@@ -1075,7 +1074,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     res.json({
       request,
       expense,
-      message: 'Expense request approved and expense created',
+      message: 'Expense request approved and deducted from imprest',
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1150,6 +1149,24 @@ export const adjustBalance = asyncHandler(async (req, res) => {
     }
     await lockImprestAccounts(client, parseInt(user_id));
 
+    if (adjustAmount < 0) {
+      const currentBalance = await imprestLedgerModel.getBalance(parseInt(user_id), parsedSiteId, client);
+      const required = Math.abs(adjustAmount);
+      if (currentBalance + 0.005 < required) {
+        await client.query('ROLLBACK');
+        if (proofKey) await deletePlotDoc(proofKey).catch(() => {});
+        const available = Math.max(currentBalance, 0);
+        return res.status(400).json({
+          code: 'INSUFFICIENT_IMPREST',
+          balance: currentBalance,
+          available,
+          required,
+          shortfall: Math.round((required - available) * 100) / 100,
+          message: `Insufficient imprest balance. Available: ₹${currentBalance}, Required: ₹${required}`,
+        });
+      }
+    }
+
     // Create ledger adjustment
     const entry = await imprestLedgerModel.createEntry({
       user_id: parseInt(user_id),
@@ -1178,6 +1195,7 @@ export const adjustBalance = asyncHandler(async (req, res) => {
       category: 'IMPREST',
       status: 'approved',
       created_by: req.user.id,
+      is_imprest_internal: true,
     };
 
     await dayBookModel.create(dayBookData, client);
@@ -1350,6 +1368,7 @@ export const acceptReturn = asyncHandler(async (req, res) => {
       to_entity: 'ADMIN',
       status: 'approved',
       created_by: req.user.id,
+      is_imprest_internal: true,
     };
 
     await dayBookModel.create(dayBookData, client);
