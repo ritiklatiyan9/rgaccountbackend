@@ -467,6 +467,51 @@ const migrate = async () => {
           PERFORM refresh_imprest_balance_snapshots(v_group.user_id, v_group.site_id);
         END LOOP;
 
+        -- Source edits/deletes can restore a legacy Admin-owned debit long
+        -- after the personal-float model has been retired. Keep those audit
+        -- rows, but immediately rebalance every Admin account touched by this
+        -- source back to zero. Staff source postings remain unchanged.
+        FOR v_group IN
+          SELECT DISTINCT il.user_id, il.site_id
+            FROM imprest_ledger il
+            JOIN users u ON u.id = il.user_id
+           WHERE il.source_module = p_source_module
+             AND il.reference_id = p_reference_id
+             AND il.site_id IS NOT NULL
+             AND LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+        LOOP
+          SELECT COALESCE(SUM(il.amount) FILTER (
+                   WHERE il.source_module IS DISTINCT FROM 'admin_float_retirement'
+                 ), 0)::numeric
+            INTO v_current
+            FROM imprest_ledger il
+           WHERE il.user_id = v_group.user_id
+             AND il.site_id = v_group.site_id;
+
+          INSERT INTO imprest_ledger (
+            user_id, type, reference_id, amount, balance_after, remarks,
+            created_by, site_id, source_module
+          ) VALUES (
+            v_group.user_id, 'ADJUSTMENT', v_group.user_id, -v_current, 0,
+            'ADMIN PERSONAL FLOAT RETIRED — BALANCE RETURNED TO SITE CUSTODY',
+            COALESCE(p_user_id, v_group.user_id), v_group.site_id,
+            'admin_float_retirement'
+          )
+          ON CONFLICT (user_id, site_id, source_module, reference_id, type)
+            WHERE source_module IS NOT NULL
+          DO UPDATE SET
+            amount = EXCLUDED.amount,
+            balance_after = 0,
+            remarks = EXCLUDED.remarks,
+            created_by = EXCLUDED.created_by,
+            created_at = CASE
+              WHEN imprest_ledger.amount IS DISTINCT FROM EXCLUDED.amount THEN NOW()
+              ELSE imprest_ledger.created_at
+            END;
+
+          PERFORM refresh_imprest_balance_snapshots(v_group.user_id, v_group.site_id);
+        END LOOP;
+
         -- A source can own at most one reservation. Moving owner/site, posting,
         -- rejecting or deleting it releases the previous hold atomically.
         DELETE FROM imprest_debit_reservations r

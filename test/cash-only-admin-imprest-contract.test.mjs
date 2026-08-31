@@ -49,7 +49,9 @@ test('universal source debits skip Admin personal imprest and retirement migrati
   const pkg = JSON.parse(await readBackend('package.json'));
 
   assert.match(universal, /v_user_role IN \('admin', 'super_admin'\)[\s\S]*?v_required := 0[\s\S]*?v_wants_posted := FALSE/);
+  assert.match(universal, /Source edits\/deletes can restore a legacy Admin-owned debit[\s\S]*?'admin_float_retirement'/);
   assert.match(retirement, /DELETE FROM imprest_debit_reservations/);
+  assert.doesNotMatch(retirement, /SELECT reconcile_imprest_debit/);
   assert.match(retirement, /source_module[\s\S]*?'admin_float_retirement'/);
   assert.match(retirement, /ADMIN PERSONAL FLOAT RETIRED/);
   assert.equal(pkg.scripts['migrate:cash-only-admin-imprest'], 'node src/migrations/126_cash_only_admin_imprest.js');
@@ -62,7 +64,8 @@ test('Imprest screens show cash-only distribution and no Admin self-draw', async
   const management = await readFrontend('src/pages/ImprestManagement.jsx');
   const ui = await readFrontend('src/components/imprest/ui.jsx');
 
-  assert.match(dashboard, /adminOwnsSiteBalance[\s\S]*?site\?\.site_balance/);
+  assert.match(dashboard, /adminUsesSiteBalance[\s\S]*?site\?\.site_balance/);
+  assert.match(dashboard, /There is no Admin personal float/);
   assert.match(dashboard, /Cash available to distribute/);
   assert.doesNotMatch(dashboard, /Myself — draw|giveSelfDraw|override_reason/);
   assert.match(management, /CASH ONLY/);

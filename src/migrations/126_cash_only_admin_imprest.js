@@ -15,33 +15,9 @@ const migrate = async () => {
     await client.query('BEGIN');
     await client.query(`SELECT pg_advisory_xact_lock(hashtext('126_cash_only_admin_imprest'))`);
 
-    // Release source-owned Admin debits through the normal audit-preserving
-    // reconciliation path before retiring any remaining allocation/transfer
-    // balance. Migration 125 installs the Admin-aware function first.
-    await client.query(`
-      SELECT reconcile_imprest_debit(
-        owned.source_module,
-        owned.reference_id,
-        NULL, NULL, 0, FALSE, FALSE,
-        'ADMIN PERSONAL FLOAT RETIRED — SOURCE RETURNED TO SITE CUSTODY',
-        NULL
-      )
-      FROM (
-        SELECT DISTINCT il.source_module, il.reference_id
-          FROM imprest_ledger il
-          JOIN users u ON u.id = il.user_id
-         WHERE LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
-           AND il.source_module IS NOT NULL
-           AND il.reference_id IS NOT NULL
-           AND il.type IN ('EXPENSE', 'ADJUSTMENT')
-        UNION
-        SELECT DISTINCT r.source_module, r.reference_id
-          FROM imprest_debit_reservations r
-          JOIN users u ON u.id = r.user_id
-         WHERE LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
-      ) owned
-    `);
-
+    // Admin reservations no longer represent spendable personal money. Do not
+    // broadly reconcile their source keys here: a source may have since moved
+    // to a staff owner whose valid debit must remain untouched.
     await client.query(`
       DELETE FROM imprest_debit_reservations r
       USING users u
