@@ -186,7 +186,9 @@ try {
   assert.ok(moveSiteId, 'rollback check needs a second site for owner/site move coverage');
   const alternateUser = (await client.query(
     `SELECT id, name, role FROM users
-      WHERE id <> $1 AND COALESCE(is_active, TRUE)
+      WHERE id <> $1
+        AND LOWER(COALESCE(role, '')) = 'sub_admin'
+        AND COALESCE(is_active, TRUE)
       ORDER BY id LIMIT 1`,
     [USER_ID]
   )).rows[0];
@@ -347,6 +349,22 @@ try {
   assert.equal(await sourceNet(client, 'expense', expense.id), 0, 'delete must add the debit back');
   assert.equal(await balance(client), baseline + FUNDING, 'delete must restore available imprest');
 
+  const modeSwitchExpense = (await client.query(
+    `INSERT INTO expenses
+       (site_id, date, payment_mode, debit, credit, remark, status, created_by)
+     VALUES ($1, CURRENT_DATE, 'CASH', 650, 0,
+             'UNIVERSAL IMPREST PAYMENT MODE SWITCH CHECK', 'pending', $2)
+     RETURNING id`,
+    [SITE_ID, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'expense', modeSwitchExpense.id), -650, 'CASH debit must reserve imprest');
+  await client.query(`UPDATE expenses SET payment_mode = 'BANK', updated_at = NOW() WHERE id = $1`, [modeSwitchExpense.id]);
+  assert.equal(await sourceNet(client, 'expense', modeSwitchExpense.id), 0, 'changing CASH to BANK must restore imprest');
+  await client.query(`UPDATE expenses SET payment_mode = 'CASH', updated_at = NOW() WHERE id = $1`, [modeSwitchExpense.id]);
+  assert.equal(await sourceNet(client, 'expense', modeSwitchExpense.id), -650, 'changing BANK to CASH must reserve imprest');
+  await client.query('DELETE FROM expenses WHERE id = $1', [modeSwitchExpense.id]);
+  assert.equal(await sourceNet(client, 'expense', modeSwitchExpense.id), 0, 'deleting the mode-switch debit must restore imprest once');
+
   const chequeExpense = (await client.query(
     `INSERT INTO expenses
        (site_id, date, payment_mode, debit, credit, remark, status,
@@ -357,21 +375,21 @@ try {
      RETURNING id`,
     [SITE_ID, USER_ID]
   )).rows[0];
-  assert.equal(await sourceReserved(client, 'expense', chequeExpense.id), 700, 'pending cheque must reserve imprest');
-  assert.equal(await sourceLedgerNet(client, 'expense', chequeExpense.id), 0, 'pending cheque must not post');
+  assert.equal(await sourceReserved(client, 'expense', chequeExpense.id), 0, 'pending cheque must not reserve imprest');
+  assert.equal(await sourceLedgerNet(client, 'expense', chequeExpense.id), 0, 'pending cheque must not touch imprest');
 
   await client.query(`UPDATE expenses SET status = 'approved', updated_at = NOW() WHERE id = $1`, [chequeExpense.id]);
-  assert.equal(await sourceReserved(client, 'expense', chequeExpense.id), 700, 'approved but uncleared cheque must remain reserved');
-  assert.equal(await sourceLedgerNet(client, 'expense', chequeExpense.id), 0, 'uncleared cheque must remain unposted');
+  assert.equal(await sourceReserved(client, 'expense', chequeExpense.id), 0, 'approved cheque must not reserve imprest');
+  assert.equal(await sourceLedgerNet(client, 'expense', chequeExpense.id), 0, 'approved cheque must not touch imprest');
 
   await client.query(`UPDATE expenses SET cheque_status = 'CLEARED', updated_at = NOW() WHERE id = $1`, [chequeExpense.id]);
-  assert.equal(await sourceReserved(client, 'expense', chequeExpense.id), 0, 'cleared cheque must consume its reservation');
-  assert.equal(await sourceLedgerNet(client, 'expense', chequeExpense.id), -700, 'cleared cheque must post the debit');
+  assert.equal(await sourceReserved(client, 'expense', chequeExpense.id), 0, 'cleared cheque must not reserve imprest');
+  assert.equal(await sourceLedgerNet(client, 'expense', chequeExpense.id), 0, 'cleared cheque must not touch imprest');
 
   await client.query(`UPDATE expenses SET cheque_status = 'BOUNCED', updated_at = NOW() WHERE id = $1`, [chequeExpense.id]);
-  assert.equal(await sourceNet(client, 'expense', chequeExpense.id), 0, 'bounced cheque must restore imprest');
+  assert.equal(await sourceNet(client, 'expense', chequeExpense.id), 0, 'bounced cheque must leave imprest unchanged');
   await client.query('DELETE FROM expenses WHERE id = $1', [chequeExpense.id]);
-  assert.equal(await sourceNet(client, 'expense', chequeExpense.id), 0, 'deleting a bounced cheque must not restore twice');
+  assert.equal(await sourceNet(client, 'expense', chequeExpense.id), 0, 'deleting a cheque must leave imprest unchanged');
 
   const monthId = Number((await client.query(
     'SELECT ensure_site_cashflow_month($1, CURRENT_DATE, $2) AS id',
@@ -423,8 +441,8 @@ try {
   )).rows[0];
   assert.equal(
     await sourceNet(client, 'farmer_payment', splitFarmer.id, Number(parents.farmer_site_id)),
-    -470,
-    'SPLIT farmer payment must reserve its actual cash and bank legs, not a mismatched summary'
+    0,
+    'SPLIT farmer payment must not touch cash-only imprest'
   );
   await client.query(
     `UPDATE farmer_payments
@@ -434,8 +452,8 @@ try {
   );
   assert.equal(
     await sourceNet(client, 'farmer_payment', splitFarmer.id, Number(parents.farmer_site_id)),
-    -510,
-    'editing SPLIT legs must reconcile the exact effective debit'
+    0,
+    'editing SPLIT legs must leave cash-only imprest unchanged'
   );
   await client.query(
     `UPDATE farmer_payments
@@ -445,20 +463,20 @@ try {
   );
   assert.equal(
     await sourceNet(client, 'farmer_payment', splitFarmer.id, Number(parents.farmer_site_id)),
-    -50,
-    'a negative SPLIT leg must not cancel a real positive cash or bank outflow'
+    0,
+    'SPLIT leg signs must not affect cash-only imprest'
   );
   await client.query('DELETE FROM farmer_payments WHERE id = $1', [splitFarmer.id]);
   assert.equal(
     await sourceNet(client, 'farmer_payment', splitFarmer.id, Number(parents.farmer_site_id)),
     0,
-    'deleting a SPLIT payment must restore all of its held money'
+    'deleting a SPLIT payment must leave imprest unchanged'
   );
 
   const legacyCommission = (await client.query(
     `INSERT INTO plot_commissions
-       (site_id, date, particular, amount, status, created_by)
-     VALUES ($1, CURRENT_DATE, 'ROLLBACK CHECK', 120, 'pending', $2)
+       (site_id, date, particular, amount, by_note, status, created_by)
+     VALUES ($1, CURRENT_DATE, 'ROLLBACK CHECK', 120, 'CASH', 'pending', $2)
      RETURNING id`,
     [parents.commission_site_id, USER_ID]
   )).rows[0];
@@ -650,6 +668,107 @@ try {
   assert.equal(spoofedUpdate.is_financial_projection, false, 'a standalone update cannot self-declare projection provenance');
   assert.equal(await sourceNet(client, 'daybook', spoofedProjection.id), -195, 'projection spoof update must remain charged');
 
+  // Prove the shared CASH-only gate on every canonical sidebar owner. These
+  // are real inserts (rolled back at the end), not direct calls to the helper.
+  const nonCashExpense = (await client.query(
+    `INSERT INTO expenses
+       (site_id, date, payment_mode, debit, credit, remark, status, created_by)
+     VALUES ($1, CURRENT_DATE, 'BANK', 201, 0, 'NON-CASH COVERAGE', 'approved', $2)
+     RETURNING id`,
+    [SITE_ID, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'expense', nonCashExpense.id), 0, 'BANK expense must not touch imprest');
+
+  const nonCashFarmer = (await client.query(
+    `INSERT INTO farmer_payments
+       (farmer_id, particular, amount, payment_mode, status, created_by)
+     VALUES ($1, 'NON-CASH COVERAGE', 202, 'BANK', 'approved', $2)
+     RETURNING id`,
+    [parents.farmer_id, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'farmer_payment', nonCashFarmer.id, Number(parents.farmer_site_id)), 0, 'BANK farmer payment must not touch imprest');
+
+  const nonCashLegacyCommission = (await client.query(
+    `INSERT INTO plot_commissions
+       (site_id, date, particular, amount, by_note, status, created_by)
+     VALUES ($1, CURRENT_DATE, 'NON-CASH COVERAGE', 203, 'BANK', 'approved', $2)
+     RETURNING id`,
+    [parents.commission_site_id, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'plot_commission', nonCashLegacyCommission.id, Number(parents.commission_site_id)), 0, 'BANK legacy commission must not touch imprest');
+
+  const nonCashCommissionPayment = (await client.query(
+    `INSERT INTO plot_commission_payments
+       (site_id, plot_commission_id, date, amount, payment_mode, status, created_by)
+     VALUES ($1, $2, CURRENT_DATE, 204, 'BANK', 'approved', $3)
+     RETURNING id`,
+    [parents.commission_site_id, parents.commission_v2_id, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'plot_commission_payment', nonCashCommissionPayment.id, Number(parents.commission_site_id)), 0, 'BANK commission payment must not touch imprest');
+
+  const nonCashVendor = (await client.query(
+    `INSERT INTO vendor_payments
+       (commitment_id, site_id, payment_date, amount, payment_mode, status, created_by)
+     VALUES ($1, $2, CURRENT_DATE, 205, 'bank', 'approved', $3)
+     RETURNING id`,
+    [parents.commitment_id, parents.vendor_site_id, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'vendor_payment', nonCashVendor.id, Number(parents.vendor_site_id)), 0, 'BANK vendor payment must not touch imprest');
+
+  const nonCashInventory = (await client.query(
+    `INSERT INTO vendor_inventory_payments
+       (order_id, site_id, payment_date, amount, payment_mode, status, created_by)
+     VALUES ($1, $2, CURRENT_DATE, 206, 'bank', 'approved', $3)
+     RETURNING id`,
+    [parents.inventory_order_id, parents.inventory_site_id, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'vendor_inventory_payment', nonCashInventory.id, Number(parents.inventory_site_id)), 0, 'BANK inventory payment must not touch imprest');
+
+  const nonCashFirm = (await client.query(
+    `INSERT INTO firm_transactions
+       (firm_id, site_id, date, description, debit, credit, payment_mode, status, created_by)
+     VALUES ($1, $2, CURRENT_DATE, 'NON-CASH COVERAGE', 207, 0, 'bank', 'approved', $3)
+     RETURNING id`,
+    [parents.firm_id, parents.firm_site_id, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'firm_transaction', nonCashFirm.id, Number(parents.firm_site_id)), 0, 'BANK firm transaction must not touch imprest');
+
+  const nonCashDirect = (await client.query(
+    `INSERT INTO cash_flow_entries
+       (cash_flow_month_id, site_id, date, particular, debit, credit, cash_type, status, created_by)
+     VALUES ($1, $2, CURRENT_DATE, 'NON-CASH COVERAGE', 208, 0, 'bank', 'approved', $3)
+     RETURNING id`,
+    [monthId, SITE_ID, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'cash_flow_entry', nonCashDirect.id), 0, 'BANK Personal Ledger debit must not touch imprest');
+
+  const nonCashMisc = (await client.query(
+    `INSERT INTO misc_income_entries
+       (site_id, category_id, direction, date, amount, payment_mode, status, created_by, remarks)
+     VALUES ($1, $2, 'debit', CURRENT_DATE, 209, 'BANK', 'approved', $3, 'NON-CASH COVERAGE')
+     RETURNING id`,
+    [SITE_ID, parents.misc_category_id, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'misc_income_entry', nonCashMisc.id), 0, 'BANK miscellaneous refund must not touch imprest');
+
+  const nonCashPlotRefund = (await client.query(
+    `INSERT INTO plot_payments
+       (plot_id, site_id, date, amount, payment_type, status, created_by, narration)
+     VALUES ($1, $2, CURRENT_DATE, -210, 'BANK', 'approved', $3, 'NON-CASH COVERAGE')
+     RETURNING id`,
+    [parents.plot_id, parents.plot_site_id, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'plot_payment', nonCashPlotRefund.id, Number(parents.plot_site_id)), 0, 'BANK plot refund must not touch imprest');
+
+  const nonCashDaybook = (await client.query(
+    `INSERT INTO day_book
+       (site_id, date, particular, entry_type, debit, credit, payment_mode, status, created_by)
+     VALUES ($1, CURRENT_DATE, 'NON-CASH COVERAGE', 'GENERAL', 211, 0, 'BANK', 'approved', $2)
+     RETURNING id`,
+    [SITE_ID, USER_ID]
+  )).rows[0];
+  assert.equal(await sourceNet(client, 'daybook', nonCashDaybook.id), 0, 'BANK Day Book debit must not touch imprest');
+
   await client.query('SAVEPOINT insufficient_debit');
   try {
     await client.query(
@@ -703,12 +822,13 @@ try {
     available_balance: baseline,
     verified: [
       'expense_lifecycle', 'farmer_payment', 'legacy_plot_commission',
-      'farmer_split_effective_amount', 'vendor_projection_owner_delete',
-      'zero_balance_guard', 'cheque_reserve_clear_bounce',
+      'cash_bank_mode_switch', 'farmer_split_non_cash', 'vendor_projection_owner_delete',
+      'zero_balance_guard', 'cheque_does_not_touch_imprest',
       'plot_commission_payment', 'vendor_payment', 'standalone_inventory_payment',
       'linked_inventory_exclusion', 'firm_transaction_and_mirror', 'firm_delete_restore',
       'direct_cashflow', 'misc_income_refund', 'negative_plot_refund',
       'standalone_daybook', 'daybook_label_bypass', 'projection_spoof_guard', 'internal_daybook_exclusion',
+      'non_cash_all_source_modules',
       'pending_delete', 'site_move', 'creator_move', 'balance_after_snapshot',
       'insufficient_guard', 'concurrent_overspend_guard',
     ],

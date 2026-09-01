@@ -210,7 +210,7 @@ test('a debit atomically locks its owner availability and rejects insufficient i
   assert.match(errorMiddleware, /INSUFFICIENT_IMPREST/);
 });
 
-test('SPLIT farmer payments charge their effective cash and bank ledger legs', async () => {
+test('SPLIT farmer payments stay outside cash-only imprest enforcement', async () => {
   const migration = await readSource(MIGRATION_PATH);
   const farmerController = await readSource('src/controllers/farmer.controller.js');
   const farmerPaymentService = await readSource('src/services/farmerPayment.service.js');
@@ -223,9 +223,47 @@ test('SPLIT farmer payments charge their effective cash and bank ledger legs', a
   assert.match(farmerBranch, /cash_amount/);
   assert.match(farmerBranch, /bank_amount/);
   assert.match(farmerBranch, /GREATEST[\s\S]*cash_amount[\s\S]*GREATEST[\s\S]*bank_amount/);
+  assert.match(migration, /UPPER\(TRIM\(COALESCE\(v_payment_mode, ''\)\)\) = 'CASH'/);
+  assert.match(migration, /shared mode gate below deliberately excludes SPLIT/);
   assert.match(farmerController, /normalizeFarmerPaymentInput\(req\.body\)/);
   assert.match(farmerPaymentService, /const total = roundMoney\(parsedCash \+ parsedBank\)/);
   assert.match(farmerPaymentService, /amount: total/);
+});
+
+test('only exact CASH mode can reserve or post imprest across every source module', async () => {
+  const migration = await readSource(MIGRATION_PATH);
+  const directCashflow = migration.slice(
+    migration.indexOf('CREATE OR REPLACE FUNCTION reconcile_direct_cashflow_imprest'),
+    migration.indexOf('CREATE OR REPLACE FUNCTION sync_universal_imprest_from_source')
+  );
+  const sourceSync = migration.slice(
+    migration.indexOf('CREATE OR REPLACE FUNCTION sync_universal_imprest_from_source'),
+    migration.indexOf('const sources = [')
+  );
+  const nonCashRepair = migration.slice(
+    migration.indexOf('// Release any source-qualified imprest state'),
+    migration.indexOf('// If an earlier version briefly classified')
+  );
+
+  assert.match(directCashflow, /UPPER\(TRIM\(COALESCE\(v_entry\.cash_type, ''\)\)\) = 'CASH'[\s\S]*?imprest_debit_is_active/);
+  assert.match(sourceSync, /v_payment_mode := COALESCE\([\s\S]*?payment_mode[\s\S]*?cash_type[\s\S]*?payment_type[\s\S]*?by_note/);
+  assert.match(sourceSync, /v_active := TG_OP <> 'DELETE'[\s\S]{0,180}UPPER\(TRIM\(COALESCE\(v_payment_mode, ''\)\)\) = 'CASH'/);
+
+  const firmBranch = sourceSync.slice(
+    sourceSync.indexOf("ELSIF TG_TABLE_NAME = 'firm_transactions'"),
+    sourceSync.indexOf("ELSIF TG_TABLE_NAME = 'misc_income_entries'")
+  );
+  assert.match(firmBranch, /v_payment_mode := v_row->>'payment_mode'[\s\S]*?= 'CASH'[\s\S]*?reconcile_imprest_debit/);
+
+  for (const table of [
+    'expenses', 'farmer_payments', 'plot_commissions',
+    'plot_commission_payments', 'vendor_payments',
+    'vendor_inventory_payments', 'firm_transactions',
+    'cash_flow_entries', 'misc_income_entries', 'plot_payments', 'day_book',
+  ]) {
+    assert.match(nonCashRepair, new RegExp(`FROM ${table} s`), `${table} must be included in non-cash repair`);
+  }
+  assert.match(nonCashRepair, /NON-CASH TRANSACTION — IMPREST RESTORED/);
 });
 
 test('Day Book plot-payment debits remain canonical refunds and cannot become receipts', async () => {

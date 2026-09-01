@@ -4,11 +4,12 @@ import pool from '../config/db.js';
 /**
  * Migration 125 — universal, transaction-safe imprest enforcement.
  *
- * Every canonical money-out row owns exactly one source-qualified imprest
- * debit. Pending/waiting/uncleared rows reserve the money immediately so two
- * pending expenses cannot spend the same float without pretending that the
- * accounting debit has posted. Rejection, cancellation, bounce or deletion
- * releases a reservation or creates/updates the matching restoring ADJUSTMENT. PostgreSQL owns
+ * Every canonical CASH money-out row owns exactly one source-qualified
+ * imprest debit. Non-cash instruments never reserve or post imprest.
+ * Pending/waiting CASH rows reserve the money immediately so two pending
+ * expenses cannot spend the same float without pretending that the accounting
+ * debit has posted. Rejection, cancellation or deletion releases a reservation
+ * or creates/updates the matching restoring ADJUSTMENT. PostgreSQL owns
  * the invariant so normal forms, nested pages, bulk operations, edit requests,
  * cheque transitions, cascades and recycle-bin restores all behave alike.
  *
@@ -685,7 +686,10 @@ const migrate = async () => {
 
         v_amount := GREATEST(COALESCE(v_entry.debit, 0), 0)
                   + GREATEST(-COALESCE(v_entry.credit, 0), 0);
-        v_active := imprest_debit_is_active(v_entry.status, v_entry.cheque_status);
+        -- Imprest is physical cash held by a user. A Personal Ledger debit
+        -- paid by bank/cheque/UPI/another instrument must never hold it.
+        v_active := UPPER(TRIM(COALESCE(v_entry.cash_type, ''))) = 'CASH'
+          AND imprest_debit_is_active(v_entry.status, v_entry.cheque_status);
         PERFORM reconcile_imprest_debit(
           'cash_flow_entry', v_entry.id, v_entry.created_by, v_entry.site_id,
           v_amount,
@@ -781,9 +785,9 @@ const migrate = async () => {
               )
             ) INTO v_user_id;
           END IF;
-          -- SPLIT payments are rendered as independent cash and bank ledger
-          -- legs. Charge their actual positive legs, not the editable summary
-          -- amount, so a mismatched total cannot understate the outflow.
+          -- Keep the effective SPLIT amount for the accounting projection, but
+          -- the shared mode gate below deliberately excludes SPLIT from
+          -- imprest. Only an exact CASH transaction may use physical float.
           IF UPPER(COALESCE(v_row->>'payment_mode', '')) = 'SPLIT' THEN
             v_amount := GREATEST(COALESCE(NULLIF(v_row->>'cash_amount', '')::numeric, 0), 0)
                       + GREATEST(COALESCE(NULLIF(v_row->>'bank_amount', '')::numeric, 0), 0);
@@ -849,7 +853,9 @@ const migrate = async () => {
             );
           END IF;
 
+          v_payment_mode := v_row->>'payment_mode';
           v_active := TG_OP <> 'DELETE'
+            AND UPPER(TRIM(COALESCE(v_payment_mode, ''))) = 'CASH'
             AND imprest_debit_is_active(v_row->>'status', v_row->>'cheque_status', v_row->>'deleted_at');
           v_posted := v_active AND financial_transaction_posts(
             'debit', v_row->>'status', v_row->>'payment_mode', v_row->>'cheque_status'
@@ -918,12 +924,15 @@ const migrate = async () => {
           RETURN NEW;
         END IF;
 
+        v_payment_mode := COALESCE(
+          v_row->>'payment_mode', v_row->>'cash_type', v_row->>'payment_type',
+          -- Legacy Plot Commission stores its instrument in by_note.
+          v_row->>'by_note'
+        );
         v_active := TG_OP <> 'DELETE'
           AND v_amount > 0
+          AND UPPER(TRIM(COALESCE(v_payment_mode, ''))) = 'CASH'
           AND imprest_debit_is_active(v_row->>'status', v_row->>'cheque_status', v_row->>'deleted_at');
-        v_payment_mode := COALESCE(
-          v_row->>'payment_mode', v_row->>'cash_type', v_row->>'payment_type'
-        );
         v_posted := v_active AND financial_transaction_posts(
           'debit', v_row->>'status', v_payment_mode, v_row->>'cheque_status'
         );
@@ -961,6 +970,70 @@ const migrate = async () => {
         FOR EACH ROW EXECUTE FUNCTION sync_universal_imprest_from_source()
       `);
     }
+
+    // Release any source-qualified imprest state created by an older version
+    // for a surviving BANK/CHEQUE/UPI/TRANSFER/SPLIT/unspecified transaction.
+    // Existing audit rows are retained and offset by the reconciler; pending
+    // reservations are removed. This is a targeted correction, not a debit
+    // backfill, because only source keys that already own generated imprest
+    // state participate.
+    await client.query(`
+      WITH owned_keys AS (
+        SELECT DISTINCT source_module, reference_id
+          FROM imprest_ledger
+         WHERE source_module IN (
+           'expense', 'farmer_payment', 'plot_commission',
+           'plot_commission_payment', 'vendor_payment',
+           'vendor_inventory_payment', 'firm_transaction',
+           'cash_flow_entry', 'misc_income_entry', 'plot_payment', 'daybook'
+         )
+           AND reference_id IS NOT NULL
+           AND type IN ('EXPENSE', 'ADJUSTMENT')
+        UNION
+        SELECT source_module, reference_id
+          FROM imprest_debit_reservations
+      ), non_cash_sources AS (
+        SELECT 'expense'::text AS source_module, s.id AS reference_id
+          FROM expenses s
+         WHERE UPPER(TRIM(COALESCE(s.payment_mode, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'farmer_payment', s.id FROM farmer_payments s
+         WHERE UPPER(TRIM(COALESCE(s.payment_mode, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'plot_commission', s.id FROM plot_commissions s
+         WHERE UPPER(TRIM(COALESCE(s.by_note, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'plot_commission_payment', s.id FROM plot_commission_payments s
+         WHERE UPPER(TRIM(COALESCE(s.payment_mode, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'vendor_payment', s.id FROM vendor_payments s
+         WHERE UPPER(TRIM(COALESCE(s.payment_mode, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'vendor_inventory_payment', s.id FROM vendor_inventory_payments s
+         WHERE UPPER(TRIM(COALESCE(s.payment_mode, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'firm_transaction', s.id FROM firm_transactions s
+         WHERE UPPER(TRIM(COALESCE(s.payment_mode, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'cash_flow_entry', s.id FROM cash_flow_entries s
+         WHERE UPPER(TRIM(COALESCE(s.cash_type, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'misc_income_entry', s.id FROM misc_income_entries s
+         WHERE UPPER(TRIM(COALESCE(s.payment_mode, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'plot_payment', s.id FROM plot_payments s
+         WHERE UPPER(TRIM(COALESCE(s.payment_type, ''))) <> 'CASH'
+        UNION ALL
+        SELECT 'daybook', s.id FROM day_book s
+         WHERE UPPER(TRIM(COALESCE(s.payment_mode, ''))) <> 'CASH'
+      )
+      SELECT reconcile_imprest_debit(
+        n.source_module, n.reference_id, NULL, NULL, 0, FALSE, FALSE,
+        'NON-CASH TRANSACTION — IMPREST RESTORED', NULL
+      )
+        FROM non_cash_sources n
+        JOIN owned_keys k USING (source_module, reference_id)
+    `);
 
     // If an earlier version briefly classified a surviving mirror as a direct
     // Day Book debit, release only that source-qualified posting/reservation.

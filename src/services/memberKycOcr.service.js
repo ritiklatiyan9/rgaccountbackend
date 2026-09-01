@@ -2,6 +2,10 @@ import { runDmsOcr } from './dmsOcr.service.js';
 
 const TIMEOUT_MS = Number(process.env.DMS_OCR_TIMEOUT_MS || 120_000);
 
+// Models Groq has withdrawn. Keep in step with chequeMatching.service.js.
+const RETIRED_GROQ_MODELS = new Set(['llama-3.3-70b-versatile']);
+const DEFAULT_GROQ_KYC_MODEL = 'openai/gpt-oss-120b';
+
 const FIELD_NAMES = [
   'full_name', 'father_name', 'mother_name', 'spouse_name', 'date_of_birth',
   'gender', 'marital_status', 'nationality', 'religion', 'qualification',
@@ -83,13 +87,14 @@ const callStructuredModel = async (prompt) => {
   const key = useGroq ? process.env.GROQ_API_KEY : process.env.MISTRAL_API_KEY;
   if (!key) throw new Error(useGroq ? 'GROQ_API_KEY is not set' : 'MISTRAL_API_KEY is not set');
 
-  // KYC structuring is intentionally pinned to the requested active text model.
-  // This also prevents an old/deprecated vision model left in deployment env
-  // from recreating the model_not_found failure that triggered this migration.
+  // KYC structuring runs on the configured Groq text model, but a model that the
+  // provider has since withdrawn must not be used — llama-3.3-70b-versatile was
+  // pinned here and Groq no longer serves it, so every extraction returned
+  // model_not_found. Same retired-model swap chequeMatching.service.js applies.
   const configuredGroqModel = String(process.env.GROQ_MODEL || '').trim();
-  const groqModel = configuredGroqModel === 'llama-3.3-70b-versatile'
+  const groqModel = configuredGroqModel && !RETIRED_GROQ_MODELS.has(configuredGroqModel)
     ? configuredGroqModel
-    : 'llama-3.3-70b-versatile';
+    : (String(process.env.GROQ_FALLBACK_MODEL || '').trim() || DEFAULT_GROQ_KYC_MODEL);
   const model = useGroq
     ? groqModel
     : (process.env.MISTRAL_KYC_MODEL || 'mistral-small-latest');
