@@ -1,4 +1,4 @@
-import { runDmsOcr } from './dmsOcr.service.js';
+import { runDmsOcr, shortModel } from './dmsOcr.service.js';
 
 const TIMEOUT_MS = Number(process.env.DMS_OCR_TIMEOUT_MS || 120_000);
 
@@ -147,7 +147,7 @@ const callStructuredModel = async (prompt) => {
   if (data.error) throw new Error(`KYC extraction: ${JSON.stringify(data.error).slice(0, 300)}`);
   return {
     payload: parseJson(data.choices?.[0]?.message?.content || ''),
-    aiEngine: `${engine}:${model}`,
+    aiEngine: `${engine === 'openrouter' ? 'or' : engine}:${shortModel(model)}`,
   };
 };
 
@@ -213,9 +213,13 @@ export const extractMemberKyc = async (buffer, mime, documentType = 'OTHER', { d
   const { text, engine } = await runDmsOcr(buffer, mime);
   if (!text) throw new Error('No readable text was found in this document');
   const result = await extractMemberKycFromText(text, documentType, documentSide);
+  // One provider doing both stages reads as "or:model", not "or:model+or:model".
+  const combined = engine.split(':')[0] === result.aiEngine.split(':')[0]
+    ? result.aiEngine
+    : `${engine}+${result.aiEngine}`;
   return {
     ...result,
-    engine: `${engine}+${result.aiEngine}`,
+    engine: combined.slice(0, 40),
     rawText: text,
     textPreview: text.slice(0, 1200),
   };

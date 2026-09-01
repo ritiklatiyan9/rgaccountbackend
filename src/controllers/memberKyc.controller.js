@@ -221,6 +221,9 @@ const processKycDocument = async (documentId, preloadedBuffer = null) => {
       ? 'FRONT'
       : document.member_document_field === 'aadhar_back_url' ? 'BACK' : null;
     const result = await extractMemberKyc(buffer, document.mime_type, document.type, { documentSide });
+    // ocr_engine / ocr_results.engine are varchar(40). A longer label used to abort
+    // the whole insert with "value too long", failing an otherwise good extraction.
+    const engineLabel = String(result.engine || '').slice(0, 40);
     const confidenceValues = Object.values(result.confidence || {}).map(Number).filter(Number.isFinite);
     const overallConfidence = confidenceValues.length
       ? confidenceValues.reduce((sum, score) => sum + score, 0) / confidenceValues.length
@@ -240,14 +243,14 @@ const processKycDocument = async (documentId, preloadedBuffer = null) => {
           JSON.stringify(result.fields || {}),
           overallConfidence,
           JSON.stringify(result.confidence || {}),
-          result.engine,
+          engineLabel,
         ]
       );
       await client.query(
         `UPDATE documents SET ocr_status = 'DONE', ocr_engine = $1,
                 ocr_completed_at = now(), ocr_error = NULL, updated_at = now()
           WHERE id = $2`,
-        [result.engine, documentId]
+        [engineLabel, documentId]
       );
       await client.query('COMMIT');
     } catch (error) {

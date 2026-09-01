@@ -22,6 +22,8 @@ const ENGINE = (process.env.DMS_OCR_ENGINE || 'mistral').toLowerCase();
 const TIMEOUT_MS = Number(process.env.DMS_OCR_TIMEOUT_MS || 120_000);
 
 const isImage = (mime = '') => mime.startsWith('image/');
+/** Model ids are vendor-prefixed and long; the engine columns are varchar(40). */
+export const shortModel = (id = '') => String(id).split('/').pop().replace(/-instruct$/, '').slice(0, 22);
 const isPdf = (mime = '') => mime === 'application/pdf';
 
 const withTimeout = async (fn) => {
@@ -141,7 +143,8 @@ const runOpenRouter = async (buffer, mime) => {
   const data = await res.json();
   if (data.error) throw new Error(`OpenRouter vision: ${JSON.stringify(data.error).slice(0, 300)}`);
   const text = (data.choices?.[0]?.message?.content || '').trim();
-  return { text, engine: `openrouter-vision:${model}` };
+  // documents.ocr_engine / ocr_results.engine are varchar(40) — keep labels short.
+  return { text, engine: `or-vision:${shortModel(model)}` };
 };
 
 /**
