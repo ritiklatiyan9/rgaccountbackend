@@ -5,6 +5,8 @@
  *   mistral (default) — Mistral OCR API. Purpose-built OCR, handles PDF *and* images natively in
  *                       ONE call (no page-splitting/preprocessing), strong on Devanagari + mixed
  *                       script. Needs env MISTRAL_API_KEY. Zero extra npm deps (global fetch).
+ *   openrouter        — OpenRouter vision LLM (OPENROUTER_VISION_MODEL). Images only; PDFs fall
+ *                       through to Mistral. Needs env OPENROUTER_API_KEY.
  *   groq              — Groq vision LLM (same engine the booking module uses). Images only here —
  *                       PDF would need pdf→image (sharp/pdf-to-png-converter), which this backend
  *                       doesn't install; use the mistral engine for PDFs. Needs env GROQ_API_KEY.
@@ -95,13 +97,64 @@ const runGroq = async (buffer, mime) => {
   return { text, engine: 'groq-vision' };
 };
 
+// ── OpenRouter vision (images only) ─────────────────────────────────────────
+// One key, any hosted vision model. Note OPENROUTER_MODEL is deliberately NOT
+// used here: the shared default (openrouter/free) refuses identity documents
+// with "User Safety: unsafe — PII/Privacy", which is exactly what KYC feeds it.
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+export const DEFAULT_OPENROUTER_VISION_MODEL = 'qwen/qwen3-vl-30b-a3b-instruct';
+
+const runOpenRouter = async (buffer, mime) => {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) throw new Error('OPENROUTER_API_KEY is not set');
+  if (!isImage(mime)) throw new Error('OpenRouter vision handles images only — use DMS_OCR_ENGINE=mistral for PDFs');
+
+  const model = process.env.OPENROUTER_VISION_MODEL || DEFAULT_OPENROUTER_VISION_MODEL;
+  const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
+  const res = await withTimeout((signal) =>
+    fetch(OPENROUTER_URL, {
+      method: 'POST',
+      signal,
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        // OpenRouter attribution — optional for them, useful on the dashboard.
+        'HTTP-Referer': process.env.OPENROUTER_APP_URL || '',
+        'X-Title': process.env.OPENROUTER_APP_NAME || '',
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 4000,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Transcribe ALL text in this document exactly as written, preserving Hindi (Devanagari) and English. Output only the raw text, no commentary.' },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        }],
+      }),
+    })
+  );
+  if (!res.ok) throw new Error(`OpenRouter vision ${res.status}: ${(await res.text()).slice(0, 300)}`);
+
+  const data = await res.json();
+  if (data.error) throw new Error(`OpenRouter vision: ${JSON.stringify(data.error).slice(0, 300)}`);
+  const text = (data.choices?.[0]?.message?.content || '').trim();
+  return { text, engine: `openrouter-vision:${model}` };
+};
+
 /**
  * runDmsOcr(buffer, mime, filename) → { text, engine }
  * Only images + PDFs are OCR'd; anything else returns empty text (caller marks it archival).
  */
 export const runDmsOcr = async (buffer, mime) => {
   if (!isImage(mime) && !isPdf(mime)) return { text: '', engine: 'none' };
-  return ENGINE === 'groq' ? runGroq(buffer, mime) : runMistral(buffer, mime);
+  // PDFs only have one path — Mistral OCR reads them natively; the vision LLMs do not.
+  if (isPdf(mime)) return runMistral(buffer, mime);
+  if (ENGINE === 'openrouter') return runOpenRouter(buffer, mime);
+  if (ENGINE === 'groq') return runGroq(buffer, mime);
+  return runMistral(buffer, mime);
 };
 
 /** True when the given mime is worth OCR'ing (used to set initial ocr_status). */

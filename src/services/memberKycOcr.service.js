@@ -5,6 +5,7 @@ const TIMEOUT_MS = Number(process.env.DMS_OCR_TIMEOUT_MS || 120_000);
 // Models Groq has withdrawn. Keep in step with chequeMatching.service.js.
 const RETIRED_GROQ_MODELS = new Set(['llama-3.3-70b-versatile']);
 const DEFAULT_GROQ_KYC_MODEL = 'openai/gpt-oss-120b';
+const DEFAULT_OPENROUTER_KYC_MODEL = 'qwen/qwen3-vl-30b-a3b-instruct';
 
 const FIELD_NAMES = [
   'full_name', 'father_name', 'mother_name', 'spouse_name', 'date_of_birth',
@@ -70,22 +71,34 @@ OCR TEXT:
 ${String(text || '').slice(0, 45_000)}
 `;
 
+const ENGINE_KEYS = { openrouter: 'OPENROUTER_API_KEY', groq: 'GROQ_API_KEY', mistral: 'MISTRAL_API_KEY' };
+
+/** auto → the first engine that has a key, OpenRouter first (one key, any model). */
+const resolveEngine = () => {
+  const requested = String(process.env.KYC_AI_ENGINE || 'auto').toLowerCase();
+  if (!['auto', 'openrouter', 'groq', 'mistral'].includes(requested)) {
+    throw new Error(`Unsupported KYC_AI_ENGINE: ${requested}`);
+  }
+  if (requested !== 'auto') {
+    if (!process.env[ENGINE_KEYS[requested]]) {
+      throw new Error(`${ENGINE_KEYS[requested]} is not set for KYC_AI_ENGINE=${requested}`);
+    }
+    return requested;
+  }
+  const found = ['openrouter', 'groq', 'mistral'].find((name) => process.env[ENGINE_KEYS[name]]);
+  if (!found) throw new Error('No AI key configured — set OPENROUTER_API_KEY, GROQ_API_KEY or MISTRAL_API_KEY');
+  return found;
+};
+
 const callStructuredModel = async (prompt) => {
-  const requestedEngine = String(
-    process.env.KYC_AI_ENGINE || 'auto'
-  ).toLowerCase();
-  if (!['auto', 'groq', 'mistral'].includes(requestedEngine)) {
-    throw new Error(`Unsupported KYC_AI_ENGINE: ${requestedEngine}`);
-  }
-  if (requestedEngine === 'groq' && !process.env.GROQ_API_KEY) {
-    throw new Error('GROQ_API_KEY is not set for KYC_AI_ENGINE=groq');
-  }
-  const useGroq = requestedEngine !== 'mistral' && Boolean(process.env.GROQ_API_KEY);
-  const url = useGroq
-    ? 'https://api.groq.com/openai/v1/chat/completions'
-    : 'https://api.mistral.ai/v1/chat/completions';
-  const key = useGroq ? process.env.GROQ_API_KEY : process.env.MISTRAL_API_KEY;
-  if (!key) throw new Error(useGroq ? 'GROQ_API_KEY is not set' : 'MISTRAL_API_KEY is not set');
+  const engine = resolveEngine();
+  const key = process.env[ENGINE_KEYS[engine]];
+  const url = engine === 'openrouter'
+    ? 'https://openrouter.ai/api/v1/chat/completions'
+    : engine === 'groq'
+      ? 'https://api.groq.com/openai/v1/chat/completions'
+      : 'https://api.mistral.ai/v1/chat/completions';
+  const useGroq = engine === 'groq';
 
   // KYC structuring runs on the configured Groq text model, but a model that the
   // provider has since withdrawn must not be used — llama-3.3-70b-versatile was
@@ -95,9 +108,14 @@ const callStructuredModel = async (prompt) => {
   const groqModel = configuredGroqModel && !RETIRED_GROQ_MODELS.has(configuredGroqModel)
     ? configuredGroqModel
     : (String(process.env.GROQ_FALLBACK_MODEL || '').trim() || DEFAULT_GROQ_KYC_MODEL);
-  const model = useGroq
-    ? groqModel
-    : (process.env.MISTRAL_KYC_MODEL || 'mistral-small-latest');
+  // OPENROUTER_MODEL is deliberately not reused: the shared default
+  // (openrouter/free) rejects identity documents outright with
+  // "User Safety: unsafe — PII/Privacy", so KYC gets its own model setting.
+  const model = engine === 'openrouter'
+    ? (process.env.OPENROUTER_KYC_MODEL || DEFAULT_OPENROUTER_KYC_MODEL)
+    : useGroq
+      ? groqModel
+      : (process.env.MISTRAL_KYC_MODEL || 'mistral-small-latest');
   const body = {
     model,
     temperature: 0,
@@ -111,16 +129,25 @@ const callStructuredModel = async (prompt) => {
   const response = await withTimeout((signal) => fetch(url, {
     method: 'POST',
     signal,
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      ...(engine === 'openrouter' ? {
+        'HTTP-Referer': process.env.OPENROUTER_APP_URL || '',
+        'X-Title': process.env.OPENROUTER_APP_NAME || '',
+      } : {}),
+    },
     body: JSON.stringify(body),
   }));
   if (!response.ok) {
     throw new Error(`KYC extraction ${response.status}: ${(await response.text()).slice(0, 300)}`);
   }
   const data = await response.json();
+  // OpenRouter reports upstream refusals as a 200 with an error body.
+  if (data.error) throw new Error(`KYC extraction: ${JSON.stringify(data.error).slice(0, 300)}`);
   return {
     payload: parseJson(data.choices?.[0]?.message?.content || ''),
-    aiEngine: useGroq ? 'groq-llama-3.3' : 'mistral-ai',
+    aiEngine: `${engine}:${model}`,
   };
 };
 
