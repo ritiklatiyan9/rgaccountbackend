@@ -575,15 +575,20 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
        ORDER BY pc.date DESC, pc.id DESC`,
       [siteId, memberName]
     ),
-    // 3. Plot Payments — by payment_from (buyer name) or buyer_name on plot
+    // 3. Plot Payments — payments on plots this member BOUGHT.
+    // Match the buyer only. pp.payment_from holds the payment MODE in this
+    // schema (payment_from || payment_type is the mode everywhere else), so
+    // matching a person's name against it dragged in unrelated plots — e.g. a
+    // broker typed there on someone else's plot.
     pool.query(
       `SELECT pp.id, pp.date, pp.amount, pp.payment_type, pp.bank_details,
-              pp.narration, pp.payment_from, pp.received_by,
-              p.plot_no, p.block, p.buyer_name
+              pp.bank_name, pp.narration, pp.payment_from, pp.received_by,
+              pp.status, pp.cheque_no, pp.cheque_status,
+              p.plot_no, p.block, COALESCE(pp.buyer_name, p.buyer_name) AS buyer_name
        FROM plot_payments pp
        JOIN plots p ON p.id = pp.plot_id
        WHERE pp.site_id = $1
-         AND (UPPER(pp.payment_from) = UPPER($2) OR UPPER(p.buyer_name) = UPPER($2))
+         AND UPPER(COALESCE(NULLIF(BTRIM(pp.buyer_name), ''), p.buyer_name, '')) = UPPER($2)
        ORDER BY pp.date DESC, pp.id DESC`,
       [siteId, memberName]
     ),
