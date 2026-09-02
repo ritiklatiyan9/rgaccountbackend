@@ -82,3 +82,21 @@ test('NOC workspace controls payment visibility and the print follows the issued
   assert.match(print, /\{showPayments && \(/);
   assert.match(print, /transactionMovesMoney\(payment, 'credit'\)/);
 });
+
+test('NOC names a farmer picked from Clients, validated against the site', () => {
+  const controller = read('../src/controllers/registry.controller.js');
+  const migration = read('../src/migrations/129_noc_farmer_member.js');
+  const editor = read('../../rgaccount/src/pages/PlotRegistryNoc.jsx');
+  const print = read('../../rgaccount/src/pages/PlotRegistryNocPrint.jsx');
+
+  assert.match(migration, /noc_farmer_member_id INTEGER REFERENCES members\(id\)/);
+  // Only a FARMER client of this registry's own site may be named.
+  assert.match(controller, /member_type = 'FARMER'/);
+  assert.match(controller, /noc_farmer_member_id = \$12::integer/);
+  assert.match(controller, /farmer,/);
+  // Dropdown reads the same Clients list as /clients, filtered to farmers.
+  assert.match(editor, /type: 'FARMER'/);
+  assert.match(editor, /noc_farmer_member_id/);
+  // Print prefers the picked farmer over the legacy free-text names.
+  assert.match(print, /farmerLine \|\| \[registry\.seller_name, registry\.farmer_name\]/);
+});

@@ -948,6 +948,15 @@ const buildNocPayload = async (registryId) => {
   }
   const inlinePayments = inlineRes.rows;
   const people = await resolveNocPeople(pool, registry, plot);
+  // Seller/farmer named on the certificate — picked from Clients (member_type FARMER).
+  const farmer = registry.noc_farmer_member_id
+    ? (await pool.query(
+        `SELECT id, full_name, father_name, phone, aadhar_no, pan_no,
+                village, district, city, state, address
+           FROM members WHERE id = $1`,
+        [registry.noc_farmer_member_id]
+      )).rows[0] || null
+    : null;
   people.kyc_required = await readNocKycRequired(pool, registry.site_id);
   // Gate is bypassed when KYC is not required for this site, or the workflow override is on.
   people.kyc_gate_active = people.kyc_required && !workflowUnlocked;
@@ -991,6 +1000,7 @@ const buildNocPayload = async (registryId) => {
     inlinePayments,
     nocHistory: historyRes.rows,
     people,
+    farmer,
     workflow_unlocked: workflowUnlocked,
     suggested_noc_no: suggestedNocNo,
     verifyUrl,
@@ -1133,7 +1143,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
   const registryId = parseInt(req.params.id);
   const {
     noc_no, noc_date, noc_place, noc_notes, noc_show_payments, noc_include_co_applicant,
-    included_plot_payment_ids, inline_payments, change_note,
+    noc_farmer_member_id, included_plot_payment_ids, inline_payments, change_note,
   } = req.body;
 
   const includedIds = Array.isArray(included_plot_payment_ids)
@@ -1208,6 +1218,23 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
       ? registry.noc_show_payments !== false
       : noc_show_payments !== false;
 
+    // Seller/farmer is optional; when set it must be a FARMER client of this site.
+    let farmerMemberId = registry.noc_farmer_member_id || null;
+    if (noc_farmer_member_id !== undefined) {
+      const wanted = parseInt(noc_farmer_member_id);
+      farmerMemberId = Number.isFinite(wanted) ? wanted : null;
+      if (farmerMemberId) {
+        const ok = await client.query(
+          `SELECT id FROM members WHERE id = $1 AND site_id = $2 AND member_type = 'FARMER'`,
+          [farmerMemberId, registry.site_id]
+        );
+        if (!ok.rows[0]) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ message: 'Pick a farmer from this site\'s clients' });
+        }
+      }
+    }
+
     // ── NOC meta on the registry ──
     await client.query(
       `UPDATE plot_registries
@@ -1220,6 +1247,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
               noc_revision = $8,
               noc_generated_by = $9,
               noc_include_co_applicant = $11::boolean,
+              noc_farmer_member_id = $12::integer,
               noc_generated_at = NOW(),
               noc_approved_at = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_at END,
               noc_approved_by = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_by END,
@@ -1237,6 +1265,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
         req.user.id,
         wasGenerated,
         includeCo,
+        farmerMemberId,
       ]
     );
 
@@ -1457,6 +1486,9 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
         id: registry.plot_id,
         plot_no: registry.plot_no,
         customer_name: registry.customer_name,
+        farmer: farmerMemberId
+          ? { id: farmerMemberId, name: (await client.query('SELECT full_name FROM members WHERE id = $1', [farmerMemberId])).rows[0]?.full_name || null }
+          : null,
       },
       payments: issuedPayments,
       totals: { included_count: includedCount, included_amount: includedAmount },
