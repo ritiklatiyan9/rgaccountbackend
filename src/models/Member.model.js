@@ -10,7 +10,8 @@ class MemberModel extends MasterModel {
     let query = `SELECT * FROM members WHERE site_id = $1`;
     const params = [siteId];
     if (memberType && memberType !== 'ALL') {
-      query += ` AND member_type = $2`;
+      // A member holds several roles; match any of them.
+      query += ` AND $2 = ANY(COALESCE(member_types, ARRAY[member_type]))`;
       params.push(memberType);
     }
     query += ` ORDER BY full_name ASC`;
@@ -20,12 +21,12 @@ class MemberModel extends MasterModel {
 
   /** Lightweight list – only columns needed for the table view */
   async findBySiteIdList(siteId, pool, memberType = null) {
-    let query = `SELECT m.id, m.member_type, m.full_name, m.father_name, m.phone, m.email,
+    let query = `SELECT m.id, m.member_type, COALESCE(m.member_types, ARRAY[m.member_type]) AS member_types, m.full_name, m.father_name, m.phone, m.email,
       m.city, m.state, m.status, m.photo, m.alt_phone, m.whatsapp, m.address, m.pincode,
       m.aadhar_no, m.pan_no, m.voter_id, m.passport_no, m.driving_license_no,
       m.aadhar_front_url, m.aadhar_back_url, m.pan_card_url, m.voter_id_url,
       m.passport_url, m.driving_license_url, m.cheque_url, m.other_kyc_url, m.team,
-      m.occupation, m.latitude, m.longitude, m.village, m.district, m.geocode_source,
+      m.occupation, m.designation, m.latitude, m.longitude, m.village, m.district, m.geocode_source,
       shared_kyc.id AS shared_kyc_case_id,
       shared_kyc.status AS shared_kyc_status,
       shared_kyc.document_count AS shared_kyc_document_count
@@ -42,7 +43,7 @@ class MemberModel extends MasterModel {
       WHERE m.site_id = $1`;
     const params = [siteId];
     if (memberType && memberType !== 'ALL') {
-      query += ` AND m.member_type = $2`;
+      query += ` AND $2 = ANY(COALESCE(m.member_types, ARRAY[m.member_type]))`;
       params.push(memberType);
     }
     query += ` ORDER BY m.full_name ASC`;
@@ -76,18 +77,20 @@ class MemberModel extends MasterModel {
     const query = `
       SELECT
         COUNT(*)::int AS total,
-        COUNT(*) FILTER (WHERE member_type = 'CLIENT')::int AS clients,
-        COUNT(*) FILTER (WHERE member_type = 'FARMER')::int AS farmers,
-        COUNT(*) FILTER (WHERE member_type = 'MEMBER')::int AS members,
-        COUNT(*) FILTER (WHERE member_type = 'BROKER')::int AS brokers,
-        COUNT(*) FILTER (WHERE member_type = 'PARTNER')::int AS partners,
-        COUNT(*) FILTER (WHERE member_type = 'VENDOR')::int AS vendors,
-        COUNT(*) FILTER (WHERE member_type = 'EMPLOYEE')::int AS employees,
-        COUNT(*) FILTER (WHERE member_type = 'OTHER')::int AS others,
+        COUNT(*) FILTER (WHERE 'CLIENT'   = ANY(roles))::int AS clients,
+        COUNT(*) FILTER (WHERE 'FARMER'   = ANY(roles))::int AS farmers,
+        COUNT(*) FILTER (WHERE 'MEMBER'   = ANY(roles))::int AS members,
+        COUNT(*) FILTER (WHERE 'BROKER'   = ANY(roles))::int AS brokers,
+        COUNT(*) FILTER (WHERE 'PARTNER'  = ANY(roles))::int AS partners,
+        COUNT(*) FILTER (WHERE 'VENDOR'   = ANY(roles))::int AS vendors,
+        COUNT(*) FILTER (WHERE 'EMPLOYEE' = ANY(roles))::int AS employees,
+        COUNT(*) FILTER (WHERE 'OTHER'    = ANY(roles))::int AS others,
         COUNT(*) FILTER (WHERE status = 'ACTIVE')::int AS active,
         COUNT(*) FILTER (WHERE status = 'INACTIVE')::int AS inactive
-      FROM members
-      WHERE site_id = $1
+      FROM (
+        SELECT status, COALESCE(member_types, ARRAY[member_type]) AS roles
+          FROM members WHERE site_id = $1
+      ) m
     `;
     const result = await pool.query(query, [siteId]);
     return result.rows[0];

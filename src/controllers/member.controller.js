@@ -39,6 +39,45 @@ export const MEMBER_FIELDS = [
   'latitude', 'longitude', 'village', 'district',
 ];
 
+// A member can hold several roles at once (CLIENT + FARMER, an EMPLOYEE who is
+// also a PARTNER, …). `member_types` is the full set; `member_type` stays the
+// primary role — the first of the set — so every existing query keeps working.
+export const MEMBER_TYPE_VALUES = ['CLIENT', 'FARMER', 'MEMBER', 'BROKER', 'PARTNER', 'VENDOR', 'EMPLOYEE', 'OTHER'];
+
+const cleanTypeList = (raw) => {
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : null;
+  if (!list) return null;
+  const seen = list
+    .map((t) => String(t).trim().toUpperCase())
+    .filter((t) => MEMBER_TYPE_VALUES.includes(t));
+  return [...new Set(seen)];
+};
+
+/** Reconcile `member_types` + `member_type` from a request body onto `data`.
+ *  `current` is the member's stored row on update, `{}` on create. */
+export const applyMemberTypes = (data, body, current = {}) => {
+  const requested = cleanTypeList(body.member_types);
+  const primary = data.member_type || null;
+  if (requested) {
+    // An explicit set wins. The primary named alongside it leads the list.
+    const types = requested.length ? requested : [primary || current.member_type || 'CLIENT'];
+    data.member_types = primary && types.includes(primary)
+      ? [primary, ...types.filter((t) => t !== primary)]
+      : types;
+    data.member_type = data.member_types[0];
+    return data;
+  }
+  if (!primary) return data;
+  // Only a primary type came in (the older single-type forms): keep the other
+  // roles the member already holds instead of silently dropping them.
+  const existing = current.member_types?.length ? current.member_types : [current.member_type].filter(Boolean);
+  data.member_types = [primary, ...existing.filter((t) => t !== primary)];
+  return data;
+};
+
+// Digits only, so '+91 99276-69955' and '9927669955 ' are the same number.
+export const samePhone = (a, b) => String(a || '').replace(/\D/g, '') === String(b || '').replace(/\D/g, '');
+
 const GEO_COORD = { latitude: 90, longitude: 180 };
 const coerceCoord = (val, max) => {
   if (val === '' || val == null) return null;
@@ -120,6 +159,8 @@ export const createMember = asyncHandler(async (req, res) => {
 
   data.site_id = parseInt(site_id);
   data.created_by = req.user.id;
+  applyMemberTypes(data, req.body);
+  if (!data.member_types) { data.member_type = data.member_type || 'CLIENT'; data.member_types = [data.member_type]; }
 
   // Run phone uniqueness check + document uploads in PARALLEL
   const phoneCheckPromise = data.phone
@@ -135,7 +176,10 @@ export const createMember = asyncHandler(async (req, res) => {
   ]);
 
   if (phoneCheck.rows.length > 0) {
-    return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name}` });
+    return res.status(409).json({
+      message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name} — open that client and add the extra role there instead of creating a second record`,
+      member_id: phoneCheck.rows[0].id,
+    });
   }
 
   Object.assign(data, docUrls);
@@ -353,7 +397,9 @@ export const updateMember = asyncHandler(async (req, res) => {
   const data = sanitize(req.body);
 
   const existingPromise = pool.query(
-    `SELECT id, site_id, latitude, longitude FROM members WHERE id = $1`,
+    `SELECT id, site_id, latitude, longitude, phone, member_type,
+            COALESCE(member_types, ARRAY[member_type]) AS member_types
+       FROM members WHERE id = $1`,
     [memberId]
   );
   const phoneCheckPromise = data.phone
@@ -377,8 +423,17 @@ export const updateMember = asyncHandler(async (req, res) => {
   const existing = existingRes.rows[0];
   if (!existing) return res.status(404).json({ message: 'Member not found' });
 
-  if (phoneCheck.rows.length > 0) {
-    return res.status(409).json({ message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name}` });
+  applyMemberTypes(data, req.body, existing);
+
+  // Only guard a phone that is actually changing. Numbers duplicated before this
+  // check existed (a KYC stub, a family line, a legacy import) must not make a
+  // record permanently uneditable when the edit never touches the phone — and a
+  // stored number that differs only in spacing counts as unchanged.
+  if (phoneCheck.rows.length > 0 && !samePhone(data.phone, existing.phone)) {
+    return res.status(409).json({
+      message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name}`,
+      member_id: phoneCheck.rows[0].id,
+    });
   }
 
   // Unchanged pin echoed back by the edit form: leave geo columns (and their nominatim/pincode source) alone.

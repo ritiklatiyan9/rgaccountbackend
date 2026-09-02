@@ -83,20 +83,25 @@ test('NOC workspace controls payment visibility and the print follows the issued
   assert.match(print, /transactionMovesMoney\(payment, 'credit'\)/);
 });
 
-test('NOC names a farmer picked from Clients, validated against the site', () => {
+test('NOC names a farmer and a company signatory picked from Clients', () => {
   const controller = read('../src/controllers/registry.controller.js');
-  const migration = read('../src/migrations/129_noc_farmer_member.js');
   const editor = read('../../rgaccount/src/pages/PlotRegistryNoc.jsx');
   const print = read('../../rgaccount/src/pages/PlotRegistryNocPrint.jsx');
 
-  assert.match(migration, /noc_farmer_member_id INTEGER REFERENCES members\(id\)/);
-  // Only a FARMER client of this registry's own site may be named.
-  assert.match(controller, /member_type = 'FARMER'/);
+  assert.match(read('../src/migrations/129_noc_farmer_member.js'), /noc_farmer_member_id INTEGER REFERENCES members\(id\)/);
+  assert.match(read('../src/migrations/130_noc_authorized_member.js'), /noc_authorized_member_id INTEGER REFERENCES members\(id\)/);
+  // Each pick must be a client of this registry's own site, of the type its role allows.
+  assert.match(controller, /AND COALESCE\(member_types, ARRAY\[member_type\]\) && \$3::text\[\]/);
+  assert.match(controller, /COMPANY_MEMBER_TYPES = \['PARTNER', 'EMPLOYEE', 'MEMBER'\]/);
   assert.match(controller, /noc_farmer_member_id = \$12::integer/);
-  assert.match(controller, /farmer,/);
-  // Dropdown reads the same Clients list as /clients, filtered to farmers.
-  assert.match(editor, /type: 'FARMER'/);
-  assert.match(editor, /noc_farmer_member_id/);
-  // Print prefers the picked farmer over the legacy free-text names.
+  assert.match(controller, /noc_authorized_member_id = \$13::integer/);
+  assert.match(controller, /authorized_signatory: authorizedSignatory,/);
+  // Both dropdowns read the same Clients list /clients loads.
+  assert.match(editor, /api\.get\('\/members', \{ params: \{ site_id: siteId \} \}\)/);
+  // A client can hold several roles, so both pickers match the whole set.
+  assert.match(editor, /rolesOf\(m\)\.includes\('FARMER'\)/);
+  assert.match(editor, /rolesOf\(m\)\.some\(\(t\) => COMPANY_MEMBER_TYPES\.includes\(t\)\)/);
+  // Print prefers the picked farmer over the legacy free-text names, and names the signatory.
   assert.match(print, /farmerLine \|\| \[registry\.seller_name, registry\.farmer_name\]/);
+  assert.match(print, /signatory \? signatory\.full_name : 'Authorised Signatory \(with seal\)'/);
 });
