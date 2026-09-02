@@ -55,7 +55,8 @@ const sourceChequeStatusSql = `CASE cfe.source_module
   ELSE cfe.cheque_status
 END`;
 
-export async function loadPendingChequeCandidates(db, organizationId, siteId) {
+export async function loadPendingChequeCandidates(db, organizationId, siteId, status = 'PENDING') {
+  const statusFilter = status == null ? null : String(status).trim().toUpperCase();
   const result = await db.query(
     `SELECT
        cfe.id AS ledger_id,
@@ -75,6 +76,7 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId) {
        END AS parent_id,
        cfe.site_id,
        cfe.date,
+       UPPER(${sourceChequeStatusSql}) AS cheque_status,
        COALESCE(NULLIF(fp.cheque_no, ''), NULLIF(pcp.cheque_no, ''), NULLIF(ft.cheque_no, ''),
                 NULLIF(pp.cheque_no, ''), NULLIF(pip.cheque_no, ''), NULLIF(ex.cheque_no, ''),
                 NULLIF(vp.cheque_no, ''), NULLIF(vip.cheque_no, ''), NULLIF(prp.cheque_no, ''),
@@ -131,15 +133,20 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId) {
          AND a.entity_entry_id = CASE WHEN cfe.source_module IS NULL THEN cfe.id ELSE cfe.source_id END
      ) alias_rows ON TRUE
      WHERE cfe.site_id = $2
-       AND UPPER(COALESCE(${sourceChequeStatusSql}, '')) = 'PENDING'
+       AND UPPER(COALESCE(${sourceChequeStatusSql}, '')) IN ('PENDING', 'CLEARED', 'BOUNCED', 'RETURNED')
+       AND ($3::text IS NULL OR UPPER(COALESCE(${sourceChequeStatusSql}, '')) = $3)
        AND (cfe.source_module IS NULL OR cfe.source_module IN (
          'farmer_payments', 'plot_commission_payments', 'firm_transactions', 'plot_payments',
          'plot_installment_payments', 'expenses', 'vendor_payments', 'vendor_inventory_payments',
          'plot_registry_payments', 'land_deal_payments', 'misc_income_entries', 'day_book'
        ))
        AND (cfe.source_module IS NULL OR cfe.source_id IS NOT NULL)
+       -- Linked registry and Day Book rows are projections of another source.
+       -- Matching them independently would expose the same cheque twice.
+       AND (cfe.source_module IS DISTINCT FROM 'plot_registry_payments' OR prp.source_plot_payment_id IS NULL)
+       AND (cfe.source_module IS DISTINCT FROM 'day_book' OR COALESCE(db.is_financial_projection, FALSE) = FALSE)
      ORDER BY cfe.date, cfe.id`,
-    [organizationId, siteId]
+    [organizationId, siteId, statusFilter]
   );
 
   return result.rows.map((row) => ({

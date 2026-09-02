@@ -10,9 +10,11 @@ import {
 
 test('pending loader trusts module status, supports newer sources, and preserves reversal face values', async () => {
   let sql = '';
+  let params = [];
   const db = {
-    query: async (query) => {
+    query: async (query, values) => {
       sql = String(query);
+      params = values;
       return { rows: [{ source: 'plot_payment', entry_id: '44', ledger_id: '488', parent_id: '816', amount: '500000.00', aliases: [] }] };
     },
   };
@@ -26,10 +28,22 @@ test('pending loader trusts module status, supports newer sources, and preserves
   assert.match(sql, /WHEN 'vendor_inventory_payments' THEN vip\.order_id/);
   assert.match(sql, /ABS\(COALESCE\(cfe\.credit, 0\) - COALESCE\(cfe\.debit, 0\)\)::numeric AS amount/);
   assert.match(sql, /COALESCE\(cfe\.credit, 0\) - COALESCE\(cfe\.debit, 0\) < 0 THEN 'DEBIT'/);
-  assert.match(sql, /UPPER\(COALESCE\(CASE cfe\.source_module[\s\S]*ELSE cfe\.cheque_status[\s\S]*END, ''\)\) = 'PENDING'/);
+  assert.match(sql, /IN \('PENDING', 'CLEARED', 'BOUNCED', 'RETURNED'\)/);
+  assert.match(sql, /\$3::text IS NULL OR UPPER\(COALESCE\(CASE cfe\.source_module[\s\S]*ELSE cfe\.cheque_status[\s\S]*END, ''\)\) = \$3/);
+  assert.deepEqual(params, [1, 8, 'PENDING']);
   assert.equal(candidateRow.parent_id, 816);
   assert.equal(candidateRow.ledger_id, 488);
   assert.equal(candidateRow.entry_id, 44);
+});
+
+test('cheque loader supports status history without changing the pending default', async () => {
+  const calls = [];
+  const db = { query: async (_sql, params) => { calls.push(params); return { rows: [] }; } };
+
+  await loadPendingChequeCandidates(db, 1, 8, 'bounced');
+  await loadPendingChequeCandidates(db, 1, 8, null);
+
+  assert.deepEqual(calls, [[1, 8, 'BOUNCED'], [1, 8, null]]);
 });
 
 const transaction = (id, overrides = {}) => ({

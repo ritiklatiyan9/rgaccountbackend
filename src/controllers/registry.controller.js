@@ -954,7 +954,8 @@ const buildNocPayload = async (registryId) => {
   // People picked from Clients for this certificate: the seller/farmer, and the
   // company member who signs it. One query — both are optional.
   const nocMemberRes = await pool.query(
-    `SELECT id, member_type, full_name, father_name, phone, aadhar_no, pan_no,
+    `SELECT id, member_type, COALESCE(member_types, ARRAY[member_type]) AS member_types,
+            full_name, father_name, phone, aadhar_no, pan_no,
             designation, department, employee_id, village, district, city, state, address
        FROM members WHERE id = ANY($1::int[])`,
     [[registry.noc_farmer_member_id, registry.noc_authorized_member_id].filter(Boolean)]

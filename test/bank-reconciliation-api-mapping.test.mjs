@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getConfiguration, requireAiMatchMode, transactionDto } from '../src/controllers/bankReconciliation.controller.js';
+import { getConfiguration, requireAiMatchMode, requireChequeListStatus, transactionDto } from '../src/controllers/bankReconciliation.controller.js';
 
 test('bank reconciliation API DTO preserves imported lineage fields and blank references', () => {
   const dto = transactionDto({
@@ -54,5 +54,15 @@ test('bank reconciliation matching API accepts only the AI flow', () => {
   assert.throws(
     () => requireAiMatchMode('manual'),
     (error) => error.code === 'INVALID_MATCH_MODE' && error.statusCode === 400,
+  );
+});
+
+test('cheque history status filter is strict and defaults to pending', () => {
+  assert.equal(requireChequeListStatus(undefined), 'PENDING');
+  assert.equal(requireChequeListStatus('bounced'), 'BOUNCED');
+  assert.equal(requireChequeListStatus('all'), 'ALL');
+  assert.throws(
+    () => requireChequeListStatus('deleted'),
+    (error) => error.code === 'INVALID_CHEQUE_STATUS' && error.statusCode === 400,
   );
 });

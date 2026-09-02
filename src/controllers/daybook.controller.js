@@ -707,6 +707,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     account_no: exp.account_no,
     branch: exp.branch,
     cheque_status: exp.cheque_status,
+    cheque_status_updated_at: exp.cheque_status_updated_at,
     cheque_no: exp.cheque_no,
     created_by: exp.created_by,
     created_at: exp.created_at,
@@ -755,6 +756,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       interest_rate: fp.interest_rate,
       interest_amount: fp.interest_amount,
       cheque_status: fp.cheque_status,
+      cheque_status_updated_at: fp.cheque_status_updated_at,
       cheque_no: fp.cheque_no,
       created_by: fp.created_by,
       created_at: fp.created_at,
@@ -942,6 +944,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       cf_month: cf.cf_month,
       cf_year: cf.cf_year,
       cheque_status: cf.cheque_status,
+      cheque_status_updated_at: cf.cheque_status_updated_at,
       cheque_no: cf.cheque_no,
       created_by: cf.created_by,
       created_at: cf.created_at,
@@ -986,6 +989,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       firm_remark: ft.remark,
       firm_cheque_no: ft.cheque_no,
       cheque_status: ft.cheque_status,
+      cheque_status_updated_at: ft.cheque_status_updated_at,
       cheque_no: ft.cheque_no,
       created_by: ft.created_by,
       created_at: ft.created_at,
@@ -1035,6 +1039,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       account_no: null,
       branch: null,
       cheque_status: pp.cheque_status,
+      cheque_status_updated_at: pp.cheque_status_updated_at,
       cheque_no: pp.cheque_no,
       created_by: pp.created_by,
       created_at: pp.created_at,
@@ -1081,6 +1086,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         account_no: null,
         branch: null,
         cheque_status: m.cheque_status,
+        cheque_status_updated_at: m.cheque_status_updated_at,
         cheque_no: m.cheque_no,
         voucher_url: m.voucher_url,
         status: m.status,
@@ -2744,10 +2750,19 @@ export const updatePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
     ppAmount = ppCredit > 0 ? ppCredit : -ppDebit;
   }
   const ppPaymentFrom = req.body.pp_payment_from !== undefined ? (req.body.pp_payment_from ? req.body.pp_payment_from.trim().toUpperCase() : null) : existing.payment_from;
-  const ppPaymentType = req.body.pp_payment_type !== undefined ? (req.body.pp_payment_type === 'BANK' ? 'BANK' : 'CASH') : existing.payment_type;
+  const requestedPaymentType = req.body.pp_payment_type !== undefined
+    ? String(req.body.pp_payment_type || '').trim().toUpperCase()
+    : String(existing.payment_type || '').trim().toUpperCase();
+  const ppPaymentType = ppPaymentFrom === 'CHEQUE' || requestedPaymentType === 'CHEQUE'
+    ? 'CHEQUE'
+    : requestedPaymentType === 'BANK' ? 'BANK' : 'CASH';
   const ppBankDetails = req.body.pp_bank_details !== undefined ? (req.body.pp_bank_details ? req.body.pp_bank_details.trim().toUpperCase() : null) : existing.bank_details;
   const ppNarration = req.body.pp_narration !== undefined ? (req.body.pp_narration ? req.body.pp_narration.trim().toUpperCase() : null) : existing.narration;
   const ppReceivedBy = req.body.pp_received_by !== undefined ? (req.body.pp_received_by ? req.body.pp_received_by.trim().toUpperCase() : null) : existing.received_by;
+  const ppChequeNo = req.body.pp_cheque_no !== undefined
+    ? (req.body.pp_cheque_no ? String(req.body.pp_cheque_no).trim().toUpperCase() : null)
+    : existing.cheque_no;
+  const existingChequeStatus = String(existing.cheque_status || '').trim().toUpperCase();
 
   // Update plot_payments record
   const ppUpdate = {
@@ -2758,6 +2773,10 @@ export const updatePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
     narration: ppNarration,
     received_by: ppReceivedBy,
     amount: ppAmount,
+    cheque_no: ppPaymentType === 'CHEQUE' ? ppChequeNo : null,
+    cheque_status: ppPaymentType === 'CHEQUE'
+      ? (['PENDING', 'CLEARED', 'BOUNCED', 'RETURNED'].includes(existingChequeStatus) ? existingChequeStatus : 'PENDING')
+      : null,
   };
 
   const updatedPp = await plotPaymentModel.update(parseInt(id), ppUpdate, pool);

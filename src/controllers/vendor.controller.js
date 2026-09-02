@@ -341,7 +341,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   );
 
   const paymentsPromise = pool.query(
-    `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.customer_signature_url, vp.authority_signature_url, vp.status, vp.approved_by, vp.approved_at, vp.cheque_no, vp.cheque_status, vp.created_at, vp.assigned_admin_id, vp.created_by,
+    `SELECT vp.id, vp.commitment_id, vp.payment_date, vp.amount, vp.payment_mode, vp.reference_no, vp.note, vp.voucher_url, vp.customer_signature_url, vp.authority_signature_url, vp.status, vp.approved_by, vp.approved_at, vp.cheque_no, vp.cheque_status, vp.cheque_status_updated_at, vp.created_at, vp.updated_at, vp.assigned_admin_id, vp.created_by,
             u.name AS created_by_name, aa.name AS assigned_admin_name
      FROM vendor_payments vp
      LEFT JOIN users u ON u.id = vp.created_by
@@ -396,7 +396,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   if (orderIds.length > 0) {
     const itemPaysResult = await pool.query(
       `SELECT p.id, p.order_id, p.payment_date, p.amount, p.payment_mode, p.reference_no,
-              p.cheque_no, p.cheque_status, p.status, p.note, p.voucher_url, p.created_at,
+              p.cheque_no, p.cheque_status, p.cheque_status_updated_at, p.status, p.note, p.voucher_url, p.created_at, p.updated_at,
               u.name AS created_by_name
        FROM vendor_inventory_payments p
        LEFT JOIN users u ON u.id = p.created_by

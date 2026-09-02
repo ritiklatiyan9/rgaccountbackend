@@ -33,6 +33,19 @@ export function requireAiMatchMode(value) {
   return mode;
 }
 
+const CHEQUE_LIST_STATUSES = new Set(['PENDING', 'CLEARED', 'BOUNCED', 'RETURNED', 'ALL']);
+
+export function requireChequeListStatus(value) {
+  const status = String(value || 'PENDING').trim().toUpperCase();
+  if (!CHEQUE_LIST_STATUSES.has(status)) {
+    const error = new Error('Cheque status must be pending, cleared, bounced, returned, or all.');
+    error.statusCode = 400;
+    error.code = 'INVALID_CHEQUE_STATUS';
+    throw error;
+  }
+  return status;
+}
+
 function sendError(res, error) {
   const status = Number(error.statusCode) || 500;
   if (status >= 500) console.error('[bank-reconciliation]', error);
@@ -269,8 +282,9 @@ export async function getConfiguration(req, res) {
 export async function listPendingCheques(req, res) {
   try {
     const site = await assertSiteAccess(pool, req.user, req.query.site_id ?? req.query.siteId);
-    const entries = await loadPendingChequeCandidates(pool, site.organization_id, site.id);
-    return res.json({ entries, total: entries.length, site: { id: site.id, name: site.name } });
+    const status = requireChequeListStatus(req.query.status);
+    const entries = await loadPendingChequeCandidates(pool, site.organization_id, site.id, status === 'ALL' ? null : status);
+    return res.json({ entries, total: entries.length, status, site: { id: site.id, name: site.name } });
   } catch (error) {
     return sendError(res, error);
   }

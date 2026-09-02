@@ -705,7 +705,11 @@ export const listTransactions = asyncHandler(async (req, res) => {
        CASE WHEN cfe.to_firm_id   = $1 THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0) ELSE 0 END AS credit,
        cfe.cash_type AS payment_mode,
        cfe.status,
+       cfe.cheque_status,
+       cfe.cheque_status_updated_at,
        cfe.created_by,
+       cfe.created_at,
+       cfe.updated_at,
        creator.name AS created_by_name,
        cfe.remarks AS remark,
        CASE

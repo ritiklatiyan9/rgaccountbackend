@@ -167,7 +167,9 @@ const MODULE_MAP = {
     model: plotPaymentModel,
     fetchOriginal: async (id, db = pool) => plotPaymentModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
-      // plot_payments columns: date, payment_from, payment_type, bank_details, narration, received_by, amount, plot_id
+      // Keep cheque metadata in the same write as its payment mode so an
+      // approved edit can never leave CHEQUE + NULL cheque_status behind.
+      const existing = await plotPaymentModel.findById(parseInt(id), db);
       const allowed = {};
       if (data.date !== undefined) allowed.date = data.date;
       if (data.payment_from !== undefined) allowed.payment_from = data.payment_from;
@@ -177,6 +179,14 @@ const MODULE_MAP = {
       if (data.received_by !== undefined) allowed.received_by = data.received_by;
       if (data.amount !== undefined) allowed.amount = data.amount;
       if (data.plot_id !== undefined) allowed.plot_id = data.plot_id;
+      if (data.cheque_no !== undefined) allowed.cheque_no = data.cheque_no || null;
+      const finalType = String(data.payment_type ?? existing?.payment_type ?? '').trim().toUpperCase();
+      const finalFrom = String(data.payment_from ?? existing?.payment_from ?? '').trim().toUpperCase();
+      if (data.payment_type !== undefined || data.payment_from !== undefined || data.cheque_status !== undefined || data.cheque_no !== undefined) {
+        allowed.cheque_status = finalType === 'CHEQUE' || finalFrom === 'CHEQUE'
+          ? (data.cheque_status || existing?.cheque_status || 'PENDING')
+          : null;
+      }
       if (Object.keys(allowed).length > 0) {
         return plotPaymentModel.update(parseInt(id), allowed, db);
       }
@@ -408,6 +418,7 @@ const MODULE_MAP = {
     fetchOriginal: async (id, db = pool) => plotPaymentModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
       // Map daybook form fields → plot_payments columns
+      const existing = await plotPaymentModel.findById(parseInt(id), db);
       const ppUpdate = {};
       if (data.date !== undefined) ppUpdate.date = data.date;
       if (data.pp_payment_from !== undefined) ppUpdate.payment_from = data.pp_payment_from;
@@ -415,9 +426,18 @@ const MODULE_MAP = {
       if (data.pp_bank_details !== undefined) ppUpdate.bank_details = data.pp_bank_details;
       if (data.pp_narration !== undefined) ppUpdate.narration = data.pp_narration;
       if (data.pp_received_by !== undefined) ppUpdate.received_by = data.pp_received_by;
+      if (data.pp_cheque_no !== undefined) ppUpdate.cheque_no = data.pp_cheque_no || null;
       // For plot payments, the amount comes from credit (received) or debit (refund)
       if (data.credit !== undefined && parseFloat(data.credit) > 0) ppUpdate.amount = parseFloat(data.credit);
       else if (data.debit !== undefined && parseFloat(data.debit) > 0) ppUpdate.amount = -(parseFloat(data.debit));
+
+      const finalType = String(data.pp_payment_type ?? existing?.payment_type ?? '').trim().toUpperCase();
+      const finalFrom = String(data.pp_payment_from ?? existing?.payment_from ?? '').trim().toUpperCase();
+      if (data.pp_payment_type !== undefined || data.pp_payment_from !== undefined || data.pp_cheque_no !== undefined) {
+        ppUpdate.cheque_status = finalType === 'CHEQUE' || finalFrom === 'CHEQUE'
+          ? (existing?.cheque_status || 'PENDING')
+          : null;
+      }
 
       if (Object.keys(ppUpdate).length > 0) {
         await plotPaymentModel.update(parseInt(id), ppUpdate, db);
