@@ -103,5 +103,7 @@ test('NOC names a farmer and a company signatory picked from Clients', () => {
   assert.match(editor, /rolesOf\(m\)\.some\(\(t\) => COMPANY_MEMBER_TYPES\.includes\(t\)\)/);
   // Print prefers the picked farmer over the legacy free-text names, and names the signatory.
   assert.match(print, /farmerLine \|\| \[registry\.seller_name, registry\.farmer_name\]/);
-  assert.match(print, /signatory \? signatory\.full_name : 'Authorised Signatory \(with seal\)'/);
+  assert.match(print, /signatory \? signatory\.full_name : 'Authorised Signatory'/);
+  // The certificate names the parties only — no signature ruling or witness blanks.
+  assert.doesNotMatch(print, /sig-rule|sig-space|Signature of |wit-row/);
 });

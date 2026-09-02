@@ -54,6 +54,12 @@ const lockImprestAccounts = async (db, ...userIds) => {
 const DISTRIBUTOR_ROLES = new Set(['admin']);
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);
 const FUNDING_HINT = 'Bring cash into the site first — or accept a staff imprest return — then distribute.';
+const canReviewImprestRequest = (user, request) => ADMIN_ROLES.has(user?.role)
+  || (
+    user?.role === 'sub_admin'
+    && Number(request?.assigned_admin_id) === Number(user.id)
+    && Number(request?.sub_admin_id) !== Number(user.id)
+  );
 const lockSiteDistribution = (client, siteId) => client.query(`SELECT pg_advisory_xact_lock(hashtext('imprest-site-' || $1::text))`, [siteId]);
 const indiaTomorrow = () => {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
@@ -925,6 +931,9 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
   const parsedSiteId = req.imprestSiteId || parseInt(site_id);
   const requestAmount = parseFloat(amount || debit) || 0;
   if (requestAmount <= 0) return res.status(400).json({ message: 'Amount must be positive' });
+  if (assigned_admin_id && Number(assigned_admin_id) === Number(req.user.id)) {
+    return res.status(400).json({ message: 'Choose another user to review your Imprest request' });
+  }
 
   // Determine request_type: if no expense-specific fields → IMPREST (cash flow), else EXPENSE.
   const hasExpenseFields = from_entity || to_entity || payment_mode || account_no || branch || category || remark;
@@ -961,17 +970,18 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
   res.status(201).json({
     request,
     message: requestType === 'IMPREST'
-      ? 'Imprest request submitted for admin approval'
-      : 'Expense request submitted for admin approval',
+      ? 'Imprest request submitted for review'
+      : 'Expense request submitted for review',
   });
 });
 
 /**
  * GET /imprest/expense-requests
- * Admin: list all pending requests; Sub-admin: list own requests
+ * Admin: list all requests; Sub-admin: list own requests, or requests assigned
+ * to them when scope=assigned.
  */
 export const listExpenseRequests = asyncHandler(async (req, res) => {
-  const { site_id, status } = req.query;
+  const { site_id, status, scope } = req.query;
 
   const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
 
@@ -982,6 +992,8 @@ export const listExpenseRequests = asyncHandler(async (req, res) => {
     } else {
       requests = await imprestExpenseRequestModel.findAllWithDetails(parsedSiteId, pool);
     }
+  } else if (scope === 'assigned') {
+    requests = await imprestExpenseRequestModel.findAssignedToReviewer(req.user.id, parsedSiteId, pool);
   } else {
     requests = await imprestExpenseRequestModel.findBySubAdminId(req.user.id, parsedSiteId, pool);
   }
@@ -991,8 +1003,9 @@ export const listExpenseRequests = asyncHandler(async (req, res) => {
 
 /**
  * PUT /imprest/expense-requests/:id/approve
- * Admin approves: IMPREST type → allocation (positive cash flow), EXPENSE type
- * → expense deducted from the requester's available imprest.
+ * Admin approval funds an IMPREST request from site cash. An explicitly
+ * assigned sub-admin funds it from their own available float. EXPENSE approval
+ * deducts the requester's available imprest.
  */
 export const approveExpenseRequest = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -1002,7 +1015,23 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // 1. Approve the request
+    // Lock before checking the assignee so two reviewers cannot race and so a
+    // sub-admin can never review an unassigned request by guessing its ID.
+    const existing = await imprestExpenseRequestModel.findByIdForUpdate(parseInt(id), client);
+    if (!existing) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Request not found' });
+    }
+    if (existing.status !== 'PENDING') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Request already processed' });
+    }
+    if (!canReviewImprestRequest(req.user, existing)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'This Imprest request is not assigned to you' });
+    }
+
+    // 1. Approve the authorized request.
     const request = await imprestExpenseRequestModel.approveRequest(
       parseInt(id),
       req.user.id,
@@ -1031,8 +1060,64 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     const requestType = request.request_type || 'EXPENSE';
     const requestAmount = parseFloat(request.amount);
 
-    // ── IMPREST type: just allocate cash to sub-admin (no expense, no daybook expense) ──
+    // ── IMPREST type: allocate cash to the requester (no expense/daybook expense) ──
     if (requestType === 'IMPREST') {
+      // A sub-admin can approve only a request explicitly sent to them. That
+      // handover comes from their own float, never from Admin Site Balance.
+      if (req.user.role === 'sub_admin') {
+        await lockImprestAccounts(client, req.user.id, request.sub_admin_id);
+        const reviewerBalance = await imprestLedgerModel.getBalance(req.user.id, request.site_id, client);
+        if (reviewerBalance < requestAmount) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            code: 'INSUFFICIENT_IMPREST',
+            balance: reviewerBalance,
+            message: `Only ₹${reviewerBalance.toLocaleString('en-IN')} is available in your Imprest float.`,
+          });
+        }
+
+        const allocation = await imprestAllocationModel.create({
+          admin_id: req.user.id,
+          sub_admin_id: request.sub_admin_id,
+          amount: requestAmount,
+          remark: request.reason || 'Imprest request approved',
+          assigned_admin_id: req.user.id,
+          site_id: request.site_id,
+          from_own_float: true,
+          site_balance_at_allocation: null,
+          override_reason: null,
+          status: 'RECEIVED',
+          confirmed_at: new Date(),
+          confirmation_remark: 'Auto-confirmed (requested and approved)',
+        }, client);
+
+        await imprestLedgerModel.createEntry({
+          user_id: req.user.id,
+          type: 'TRANSFER_OUT',
+          reference_id: allocation.id,
+          amount: -requestAmount,
+          remarks: `Imprest request #${request.id} approved for ${eligibleRequester.name || 'requester'}.`,
+          created_by: req.user.id,
+          site_id: request.site_id,
+        }, client);
+        await imprestLedgerModel.createEntry({
+          user_id: request.sub_admin_id,
+          type: 'TRANSFER_IN',
+          reference_id: allocation.id,
+          amount: requestAmount,
+          remarks: `Imprest request #${request.id} funded by ${req.user.name || 'assigned reviewer'}.`,
+          created_by: req.user.id,
+          site_id: request.site_id,
+        }, client);
+
+        await client.query('COMMIT');
+        return res.json({
+          request,
+          allocation,
+          message: 'Imprest request approved — funds transferred from your float',
+        });
+      }
+
       // A requested allocation is still a distribution of Admin Site Balance.
       // Serialize it with direct allocations, and use the same transaction for
       // the custody snapshot so concurrent approvals cannot mint staff float.
@@ -1151,22 +1236,49 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
 
 /**
  * PUT /imprest/expense-requests/:id/reject
- * Admin rejects an expense request
+ * Admin, or the explicitly assigned sub-admin, rejects a request.
  */
 export const rejectExpenseRequest = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { review_remark } = req.body;
 
-  const request = await imprestExpenseRequestModel.rejectRequest(
-    parseInt(id),
-    req.user.id,
-    review_remark ? review_remark.trim() : null,
-    pool
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await imprestExpenseRequestModel.findByIdForUpdate(parseInt(id), client);
+    if (!existing) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Request not found' });
+    }
+    if (existing.status !== 'PENDING') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Request already processed' });
+    }
+    if (!canReviewImprestRequest(req.user, existing)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'This Imprest request is not assigned to you' });
+    }
 
-  if (!request) return res.status(404).json({ message: 'Request not found or already processed' });
+    const request = await imprestExpenseRequestModel.rejectRequest(
+      parseInt(id),
+      req.user.id,
+      review_remark ? review_remark.trim() : null,
+      client
+    );
 
-  res.json({ request, message: 'Expense request rejected' });
+    if (!request) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Request already processed' });
+    }
+
+    await client.query('COMMIT');
+    res.json({ request, message: 'Imprest request rejected' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 // ══════════════════════════════════════════════════

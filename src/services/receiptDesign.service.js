@@ -8,6 +8,8 @@ export const RECEIPT_TEMPLATE_IDS = Object.freeze([
   'teal-modern', 'copper-vintage', 'graphite-grid', 'forest-bond',
   'azure-stripe', 'plum-elegance', 'saffron-ledger', 'slate-sidebar',
   'ruby-banner', 'clean-borderless', 'navy-watermark', 'compact-dual',
+  'simple-office', 'simple-green', 'fine-line', 'receipt-book',
+  'crafted-heritage', 'artisan-copper', 'sage-letterpress', 'royal-certificate',
 ]);
 
 export const RECEIPT_FIELD_KEYS = Object.freeze([
@@ -47,7 +49,29 @@ const COMMON_FIELDS = Object.freeze({
   evidence: true,
 });
 
-const modeDefaults = (mode) => ({
+const modeDefaults = (mode) => {
+  const base = baseModeDefaults(mode);
+  if (mode !== 'cheque') return base;
+  // Mirrors rgaccount/src/lib/receiptDesigner.js: cheque = non-cash layout
+  // with its own identity + realization declaration.
+  return {
+    ...base,
+    template_id: 'teal-modern',
+    font_family: 'Trebuchet MS',
+    colors: { ...base.colors, accent: '#0d9488', background: '#f6fffe' },
+    detail_items: base.detail_items.map((item) => (
+      item.key === 'payment_mode' ? { ...item, sample: 'Cheque' } : item
+    )),
+    content: {
+      ...base.content,
+      title: 'Cheque Receipt',
+      amount_label: 'Cheque amount',
+      declaration: 'This receipt is issued against a cheque and is valid subject to realization of the instrument and reconciliation in the books of account. E. & O.E.',
+    },
+  };
+};
+
+const baseModeDefaults = (mode) => ({
   template_id: mode === 'cash' ? 'copper-vintage' : 'executive-classic',
   page_size: mode === 'cash' ? 'A5' : 'A4',
   font_family: mode === 'cash' ? 'Georgia' : 'Inter',
@@ -85,6 +109,7 @@ const modeDefaults = (mode) => ({
 export const DEFAULT_RECEIPT_DESIGN = Object.freeze({
   version: 1,
   cash: modeDefaults('cash'),
+  cheque: modeDefaults('cheque'),
   non_cash: modeDefaults('non_cash'),
 });
 
@@ -150,6 +175,7 @@ const normalizeMode = (value, mode) => {
 export const normalizeReceiptDesign = (value) => ({
   version: 1,
   cash: normalizeMode(isObject(value) ? value.cash : null, 'cash'),
+  cheque: normalizeMode(isObject(value) ? value.cheque : null, 'cheque'),
   non_cash: normalizeMode(isObject(value) ? value.non_cash : null, 'non_cash'),
 });
 

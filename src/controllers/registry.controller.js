@@ -953,16 +953,29 @@ const buildNocPayload = async (registryId) => {
   const people = await resolveNocPeople(pool, registry, plot);
   // People picked from Clients for this certificate: the seller/farmer, and the
   // company member who signs it. One query — both are optional.
+  // Multi-people arrays are canonical; the single columns feed them as fallback
+  // for registries saved before migration 135.
+  const farmerIds = registry.noc_farmer_member_ids?.length
+    ? registry.noc_farmer_member_ids
+    : [registry.noc_farmer_member_id].filter(Boolean);
+  const authorizedIds = registry.noc_authorized_member_ids?.length
+    ? registry.noc_authorized_member_ids
+    : [registry.noc_authorized_member_id].filter(Boolean);
+  const clientMemberIds = registry.noc_client_member_ids || [];
   const nocMemberRes = await pool.query(
     `SELECT id, member_type, COALESCE(member_types, ARRAY[member_type]) AS member_types,
             full_name, father_name, phone, aadhar_no, pan_no,
             designation, department, employee_id, village, district, city, state, address
        FROM members WHERE id = ANY($1::int[])`,
-    [[registry.noc_farmer_member_id, registry.noc_authorized_member_id].filter(Boolean)]
+    [[...new Set([...farmerIds, ...authorizedIds, ...clientMemberIds])]]
   );
   const nocMemberById = (memberId) => nocMemberRes.rows.find((row) => row.id === memberId) || null;
-  const farmer = registry.noc_farmer_member_id ? nocMemberById(registry.noc_farmer_member_id) : null;
-  const authorizedSignatory = registry.noc_authorized_member_id ? nocMemberById(registry.noc_authorized_member_id) : null;
+  const membersFor = (ids) => ids.map(nocMemberById).filter(Boolean);
+  const farmers = membersFor(farmerIds);
+  const authorizedSignatories = membersFor(authorizedIds);
+  const clientMembers = membersFor(clientMemberIds);
+  const farmer = farmers[0] || null;
+  const authorizedSignatory = authorizedSignatories[0] || null;
   people.kyc_required = await readNocKycRequired(pool, registry.site_id);
   // Gate is bypassed when KYC is not required for this site, or the workflow override is on.
   people.kyc_gate_active = people.kyc_required && !workflowUnlocked;
@@ -1008,6 +1021,9 @@ const buildNocPayload = async (registryId) => {
     people,
     farmer,
     authorized_signatory: authorizedSignatory,
+    farmers,
+    authorized_signatories: authorizedSignatories,
+    client_members: clientMembers,
     workflow_unlocked: workflowUnlocked,
     suggested_noc_no: suggestedNocNo,
     verifyUrl,
@@ -1151,6 +1167,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
   const {
     noc_no, noc_date, noc_place, noc_notes, noc_show_payments, noc_include_co_applicant,
     noc_farmer_member_id, noc_authorized_member_id, included_plot_payment_ids, inline_payments, change_note,
+    noc_farmer_member_ids, noc_authorized_member_ids, noc_client_member_ids,
   } = req.body;
 
   const includedIds = Array.isArray(included_plot_payment_ids)
@@ -1227,32 +1244,65 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
 
     // The people named on the certificate are optional, but each must be a client
     // of this registry's own site and of the type the role allows.
-    const resolveNocMember = async (incoming, current, types, label) => {
+    // Every id must belong to this site and carry a role the slot allows.
+    // Order is preserved — the first entry doubles as the legacy single value.
+    const resolveNocMembers = async (incoming, current, types, label) => {
       if (incoming === undefined) return current || null;
-      const wanted = parseInt(incoming);
-      if (!Number.isFinite(wanted)) return null;
+      const wanted = [...new Set((Array.isArray(incoming) ? incoming : [incoming])
+        .map((n) => parseInt(n)).filter(Number.isFinite))];
+      if (!wanted.length) return null;
       const ok = await client.query(
         `SELECT id FROM members
-          WHERE id = $1 AND site_id = $2
+          WHERE id = ANY($1::int[]) AND site_id = $2
             AND COALESCE(member_types, ARRAY[member_type]) && $3::text[]`,
         [wanted, registry.site_id, types]
       );
-      if (!ok.rows[0]) {
-        const error = new Error(`Pick a ${label} from this site's clients`);
+      if (ok.rows.length !== wanted.length) {
+        const error = new Error(`Pick each ${label} from this site's clients`);
         error.status = 400;
         throw error;
       }
       return wanted;
     };
-    let farmerMemberId;
-    let authorizedMemberId;
+    let farmerMemberIds;
+    let authorizedMemberIds;
+    let clientMemberIds;
     try {
-      farmerMemberId = await resolveNocMember(noc_farmer_member_id, registry.noc_farmer_member_id, ['FARMER'], 'farmer');
-      authorizedMemberId = await resolveNocMember(noc_authorized_member_id, registry.noc_authorized_member_id, COMPANY_MEMBER_TYPES, 'company member');
+      // Array inputs win; the legacy single fields still work for older frontends.
+      farmerMemberIds = await resolveNocMembers(
+        noc_farmer_member_ids !== undefined ? noc_farmer_member_ids : noc_farmer_member_id,
+        registry.noc_farmer_member_ids?.length ? registry.noc_farmer_member_ids : [registry.noc_farmer_member_id].filter(Boolean),
+        ['FARMER'], 'farmer');
+      authorizedMemberIds = await resolveNocMembers(
+        noc_authorized_member_ids !== undefined ? noc_authorized_member_ids : noc_authorized_member_id,
+        registry.noc_authorized_member_ids?.length ? registry.noc_authorized_member_ids : [registry.noc_authorized_member_id].filter(Boolean),
+        COMPANY_MEMBER_TYPES, 'company member');
+      clientMemberIds = await resolveNocMembers(
+        noc_client_member_ids, registry.noc_client_member_ids, ['CLIENT'], 'client');
     } catch (selectionError) {
       if (!selectionError.status) throw selectionError;
       await client.query('ROLLBACK');
       return res.status(400).json({ message: selectionError.message });
+    }
+    const farmerMemberId = farmerMemberIds?.[0] || null;
+    const authorizedMemberId = authorizedMemberIds?.[0] || null;
+
+    // Extra purchasers face the same KYC gate as the primary buyer.
+    if (!workflowUnlocked && kycRequired && clientMemberIds?.length) {
+      const kycRes = await client.query(
+        `SELECT m.full_name FROM members m
+          WHERE m.id = ANY($1::int[])
+            AND NOT EXISTS (SELECT 1 FROM kyc_cases k WHERE k.client_member_id = m.id AND k.status = 'VERIFIED')`,
+        [clientMemberIds]
+      );
+      if (kycRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          code: 'KYC_REQUIRED',
+          message: `KYC must be complete before the NOC is generated — ${kycRes.rows.map((r) => `${r.full_name}: KYC not verified`).join('; ')}`,
+          blockers: kycRes.rows.map((r) => `${r.full_name}: KYC not verified`),
+        });
+      }
     }
 
     // ── NOC meta on the registry ──
@@ -1269,6 +1319,9 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
               noc_include_co_applicant = $11::boolean,
               noc_farmer_member_id = $12::integer,
               noc_authorized_member_id = $13::integer,
+              noc_farmer_member_ids = $14::integer[],
+              noc_authorized_member_ids = $15::integer[],
+              noc_client_member_ids = $16::integer[],
               noc_generated_at = NOW(),
               noc_approved_at = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_at END,
               noc_approved_by = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_by END,
@@ -1288,6 +1341,9 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
         includeCo,
         farmerMemberId,
         authorizedMemberId,
+        farmerMemberIds,
+        authorizedMemberIds,
+        clientMemberIds,
       ]
     );
 

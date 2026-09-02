@@ -527,6 +527,43 @@ class ImprestExpenseRequestModel extends MasterModel {
   }
 
   /**
+   * Find requests explicitly assigned to a reviewer. This is kept separate
+   * from the requester's own history so a sub-admin can safely receive an
+   * approval inbox without gaining visibility into every site request.
+   */
+  async findAssignedToReviewer(reviewerId, siteId, pool) {
+    let query = `
+      SELECT ier.*, u.name as sub_admin_name, u.email as sub_admin_email,
+             s.name as site_name, r.name as reviewer_name,
+             asa.name as assigned_admin_name
+      FROM imprest_expense_requests ier
+      LEFT JOIN users u ON ier.sub_admin_id = u.id
+      LEFT JOIN sites s ON ier.site_id = s.id
+      LEFT JOIN users r ON ier.reviewed_by = r.id
+      LEFT JOIN users asa ON ier.assigned_admin_id = asa.id
+      WHERE ier.assigned_admin_id = $1
+        AND ier.sub_admin_id <> $1
+    `;
+    const params = [reviewerId];
+    if (siteId) {
+      query += ` AND ier.site_id = $2`;
+      params.push(siteId);
+    }
+    query += ` ORDER BY ier.created_at DESC`;
+    const result = await pool.query(query, params);
+    return result.rows;
+  }
+
+  /** Lock a request before authorizing and reviewing it. */
+  async findByIdForUpdate(id, pool) {
+    const result = await pool.query(
+      'SELECT * FROM imprest_expense_requests WHERE id = $1 FOR UPDATE',
+      [id]
+    );
+    return result.rows[0];
+  }
+
+  /**
    * Approve a request
    */
   async approveRequest(id, reviewedBy, reviewRemark, pool) {

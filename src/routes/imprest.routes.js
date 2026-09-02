@@ -82,14 +82,18 @@ router.post('/transfers', requirePermission('imprest', 'write'), accessByRequire
 
 // ── Pending receipts (sub-admin confirms received funds) ──
 router.get('/pending-receipts', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, getPendingReceipts);
-router.put('/allocations/:id/confirm', requirePermission('imprest', 'update'), accessByAllocation, bustImprestCache, confirmReceipt);
+// Confirming money physically received is an ownership action, not a module
+// edit. The controller still verifies that the allocation belongs to caller.
+router.put('/allocations/:id/confirm', requirePermission('imprest', 'read'), accessByAllocation, bustImprestCache, confirmReceipt);
 
 // ── Sub-admin creates expense from imprest ──
 router.post('/expense', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, createExpenseFromImprest);
 
 // ── Expense requests (overdraft flow) ──
 router.get('/expense-requests', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, listExpenseRequests);
-router.post('/expense-requests', requirePermission('imprest', 'write'), accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, createExpenseRequest);
+// A user who can open their Imprest account may ask for a refill even when
+// their role is not allowed to post expenses or transfers.
+router.post('/expense-requests', requirePermission('imprest', 'read'), accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, createExpenseRequest);
 
 // ── Allocations: admin → sub-admin OR sub-admin → sub-admin (peer transfer) ──
 // Controller enforces role-specific rules (ledger debit for sub-admin giver, ownership check on cancel).
@@ -101,9 +105,10 @@ router.delete('/allocations/:id', requirePermission('imprest', 'delete'), access
 router.get('/all-balances', requireRole('admin'), accessByQuerySite, imprestReadCache, getAllBalances);
 router.post('/adjust', requireRole('admin'), uploadProofPhoto, accessByRequiredBodySite, requireTargetUser, bustImprestCache, adjustBalance);
 
-// ── Admin approve/reject expense requests ──
-router.put('/expense-requests/:id/approve', requireRole('admin'), accessByExpenseRequest, bustImprestCache, approveExpenseRequest);
-router.put('/expense-requests/:id/reject', requireRole('admin'), accessByExpenseRequest, bustImprestCache, rejectExpenseRequest);
+// ── Assigned reviewer approve/reject expense requests ──
+// Controllers limit sub-admins to requests explicitly assigned to them.
+router.put('/expense-requests/:id/approve', requireRole('admin', 'sub_admin'), requirePermission('imprest', 'read'), accessByExpenseRequest, bustImprestCache, approveExpenseRequest);
+router.put('/expense-requests/:id/reject', requireRole('admin', 'sub_admin'), requirePermission('imprest', 'read'), accessByExpenseRequest, bustImprestCache, rejectExpenseRequest);
 
 // ── Imprest returns (sub-admin → admin money return) ──
 router.post('/returns', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, createReturn);
