@@ -15,7 +15,8 @@ import asyncHandler from '../utils/asyncHandler.js';
 const MAP_SOURCES = new Set([
   'day_book', 'expenses', 'farmer_payments', 'plot_commissions',
   'firm_transactions', 'plot_payments', 'plot_installment_payments',
-  'vendor_payments', 'plot_commission_payments', 'cashflow_entry',
+  'vendor_payments', 'plot_commission_payments', 'land_deal_payments',
+  'misc_income_entries', 'cashflow_entry',
 ]);
 
 export const listBankAccounts = asyncHandler(async (req, res) => {

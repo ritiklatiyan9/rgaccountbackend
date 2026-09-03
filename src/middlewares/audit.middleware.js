@@ -18,7 +18,7 @@ const MODULE_MAP = {
   expenses: 'expenses', registries: 'plot_registry', members: 'clients', 'member-kyc': 'clients',
   daybook: 'daybook', banks: 'cashflow', imprest: 'imprest', 'document-imprest': 'document_imprest',
   'edit-requests': 'edit_approvals', permissions: 'permissions', 'member-categories': 'clients',
-  'expense-categories': 'expenses', activity: 'activity', excel: 'excel', folders: 'excel',
+  'expense-categories': 'expenses', activity: 'activity', excel: 'excel', folders: 'excel', spreadsheets: 'excel',
   approvals: 'approvals', chat: 'chat', vendors: 'vendors', 'dashboard-permissions': 'dashboard',
   upi: 'upi_collect', signatures: 'signatures', 'balance-sheet': 'balance_sheet', settings: 'settings',
   compliance: 'compliance', 'compliance-documents': 'compliance', construction: 'construction',
@@ -104,6 +104,9 @@ export default function auditRequestMiddleware(req, res, next) {
   const method = String(req.method || '').toUpperCase();
   const segments = segmentsOf(req);
   if (!METHOD_ACTION[method] || segments[0] === 'audit-logs' || segments[0] === 'receipt-history') return next();
+  // Spreadsheet autosave batches and export pings would create one HTTP row
+  // per debounce tick; the controller writes the meaningful business events.
+  if (segments[0] === 'spreadsheets' && ['changes', 'export'].includes(segments[2])) return next();
   if (segments[0] === 'graphql' && !/^\s*mutation\b/i.test(String(req.body?.query || ''))) return next();
 
   const startedAt = Date.now();
