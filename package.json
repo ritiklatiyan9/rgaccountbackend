@@ -83,6 +83,7 @@
     "migrate:plot-cheque-invariant": "node src/migrations/133_plot_payment_cheque_invariant.js",
     "migrate:pending-cheque-invariants": "node src/migrations/134_pending_cheque_invariants.js",
     "migrate:bank-daybook-statement-view": "node src/migrations/136_bank_daybook_statement_view.js",
+    "migrate:blank-mode-cash": "node src/migrations/137_blank_payment_mode_is_cash.js",
     "import:bank-daybook-statement-view": "node src/scripts/importBankDaybookStatementView.mjs"
   },
   "dependencies": {

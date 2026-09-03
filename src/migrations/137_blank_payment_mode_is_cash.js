@@ -15,17 +15,33 @@ import pool from '../config/db.js';
  * Found on OM ASSOCIATES (site 5): 16 blank-mode expenses, ₹4,01,390 —
  * exactly the difference between the Bank Day Book and the ICICI statement.
  *
- *  1. Redefine the mirror function so a blank mode maps to 'cash'.
+ * sync_plot_payment_cheque_mirror() carries the identical CASE for
+ * plot_payments.payment_type. No row is mislabelled through it today, but it
+ * would drift the same way on the next blank-mode plot payment, so both
+ * functions are pointed at the shared rule here rather than one being left to
+ * reintroduce the bug.
+ *
+ *  1. Redefine both mirror functions to use cashflow_mode_bucket().
  *  2. Backfill cfe.cash_type for the rows the old CASE mislabelled.
  *
  * Money moves between the Cash and Bank books of the affected sites; no site
  * total changes and no source row is touched. Run manually, on purpose:
  *   node src/migrations/137_blank_payment_mode_is_cash.js
  */
+// Each mirrored source table with the column holding its payment instrument.
 const MIRRORED_SOURCES = [
-  'day_book', 'expenses', 'farmer_payments', 'firm_transactions', 'land_deal_payments',
-  'misc_income_entries', 'plot_commission_payments', 'plot_installment_payments',
-  'plot_registry_payments', 'vendor_inventory_payments', 'vendor_payments',
+  ['day_book', 'payment_mode'],
+  ['expenses', 'payment_mode'],
+  ['farmer_payments', 'payment_mode'],
+  ['firm_transactions', 'payment_mode'],
+  ['land_deal_payments', 'payment_mode'],
+  ['misc_income_entries', 'payment_mode'],
+  ['plot_commission_payments', 'payment_mode'],
+  ['plot_installment_payments', 'payment_mode'],
+  ['plot_payments', 'payment_type'],
+  ['plot_registry_payments', 'payment_mode'],
+  ['vendor_inventory_payments', 'payment_mode'],
+  ['vendor_payments', 'payment_mode'],
 ];
 
 export async function up() {
@@ -72,8 +88,31 @@ export async function up() {
       $$
     `);
 
+    await client.query(`
+      CREATE OR REPLACE FUNCTION sync_plot_payment_cheque_mirror()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      DECLARE
+        v_cash_type TEXT;
+      BEGIN
+        v_cash_type := cashflow_mode_bucket(NEW.payment_type);
+        UPDATE cash_flow_entries
+           SET cheque_status = NEW.cheque_status,
+               cheque_no = NEW.cheque_no,
+               cash_type = v_cash_type,
+               updated_at = NOW()
+         WHERE source_module = 'plot_payments'
+           AND source_id = NEW.id
+           AND (cash_type, cheque_status, cheque_no)
+               IS DISTINCT FROM (v_cash_type, NEW.cheque_status, NEW.cheque_no);
+        RETURN NEW;
+      END;
+      $$
+    `);
+
     let total = 0;
-    for (const table of MIRRORED_SOURCES) {
+    for (const [table, modeColumn] of MIRRORED_SOURCES) {
       const exists = await client.query(`SELECT to_regclass($1) IS NOT NULL AS ok`, [table]);
       if (!exists.rows[0]?.ok) continue;
       const result = await client.query(`
@@ -83,7 +122,7 @@ export async function up() {
          WHERE cfe.source_module = $1
            AND cfe.source_id = t.id
            AND cfe.cash_type = 'bank'
-           AND NULLIF(TRIM(COALESCE(t.payment_mode, '')), '') IS NULL
+           AND NULLIF(TRIM(COALESCE(t.${modeColumn}, '')), '') IS NULL
       `, [table]);
       if (result.rowCount) console.log(`Migration 137: ${table} → ${result.rowCount} blank-mode row(s) moved to cash`);
       total += result.rowCount;
