@@ -7,6 +7,7 @@ import {
   cancelAllocation,
   getPendingReceipts,
   confirmReceipt,
+  declineReceipt,
   getBalance,
   getLedger,
   getAllBalances,
@@ -85,6 +86,10 @@ router.get('/pending-receipts', requirePermission('imprest', 'read'), accessByQu
 // Confirming money physically received is an ownership action, not a module
 // edit. The controller still verifies that the allocation belongs to caller.
 router.put('/allocations/:id/confirm', requirePermission('imprest', 'read'), accessByAllocation, bustImprestCache, confirmReceipt);
+
+// Declining mirrors confirming: it is the recipient's decision, so it rides on
+// read permission — the recipient may hold neither write nor delete.
+router.put('/allocations/:id/decline', requirePermission('imprest', 'read'), accessByAllocation, bustImprestCache, declineReceipt);
 
 // ── Sub-admin creates expense from imprest ──
 router.post('/expense', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, createExpenseFromImprest);

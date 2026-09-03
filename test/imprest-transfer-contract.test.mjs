@@ -55,3 +55,32 @@ test('pending allocation is ledger-neutral for both parties until the recipient 
   assert.match(confirmReceipt, /type:\s*'TRANSFER_OUT'/);
   assert.match(confirmReceipt, /'This handover was already confirmed or cancelled'/);
 });
+
+test('a handover is declined only by its recipient and never after acceptance', async () => {
+  const controller = await readSource('src/controllers/imprest.controller.js');
+  const model = await readSource('src/models/Imprest.model.js');
+  const routes = await readSource('src/routes/imprest.routes.js');
+  const migration = await readSource('src/migrations/138_allocation_decline.js');
+
+  const declineStart = controller.indexOf('export const declineReceipt');
+  assert.ok(declineStart > -1, 'declineReceipt handler exists');
+  const declineEnd = controller.indexOf('export const', declineStart + 1);
+  const decline = controller.slice(declineStart, declineEnd === -1 ? undefined : declineEnd);
+
+  // Recipient-only, reason required, and both refusal paths share one release.
+  assert.match(decline, /existing\.sub_admin_id !== req\.user\.id/);
+  assert.match(decline, /A decline reason is required/);
+  assert.match(decline, /releasePendingAllocation\(/);
+  const cancelStart = controller.indexOf('export const cancelAllocation');
+  const cancel = controller.slice(cancelStart, controller.indexOf('releasePendingAllocation, but', cancelStart) === -1 ? controller.indexOf('async function releasePendingAllocation') : undefined);
+  assert.match(cancel, /releasePendingAllocation\(/);
+
+  // Acceptance is final: the handler names the case, and the model's WHERE
+  // clause makes accept-then-decline impossible even in a race.
+  assert.match(decline, /a received handover cannot be declined/);
+  assert.match(model, /SET status = 'DECLINED',[\s\S]*?WHERE id = \$1 AND status = 'PENDING_RECEIPT'/);
+
+  // Route rides on read permission like confirm — recipients may lack delete.
+  assert.match(routes, /router\.put\('\/allocations\/:id\/decline', requirePermission\('imprest', 'read'\), accessByAllocation/);
+  assert.match(migration, /'PENDING_RECEIPT', 'RECEIVED', 'CANCELLED', 'DECLINED'/);
+});

@@ -312,39 +312,108 @@ export const cancelAllocation = asyncHandler(async (req, res) => {
       return res.status(409).json({ message: 'Allocation could not be cancelled' });
     }
 
-    // New pending handovers never change either balance. Only legacy rows that
-    // already contain an escrow debit need a compensating refund.
-    const escrow = await client.query(
-      `SELECT il.id, u.role
-         FROM imprest_ledger il
-         JOIN users u ON u.id = il.user_id
-        WHERE il.user_id = $1 AND il.site_id = $2 AND il.reference_id = $3
-          AND il.type = 'TRANSFER_OUT' AND il.amount < 0
-        LIMIT 1`,
-      [existing.admin_id, existing.site_id, allocation.id]
-    );
-    if (escrow.rows[0] && !ADMIN_ROLES.has(escrow.rows[0].role)) {
-      await lockImprestAccounts(client, existing.admin_id);
-      await imprestLedgerModel.createEntry({
-        user_id: existing.admin_id,
-        type: 'TRANSFER_REFUND',
-        reference_id: allocation.id,
-        amount: parseFloat(existing.amount),
-        remarks: `Handover cancelled — funds returned to giver.`,
-        created_by: req.user.id,
-        site_id: existing.site_id,
-      }, client);
-    }
-
-    await client.query(
-      `UPDATE day_book
-          SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
-        WHERE imprest_allocation_id = $1 AND status = 'pending'`,
-      [allocation.id, req.user.id]
-    );
+    await releasePendingAllocation(client, existing, allocation, req.user.id,
+      'Handover cancelled — funds returned to giver.');
 
     await client.query('COMMIT');
     res.json({ allocation, message: 'Allocation cancelled' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * A pending handover that will never be confirmed must release the giver:
+ * refund any legacy escrow debit they already carry and reject the pending
+ * day-book memo row. Shared by the giver's cancel and the recipient's decline.
+ */
+async function releasePendingAllocation(client, existing, allocation, actorId, refundRemark) {
+  // New pending handovers never change either balance. Only legacy rows that
+  // already contain an escrow debit need a compensating refund.
+  const escrow = await client.query(
+    `SELECT il.id, u.role
+       FROM imprest_ledger il
+       JOIN users u ON u.id = il.user_id
+      WHERE il.user_id = $1 AND il.site_id = $2 AND il.reference_id = $3
+        AND il.type = 'TRANSFER_OUT' AND il.amount < 0
+      LIMIT 1`,
+    [existing.admin_id, existing.site_id, allocation.id]
+  );
+  if (escrow.rows[0] && !ADMIN_ROLES.has(escrow.rows[0].role)) {
+    await lockImprestAccounts(client, existing.admin_id);
+    await imprestLedgerModel.createEntry({
+      user_id: existing.admin_id,
+      type: 'TRANSFER_REFUND',
+      reference_id: allocation.id,
+      amount: parseFloat(existing.amount),
+      remarks: refundRemark,
+      created_by: actorId,
+      site_id: existing.site_id,
+    }, client);
+  }
+
+  await client.query(
+    `UPDATE day_book
+        SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
+      WHERE imprest_allocation_id = $1 AND status = 'pending'`,
+    [allocation.id, actorId]
+  );
+}
+
+/**
+ * PUT /imprest/allocations/:id/decline
+ * The recipient refuses a pending handover. Pending rows are ledger-neutral,
+ * so declining moves no money — it only releases the giver (legacy escrow
+ * refund + day-book memo rejection) and records who said no and why.
+ * Acceptance is final: a RECEIVED allocation can never be declined.
+ */
+export const declineReceipt = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { decline_reason } = req.body;
+
+  if (req.user.role === 'super_admin') {
+    return res.status(403).json({ code: 'OBSERVER_ROLE', message: 'Super Admin observes imprest and cannot receive float' });
+  }
+  if (!decline_reason || !decline_reason.trim()) {
+    return res.status(400).json({ message: 'A decline reason is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const existing = await imprestAllocationModel.findById(parseInt(id), client);
+    if (!existing) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Allocation not found' });
+    }
+    if (existing.sub_admin_id !== req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'This handover is not assigned to you' });
+    }
+    if (existing.status === 'RECEIVED') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'This handover was already accepted — a received handover cannot be declined' });
+    }
+    if (existing.status !== 'PENDING_RECEIPT') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'This handover was already cancelled or declined' });
+    }
+
+    const allocation = await imprestAllocationModel.declineAllocation(parseInt(id), decline_reason.trim(), client);
+    if (!allocation) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'This handover was already confirmed or cancelled' });
+    }
+
+    await releasePendingAllocation(client, existing, allocation, req.user.id,
+      'Handover declined by recipient — funds returned to giver.');
+
+    await client.query('COMMIT');
+    res.json({ allocation, message: 'Handover declined' });
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

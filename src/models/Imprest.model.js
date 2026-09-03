@@ -119,6 +119,24 @@ class ImprestAllocationModel extends MasterModel {
     const result = await pool.query(query, [id]);
     return result.rows[0];
   }
+
+  /**
+   * Recipient declines a pending handover. Only PENDING_RECEIPT rows can
+   * flip, so a RECEIVED allocation can never be declined — even in a race.
+   */
+  async declineAllocation(id, reason, pool) {
+    const query = `
+      UPDATE imprest_allocations
+      SET status = 'DECLINED',
+          decline_reason = $2,
+          declined_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1 AND status = 'PENDING_RECEIPT'
+      RETURNING *
+    `;
+    const result = await pool.query(query, [id, reason]);
+    return result.rows[0];
+  }
 }
 
 // ── Imprest Ledger Model ──

@@ -29,6 +29,34 @@ export const buildCategoryWhere = (categories, category, params, pIdx) => {
   return { clause: ` AND (${parts.join(' OR ')})`, pIdx: next };
 };
 
+/**
+ * The Payment-mode filter accepts three shapes: a bucket (`BUCKET:CASH` /
+ * `BUCKET:BANK`), the literal `UNSPECIFIED`, or one exact mode.
+ *
+ * A bucket defers to the database's own `ledger_bucket()` (migration 079) —
+ * the single rule for "CASH or blank is cash, every other mode settles through
+ * a bank", mirrored in JS by classifyPaymentMode() in both repos. Reusing it
+ * means the Bank bucket can never drift from the Day Book or the ledger.
+ *
+ * Shared by the row query and the breakdown query on purpose: when these two
+ * built their own clauses, a filter applied to the rows but not the totals.
+ */
+export const MODE_BUCKET_FILTERS = Object.freeze({ 'BUCKET:CASH': 'cash', 'BUCKET:BANK': 'bank' });
+
+export const buildModeWhere = (mode, params, pIdx) => {
+  if (!mode) return { clause: '', pIdx };
+  if (mode === 'UNSPECIFIED') {
+    return { clause: ` AND (u.payment_mode IS NULL OR u.payment_mode = '')`, pIdx };
+  }
+  const bucket = MODE_BUCKET_FILTERS[mode];
+  if (bucket) {
+    params.push(bucket);
+    return { clause: ` AND ledger_bucket(u.payment_mode) = $${pIdx}`, pIdx: pIdx + 1 };
+  }
+  params.push(mode);
+  return { clause: ` AND u.payment_mode = $${pIdx}`, pIdx: pIdx + 1 };
+};
+
 // ── Expense Model ──
 class ExpenseModel extends MasterModel {
   constructor() {
@@ -369,13 +397,9 @@ class ExpenseModel extends MasterModel {
     if (only_site === 'true') { whereClause += ` AND u.source = 'expenses'`; }
     if (created_by) { whereClause += ` AND u.created_by = $${pIdx++}`; params.push(created_by); }
     if (status) { whereClause += ` AND u.status = $${pIdx++}`; params.push(status); }
-    if (mode) {
-      if (mode === 'UNSPECIFIED') {
-        whereClause += ` AND (u.payment_mode IS NULL OR u.payment_mode = '')`;
-      } else {
-        whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode);
-      }
-    }
+    const md = buildModeWhere(mode, params, pIdx);
+    whereClause += md.clause;
+    pIdx = md.pIdx;
     const cat = buildCategoryWhere(categories, category, params, pIdx);
     whereClause += cat.clause;
     pIdx = cat.pIdx;
@@ -590,13 +614,9 @@ class ExpenseModel extends MasterModel {
     if (created_by) { whereClause += ` AND u.created_by = $${pIdx++}`; params.push(created_by); }
     if (status) { whereClause += ` AND u.status = $${pIdx++}`; params.push(status); }
 
-    if (mode) {
-      if (mode === 'UNSPECIFIED') {
-        whereClause += ` AND (u.payment_mode IS NULL OR u.payment_mode = '')`;
-      } else {
-        whereClause += ` AND u.payment_mode = $${pIdx++}`; params.push(mode);
-      }
-    }
+    const md = buildModeWhere(mode, params, pIdx);
+    whereClause += md.clause;
+    pIdx = md.pIdx;
     const cat = buildCategoryWhere(categories, category, params, pIdx);
     whereClause += cat.clause;
     pIdx = cat.pIdx;
