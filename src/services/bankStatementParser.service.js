@@ -4,7 +4,7 @@ import * as XLSX from '@e965/xlsx';
 export const BANK_STATEMENT_PARSER_VERSION = 'bank-statement-v3';
 
 const HEADER_ALIASES = {
-  source_serial: ['sr no', 'sr number', 'serial no', 'serial number', 's no', 'sequence'],
+  source_serial: ['sr no', 'sr number', 'serial no', 'serial number', 's no', 'sequence', 'no'],
   transaction_date: ['transaction date', 'txn date', 'txn posted date', 'tran date', 'date', 'posting date', 'bank date'],
   value_date: ['value date', 'valued date'],
   narration: ['narration', 'description', 'description narration', 'particulars', 'transaction details', 'transaction remarks', 'remarks', 'details'],
@@ -12,7 +12,7 @@ const HEADER_ALIASES = {
   cheque_reference: ['cheque no', 'cheque number', 'chq no', 'chq number', 'instrument no', 'instrument number', 'cheque reference no', 'reference number'],
   debit: ['debit', 'debit amount', 'withdrawal', 'withdrawal amount', 'dr amount', 'amount debited'],
   credit: ['credit', 'credit amount', 'deposit', 'deposit amount', 'cr amount', 'amount credited'],
-  balance: ['balance', 'balance inr', 'closing balance', 'available balance'],
+  balance: ['balance', 'balance inr', 'closing balance', 'available balance', 'available balance inr'],
   account_suffix: ['account suffix', 'account last 4', 'account last four', 'account no', 'account number', 'a c no', 'account'],
   branch: ['branch', 'branch name'],
 };

@@ -706,7 +706,6 @@ export const listTransactions = asyncHandler(async (req, res) => {
        cfe.cash_type AS payment_mode,
        cfe.status,
        cfe.cheque_status,
-       cfe.cheque_status_updated_at,
        cfe.created_by,
        cfe.created_at,
        cfe.updated_at,

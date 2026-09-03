@@ -54,8 +54,7 @@ export async function up() {
       $$
     `);
 
-    // Run before migration 132's timestamp trigger so a derived status also
-    // receives cheque_status_updated_at.
+    // Normalize the source before its cheque status is mirrored to cash flow.
     await client.query(`DROP TRIGGER IF EXISTS trg_aa_plot_payment_cheque_invariant ON plot_payments`);
     await client.query(`
       CREATE TRIGGER trg_aa_plot_payment_cheque_invariant

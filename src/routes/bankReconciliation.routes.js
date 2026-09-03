@@ -8,6 +8,7 @@ import {
   applyBankDaybookReconciliation,
   previewBankDaybookReconciliation,
 } from '../controllers/bankDaybookReconciliation.controller.js';
+import { getActiveBankDaybookStatementView } from '../controllers/bankDaybookStatementView.controller.js';
 import {
   confirmMatches,
   createUpload,
@@ -60,6 +61,14 @@ router.post(
   requireAllEntryVisibility('daybook'),
   upload.single('statement'),
   applyBankDaybookReconciliation
+);
+// An imported statement can be used as a read-only Bank Day Book presentation
+// without changing underlying accounting entries in any module.
+router.get(
+  '/daybook/statement-view',
+  requirePermission('daybook', 'read'),
+  requireAllEntryVisibility('daybook'),
+  getActiveBankDaybookStatementView,
 );
 
 // General transaction reconciliation has its own workflow namespace and
