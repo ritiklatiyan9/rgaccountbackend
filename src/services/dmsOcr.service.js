@@ -5,8 +5,9 @@
  *   mistral (default) — Mistral OCR API. Purpose-built OCR, handles PDF *and* images natively in
  *                       ONE call (no page-splitting/preprocessing), strong on Devanagari + mixed
  *                       script. Needs env MISTRAL_API_KEY. Zero extra npm deps (global fetch).
- *   openrouter        — OpenRouter vision LLM (OPENROUTER_VISION_MODEL). Images only; PDFs fall
- *                       through to Mistral. Needs env OPENROUTER_API_KEY.
+ *   openrouter        — OpenRouter multimodal LLM (OPENROUTER_VISION_MODEL). Images and PDFs are
+ *                       sent through OpenRouter, so provider and PDF-parser charges use the
+ *                       OpenRouter account. Needs env OPENROUTER_API_KEY.
  *   groq              — Groq vision LLM (same engine the booking module uses). Images only here —
  *                       PDF would need pdf→image (sharp/pdf-to-png-converter), which this backend
  *                       doesn't install; use the mistral engine for PDFs. Needs env GROQ_API_KEY.
@@ -99,7 +100,7 @@ const runGroq = async (buffer, mime) => {
   return { text, engine: 'groq-vision' };
 };
 
-// ── OpenRouter vision (images only) ─────────────────────────────────────────
+// ── OpenRouter multimodal OCR (images + PDFs) ────────────────────────────────
 // One key, any hosted vision model. Note OPENROUTER_MODEL is deliberately NOT
 // used here: the shared default (openrouter/free) refuses identity documents
 // with "User Safety: unsafe — PII/Privacy", which is exactly what KYC feeds it.
@@ -109,10 +110,27 @@ export const DEFAULT_OPENROUTER_VISION_MODEL = 'qwen/qwen3-vl-30b-a3b-instruct';
 const runOpenRouter = async (buffer, mime) => {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) throw new Error('OPENROUTER_API_KEY is not set');
-  if (!isImage(mime)) throw new Error('OpenRouter vision handles images only — use DMS_OCR_ENGINE=mistral for PDFs');
 
   const model = process.env.OPENROUTER_VISION_MODEL || DEFAULT_OPENROUTER_VISION_MODEL;
   const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
+  const fileContent = isPdf(mime)
+    ? {
+        type: 'file',
+        file: {
+          filename: 'kyc-document.pdf',
+          file_data: dataUrl,
+        },
+      }
+    : { type: 'image_url', image_url: { url: dataUrl } };
+  // Scanned KYC PDFs need OCR rather than plain text extraction. Selecting the
+  // parser in the OpenRouter request ensures that its cost is charged to the
+  // configured OpenRouter account instead of calling Mistral directly.
+  const pdfPlugins = isPdf(mime)
+    ? [{
+        id: 'file-parser',
+        pdf: { engine: process.env.OPENROUTER_PDF_ENGINE || 'mistral-ocr' },
+      }]
+    : undefined;
   const res = await withTimeout((signal) =>
     fetch(OPENROUTER_URL, {
       method: 'POST',
@@ -128,11 +146,12 @@ const runOpenRouter = async (buffer, mime) => {
         model,
         temperature: 0,
         max_tokens: 4000,
+        ...(pdfPlugins ? { plugins: pdfPlugins } : {}),
         messages: [{
           role: 'user',
           content: [
             { type: 'text', text: 'Transcribe ALL text in this document exactly as written, preserving Hindi (Devanagari) and English. Output only the raw text, no commentary.' },
-            { type: 'image_url', image_url: { url: dataUrl } },
+            fileContent,
           ],
         }],
       }),
@@ -153,8 +172,6 @@ const runOpenRouter = async (buffer, mime) => {
  */
 export const runDmsOcr = async (buffer, mime) => {
   if (!isImage(mime) && !isPdf(mime)) return { text: '', engine: 'none' };
-  // PDFs only have one path — Mistral OCR reads them natively; the vision LLMs do not.
-  if (isPdf(mime)) return runMistral(buffer, mime);
   if (ENGINE === 'openrouter') return runOpenRouter(buffer, mime);
   if (ENGINE === 'groq') return runGroq(buffer, mime);
   return runMistral(buffer, mime);
