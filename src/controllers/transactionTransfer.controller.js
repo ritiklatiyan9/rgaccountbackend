@@ -398,7 +398,13 @@ const copyBankMapping = async (client, source, targetType, targetId) => {
   if (!source.bank_account_id || targetType === 'personal_ledger') return;
   const sourceModule = targetType === 'expense' ? 'expenses' : targetType === 'farmer_payment' ? 'farmer_payments' : 'plot_payments';
   await client.query(
-    'UPDATE cash_flow_entries SET bank_account_id = $1 WHERE source_module = $2 AND source_id = $3',
+    `UPDATE cash_flow_entries cfe
+        SET bank_account_id = ba.id
+       FROM bank_accounts ba
+      WHERE ba.id = $1
+        AND ba.site_id = cfe.site_id
+        AND cfe.source_module = $2
+        AND cfe.source_id = $3`,
     [source.bank_account_id, sourceModule, targetId],
   );
 };

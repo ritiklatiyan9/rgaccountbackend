@@ -51,6 +51,7 @@ export const createMaterial = asyncHandler(async (req, res) => {
 
 export const updateMaterial = asyncHandler(async (req, res) => {
   const id = parseInt(req.params.id, 10);
+  const siteId = requireSite(req, res); if (!siteId) return;
   const fields = ['name', 'code', 'unit', 'category', 'min_stock', 'rate', 'notes', 'is_active'];
   const sets = [];
   const params = [];
@@ -65,9 +66,10 @@ export const updateMaterial = asyncHandler(async (req, res) => {
     sets.push(`${f} = $${params.length}`);
   }
   if (sets.length === 0) return res.status(400).json({ message: 'Nothing to update' });
-  params.push(id);
+  params.push(id, siteId);
   const { rows } = await pool.query(
-    `UPDATE inventory_materials SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length} RETURNING *`,
+    `UPDATE inventory_materials SET ${sets.join(', ')}, updated_at = NOW()
+      WHERE id = $${params.length - 1} AND site_id = $${params.length} RETURNING *`,
     params
   );
   if (!rows[0]) return res.status(404).json({ message: 'Material not found' });
@@ -76,16 +78,18 @@ export const updateMaterial = asyncHandler(async (req, res) => {
 
 export const deleteMaterial = asyncHandler(async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const { rows } = await pool.query('SELECT 1 FROM inventory_movements WHERE material_id = $1 LIMIT 1', [id]);
+  const siteId = requireSite(req, res); if (!siteId) return;
+  const { rows } = await pool.query('SELECT 1 FROM inventory_movements WHERE material_id = $1 AND site_id = $2 LIMIT 1', [id, siteId]);
   if (rows.length) return res.status(409).json({ message: 'Cannot delete — this material has stock movements. Deactivate it instead.' });
-  const del = await pool.query('DELETE FROM inventory_materials WHERE id = $1 RETURNING id', [id]);
+  const del = await pool.query('DELETE FROM inventory_materials WHERE id = $1 AND site_id = $2 RETURNING id', [id, siteId]);
   if (!del.rows[0]) return res.status(404).json({ message: 'Material not found' });
   res.json({ success: true });
 });
 
 export const getMaterial = asyncHandler(async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const { rows } = await pool.query('SELECT * FROM inventory_materials WHERE id = $1', [id]);
+  const siteId = requireSite(req, res); if (!siteId) return;
+  const { rows } = await pool.query('SELECT * FROM inventory_materials WHERE id = $1 AND site_id = $2', [id, siteId]);
   if (!rows[0]) return res.status(404).json({ message: 'Material not found' });
   const stock = await inventoryModel.stockFor(id);
   const movements = await inventoryModel.listMovements(rows[0].site_id, { materialId: id, limit: 50 });
@@ -105,9 +109,13 @@ export const listMovements = asyncHandler(async (req, res) => {
 
 export const createMovement = asyncHandler(async (req, res) => {
   const siteId = requireSite(req, res); if (!siteId) return;
-  const { material_id, movement_type, qty, rate, project_id, task_id, ref_type, ref_id, note, expiry_date } = req.body;
+  const { material_id, movement_type, qty, rate, project_id, task_id, location_id, ref_type, ref_id, note, expiry_date } = req.body;
+  const materialId = parseInt(material_id, 10);
+  const projectId = project_id ? parseInt(project_id, 10) : null;
+  const taskId = task_id ? parseInt(task_id, 10) : null;
+  const locationId = location_id ? parseInt(location_id, 10) : null;
   const type = String(movement_type || '').toUpperCase();
-  if (!material_id) return res.status(400).json({ message: 'material_id is required' });
+  if (!Number.isInteger(materialId)) return res.status(400).json({ message: 'material_id is required' });
   if (!ALL_TYPES.has(type)) return res.status(400).json({ message: 'Invalid movement_type' });
   const q = Number(qty);
   if (!Number.isFinite(q) || q === 0) return res.status(400).json({ message: 'qty must be a non-zero number' });
@@ -115,23 +123,68 @@ export const createMovement = asyncHandler(async (req, res) => {
   if (type !== 'ADJUSTMENT' && q < 0) return res.status(400).json({ message: 'qty must be positive for this movement type' });
   if (expiry_date && !isoDate(expiry_date)) return res.status(400).json({ message: 'expiry_date must be YYYY-MM-DD' });
 
-  const mat = await pool.query('SELECT id, rate FROM inventory_materials WHERE id = $1 AND site_id = $2', [material_id, siteId]);
-  if (!mat.rows[0]) return res.status(404).json({ message: 'Material not found for this site' });
-
-  // Guard stock-reducing movements against going negative.
-  if (REDUCING.has(type) || type === 'RESERVE') {
-    const { on_hand, available } = await inventoryModel.stockFor(material_id);
-    const cap = type === 'RESERVE' ? available : on_hand;
-    if (q > cap) return res.status(400).json({ message: `Only ${cap} in stock — cannot ${type.toLowerCase()} ${q}` });
+  if ((taskId || locationId) && !projectId) {
+    return res.status(400).json({ message: 'Select a project for the linked task or location' });
   }
 
-  const movement = await inventoryModel.insertMovement({
-    site_id: siteId, material_id, movement_type: type, qty: q,
-    rate: rate !== undefined ? Number(rate) : parseFloat(mat.rows[0].rate) || 0,
-    project_id, task_id, ref_type, ref_id, note, created_by: req.user.id,
-    expiry_date: (STOCK_IN.has(type) || (type === 'ADJUSTMENT' && q > 0)) ? isoDate(expiry_date) : null,
-  });
-  res.status(201).json({ movement });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Serialize every balance-changing operation for this material. Without
+    // this lock, two requests can both pass a stock check and over-issue.
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [141001, materialId]);
+
+    const mat = await client.query(
+      'SELECT id, rate FROM inventory_materials WHERE id = $1 AND site_id = $2',
+      [materialId, siteId]
+    );
+    if (!mat.rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Material not found for this site' }); }
+    if (projectId) {
+      const project = await client.query('SELECT 1 FROM construction_projects WHERE id = $1 AND site_id = $2', [projectId, siteId]);
+      if (!project.rows[0]) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'Project does not belong to this site' }); }
+    }
+    if (taskId) {
+      const task = await client.query('SELECT 1 FROM construction_tasks WHERE id = $1 AND project_id = $2', [taskId, projectId]);
+      if (!task.rows[0]) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'Task does not belong to this project' }); }
+    }
+    if (locationId) {
+      const location = await client.query(
+        'SELECT 1 FROM construction_locations WHERE id = $1 AND project_id = $2',
+        [locationId, projectId]
+      );
+      if (!location.rows[0]) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'Location does not belong to this project' }); }
+    }
+
+    const stock = await inventoryModel.stockFor(materialId, client);
+    const reduction = REDUCING.has(type) ? q : type === 'ADJUSTMENT' && q < 0 ? Math.abs(q) : 0;
+    if (reduction > stock.available) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: `Only ${stock.available} available — cannot ${type.toLowerCase()} ${reduction}` });
+    }
+    if (type === 'RESERVE' && q > stock.available) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: `Only ${stock.available} available — cannot reserve ${q}` });
+    }
+    if (type === 'UNRESERVE' && q > stock.reserved) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: `Only ${stock.reserved} reserved — cannot unreserve ${q}` });
+    }
+
+    const movement = await inventoryModel.insertMovement({
+      site_id: siteId, material_id: materialId, movement_type: type, qty: q,
+      rate: rate !== undefined ? Number(rate) : parseFloat(mat.rows[0].rate) || 0,
+      project_id: projectId, task_id: taskId, location_id: locationId,
+      ref_type, ref_id, note, created_by: req.user.id,
+      expiry_date: (STOCK_IN.has(type) || (type === 'ADJUSTMENT' && q > 0)) ? isoDate(expiry_date) : null,
+    }, client);
+    await client.query('COMMIT');
+    res.status(201).json({ movement });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 // ── Vendor order → stock (procurement link) ─────────────────
@@ -154,7 +207,8 @@ export const receiveVendorOrder = asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     // Lock the order so two concurrent receipts can't both pass the pending check.
     const { rows: [order] } = await client.query(
-      `SELECT id, item_name, item_category, unit, rate, qty_ordered, status, vendor_name
+      `SELECT id, item_name, item_category, unit, rate, qty_ordered, status, vendor_name,
+              project_id, location_id, material_request_id
          FROM vendor_inventory_orders WHERE id = $1 AND site_id = $2 FOR UPDATE`,
       [orderId, siteId]
     );
@@ -190,6 +244,7 @@ export const receiveVendorOrder = asyncHandler(async (req, res) => {
     const movement = await inventoryModel.insertMovement({
       site_id: siteId, material_id: materialId, movement_type: 'RECEIPT', qty,
       rate: req.body.rate !== undefined && req.body.rate !== '' ? Number(req.body.rate) : parseFloat(order.rate) || 0,
+      project_id: order.project_id, location_id: order.location_id, request_id: order.material_request_id,
       ref_type: 'VENDOR_ORDER', ref_id: orderId,
       note: (req.body.note || '').trim() || `Vendor order #${orderId} — ${order.vendor_name}`,
       created_by: req.user.id,

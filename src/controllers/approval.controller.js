@@ -4,7 +4,7 @@ import {
   postApprovedImprestDebit,
   reverseApprovedImprestDebit,
 } from '../services/imprestPosting.service.js';
-import { notifyPlotPaymentRecorded } from '../utils/notify.js';
+import { notifyApprovedPlotPayment } from '../services/plotPaymentNotification.service.js';
 import { CHEQUE_STATUSES, updateChequeStatusRecord } from '../services/chequeStatus.service.js';
 
 /**
@@ -918,7 +918,7 @@ export const approveEntry = asyncHandler(async (req, res) => {
   }
   if (source === 'plot_payment'
     && !['BOUNCED', 'RETURNED'].includes(String(entry.cheque_status || '').toUpperCase())) {
-    notifyPlotPaymentRecorded(entry).catch((error) => {
+    notifyApprovedPlotPayment(entry).catch((error) => {
       console.error('[Approval] Plot payment notification failed:', error?.message || error);
     });
   }
@@ -1173,7 +1173,7 @@ export const bulkApprove = asyncHandler(async (req, res) => {
     if (table === 'plot_payments') {
       for (const row of result.rows) {
         if (!['BOUNCED', 'RETURNED'].includes(String(row.cheque_status || '').toUpperCase())) {
-          notifyPlotPaymentRecorded(row).catch((error) => {
+          notifyApprovedPlotPayment(row).catch((error) => {
             console.error('[Approval] Plot payment notification failed:', error?.message || error);
           });
         }

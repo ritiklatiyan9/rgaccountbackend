@@ -11,6 +11,8 @@ import {
   getReceiptDesign,
   updateReceiptDesign,
   updateFeature,
+  getPaymentNotificationSettings,
+  updatePaymentNotificationSettings,
 } from '../controllers/applicationSetting.controller.js';
 import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
@@ -42,6 +44,11 @@ router.put('/sidebar-order', authMiddleware, updateSidebarOrder);
 // Payment-reminder SMS config — admin only, per site.
 router.get('/sms-reminders', authMiddleware, requireRole('admin'), getSmsReminderSettings);
 router.put('/sms-reminders', authMiddleware, requireRole('admin'), updateSmsReminderSettings);
+
+// Approval-time receipt notifications for installment-plan plots — admin only,
+// per site, with independent switches and copy for each payment mode.
+router.get('/payment-notifications', authMiddleware, requireRole('admin'), getPaymentNotificationSettings);
+router.put('/payment-notifications', authMiddleware, requireRole('admin'), updatePaymentNotificationSettings);
 
 // Receipt rendering is shared by every transaction module, so every assigned
 // user can read the active site design. Organisation-level edits remain admin-only.

@@ -15,6 +15,33 @@ const getSiteId = (req) => {
   return Number.isInteger(siteId) && siteId > 0 ? siteId : null;
 };
 
+const resolveOrderScope = async (siteId, projectValue, locationValue, requestValue) => {
+  const projectId = projectValue ? asInt(projectValue) : null;
+  let locationId = locationValue ? asInt(locationValue) : null;
+  const requestId = requestValue ? asInt(requestValue) : null;
+  if (!projectId && (locationId || requestId)) return { error: 'Select a project for the linked location or material request' };
+  if (!projectId) return { projectId: null, locationId: null, requestId: null };
+  const project = await pool.query('SELECT 1 FROM construction_projects WHERE id = $1 AND site_id = $2', [projectId, siteId]);
+  if (!project.rows[0]) return { error: 'Selected project is invalid for this site' };
+  if (locationId) {
+    const location = await pool.query('SELECT 1 FROM construction_locations WHERE id = $1 AND project_id = $2', [locationId, projectId]);
+    if (!location.rows[0]) return { error: 'Selected location is invalid for this project' };
+  }
+  if (requestId) {
+    const request = await pool.query(
+      'SELECT location_id FROM construction_material_requests WHERE id = $1 AND project_id = $2 AND site_id = $3',
+      [requestId, projectId, siteId]
+    );
+    if (!request.rows[0]) return { error: 'Selected material request is invalid for this project' };
+    const requestLocationId = request.rows[0].location_id;
+    if (locationId && requestLocationId && locationId !== requestLocationId) {
+      return { error: 'Selected location does not match the material request' };
+    }
+    locationId ||= requestLocationId;
+  }
+  return { projectId, locationId, requestId };
+};
+
 // Reusable SQL fragment computing order_value (net) and outstanding
 const ORDER_VALUE_SQL = `ROUND(o.qty_ordered * o.rate
   - COALESCE(CASE
@@ -44,6 +71,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
   const status = (req.query.status || '').trim();
   const vendorId = parseInt(req.query.vendor_id) || null;
   const category = (req.query.category || '').trim();
+  const projectId = parseInt(req.query.project_id) || null;
 
   const conditions = ['o.site_id = $1'];
   const values = [siteId];
@@ -71,6 +99,11 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
     values.push(category.toLowerCase());
     idx++;
   }
+  if (projectId) {
+    conditions.push(`o.project_id = $${idx}`);
+    values.push(projectId);
+    idx++;
+  }
   // Goods-receipt queue: ordered qty not yet booked into the stock ledger.
   if (req.query.pending_receipt === 'true') {
     conditions.push(`o.status <> 'cancelled' AND o.qty_ordered > ${RECEIVED_QTY_SQL}`);
@@ -95,7 +128,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
            AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
            AND ($${creatorIdx}::int IS NULL OR vip.created_by = $${creatorIdx}::int)
        ), 0) AS total_paid,
-       o.commitment_id,
+       o.commitment_id, o.project_id, o.location_id, o.material_request_id,
        ${ORDER_VALUE_SQL} AS order_value,
        (${ORDER_VALUE_SQL} - COALESCE((
          SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
@@ -107,10 +140,14 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        (o.qty_ordered - ${RECEIVED_QTY_SQL}) AS pending_qty,
        o.order_date, o.expected_date, o.note, o.status, o.created_at,
        m.full_name AS vendor_member_name,
-       vc.head_name, vc.work_title
+       vc.head_name, vc.work_title,
+       cp.name AS project_name, cp.project_type,
+       l.name AS location_name, l.location_type
      FROM vendor_inventory_orders o
      LEFT JOIN members m ON m.id = o.vendor_member_id
      LEFT JOIN vendor_commitments vc ON vc.id = o.commitment_id
+     LEFT JOIN construction_projects cp ON cp.id = o.project_id
+     LEFT JOIN construction_locations l ON l.id = o.location_id
      WHERE ${where}
      ORDER BY o.order_date DESC, o.id DESC
      LIMIT $${creatorIdx + 1} OFFSET $${creatorIdx + 2}`,
@@ -168,10 +205,14 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
        ${RECEIVED_QTY_SQL} AS received_qty,
        (o.qty_ordered - ${RECEIVED_QTY_SQL}) AS pending_qty,
        m.full_name AS vendor_member_name,
-       vc.head_name, vc.work_title
+       vc.head_name, vc.work_title,
+       cp.name AS project_name, cp.project_type,
+       l.name AS location_name, l.location_type
      FROM vendor_inventory_orders o
      LEFT JOIN members m ON m.id = o.vendor_member_id
      LEFT JOIN vendor_commitments vc ON vc.id = o.commitment_id
+     LEFT JOIN construction_projects cp ON cp.id = o.project_id
+     LEFT JOIN construction_locations l ON l.id = o.location_id
      WHERE o.id = $1 AND o.site_id = $2`,
     [orderId, siteId]
   );
@@ -221,6 +262,9 @@ export const createInventoryOrder = asyncHandler(async (req, res) => {
     expected_date,
     note,
     commitment_id,
+    project_id,
+    location_id,
+    material_request_id,
   } = req.body;
 
   if (!(item_name || '').trim()) return res.status(400).json({ message: 'item_name is required' });
@@ -248,12 +292,35 @@ export const createInventoryOrder = asyncHandler(async (req, res) => {
   if (!resolvedVendorName) return res.status(400).json({ message: 'vendor_name is required' });
 
   const commitmentIdVal = commitment_id ? asInt(commitment_id) : null;
+  const scope = await resolveOrderScope(siteId, project_id, location_id, material_request_id);
+  if (scope.error) return res.status(400).json({ message: scope.error });
+
+  if (commitmentIdVal) {
+    const commitment = await pool.query(
+      'SELECT project_id, location_id FROM vendor_commitments WHERE id = $1 AND site_id = $2',
+      [commitmentIdVal, siteId]
+    );
+    if (!commitment.rows[0]) return res.status(400).json({ message: 'Commitment not found for this site' });
+    if (scope.projectId && commitment.rows[0].project_id && scope.projectId !== commitment.rows[0].project_id) {
+      return res.status(400).json({ message: 'Commitment and purchase order must belong to the same project' });
+    }
+    if (scope.locationId && commitment.rows[0].location_id && scope.locationId !== commitment.rows[0].location_id) {
+      return res.status(400).json({ message: 'Commitment and purchase order must belong to the same location' });
+    }
+    if (!scope.projectId) {
+      scope.projectId = commitment.rows[0].project_id;
+      scope.locationId = commitment.rows[0].location_id;
+    } else if (!scope.locationId) {
+      scope.locationId = commitment.rows[0].location_id;
+    }
+  }
 
   const result = await pool.query(
     `INSERT INTO vendor_inventory_orders
        (site_id, vendor_member_id, vendor_name, item_name, item_category, unit,
-        qty_ordered, rate, discount_pct, discount_amount, order_date, expected_date, note, created_by, commitment_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        qty_ordered, rate, discount_pct, discount_amount, order_date, expected_date, note, created_by, commitment_id,
+        project_id, location_id, material_request_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
      RETURNING *`,
     [
       siteId,
@@ -271,6 +338,9 @@ export const createInventoryOrder = asyncHandler(async (req, res) => {
       (note || '').trim() || null,
       req.user.id,
       commitmentIdVal,
+      scope.projectId,
+      scope.locationId,
+      scope.requestId,
     ]
   );
 

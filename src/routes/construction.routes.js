@@ -3,6 +3,7 @@ const router = express.Router();
 
 import {
   listProjects, createProject, getProject, updateProject, deleteProject,
+  createLocation, bulkCreateLocations, updateLocation, deleteLocation,
   createTask, updateTask, deleteTask,
   createMaterialRequest, getMaterialRequest, issueMaterialRequest, updateMaterialRequest,
   consumeMaterial, constructionSummary,
@@ -21,6 +22,12 @@ router.post('/projects', requirePermission('construction', 'write'), createProje
 router.get('/projects/:id', requirePermission('construction', 'read'), getProject);
 router.put('/projects/:id', requirePermission('construction', 'update'), updateProject);
 router.delete('/projects/:id', requirePermission('construction', 'delete'), deleteProject);
+
+// Reusable project hierarchy for mixed developments.
+router.post('/projects/:id/locations', requirePermission('construction', 'write'), createLocation);
+router.post('/projects/:id/locations/bulk', requirePermission('construction', 'write'), bulkCreateLocations);
+router.put('/locations/:locationId', requirePermission('construction', 'update'), updateLocation);
+router.delete('/locations/:locationId', requirePermission('construction', 'delete'), deleteLocation);
 
 // Tasks (nested create, flat update/delete)
 router.post('/projects/:id/tasks', requirePermission('construction', 'write'), createTask);

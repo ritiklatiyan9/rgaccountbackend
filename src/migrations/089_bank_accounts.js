@@ -41,9 +41,22 @@ const migrate = async () => {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    // Migration 140 replaces this firm-global uniqueness rule with a per-site
+    // one. Do not recreate the legacy index on later deploys once site_id is
+    // present, because the same bank name may validly exist at several sites.
     await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS uq_bank_accounts_name
-        ON bank_accounts (UPPER(TRIM(name)))
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+           WHERE table_schema = 'public'
+             AND table_name = 'bank_accounts'
+             AND column_name = 'site_id'
+        ) THEN
+          CREATE UNIQUE INDEX IF NOT EXISTS uq_bank_accounts_name
+            ON bank_accounts (UPPER(TRIM(name)));
+        END IF;
+      END $$
     `);
 
     await client.query(`

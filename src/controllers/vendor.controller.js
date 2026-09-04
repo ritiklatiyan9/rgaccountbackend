@@ -12,6 +12,20 @@ const getSiteId = (req) => {
   return Number.isInteger(siteId) && siteId > 0 ? siteId : null;
 };
 
+const resolveProjectLocation = async (siteId, projectIdValue, locationIdValue, client = pool) => {
+  const projectId = projectIdValue ? asInt(projectIdValue) : null;
+  const locationId = locationIdValue ? asInt(locationIdValue) : null;
+  if (!projectId && locationId) return { error: 'Select a project before selecting a location' };
+  if (!projectId) return { projectId: null, locationId: null };
+  const project = await client.query('SELECT 1 FROM construction_projects WHERE id = $1 AND site_id = $2', [projectId, siteId]);
+  if (!project.rows[0]) return { error: 'Selected project is invalid for this site' };
+  if (locationId) {
+    const location = await client.query('SELECT 1 FROM construction_locations WHERE id = $1 AND project_id = $2', [locationId, projectId]);
+    if (!location.rows[0]) return { error: 'Selected location is invalid for this project' };
+  }
+  return { projectId, locationId };
+};
+
 export const getVendorUsers = asyncHandler(async (req, res) => {
   const siteId = getSiteId(req);
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
@@ -47,6 +61,35 @@ export const createVendorUser = asyncHandler(async (req, res) => {
   );
 
   res.status(201).json({ vendor: result.rows[0] });
+});
+
+// Vendor users need a small, read-only construction lookup without receiving
+// broad Construction permissions. This keeps the modules separable while
+// allowing a contract to be assigned to a project/location.
+export const listConstructionProjectOptions = asyncHandler(async (req, res) => {
+  const siteId = getSiteId(req);
+  if (!siteId) return res.status(400).json({ message: 'site_id is required' });
+  const [projects, locations] = await Promise.all([
+    pool.query(
+      `SELECT id, name, code, project_type, status
+         FROM construction_projects WHERE site_id = $1 AND status <> 'CANCELLED'
+        ORDER BY status = 'ACTIVE' DESC, name`,
+      [siteId]
+    ),
+    pool.query(
+      `WITH RECURSIVE tree AS (
+         SELECT l.id, l.project_id, l.parent_id, l.name, l.location_type, l.name::text AS path, 0 AS depth
+           FROM construction_locations l JOIN construction_projects p ON p.id = l.project_id
+          WHERE p.site_id = $1 AND l.parent_id IS NULL
+         UNION ALL
+         SELECT child.id, child.project_id, child.parent_id, child.name, child.location_type,
+                (tree.path || ' / ' || child.name)::text, tree.depth + 1
+           FROM construction_locations child JOIN tree ON tree.id = child.parent_id
+       ) SELECT * FROM tree ORDER BY project_id, path`,
+      [siteId]
+    ),
+  ]);
+  res.json({ projects: projects.rows, locations: locations.rows });
 });
 
 export const listVendorHeads = asyncHandler(async (req, res) => {
@@ -155,6 +198,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
   const search = (req.query.search || '').trim();
   const statusFilter = (req.query.status || '').trim();
   const headIdFilter = parseInt(req.query.head_id) || null;
+  const projectIdFilter = parseInt(req.query.project_id) || null;
 
   // Build WHERE conditions
   const conditions = ['vc.site_id = $1'];
@@ -178,6 +222,11 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
   if (headIdFilter) {
     conditions.push(`vc.head_id = $${paramIdx}`);
     values.push(headIdFilter);
+    paramIdx++;
+  }
+  if (projectIdFilter) {
+    conditions.push(`vc.project_id = $${paramIdx}`);
+    values.push(projectIdFilter);
     paramIdx++;
   }
 
@@ -205,6 +254,8 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       vc.due_date,
       vc.note,
       vc.status,
+      vc.project_id,
+      vc.location_id,
       vc.assigned_admin_id,
       vc.created_by,
       vc.created_at,
@@ -218,12 +269,18 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       COALESCE(inv.inv_net_amount, 0)::numeric(14,2) AS inventory_net_amount,
       COALESCE(inv.inv_total_paid, 0)::numeric(14,2) AS inventory_total_paid,
       COALESCE(inv.inv_outstanding, 0)::numeric(14,2) AS inventory_outstanding
+      ,cp.name AS project_name
+      ,cp.project_type
+      ,l.name AS location_name
+      ,l.location_type
      FROM vendor_commitments vc
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
        AND financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      LEFT JOIN users cu ON cu.id = vc.created_by
      LEFT JOIN users aa ON aa.id = vc.assigned_admin_id
+     LEFT JOIN construction_projects cp ON cp.id = vc.project_id
+     LEFT JOIN construction_locations l ON l.id = vc.location_id
      LEFT JOIN (
        SELECT commitment_id,
               COUNT(*)::int AS item_count,
@@ -239,7 +296,8 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
        GROUP BY commitment_id
      ) inv ON inv.commitment_id = vc.id
      WHERE ${whereClause}
-     GROUP BY vc.id, m.full_name, cu.name, cu.email, aa.name, inv.item_count, inv.inv_net_amount, inv.inv_total_paid, inv.inv_outstanding
+     GROUP BY vc.id, m.full_name, cu.name, cu.email, aa.name, cp.name, cp.project_type,
+              l.name, l.location_type, inv.item_count, inv.inv_net_amount, inv.inv_total_paid, inv.inv_outstanding
      ORDER BY vc.created_at DESC, vc.id DESC
      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     [...values, limit, offset]
@@ -323,20 +381,28 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       vc.due_date,
       vc.note,
       vc.status,
+      vc.project_id,
+      vc.location_id,
       vc.assigned_admin_id,
       vc.created_at,
       aa.name AS assigned_admin_name,
       COALESCE(SUM(vp.amount), 0)::numeric(14,2) AS paid_amount,
       (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
-      m.full_name AS vendor_member_name
+      m.full_name AS vendor_member_name,
+      cp.name AS project_name,
+      cp.project_type,
+      l.name AS location_name,
+      l.location_type
      FROM vendor_commitments vc
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
        AND financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)
        AND ($3::int IS NULL OR vp.created_by = $3::int)
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      LEFT JOIN users aa ON aa.id = vc.assigned_admin_id
+     LEFT JOIN construction_projects cp ON cp.id = vc.project_id
+     LEFT JOIN construction_locations l ON l.id = vc.location_id
      WHERE vc.id = $1 AND vc.site_id = $2
-     GROUP BY vc.id, m.full_name, aa.name`,
+     GROUP BY vc.id, m.full_name, aa.name, cp.name, cp.project_type, l.name, l.location_type`,
     [commitmentId, siteId, entryVisibility.creatorId]
   );
 
@@ -539,6 +605,8 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
     note,
     assigned_admin_id,
     inventory_items,
+    project_id,
+    location_id,
   } = req.body;
 
   const amount = parseFloat(contract_amount);
@@ -582,13 +650,16 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
 
   if (!finalHeadName) return res.status(400).json({ message: 'Head is required' });
 
+  const scope = await resolveProjectLocation(siteId, project_id, location_id);
+  if (scope.error) return res.status(400).json({ message: scope.error });
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const result = await client.query(
-      `INSERT INTO vendor_commitments (site_id, vendor_member_id, vendor_name, head_id, head_name, work_title, contract_amount, start_date, due_date, note, created_by, assigned_admin_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO vendor_commitments (site_id, vendor_member_id, vendor_name, head_id, head_name, work_title, contract_amount, start_date, due_date, note, created_by, assigned_admin_id, project_id, location_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         siteId,
@@ -603,6 +674,8 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
         note?.trim() || null,
         req.user.id,
         assigned_admin_id ? parseInt(assigned_admin_id) : null,
+        scope.projectId,
+        scope.locationId,
       ]
     );
 
@@ -612,7 +685,7 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
     // round-trip per item inside the transaction).
     let createdItems = [];
     if (Array.isArray(inventory_items) && inventory_items.length > 0) {
-      const COLS = 15;
+      const COLS = 17;
       const values = [];
       const placeholders = [];
       const defaultOrderDate = start_date || new Date().toISOString().slice(0, 10);
@@ -630,7 +703,7 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
 
         const base = idx * COLS;
         placeholders.push(
-          `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7},$${base + 8},$${base + 9},$${base + 10},$${base + 11},$${base + 12},$${base + 13},$${base + 14},$${base + 15})`
+          `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7},$${base + 8},$${base + 9},$${base + 10},$${base + 11},$${base + 12},$${base + 13},$${base + 14},$${base + 15},$${base + 16},$${base + 17})`
         );
         values.push(
           siteId,
@@ -648,6 +721,8 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
           item.expected_date || null,
           (item.note || '').trim() || null,
           req.user.id,
+          scope.projectId,
+          scope.locationId,
         );
         idx++;
       }
@@ -656,7 +731,8 @@ export const createVendorCommitment = asyncHandler(async (req, res) => {
         const itemRes = await client.query(
           `INSERT INTO vendor_inventory_orders
              (site_id, commitment_id, vendor_member_id, vendor_name, item_name, item_category, unit,
-              qty_ordered, rate, discount_pct, discount_amount, order_date, expected_date, note, created_by)
+              qty_ordered, rate, discount_pct, discount_amount, order_date, expected_date, note, created_by,
+              project_id, location_id)
            VALUES ${placeholders.join(',')}
            RETURNING *`,
           values
@@ -1057,19 +1133,30 @@ export const updateVendorCommitment = asyncHandler(async (req, res) => {
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
 
   const existing = await pool.query(
-    'SELECT id FROM vendor_commitments WHERE id = $1 AND site_id = $2',
+    'SELECT id, project_id, location_id FROM vendor_commitments WHERE id = $1 AND site_id = $2',
     [id, siteId]
   );
   if (!existing.rows[0]) return res.status(404).json({ message: 'Commitment not found' });
 
+  let normalizedScope = null;
+  if (req.body.project_id !== undefined || req.body.location_id !== undefined) {
+    const projectChanged = req.body.project_id !== undefined && String(req.body.project_id || '') !== String(existing.rows[0].project_id || '');
+    normalizedScope = await resolveProjectLocation(
+      siteId,
+      req.body.project_id !== undefined ? req.body.project_id : existing.rows[0].project_id,
+      req.body.location_id !== undefined ? req.body.location_id : (projectChanged ? null : existing.rows[0].location_id)
+    );
+    if (normalizedScope.error) return res.status(400).json({ message: normalizedScope.error });
+  }
+
   const fields = [];
   const values = [];
 
-  const allowed = ['vendor_name', 'head_id', 'head_name', 'work_title', 'start_date', 'due_date', 'note', 'contract_amount', 'status'];
+  const allowed = ['vendor_name', 'head_id', 'head_name', 'work_title', 'start_date', 'due_date', 'note', 'contract_amount', 'status', 'project_id', 'location_id'];
   for (const key of allowed) {
-    if (req.body[key] !== undefined) {
+    if (req.body[key] !== undefined || (normalizedScope && key === 'location_id')) {
       fields.push(`${key} = $${fields.length + 1}`);
-      values.push(req.body[key]);
+      values.push(key === 'project_id' ? normalizedScope?.projectId : key === 'location_id' ? normalizedScope?.locationId : req.body[key]);
     }
   }
 

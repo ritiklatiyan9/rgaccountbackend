@@ -57,7 +57,7 @@ async function assertSiteAccess(db, user, requestedSiteId) {
   return site;
 }
 
-async function resolveScope(db, rawScope) {
+async function resolveScope(db, rawScope, siteId) {
   const scope = String(rawScope || 'all').trim().toLowerCase();
   if (scope === 'all') return { scope, bank: null };
   if (scope === 'unmapped') return { scope, bank: null };
@@ -67,7 +67,10 @@ async function resolveScope(db, rawScope) {
     error.code = 'INVALID_BANK_SCOPE';
     throw error;
   }
-  const result = await db.query('SELECT id, name, account_no, is_active FROM bank_accounts WHERE id = $1', [Number(scope)]);
+  const result = await db.query(
+    'SELECT id, name, account_no, is_active FROM bank_accounts WHERE id = $1 AND site_id = $2',
+    [Number(scope), siteId]
+  );
   if (!result.rows[0]) {
     const error = new Error('The selected bank account no longer exists.');
     error.statusCode = 404;
@@ -77,7 +80,7 @@ async function resolveScope(db, rawScope) {
   return { scope, bank: result.rows[0] };
 }
 
-async function accountWarning(db, parsed, bank, scope) {
+async function accountWarning(db, parsed, bank, scope, siteId) {
   if (!parsed.metadata.statement_account_suffix) return null;
   const statementSuffix = String(parsed.metadata.statement_account_suffix).toUpperCase();
   if (bank) {
@@ -87,11 +90,12 @@ async function accountWarning(db, parsed, bank, scope) {
   }
   const configured = await db.query(
     `SELECT id, name
-       FROM bank_accounts
+      FROM bank_accounts
       WHERE RIGHT(UPPER(REGEXP_REPLACE(COALESCE(account_no, ''), '[^0-9A-Za-z]', '', 'g')), 4) = $1
+        AND site_id = $2
       ORDER BY is_active DESC, id
       LIMIT 1`,
-    [statementSuffix]
+    [statementSuffix, siteId]
   );
   if (!configured.rows[0]) {
     return `Statement account ends in ${statementSuffix}, but no configured ERP bank account has that suffix. Current scope is ${scope === 'unmapped' ? 'unmapped entries' : 'all non-cash entries'}.`;
@@ -115,7 +119,7 @@ const parseStatement = (req) => {
 export async function previewBankDaybookReconciliation(req, res) {
   try {
     const site = await assertSiteAccess(pool, req.user, req.body.site_id ?? req.body.siteId);
-    const { scope, bank } = await resolveScope(pool, req.body.bank_scope ?? req.body.bankScope);
+    const { scope, bank } = await resolveScope(pool, req.body.bank_scope ?? req.body.bankScope, site.id);
     const parsed = parseStatement(req);
     const candidates = await loadBankDaybookCandidates(pool, {
       siteId: site.id,
@@ -127,7 +131,7 @@ export async function previewBankDaybookReconciliation(req, res) {
       Promise.resolve(reconcileBankDaybookRows(parsed.rows, candidates)),
       pool.query('SELECT revision FROM daybook_global_order_state WHERE site_id = $1', [site.id]),
     ]);
-    const warning = await accountWarning(pool, parsed, bank, scope);
+    const warning = await accountWarning(pool, parsed, bank, scope, site.id);
     return res.json({
       preview: {
         file_name: req.file.originalname,
@@ -248,8 +252,8 @@ export async function applyBankDaybookReconciliation(req, res) {
     client = await pool.connect();
     await client.query('BEGIN');
     const site = await assertSiteAccess(client, req.user, siteId);
-    const { scope, bank } = await resolveScope(client, req.body.bank_scope ?? req.body.bankScope);
-    const warning = await accountWarning(client, parsed, bank, scope);
+    const { scope, bank } = await resolveScope(client, req.body.bank_scope ?? req.body.bankScope, site.id);
+    const warning = await accountWarning(client, parsed, bank, scope, site.id);
     if (warning && !truthy(req.body.acknowledge_account_mismatch)) {
       const error = new Error(`${warning} Confirm the account mismatch explicitly before applying.`);
       error.statusCode = 409;

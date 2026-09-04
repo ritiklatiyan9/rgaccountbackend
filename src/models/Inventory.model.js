@@ -23,6 +23,7 @@ const STOCK_AGG = `
       WHEN movement_type = 'UNRESERVE' THEN -qty
       ELSE 0 END) AS reserved
   FROM inventory_movements
+  WHERE site_id = $1
   GROUP BY material_id
 `;
 
@@ -123,12 +124,12 @@ export const inventoryModel = {
   async insertMovement(m, client = pool) {
     const { rows } = await client.query(
       `INSERT INTO inventory_movements
-         (site_id, material_id, movement_type, qty, rate, project_id, task_id, request_id, ref_type, ref_id, note, created_by, expiry_date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         (site_id, material_id, movement_type, qty, rate, project_id, task_id, request_id, location_id, ref_type, ref_id, note, created_by, expiry_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING *`,
       [
         m.site_id, m.material_id, m.movement_type, m.qty, m.rate || 0,
-        m.project_id || null, m.task_id || null, m.request_id || null,
+        m.project_id || null, m.task_id || null, m.request_id || null, m.location_id || null,
         m.ref_type || null, m.ref_id || null, m.note || null, m.created_by || null,
         m.expiry_date || null,
       ]
@@ -144,10 +145,11 @@ export const inventoryModel = {
     params.push(limit);
     const { rows } = await pool.query(
       `SELECT mv.*, m.name AS material_name, m.unit AS material_unit,
-              p.name AS project_name, u.name AS created_by_name
+              p.name AS project_name, l.name AS location_name, l.location_type, u.name AS created_by_name
          FROM inventory_movements mv
          JOIN inventory_materials m ON m.id = mv.material_id
          LEFT JOIN construction_projects p ON p.id = mv.project_id
+         LEFT JOIN construction_locations l ON l.id = mv.location_id
          LEFT JOIN users u ON u.id = mv.created_by
          ${where}
          ORDER BY mv.created_at DESC, mv.id DESC

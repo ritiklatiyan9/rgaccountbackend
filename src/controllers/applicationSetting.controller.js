@@ -4,6 +4,12 @@ import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSett
 import { getConfig as getSmsConfig, saveConfig as saveSmsConfig } from '../services/smsReminder.service.js';
 import { isSmsQueueConfigured } from '../utils/sqs.js';
 import {
+  getPaymentNotificationConfig,
+  savePaymentNotificationConfig,
+  PAYMENT_NOTIFICATION_MODES,
+  PAYMENT_NOTIFICATION_PLACEHOLDERS,
+} from '../services/plotPaymentNotification.service.js';
+import {
   getReceiptDesign as readReceiptDesign,
   saveReceiptDesign,
   RECEIPT_TEMPLATE_IDS,
@@ -165,6 +171,38 @@ export const updateSmsReminderSettings = asyncHandler(async (req, res) => {
     message: settings.enabled
       ? `Automatic SMS reminders on — ${settings.days_before.join(', ')} day(s) around the due date at ${String(settings.send_hour).padStart(2, '0')}:00 IST`
       : 'Automatic SMS reminders turned off',
+  });
+});
+
+/** GET /settings/payment-notifications?site_id=123 */
+export const getPaymentNotificationSettings = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.query.site_id);
+  if (!siteId) return;
+
+  res.json({
+    site_id: siteId,
+    settings: await getPaymentNotificationConfig(siteId),
+    mode_keys: PAYMENT_NOTIFICATION_MODES,
+    placeholders: PAYMENT_NOTIFICATION_PLACEHOLDERS,
+    queue_configured: isSmsQueueConfigured(),
+  });
+});
+
+/** PUT /settings/payment-notifications */
+export const updatePaymentNotificationSettings = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.body.site_id);
+  if (!siteId) return;
+
+  const settings = await savePaymentNotificationConfig(siteId, req.body, req.user.id);
+  res.json({
+    site_id: siteId,
+    settings,
+    mode_keys: PAYMENT_NOTIFICATION_MODES,
+    placeholders: PAYMENT_NOTIFICATION_PLACEHOLDERS,
+    queue_configured: isSmsQueueConfigured(),
+    message: settings.enabled
+      ? 'Installment payment notifications enabled for this site'
+      : 'Installment payment notifications turned off',
   });
 });
 

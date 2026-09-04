@@ -11,6 +11,7 @@ import {
   getVendorPaymentReceipt,
   getVendorUsers,
   createVendorUser,
+  listConstructionProjectOptions,
   listAllInventoryItems,
   deleteVendorCommitment,
   bulkDeleteVendorCommitments,
@@ -54,6 +55,7 @@ router.use(requireRole('admin', 'sub_admin'));
 
 router.get('/users', requirePermission('vendors', 'read'), vendorMetaCache, getVendorUsers);
 router.post('/users', requirePermission('vendors', 'write'), bustVendorMetaCache, createVendorUser);
+router.get('/project-options', requirePermission('vendors', 'read'), listConstructionProjectOptions);
 router.get('/heads', requirePermission('vendors', 'read'), vendorMetaCache, listVendorHeads);
 // Head writes also have to bust the vendors-meta cache (heads listing).
 router.post('/heads', requirePermission('vendors', 'write'), bustVendorMetaCache, createVendorHead);
