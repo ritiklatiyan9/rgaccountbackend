@@ -32,6 +32,7 @@ export const ALL_COMPONENTS = [
   'member_search',
   'activity_card',
   'compliance_calendar',
+  'compliance_watch',
   'verify_panel',
 ];
 
