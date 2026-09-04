@@ -17,12 +17,10 @@ export async function up() {
         id                       BIGSERIAL PRIMARY KEY,
         site_id                  INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
         title                    VARCHAR(180) NOT NULL,
-        subject                  VARCHAR(200),
         message                  TEXT NOT NULL,
         channels                 TEXT[] NOT NULL,
         message_type             VARCHAR(20) NOT NULL DEFAULT 'TRANSACTIONAL'
                                    CHECK (message_type IN ('TRANSACTIONAL','PROMOTIONAL')),
-        whatsapp_template_name   VARCHAR(180),
         audience_mode            VARCHAR(20) NOT NULL
                                    CHECK (audience_mode IN ('SELECTED','FILTERED')),
         audience_filters         JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -39,8 +37,8 @@ export async function up() {
         created_by               INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        CHECK (cardinality(channels) BETWEEN 1 AND 3),
-        CHECK (channels <@ ARRAY['SMS','WHATSAPP','EMAIL']::text[])
+        CHECK (cardinality(channels) = 1),
+        CHECK (channels = ARRAY['SMS']::text[])
       )
     `);
 
@@ -51,7 +49,7 @@ export async function up() {
         site_id             INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
         member_id           INTEGER REFERENCES members(id) ON DELETE SET NULL,
         client_name         VARCHAR(255) NOT NULL,
-        channel             VARCHAR(12) NOT NULL CHECK (channel IN ('SMS','WHATSAPP','EMAIL')),
+        channel             VARCHAR(12) NOT NULL CHECK (channel = 'SMS'),
         destination         VARCHAR(320) NOT NULL,
         rendered_subject    VARCHAR(200),
         rendered_message    TEXT NOT NULL,

@@ -5,15 +5,14 @@ import {
   enqueueClientMessages, isClientMessageQueueConfigured,
 } from '../services/clientMessagingQueue.service.js';
 
-const CHANNELS = new Set(['SMS', 'WHATSAPP', 'EMAIL']);
-const CONTACT_FILTERS = new Set(['ANY', 'ALL', 'SMS', 'WHATSAPP', 'EMAIL']);
+const CHANNELS = new Set(['SMS']);
+const CONTACT_FILTERS = new Set(['ANY', 'ALL', 'SMS']);
 const AUDIENCE_MODES = new Set(['SELECTED', 'FILTERED']);
 const CLIENT_SCOPE = `'CLIENT' = ANY(COALESCE(m.member_types, ARRAY[UPPER(COALESCE(m.member_type,''))]))
   AND LOWER(COALESCE(m.status,'active')) <> 'deleted'`;
 const MAX_RECIPIENTS = 500;
 
 const text = (value, max = 1000) => String(value || '').trim().slice(0, max);
-const validEmail = (value) => /^\S+@\S+\.\S+$/.test(String(value || '').trim());
 const normalisePhone = (value) => {
   let digits = String(value || '').replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
@@ -39,15 +38,13 @@ const recipientWhere = (siteId, rawFilters = {}, memberIds = null) => {
   if (filters.search) {
     values.push(`%${filters.search}%`);
     const searchParam = `$${values.length}`;
-    conditions.push(`(m.full_name ILIKE ${searchParam} OR m.phone ILIKE ${searchParam} OR m.whatsapp ILIKE ${searchParam} OR m.email ILIKE ${searchParam})`);
+    conditions.push(`(m.full_name ILIKE ${searchParam} OR m.phone ILIKE ${searchParam} OR m.alt_phone ILIKE ${searchParam})`);
   }
   if (filters.city) add(`UPPER(TRIM(COALESCE(m.city,''))) = UPPER(?)`, filters.city);
   if (filters.team) add(`UPPER(TRIM(COALESCE(m.team,''))) = UPPER(?)`, filters.team);
   if (filters.status) add(`UPPER(COALESCE(m.status,'ACTIVE')) = ?`, filters.status);
-  if (filters.contact === 'SMS') conditions.push(`COALESCE(NULLIF(TRIM(m.phone),''), NULLIF(TRIM(m.alt_phone),''), NULLIF(TRIM(m.whatsapp),'')) IS NOT NULL`);
-  if (filters.contact === 'WHATSAPP') conditions.push(`COALESCE(NULLIF(TRIM(m.whatsapp),''), NULLIF(TRIM(m.phone),''), NULLIF(TRIM(m.alt_phone),'')) IS NOT NULL`);
-  if (filters.contact === 'EMAIL') conditions.push(`NULLIF(TRIM(m.email),'') IS NOT NULL`);
-  if (filters.contact === 'ANY') conditions.push(`COALESCE(NULLIF(TRIM(m.phone),''), NULLIF(TRIM(m.alt_phone),''), NULLIF(TRIM(m.whatsapp),''), NULLIF(TRIM(m.email),'')) IS NOT NULL`);
+  if (filters.contact === 'SMS') conditions.push(`COALESCE(NULLIF(TRIM(m.phone),''), NULLIF(TRIM(m.alt_phone),'')) IS NOT NULL`);
+  if (filters.contact === 'ANY') conditions.push(`COALESCE(NULLIF(TRIM(m.phone),''), NULLIF(TRIM(m.alt_phone),'')) IS NOT NULL`);
   if (Array.isArray(memberIds)) add(`m.id = ANY(?::int[])`, memberIds);
   return { where: conditions.join(' AND '), values, filters };
 };
@@ -61,10 +58,7 @@ const scopeOrReject = async (req, res, source = 'query') => {
 
 const providerStatus = () => ({
   queue: Boolean(isClientMessageQueueConfigured()),
-  email: Boolean(process.env.AWS_SES_FROM_EMAIL),
   sms: Boolean(process.env.AWS_SMS_ORIGINATION_IDENTITY),
-  whatsapp: Boolean(process.env.AWS_WHATSAPP_PHONE_NUMBER_ID && process.env.AWS_WHATSAPP_META_API_VERSION),
-  whatsapp_template: process.env.AWS_WHATSAPP_TEMPLATE_NAME || null,
   region: process.env.AWS_REGION || 'ap-south-1',
 });
 
@@ -79,11 +73,9 @@ export const listMessageRecipients = asyncHandler(async (req, res) => {
 
   const [rows, count, facets, status] = await Promise.all([
     pool.query(
-      `SELECT m.id, m.full_name AS name, m.phone, m.alt_phone, m.whatsapp, m.email,
+      `SELECT m.id, m.full_name AS name, m.phone, m.alt_phone,
               m.city, m.state, m.team, m.status,
-              (COALESCE(NULLIF(TRIM(m.phone),''), NULLIF(TRIM(m.alt_phone),''), NULLIF(TRIM(m.whatsapp),'')) IS NOT NULL) AS has_sms,
-              (COALESCE(NULLIF(TRIM(m.whatsapp),''), NULLIF(TRIM(m.phone),''), NULLIF(TRIM(m.alt_phone),'')) IS NOT NULL) AS has_whatsapp,
-              (NULLIF(TRIM(m.email),'') IS NOT NULL) AS has_email
+              (COALESCE(NULLIF(TRIM(m.phone),''), NULLIF(TRIM(m.alt_phone),'')) IS NOT NULL) AS has_sms
          FROM members m WHERE ${query.where}
         ORDER BY m.full_name, m.id LIMIT $${query.values.length + 1} OFFSET $${query.values.length + 2}`,
       [...query.values, limit, offset]
@@ -97,9 +89,7 @@ export const listMessageRecipients = asyncHandler(async (req, res) => {
     ),
     pool.query(
       `SELECT COUNT(*)::int AS clients,
-              COUNT(*) FILTER (WHERE COALESCE(NULLIF(TRIM(phone),''),NULLIF(TRIM(alt_phone),''),NULLIF(TRIM(whatsapp),'')) IS NOT NULL)::int AS sms,
-              COUNT(*) FILTER (WHERE COALESCE(NULLIF(TRIM(whatsapp),''),NULLIF(TRIM(phone),''),NULLIF(TRIM(alt_phone),'')) IS NOT NULL)::int AS whatsapp,
-              COUNT(*) FILTER (WHERE NULLIF(TRIM(email),'') IS NOT NULL)::int AS email
+              COUNT(*) FILTER (WHERE COALESCE(NULLIF(TRIM(phone),''),NULLIF(TRIM(alt_phone),'')) IS NOT NULL)::int AS sms
          FROM members m WHERE m.site_id=$1 AND ${CLIENT_SCOPE}`,
       [scope.siteId]
     ),
@@ -144,10 +134,10 @@ export const listMessageCampaigns = asyncHandler(async (req, res) => {
 });
 
 const render = (template, client, siteName) => String(template || '').replace(
-  /\{\{\s*(name|site|city|phone|email)\s*\}\}/gi,
+  /\{\{\s*(name|site|city|phone)\s*\}\}/gi,
   (_, key) => ({
     name: client.name || 'Customer', site: siteName || '', city: client.city || '',
-    phone: client.phone || '', email: client.email || '',
+    phone: client.phone || client.alt_phone || '',
   })[key.toLowerCase()]
 );
 
@@ -159,22 +149,17 @@ export const createMessageCampaign = asyncHandler(async (req, res) => {
   if (req.body.consent_confirmed !== true) return res.status(400).json({ message: 'Confirm that the selected clients consented to receive these messages' });
 
   const title = text(req.body.title, 180);
-  const subject = text(req.body.subject, 200);
   const message = text(req.body.message, 10000);
   const channels = [...new Set((Array.isArray(req.body.channels) ? req.body.channels : []).map((value) => String(value).toUpperCase()))];
   const audienceMode = String(req.body.audience_mode || '').toUpperCase();
   const messageType = String(req.body.message_type || 'TRANSACTIONAL').toUpperCase();
-  const whatsappTemplate = text(req.body.whatsapp_template_name || process.env.AWS_WHATSAPP_TEMPLATE_NAME, 180);
 
   if (!title) return res.status(400).json({ message: 'Campaign title is required' });
   if (!message) return res.status(400).json({ message: 'Message is required' });
-  if (!channels.length || channels.some((channel) => !CHANNELS.has(channel))) return res.status(400).json({ message: 'Choose SMS, WhatsApp or Email' });
+  if (channels.length !== 1 || channels[0] !== 'SMS') return res.status(400).json({ message: 'SMS is the only supported channel' });
   if (!AUDIENCE_MODES.has(audienceMode)) return res.status(400).json({ message: 'Choose selected clients or all filtered clients' });
   if (!['TRANSACTIONAL', 'PROMOTIONAL'].includes(messageType)) return res.status(400).json({ message: 'Invalid message type' });
-  if (channels.includes('EMAIL') && !subject) return res.status(400).json({ message: 'Email subject is required' });
-  if (channels.includes('SMS') && message.length > 1500) return res.status(400).json({ message: 'SMS message must be 1500 characters or fewer' });
-  if (channels.includes('WHATSAPP') && message.length > 1000) return res.status(400).json({ message: 'WhatsApp template message must be 1000 characters or fewer' });
-  if (channels.includes('WHATSAPP') && !whatsappTemplate) return res.status(503).json({ message: 'AWS WhatsApp template is not configured' });
+  if (message.length > 1500) return res.status(400).json({ message: 'SMS message must be 1500 characters or fewer' });
 
   const providers = providerStatus();
   const unavailable = channels.filter((channel) => !providers[channel.toLowerCase()]);
@@ -195,7 +180,7 @@ export const createMessageCampaign = asyncHandler(async (req, res) => {
     memberIds
   );
   const recipientResult = await pool.query(
-    `SELECT m.id, m.full_name AS name, m.phone, m.alt_phone, m.whatsapp, m.email, m.city
+    `SELECT m.id, m.full_name AS name, m.phone, m.alt_phone, m.city
        FROM members m WHERE ${recipientQuery.where} ORDER BY m.id LIMIT $${recipientQuery.values.length + 1}`,
     [...recipientQuery.values, MAX_RECIPIENTS + 1]
   );
@@ -208,12 +193,8 @@ export const createMessageCampaign = asyncHandler(async (req, res) => {
   const deliveries = [];
   for (const client of recipientResult.rows) {
     for (const channel of channels) {
-      const rawDestination = channel === 'EMAIL'
-        ? String(client.email || '').trim().toLowerCase()
-        : channel === 'WHATSAPP'
-          ? client.whatsapp || client.phone || client.alt_phone
-          : client.phone || client.alt_phone || client.whatsapp;
-      const destination = channel === 'EMAIL' ? (validEmail(rawDestination) ? rawDestination : null) : normalisePhone(rawDestination);
+      const rawDestination = client.phone || client.alt_phone;
+      const destination = normalisePhone(rawDestination);
       const duplicate = destination && seen.has(`${channel}:${destination}`);
       if (destination && !duplicate) seen.add(`${channel}:${destination}`);
       deliveries.push({
@@ -221,7 +202,7 @@ export const createMessageCampaign = asyncHandler(async (req, res) => {
         client_name: client.name,
         channel,
         destination: destination || '(missing)',
-        rendered_subject: channel === 'EMAIL' ? render(subject, client, siteName) : null,
+        rendered_subject: null,
         rendered_message: render(message, client, siteName),
         status: !destination || duplicate ? 'SKIPPED' : 'QUEUED',
         error: !destination ? `No valid ${channel.toLowerCase()} destination` : duplicate ? 'Duplicate destination in this campaign' : null,
@@ -238,10 +219,10 @@ export const createMessageCampaign = asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     const campaignResult = await client.query(
       `INSERT INTO client_message_campaigns
-         (site_id,title,subject,message,channels,message_type,whatsapp_template_name,audience_mode,audience_filters,
+         (site_id,title,message,channels,message_type,audience_mode,audience_filters,
           recipient_count,delivery_count,skipped_count,status,consent_confirmed,consent_confirmed_at,created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'QUEUING',TRUE,NOW(),$13) RETURNING *`,
-      [scope.siteId, title, subject || null, message, channels, messageType, whatsappTemplate || null,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'QUEUING',TRUE,NOW(),$11) RETURNING *`,
+      [scope.siteId, title, message, channels, messageType,
        audienceMode, JSON.stringify(audienceMode === 'FILTERED' ? filters : { member_ids: memberIds }),
        recipientResult.rows.length, deliveries.length, deliveries.length - queueable.length, req.user.id]
     );
@@ -273,11 +254,9 @@ export const createMessageCampaign = asyncHandler(async (req, res) => {
     campaign_id: campaign.id,
     channel: delivery.channel,
     destination: delivery.destination,
-    subject: delivery.rendered_subject,
     message: delivery.rendered_message,
     title,
     message_type: messageType,
-    whatsapp_template_name: whatsappTemplate || undefined,
   }));
   const queued = await enqueueClientMessages(jobs);
   for (const failure of queued.failed) {

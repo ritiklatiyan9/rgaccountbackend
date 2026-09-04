@@ -2,13 +2,9 @@ import 'dotenv/config';
 import {
   DeleteMessageCommand, ReceiveMessageCommand, SQSClient,
 } from '@aws-sdk/client-sqs';
-import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import {
   PinpointSMSVoiceV2Client, SendTextMessageCommand,
 } from '@aws-sdk/client-pinpoint-sms-voice-v2';
-import {
-  SendWhatsAppMessageCommand, SocialMessagingClient,
-} from '@aws-sdk/client-socialmessaging';
 import pool from '../config/db.js';
 import { clientMessageQueueUrl, isClientMessageQueueConfigured } from '../services/clientMessagingQueue.service.js';
 
@@ -17,9 +13,7 @@ import { clientMessageQueueUrl, isClientMessageQueueConfigured } from '../servic
 const awsConfig = (region) => ({ region });
 
 const queue = new SQSClient(awsConfig(process.env.AWS_MESSAGING_QUEUE_REGION || process.env.AWS_REGION || 'ap-south-1'));
-const ses = new SESv2Client(awsConfig(process.env.AWS_SES_REGION || process.env.AWS_REGION || 'ap-south-1'));
 const sms = new PinpointSMSVoiceV2Client(awsConfig(process.env.AWS_SMS_REGION || process.env.AWS_REGION || 'ap-south-1'));
-const social = new SocialMessagingClient(awsConfig(process.env.AWS_WHATSAPP_REGION || process.env.AWS_REGION || 'us-east-1'));
 
 const phoneE164 = (value) => {
   let digits = String(value || '').replace(/\D/g, '');
@@ -27,34 +21,11 @@ const phoneE164 = (value) => {
   if (digits.length === 10) digits = `91${digits}`;
   return digits.length >= 11 && digits.length <= 15 ? `+${digits}` : null;
 };
-const escapeHtml = (value) => String(value || '').replace(/[<>&"']/g, (character) => ({
-  '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;',
-}[character]));
 const permanentAwsError = (error) => [
   'AccessDeniedException', 'ValidationException', 'InvalidParameterException',
   'InvalidParametersException', 'ResourceNotFoundException', 'MessageRejected',
-  'MailFromDomainNotVerifiedException', 'AccountSuspendedException',
+  'AccountSuspendedException',
 ].includes(error?.name);
-
-async function sendEmail(job) {
-  const from = process.env.AWS_SES_FROM_EMAIL;
-  if (!from) throw Object.assign(new Error('AWS_SES_FROM_EMAIL is not configured'), { permanent: true });
-  const response = await ses.send(new SendEmailCommand({
-    FromEmailAddress: from,
-    Destination: { ToAddresses: [job.destination] },
-    Content: {
-      Simple: {
-        Subject: { Data: job.subject || job.title, Charset: 'UTF-8' },
-        Body: {
-          Text: { Data: job.message, Charset: 'UTF-8' },
-          Html: { Data: `<div style="font-family:Arial,Helvetica,sans-serif;white-space:pre-wrap;line-height:1.6">${escapeHtml(job.message)}</div>`, Charset: 'UTF-8' },
-        },
-      },
-    },
-    ...(process.env.AWS_SES_CONFIGURATION_SET ? { ConfigurationSetName: process.env.AWS_SES_CONFIGURATION_SET } : {}),
-  }));
-  return response.MessageId;
-}
 
 async function sendSms(job) {
   const destination = phoneE164(job.destination);
@@ -76,33 +47,7 @@ async function sendSms(job) {
   return response.MessageId;
 }
 
-async function sendWhatsApp(job) {
-  const destination = phoneE164(job.destination);
-  const origin = process.env.AWS_WHATSAPP_PHONE_NUMBER_ID;
-  const template = job.whatsapp_template_name || process.env.AWS_WHATSAPP_TEMPLATE_NAME;
-  const metaApiVersion = process.env.AWS_WHATSAPP_META_API_VERSION;
-  if (!destination || !origin || !template || !metaApiVersion) {
-    throw Object.assign(new Error('WhatsApp destination, phone number ID, Meta API version and approved template are required'), { permanent: true });
-  }
-  const payload = {
-    messaging_product: 'whatsapp',
-    to: destination,
-    type: 'template',
-    template: {
-      name: template,
-      language: { code: process.env.AWS_WHATSAPP_TEMPLATE_LANGUAGE || 'en_US' },
-      components: [{ type: 'body', parameters: [{ type: 'text', text: job.message.replace(/\s+/g, ' ').trim() }] }],
-    },
-  };
-  const response = await social.send(new SendWhatsAppMessageCommand({
-    originationPhoneNumberId: origin,
-    metaApiVersion,
-    message: Buffer.from(JSON.stringify(payload)),
-  }));
-  return response.messageId;
-}
-
-const senders = { EMAIL: sendEmail, SMS: sendSms, WHATSAPP: sendWhatsApp };
+const senders = { SMS: sendSms };
 
 async function refreshCampaign(campaignId) {
   await pool.query(
@@ -131,7 +76,17 @@ async function processMessage(message) {
   } catch {
     return true;
   }
-  if (!job?.delivery_id || !senders[job.channel]) return true;
+  if (!job?.delivery_id) return true;
+  if (!senders[job.channel]) {
+    await pool.query(
+      `UPDATE client_message_deliveries
+          SET status='FAILED', error='This delivery channel is no longer supported', updated_at=NOW()
+        WHERE id=$1 AND status IN ('QUEUED','SENDING')`,
+      [job.delivery_id]
+    );
+    if (job.campaign_id) await refreshCampaign(job.campaign_id);
+    return true;
+  }
 
   const claim = await pool.query(
     `UPDATE client_message_deliveries

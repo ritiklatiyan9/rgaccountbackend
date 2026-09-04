@@ -92,7 +92,7 @@
     "migrate:spreadsheets": "node src/migrations/139_spreadsheet_workbooks.js",
     "migrate:bank-account-site-scope": "node src/migrations/140_bank_accounts_site_scope.js",
     "migrate:construction-portfolio": "node src/migrations/141_construction_portfolio_structure.js",
-    "migrate:client-messaging": "node src/migrations/142_client_messaging_campaigns.js",
+    "migrate:client-messaging": "node src/migrations/142_client_messaging_campaigns.js && node src/migrations/143_remove_client_messaging_whatsapp.js && node src/migrations/144_remove_client_messaging_email.js",
     "test:construction-portfolio": "node --test test/construction-portfolio-contract.test.mjs",
     "test:client-messaging": "node --test test/client-messaging-contract.test.mjs",
     "worker:client-messages": "node src/workers/clientMessagingWorker.js",
@@ -102,8 +102,6 @@
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",
     "@aws-sdk/client-s3": "3.700.0",
-    "@aws-sdk/client-sesv2": "^3.1126.0",
-    "@aws-sdk/client-socialmessaging": "^3.1126.0",
     "@aws-sdk/client-sqs": "^3.699.0",
     "@aws-sdk/lib-storage": "3.700.0",
     "@aws-sdk/s3-request-presigner": "3.700.0",

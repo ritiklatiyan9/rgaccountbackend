@@ -10,7 +10,9 @@ test('messaging data is durable, site scoped, consent audited and recipient uniq
   assert.match(migration, /site_id\s+INTEGER NOT NULL REFERENCES sites\(id\) ON DELETE CASCADE/);
   assert.match(migration, /consent_confirmed\s+BOOLEAN NOT NULL DEFAULT FALSE/);
   assert.match(migration, /UNIQUE \(campaign_id, member_id, channel\)/);
-  assert.match(migration, /CHECK \(channels <@ ARRAY\['SMS','WHATSAPP','EMAIL'\]::text\[\]\)/);
+  assert.match(migration, /CHECK \(channels = ARRAY\['SMS'\]::text\[\]\)/);
+  assert.match(migration, /channel = 'SMS'/);
+  assert.doesNotMatch(migration, /WHATSAPP|EMAIL/);
   assert.match(migration, /idx_client_message_deliveries_campaign_status/);
 });
 
@@ -40,7 +42,7 @@ test('campaign creation enforces assigned-site scope, consent and bulk limits', 
   assert.match(controller, /status: !destination \|\| duplicate \? 'SKIPPED' : 'QUEUED'/);
 });
 
-test('AWS delivery is asynchronous and uses the official channel clients', async () => {
+test('AWS SMS delivery is asynchronous and uses the official SMS client', async () => {
   const [queue, worker] = await Promise.all([
     source('src/services/clientMessagingQueue.service.js'),
     source('src/workers/clientMessagingWorker.js'),
@@ -48,11 +50,29 @@ test('AWS delivery is asynchronous and uses the official channel clients', async
 
   assert.match(queue, /SendMessageBatchCommand/);
   assert.match(queue, /start \+= 10/);
-  assert.match(worker, /SESv2Client/);
   assert.match(worker, /PinpointSMSVoiceV2Client/);
-  assert.match(worker, /SocialMessagingClient/);
-  assert.match(worker, /type: 'template'/);
+  assert.doesNotMatch(worker, /SESv2Client|SendEmailCommand|SocialMessagingClient|SendWhatsAppMessage|WHATSAPP|EMAIL/);
   assert.match(worker, /ApproximateReceiveCount/);
   assert.match(worker, /receiveCount >= 5/);
   assert.match(worker, /WHERE id=\$1 AND campaign_id=\$2 AND status='QUEUED'/);
+});
+
+test('WhatsApp retirement keeps history but blocks new campaign rows', async () => {
+  const retirement = await source('src/migrations/143_remove_client_messaging_whatsapp.js');
+
+  assert.match(retirement, /status='FAILED'/);
+  assert.match(retirement, /channel='WHATSAPP'/);
+  assert.match(retirement, /client_message_campaigns_no_whatsapp/);
+  assert.match(retirement, /client_message_deliveries_no_whatsapp/);
+  assert.match(retirement, /NOT VALID/);
+});
+
+test('email retirement keeps history while making client messaging SMS-only', async () => {
+  const retirement = await source('src/migrations/144_remove_client_messaging_email.js');
+
+  assert.match(retirement, /status='FAILED'/);
+  assert.match(retirement, /channel='EMAIL'/);
+  assert.match(retirement, /client_message_campaigns_sms_only/);
+  assert.match(retirement, /client_message_deliveries_sms_only/);
+  assert.match(retirement, /CHECK \(channels = ARRAY\['SMS'\]::text\[\]\) NOT VALID/);
 });

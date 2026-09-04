@@ -1,8 +1,8 @@
 # AWS client messaging setup
 
-The Client Messages workspace creates a site-scoped, consent-audited campaign in PostgreSQL, places one delivery job per client/channel in Amazon SQS, and sends it from a separate worker through Amazon SES, AWS End User Messaging SMS, or AWS End User Messaging Social (WhatsApp).
+The Client SMS workspace creates a site-scoped, consent-audited campaign in PostgreSQL, places one delivery job per client in Amazon SQS, and sends it from a separate worker through AWS End User Messaging SMS.
 
-`SENT` in the database means AWS accepted the API request. It is not a handset, inbox, read, or click receipt. Add provider event destinations later if those states are required.
+`SENT` in the database means AWS accepted the API request. It is not a handset delivery or read receipt. Add an SMS event destination later if those states are required.
 
 ## 1. Apply the database migration
 
@@ -15,7 +15,14 @@ npm run migrate:client-messaging
 
 The normal `npm start` and `npm run migrate` chains also apply this migration.
 
-## 2. Create the SQS queue
+## 2. Choose the AWS account and region
+
+1. Sign in to the AWS account that will own the messaging resources.
+2. For an India deployment, use `ap-south-1` (Mumbai) for SQS and SMS unless your existing architecture requires otherwise.
+3. For local development, configure an AWS CLI profile or IAM Identity Center session and verify it with `aws sts get-caller-identity`.
+4. In production, attach an IAM role to the API and worker runtime. Do not store long-lived AWS access keys in the repository.
+
+## 3. Create the SQS queue
 
 In the same AWS account and region as the API:
 
@@ -27,7 +34,7 @@ In the same AWS account and region as the API:
 
 The API must be able to call `sqs:SendMessage`. The worker needs `sqs:ReceiveMessage` and `sqs:DeleteMessage` for the main queue.
 
-## 3. Give the app an IAM role
+## 4. Give the app an IAM role
 
 Attach an IAM role to the ECS task, EC2 instance, Lambda-compatible runtime, or other workload that runs the API and worker. The AWS SDK uses the default credential provider chain, so production does not need access keys in `.env`.
 
@@ -51,9 +58,7 @@ The combined role needs these actions, scoped to the relevant resources wherever
       "Sid": "ClientMessageProviders",
       "Effect": "Allow",
       "Action": [
-        "ses:SendEmail",
-        "sms-voice:SendTextMessage",
-        "social-messaging:SendWhatsAppMessage"
+        "sms-voice:SendTextMessage"
       ],
       "Resource": "*"
     }
@@ -61,20 +66,7 @@ The combined role needs these actions, scoped to the relevant resources wherever
 }
 ```
 
-For production, split the API and worker roles: the API only needs `sqs:SendMessage`; the worker needs receive/delete plus the provider actions. Restrict SES to the verified identity and tighten other resources using the ARNs supported in the regions you selected.
-
-## 4. Configure Amazon SES email
-
-1. In Amazon SES, verify the sending domain or email identity and enable DKIM for a domain.
-2. If the account is in the SES sandbox, request production access. In the sandbox, recipients also have to be verified.
-3. Optionally create a configuration set for delivery/bounce events.
-4. Set:
-
-```dotenv
-AWS_SES_REGION=ap-south-1
-AWS_SES_FROM_EMAIL=updates@your-domain.example
-AWS_SES_CONFIGURATION_SET=
-```
+For production, split the API and worker roles: the API only needs `sqs:SendMessage`; the worker needs receive/delete plus `sms-voice:SendTextMessage`. Tighten access using the resource ARNs supported in your selected region.
 
 ## 5. Configure AWS End User Messaging SMS
 
@@ -99,26 +91,7 @@ AWS_SMS_TEMPLATE_ID=YOUR_DLT_TEMPLATE_ID
 
 The UI accepts custom text, but India SMS text still has to comply with the selected registered DLT template. Use the **Promotional** category only for properly consented marketing traffic.
 
-## 6. Configure WhatsApp through AWS End User Messaging Social
-
-1. In AWS End User Messaging Social, link or create a Meta WhatsApp Business Account and register an origination phone number.
-2. Complete Meta business/phone verification and move the number to production.
-3. Obtain explicit WhatsApp opt-in from recipients.
-4. Create and obtain approval for a template such as `client_site_update`. This implementation expects one body text variable; the composed custom message is passed as that variable.
-5. Copy the origination phone-number ID and choose a Meta API version currently supported by AWS/Meta.
-6. Set:
-
-```dotenv
-AWS_WHATSAPP_REGION=YOUR_SUPPORTED_SOCIAL_MESSAGING_REGION
-AWS_WHATSAPP_PHONE_NUMBER_ID=YOUR_ORIGINATION_PHONE_NUMBER_ID
-AWS_WHATSAPP_TEMPLATE_NAME=client_site_update
-AWS_WHATSAPP_TEMPLATE_LANGUAGE=en_US
-AWS_WHATSAPP_META_API_VERSION=vXX.X
-```
-
-This worker deliberately sends approved templates. Free-form WhatsApp messages are subject to the 24-hour customer-service window and are not used by this campaign flow.
-
-## 7. Start the API and worker
+## 6. Start the API and worker
 
 Set the variables from `.env.example`, then run the web API and a persistent worker as separate processes:
 
@@ -129,22 +102,19 @@ npm run worker:client-messages
 
 In production, supervise the worker with the same platform used for the API (for example, a separate ECS service or process unit) and configure restarts, logs, alarms, and DLQ alerts.
 
-## 8. Grant application permission and test safely
+## 7. Grant application permission and test safely
 
 1. As an administrator, open **Module Permissions**.
-2. Grant the intended sub-admin **View** on Management Analytics and **Create** on Client Messaging.
-3. Open **Management Analytics → Client Messages**.
-4. Send a one-recipient transactional test to an email address/phone number you own and have opted in.
+2. Grant the intended sub-admin **View** on Management Analytics and **Create** on Client SMS.
+3. Open **Management Analytics → Client SMS**.
+4. Send a one-recipient transactional test to a phone number you own and have opted in.
 5. Confirm the campaign moves from `QUEUED`/`SENDING` to `COMPLETED`, and inspect worker logs and the AWS console if it fails.
-6. Test missing contact data, duplicate destinations, SES bounces, SMS opt-out handling, WhatsApp template rejection, and DLQ alarms before enabling bulk sends.
+6. Test missing mobile numbers, duplicate destinations, SMS opt-out handling, provider rejection, and DLQ alarms before enabling bulk sends.
 
 Never store opt-in as only a checkbox click. Keep the underlying consent evidence and channel-specific unsubscribe/opt-out workflow in your system of record.
 
 ## AWS references
 
 - [Amazon SQS visibility timeouts and DLQ guidance](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html)
-- [Amazon SES verified identities and sandbox rules](https://docs.aws.amazon.com/ses/latest/dg/verify-addresses-and-domains.html)
 - [AWS End User Messaging SMS `SendTextMessage`](https://docs.aws.amazon.com/pinpoint/latest/apireference_smsvoicev2/API_SendTextMessage.html)
 - [India local-route and DLT requirements](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-sms-senderid-india-routes.html)
-- [WhatsApp sending, opt-in, templates, and the 24-hour service window](https://docs.aws.amazon.com/social-messaging/latest/userguide/whatsapp-send-message.html)
-- [AWS Social Messaging `SendWhatsAppMessage`](https://docs.aws.amazon.com/social-messaging/latest/APIReference/API_SendWhatsAppMessage.html)
