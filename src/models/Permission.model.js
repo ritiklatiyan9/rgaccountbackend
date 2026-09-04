@@ -38,6 +38,9 @@ export const ALL_MODULES = Object.freeze([
     'recycle_bin',
     // Whole-site management aggregates (read-only). A grant reveals site-wide totals, so opt-in only.
     'management_analytics',
+    // Sending external client communications is deliberately separate from
+    // read-only analytics access and stays opt-in for sub-admins.
+    'client_messaging',
     // Miscellaneous income (maintenance, tokens, gifts…) — money module, admin opts sub-admins in.
     'misc_income',
 ]);
@@ -65,6 +68,7 @@ const RESTRICTED_MODULES = new Set([
     'audit_logs',
     'recycle_bin',
     'management_analytics',
+    'client_messaging',
     'misc_income',
 ]);
 

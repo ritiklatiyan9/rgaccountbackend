@@ -9,6 +9,9 @@ import {
   getRegistryAnalytics, getExpenseAnalytics, getVendorAnalytics, getConstructionAnalytics,
 } from '../controllers/managementAnalytics.controller.js';
 import { streamAssistant, generateInsights, chartInsight, runGeocode } from '../controllers/managementAnalyticsAi.controller.js';
+import {
+  createMessageCampaign, getMessagingOverview, listMessageCampaigns, listMessageRecipients,
+} from '../controllers/managementAnalyticsMessaging.controller.js';
 
 const router = express.Router();
 
@@ -17,6 +20,7 @@ router.use(authMiddleware, requireRole('admin', 'sub_admin'), requirePermission(
 
 const cache = cacheResponse({ ttlSeconds: 120, namespace: 'management-analytics' });
 const aiLimiter = createRateLimiter({ windowMs: 60_000, max: 24, keyPrefix: 'mgmt-ai:' });
+const messagingLimiter = createRateLimiter({ windowMs: 60_000, max: 10, keyPrefix: 'mgmt-messaging:' });
 
 router.get('/overview', cache, getOverview);
 router.get('/clients', cache, getClients);
@@ -26,6 +30,15 @@ router.get('/registries', cache, getRegistryAnalytics);
 router.get('/expenses', cache, getExpenseAnalytics);
 router.get('/vendors', cache, getVendorAnalytics);
 router.get('/construction', cache, getConstructionAnalytics);
+router.get('/messaging/overview', requirePermission('client_messaging', 'read'), getMessagingOverview);
+router.get('/messaging/recipients', requirePermission('client_messaging', 'read'), listMessageRecipients);
+router.get('/messaging/campaigns', requirePermission('client_messaging', 'read'), listMessageCampaigns);
+router.post(
+  '/messaging/campaigns',
+  requirePermission('client_messaging', 'write'),
+  messagingLimiter,
+  createMessageCampaign
+);
 
 router.post('/assistant', aiLimiter, streamAssistant);
 router.post('/insights', aiLimiter, generateInsights);
