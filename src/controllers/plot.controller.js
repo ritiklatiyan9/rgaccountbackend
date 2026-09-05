@@ -294,6 +294,9 @@ export const createPlot = asyncHandler(async (req, res) => {
     plot_no: trimmedPlotNo,
     block: block ? block.trim().toUpperCase() : null,
     buyer_name: buyer_name ? buyer_name.trim().toUpperCase() : null,
+    nominee_name: req.body.nominee_name ? String(req.body.nominee_name).trim().toUpperCase() : null,
+    nominee_relation: req.body.nominee_relation ? String(req.body.nominee_relation).trim() : null,
+    nominee_phone: req.body.nominee_phone ? String(req.body.nominee_phone).trim() : null,
     co_applicant_name: req.body.co_applicant_name ? String(req.body.co_applicant_name).trim().toUpperCase() : null,
     co_applicant_relation: req.body.co_applicant_relation ? String(req.body.co_applicant_relation).trim() : null,
     co_applicant_phone: req.body.co_applicant_phone ? String(req.body.co_applicant_phone).trim() : null,
@@ -396,7 +399,9 @@ export const searchPlots = asyncHandler(async (req, res) => {
   if (normalizedQuery.length < 1 || normalizedQuery.length > 50) {
     return res.json({ plots: [] });
   }
-  const plots = await plotModel.searchByPlotNo(parseInt(site_id), normalizedQuery, pool);
+  const plots = req.query.person === '1'
+    ? await plotModel.searchByPerson(parseInt(site_id), normalizedQuery, pool)
+    : await plotModel.searchByPlotNo(parseInt(site_id), normalizedQuery, pool);
   res.json({ plots });
 });
 
@@ -433,6 +438,11 @@ export const updatePlot = asyncHandler(async (req, res) => {
   }
   if (block !== undefined) updateData.block = block ? block.trim().toUpperCase() : null;
   if (buyer_name !== undefined) updateData.buyer_name = buyer_name ? buyer_name.trim().toUpperCase() : null;
+  for (const field of ['nominee_name', 'nominee_relation', 'nominee_phone']) {
+    if (req.body[field] === undefined) continue;
+    const value = req.body[field] == null ? '' : String(req.body[field]).trim();
+    updateData[field] = value ? (field === 'nominee_name' ? value.toUpperCase() : value) : null;
+  }
   for (const f of ['co_applicant_name', 'co_applicant_relation', 'co_applicant_phone', 'co_applicant_aadhar', 'co_applicant_pan']) {
     if (req.body[f] === undefined) continue;
     const v = req.body[f] === null ? '' : String(req.body[f]).trim();

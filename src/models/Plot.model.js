@@ -101,7 +101,8 @@ class PlotModel extends MasterModel {
     if (!term) return [];
     const query = `
       WITH matched_plots AS (
-        SELECT id, site_id, plot_no, block, buyer_name, booking_by, status, plot_tag
+        SELECT id, site_id, plot_no, block, buyer_name, booking_by, status, plot_tag,
+               nominee_name, nominee_relation, nominee_phone
           FROM plots
          WHERE site_id = $1
            AND UPPER(plot_no) = UPPER($2)
@@ -160,6 +161,56 @@ class PlotModel extends MasterModel {
         CROSS JOIN module_summary
     `;
     const result = await pool.query(query, [siteId, term]);
+    return result.rows;
+  }
+
+  /** Customer/nominee lookup is separate from strict plot-number matching. */
+  async searchByPerson(siteId, q, pool) {
+    const term = String(q || '').trim();
+    if (term.length < 2) return [];
+    const digits = term.replace(/\D/g, '');
+    const query = `
+      WITH matched_plots AS (
+        SELECT p.id, p.site_id, p.plot_no, p.block, p.buyer_name, p.booking_by,
+               p.status, p.plot_tag, p.nominee_name, p.nominee_relation, p.nominee_phone
+        FROM plots p
+        WHERE p.site_id = $1 AND (
+          p.buyer_name ILIKE $2 OR p.nominee_name ILIKE $2 OR p.nominee_phone ILIKE $2
+          OR ($3::text IS NOT NULL AND regexp_replace(p.nominee_phone, '[^0-9]', '', 'g') LIKE $3)
+          OR EXISTS (
+            SELECT 1 FROM members m
+            WHERE m.site_id = p.site_id
+              AND (UPPER(BTRIM(m.full_name)) = UPPER(BTRIM(p.buyer_name))
+                OR EXISTS (SELECT 1 FROM bookings b
+                  WHERE b.plot_id = p.id AND b.client_member_id = m.id
+                    AND COALESCE(b.status, '') NOT ILIKE 'cancel%'))
+              AND (m.full_name ILIKE $2 OR m.phone ILIKE $2 OR m.alt_phone ILIKE $2
+                OR m.nominee_name ILIKE $2 OR m.nominee_phone ILIKE $2
+                OR ($3::text IS NOT NULL AND (
+                  regexp_replace(m.phone, '[^0-9]', '', 'g') LIKE $3
+                  OR regexp_replace(m.alt_phone, '[^0-9]', '', 'g') LIKE $3)))
+          )
+        )
+        ORDER BY (UPPER(COALESCE(p.plot_tag, '')) = 'OLD'), p.plot_no, p.id DESC
+        LIMIT 10
+      )
+      SELECT p.*,
+        (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count,
+        (SELECT COUNT(*)::int FROM plot_installments pi WHERE pi.plot_id = p.id) AS installment_count,
+        (SELECT COUNT(*)::int FROM plot_installment_payments pip WHERE pip.plot_id = p.id) AS installment_payment_count,
+        (SELECT COUNT(*)::int FROM plot_commissions_v2 pc WHERE pc.plot_id = p.id) AS commission_count,
+        registry.registry_id, registry.registry_count, registry.has_noc
+      FROM matched_plots p
+      LEFT JOIN LATERAL (
+        SELECT MAX(pr.id) AS registry_id, COUNT(*)::int AS registry_count,
+          COALESCE(BOOL_OR(pr.noc_generated_at IS NOT NULL OR pr.noc_approved_at IS NOT NULL), false) AS has_noc
+        FROM plot_registries pr
+        WHERE pr.site_id = p.site_id AND (pr.plot_id = p.id
+          OR (pr.plot_id IS NULL AND UPPER(pr.plot_no) = UPPER(p.plot_no)))
+      ) registry ON true
+      ORDER BY (UPPER(COALESCE(p.plot_tag, '')) = 'OLD'), p.plot_no, p.id DESC
+    `;
+    const result = await pool.query(query, [siteId, `%${term}%`, digits.length >= 3 ? `%${digits}%` : null]);
     return result.rows;
   }
 

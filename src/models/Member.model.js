@@ -60,6 +60,9 @@ class MemberModel extends MasterModel {
           full_name ILIKE $2
           OR father_name ILIKE $2
           OR phone ILIKE $2
+          OR alt_phone ILIKE $2
+          OR nominee_name ILIKE $2
+          OR nominee_phone ILIKE $2
           OR email ILIKE $2
           OR aadhar_no ILIKE $2
           OR pan_no ILIKE $2
