@@ -5,10 +5,11 @@ import MasterModel from './MasterModel.js';
  * so the rows and the totals can never disagree.
  * Multiple categories are OR-combined — picking three shows rows from all three.
  * A non-empty `categories` array overrides the legacy single `category`.
+ * `column` points the same clause at another text column (sub_category).
  * Mutates `params` (pushes bind values) and returns the next placeholder index.
  */
-export const buildCategoryWhere = (categories, category, params, pIdx) => {
-  const uncategorized = `(u.category IS NULL OR u.category = '')`;
+export const buildCategoryWhere = (categories, category, params, pIdx, column = 'category') => {
+  const uncategorized = `(u.${column} IS NULL OR u.${column} = '')`;
   const tokens = Array.isArray(categories)
     ? categories.map((c) => String(c).trim()).filter(Boolean)
     : [];
@@ -17,14 +18,14 @@ export const buildCategoryWhere = (categories, category, params, pIdx) => {
     if (!category) return { clause: '', pIdx };
     if (String(category).toUpperCase() === 'UNCATEGORIZED') return { clause: ` AND ${uncategorized}`, pIdx };
     params.push(category);
-    return { clause: ` AND u.category = $${pIdx}`, pIdx: pIdx + 1 };
+    return { clause: ` AND u.${column} = $${pIdx}`, pIdx: pIdx + 1 };
   }
 
   let next = pIdx;
   const parts = tokens.map((token) => {
     if (token.toUpperCase() === 'UNCATEGORIZED') return uncategorized;
     params.push(`%${token}%`);
-    return `u.category ILIKE $${next++}`;
+    return `u.${column} ILIKE $${next++}`;
   });
   return { clause: ` AND (${parts.join(' OR ')})`, pIdx: next };
 };
@@ -385,7 +386,7 @@ class ExpenseModel extends MasterModel {
    * Calculates running balance dynamically across both tables.
    */
   async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
-    const { search, status, mode, category, categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
     const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -403,11 +404,14 @@ class ExpenseModel extends MasterModel {
     const cat = buildCategoryWhere(categories, category, params, pIdx);
     whereClause += cat.clause;
     pIdx = cat.pIdx;
+    const sub = buildCategoryWhere(sub_categories, sub_category, params, pIdx, 'sub_category');
+    whereClause += sub.clause;
+    pIdx = sub.pIdx;
     if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
     if (dateFrom) { whereClause += ` AND u.date >= $${pIdx++}`; params.push(dateFrom); }
     if (dateTo) { whereClause += ` AND u.date <= $${pIdx++}`; params.push(dateTo); }
     if (search) {
-      whereClause += ` AND (u.from_entity ILIKE $${pIdx} OR u.to_entity ILIKE $${pIdx} OR u.remark ILIKE $${pIdx} OR u.account_no ILIKE $${pIdx} OR u.branch ILIKE $${pIdx} OR u.category ILIKE $${pIdx})`;
+      whereClause += ` AND (u.from_entity ILIKE $${pIdx} OR u.to_entity ILIKE $${pIdx} OR u.remark ILIKE $${pIdx} OR u.account_no ILIKE $${pIdx} OR u.branch ILIKE $${pIdx} OR u.category ILIKE $${pIdx} OR u.sub_category ILIKE $${pIdx})`;
       params.push(`%${search}%`);
       pIdx++;
     }
@@ -425,7 +429,7 @@ class ExpenseModel extends MasterModel {
       WITH unified AS (
         SELECT 
           id::text as virtual_id, id as original_id, site_id, date, from_entity, to_entity, 
-          payment_mode, debit, credit, remark, account_no, branch, category, 
+          payment_mode, debit, credit, remark, account_no, branch, category, sub_category,
           status, cheque_status, approved_by, approved_at, created_by, created_at, updated_at,
           assigned_user_id, assigned_admin_id, voucher_url, bill_url, customer_signature_url, authority_signature_url,
           -- voucher_urls/bill_urls are the multi-file source of truth; rows written
@@ -445,7 +449,7 @@ class ExpenseModel extends MasterModel {
           NULL as from_entity, UPPER(f.name) as to_entity,
           fp.payment_mode, fp.amount as debit, 0::numeric as credit,
           UPPER(f.name) || ' - FARMER PAYMENT' || CASE WHEN fp.remarks IS NOT NULL AND fp.remarks != '' THEN ' - ' || fp.remarks ELSE '' END as remark,
-          fp.bank_account_no as account_no, fp.bank_ifsc as branch, 'FARMER PAYMENT' as category,
+          fp.bank_account_no as account_no, fp.bank_ifsc as branch, 'FARMER PAYMENT' as category, NULL::varchar as sub_category,
           fp.status, fp.cheque_status, fp.approved_by, fp.approved_at, fp.created_by, fp.created_at, fp.updated_at,
           NULL::int as assigned_user_id, fp.assigned_admin_id, fp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[fp.voucher_url], NULL) as voucher_urls,
@@ -463,7 +467,7 @@ class ExpenseModel extends MasterModel {
           NULL as from_entity, UPPER(ag.full_name) as to_entity,
           pcp.payment_mode, pcp.amount as debit, 0::numeric as credit,
           UPPER(ag.full_name) || COALESCE(' (Plot: ' || p.plot_no || ')', '') || ' - COMMISSION' || CASE WHEN pcp.remarks IS NOT NULL AND pcp.remarks != '' THEN ' - ' || pcp.remarks ELSE '' END as remark,
-          NULL as account_no, NULL as branch, 'COMMISSION' as category,
+          NULL as account_no, NULL as branch, 'COMMISSION' as category, NULL::varchar as sub_category,
           pcp.status, pcp.cheque_status, pcp.approved_by, pcp.approved_at, pcp.created_by, pcp.created_at, pcp.updated_at,
           NULL::int as assigned_user_id, pcp.assigned_admin_id, pcp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[pcp.voucher_url], NULL) as voucher_urls,
@@ -483,7 +487,7 @@ class ExpenseModel extends MasterModel {
           NULL as from_entity, UPPER(vc.vendor_name) as to_entity,
           UPPER(vp.payment_mode) as payment_mode, vp.amount as debit, 0::numeric as credit,
           UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' || CASE WHEN vp.note IS NOT NULL AND vp.note != '' THEN ' - ' || vp.note ELSE '' END as remark,
-          NULL as account_no, NULL as branch, 'VENDOR PAYMENT' as category,
+          NULL as account_no, NULL as branch, 'VENDOR PAYMENT' as category, NULL::varchar as sub_category,
           vp.status, vp.cheque_status, vp.approved_by, vp.approved_at, vp.created_by, vp.created_at, vp.updated_at,
           NULL::int as assigned_user_id, vp.assigned_admin_id, vp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[vp.voucher_url], NULL) as voucher_urls,
@@ -501,7 +505,7 @@ class ExpenseModel extends MasterModel {
           NULL as from_entity, cfe.to_name as to_entity,
           UPPER(cfe.cash_type) as payment_mode, cfe.debit, 0::numeric as credit,
           COALESCE(cfe.particular, '') || CASE WHEN cfe.remarks IS NOT NULL AND cfe.remarks != '' THEN ' - ' || cfe.remarks ELSE '' END as remark,
-          NULL as account_no, NULL as branch, 'PERSONAL LEDGER' as category,
+          NULL as account_no, NULL as branch, 'PERSONAL LEDGER' as category, NULL::varchar as sub_category,
           cfe.status, cfe.cheque_status, cfe.approved_by, cfe.approved_at, cfe.created_by, cfe.created_at, cfe.updated_at,
           NULL::int as assigned_user_id, NULL::int as assigned_admin_id, cfe.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[cfe.voucher_url], NULL) as voucher_urls,
@@ -520,7 +524,7 @@ class ExpenseModel extends MasterModel {
           d.from_entity, d.to_entity,
           d.payment_mode, d.debit, d.credit,
           d.particular || CASE WHEN d.remarks IS NOT NULL AND d.remarks != '' THEN ' - ' || d.remarks ELSE '' END as remark,
-          d.account_no, d.branch, d.category,
+          d.account_no, d.branch, d.category, NULL::varchar as sub_category,
           d.status, d.cheque_status, d.approved_by, d.approved_at, d.created_by, d.created_at, d.updated_at,
           d.assigned_user_id, d.assigned_admin_id, d.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[d.voucher_url], NULL) as voucher_urls,
@@ -606,7 +610,7 @@ class ExpenseModel extends MasterModel {
    * Unified Breakdown stats based on the active filters
    */
   async getUnifiedBreakdowns(siteId, filters, pool) {
-    const { search, status, mode, category, categories, to_entity, dateFrom, dateTo, only_site, created_by } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, only_site, created_by } = filters;
     const params = [siteId];
     let pIdx = 2;
     let whereClause = '';
@@ -620,11 +624,14 @@ class ExpenseModel extends MasterModel {
     const cat = buildCategoryWhere(categories, category, params, pIdx);
     whereClause += cat.clause;
     pIdx = cat.pIdx;
+    const sub = buildCategoryWhere(sub_categories, sub_category, params, pIdx, 'sub_category');
+    whereClause += sub.clause;
+    pIdx = sub.pIdx;
     if (to_entity) { whereClause += ` AND u.to_entity = $${pIdx++}`; params.push(to_entity); }
     if (dateFrom) { whereClause += ` AND u.date >= $${pIdx++}`; params.push(dateFrom); }
     if (dateTo) { whereClause += ` AND u.date <= $${pIdx++}`; params.push(dateTo); }
     if (search) {
-      whereClause += ` AND (u.from_entity ILIKE $${pIdx} OR u.to_entity ILIKE $${pIdx} OR u.remark ILIKE $${pIdx} OR u.account_no ILIKE $${pIdx} OR u.branch ILIKE $${pIdx} OR u.category ILIKE $${pIdx})`;
+      whereClause += ` AND (u.from_entity ILIKE $${pIdx} OR u.to_entity ILIKE $${pIdx} OR u.remark ILIKE $${pIdx} OR u.account_no ILIKE $${pIdx} OR u.branch ILIKE $${pIdx} OR u.category ILIKE $${pIdx} OR u.sub_category ILIKE $${pIdx})`;
       params.push(`%${search}%`);
       pIdx++;
     }
@@ -640,7 +647,7 @@ class ExpenseModel extends MasterModel {
           SELECT payment_mode,
                  CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
                  CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-                 date, from_entity, to_entity, remark, account_no, branch, category, created_by, status
+                 date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status
           FROM expenses WHERE site_id = $1
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(payment_mode, 'UNSPECIFIED') ORDER BY total_debit DESC`;
@@ -653,7 +660,7 @@ class ExpenseModel extends MasterModel {
           SELECT payment_mode,
                  CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
                  CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-                 date, from_entity, to_entity, remark, account_no, branch, category, created_by, status
+                 date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status
           FROM expenses WHERE site_id = $1
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY category ASC`;
@@ -670,18 +677,18 @@ class ExpenseModel extends MasterModel {
     // computes both groupings using GROUPING SETS.
     const combinedQuery = `
       WITH unified AS (
-        SELECT date, payment_mode, category, to_entity, from_entity, remark, account_no, branch,
+        SELECT date, payment_mode, category, sub_category, to_entity, from_entity, remark, account_no, branch,
           CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
           CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
           created_by, status
         FROM expenses WHERE site_id = $1
         UNION ALL
-        SELECT fp.date, fp.payment_mode, 'FARMER PAYMENT' as category, UPPER(f.name) as to_entity, NULL as from_entity,
+        SELECT fp.date, fp.payment_mode, 'FARMER PAYMENT' as category, NULL::varchar as sub_category, UPPER(f.name) as to_entity, NULL as from_entity,
           UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit, fp.created_by, fp.status
         FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
         WHERE f.site_id = $1 AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
         UNION ALL
-        SELECT pcp.date, pcp.payment_mode, 'COMMISSION' as category, UPPER(ag.full_name) as to_entity, NULL as from_entity,
+        SELECT pcp.date, pcp.payment_mode, 'COMMISSION' as category, NULL::varchar as sub_category, UPPER(ag.full_name) as to_entity, NULL as from_entity,
           UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch,
           CASE WHEN pcp.amount > 0 THEN pcp.amount ELSE 0 END as debit,
           CASE WHEN pcp.amount < 0 THEN ABS(pcp.amount) ELSE 0 END as credit,
@@ -694,12 +701,12 @@ class ExpenseModel extends MasterModel {
           pcp.status, pcp.payment_mode, pcp.cheque_status
         )
         UNION ALL
-        SELECT vp.payment_date as date, UPPER(vp.payment_mode) as payment_mode, 'VENDOR PAYMENT' as category, UPPER(vc.vendor_name) as to_entity, NULL as from_entity,
+        SELECT vp.payment_date as date, UPPER(vp.payment_mode) as payment_mode, 'VENDOR PAYMENT' as category, NULL::varchar as sub_category, UPPER(vc.vendor_name) as to_entity, NULL as from_entity,
           UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' as remark, NULL as account_no, NULL as branch, vp.amount as debit, 0::numeric as credit, vp.created_by, vp.status
         FROM vendor_payments vp JOIN vendor_commitments vc ON vp.commitment_id = vc.id
         WHERE vp.site_id = $1 AND financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)
         UNION ALL
-        SELECT cfe.date, UPPER(cfe.cash_type) as payment_mode, 'PERSONAL LEDGER' as category, cfe.to_name as to_entity, NULL as from_entity,
+        SELECT cfe.date, UPPER(cfe.cash_type) as payment_mode, 'PERSONAL LEDGER' as category, NULL::varchar as sub_category, cfe.to_name as to_entity, NULL as from_entity,
           COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit, cfe.created_by, 'approved'::varchar as status
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
@@ -707,7 +714,7 @@ class ExpenseModel extends MasterModel {
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
           AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
         UNION ALL
-        SELECT d.date, d.payment_mode, d.category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit, d.created_by, d.status
+        SELECT d.date, d.payment_mode, d.category, NULL::varchar as sub_category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit, d.created_by, d.status
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
           AND (

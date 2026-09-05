@@ -18,6 +18,7 @@ function normalizeFilters(filters = {}) {
     status: filters.status || undefined,
     mode: filters.mode || undefined,
     category: filters.category || undefined,
+    sub_category: filters.sub_category || undefined,
     to_entity: filters.to_entity || undefined,
     dateFrom: filters.dateFrom || undefined,
     dateTo: filters.dateTo || undefined,
@@ -35,6 +36,14 @@ function normalizeFilters(filters = {}) {
       normalized.categories = tokens;
       // Avoid conflict with the legacy single-category path — the model will prefer `categories`.
       normalized.category = undefined;
+    }
+  }
+
+  if (Array.isArray(filters.sub_categories) && filters.sub_categories.length > 0) {
+    const tokens = filters.sub_categories.map((c) => String(c).trim()).filter(Boolean);
+    if (tokens.length > 0) {
+      normalized.sub_categories = tokens;
+      normalized.sub_category = undefined;
     }
   }
 

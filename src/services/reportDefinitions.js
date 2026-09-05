@@ -72,9 +72,16 @@ export const REPORTS = Object.freeze({
     amount: 'e.debit',
     amountLabel: 'Spent',
     dimension: { expr: `COALESCE(NULLIF(e.category, ''), 'UNCATEGORIZED')`, label: 'Category' },
+    // Alternate groupings, picked with ?dimension=<key>; `dimension` above stays the default.
+    dimensions: [
+      { key: 'category', expr: `COALESCE(NULLIF(e.category, ''), 'UNCATEGORIZED')`, label: 'Category' },
+      { key: 'sub_category', expr: `COALESCE(NULLIF(e.sub_category, ''), 'NO SUB-CATEGORY')`, label: 'Sub-category' },
+      { key: 'category_sub', expr: `COALESCE(NULLIF(e.category, ''), 'UNCATEGORIZED') || ' › ' || COALESCE(NULLIF(e.sub_category, ''), '—')`, label: 'Category › Sub-category' },
+    ],
     columns: [
       { key: 'date', expr: 'e.date', label: 'Date', type: 'date' },
       { key: 'category', expr: 'e.category', label: 'Category' },
+      { key: 'sub_category', expr: 'e.sub_category', label: 'Sub-category' },
       { key: 'to_entity', expr: 'e.to_entity', label: 'Paid to' },
       { key: 'from_entity', expr: 'e.from_entity', label: 'Paid from' },
       { key: 'debit', expr: 'e.debit', label: 'Debit', type: 'money' },

@@ -92,6 +92,8 @@ const ExpensesPageFiltersInput = new GraphQLInputObjectType({
     // all conditions are AND'd (e.g. ["PHASE 2", "JCB"] returns rows whose category contains
     // both substrings). Takes precedence over `category` when non-empty.
     categories:  { type: new GraphQLList(new GraphQLNonNull(GraphQLString)) },
+    subCategory:   { type: GraphQLString },
+    subCategories: { type: new GraphQLList(new GraphQLNonNull(GraphQLString)) },
     toEntity:    { type: GraphQLString },
     dateFrom:    { type: GraphQLString },
     dateTo:      { type: GraphQLString },
@@ -402,6 +404,7 @@ const ExpenseEntryType = new GraphQLObjectType({
     account_no:        { type: GraphQLString },
     branch:            { type: GraphQLString },
     category:          { type: GraphQLString },
+    sub_category:      { type: GraphQLString },
     status:            { type: GraphQLString },
     approved_by:       { type: GraphQLInt },
     approved_at:       { type: GraphQLString },
@@ -1051,6 +1054,10 @@ const QueryType = new GraphQLObjectType({
           categories: Array.isArray(filters.categories) && filters.categories.length > 0
             ? filters.categories.map((c) => String(c).trim()).filter(Boolean)
             : undefined,
+          sub_category: filters.subCategory || undefined,
+          sub_categories: Array.isArray(filters.subCategories) && filters.subCategories.length > 0
+            ? filters.subCategories.map((c) => String(c).trim()).filter(Boolean)
+            : undefined,
           to_entity: filters.toEntity || undefined,
           dateFrom: filters.dateFrom || undefined,
           dateTo: filters.dateTo || undefined,
@@ -1106,6 +1113,10 @@ const QueryType = new GraphQLObjectType({
           category: filters.category || undefined,
           categories: Array.isArray(filters.categories) && filters.categories.length > 0
             ? filters.categories.map((c) => String(c).trim()).filter(Boolean)
+            : undefined,
+          sub_category: filters.subCategory || undefined,
+          sub_categories: Array.isArray(filters.subCategories) && filters.subCategories.length > 0
+            ? filters.subCategories.map((c) => String(c).trim()).filter(Boolean)
             : undefined,
           to_entity: filters.toEntity || undefined,
           dateFrom: filters.dateFrom || undefined,

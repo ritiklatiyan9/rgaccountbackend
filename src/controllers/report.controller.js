@@ -44,8 +44,10 @@ const scope = (def, siteId, from, to) => {
 };
 
 /** Build the full report payload for a module + range. */
-export const buildReport = async (moduleKey, siteId, from, to, { rowLimit = 500 } = {}) => {
+export const buildReport = async (moduleKey, siteId, from, to, { rowLimit = 500, dimension } = {}) => {
   const def = REPORTS[moduleKey];
+  // A module may offer alternate groupings; `dimension` only selects a declared one, never reaches SQL.
+  const dim = (def.dimensions || []).find((d) => d.key === dimension) || def.dimension;
   const { where, params } = scope(def, siteId, from, to);
   // Headcount reports have no money column — NULL needs a type or SUM() is ambiguous.
   const amount = def.amount || 'NULL::numeric';
@@ -73,7 +75,7 @@ export const buildReport = async (moduleKey, siteId, from, to, { rowLimit = 500 
       params
     ),
     pool.query(
-      `SELECT ${def.dimension.expr} AS label,
+      `SELECT ${dim.expr} AS label,
               COUNT(*)::int AS count,
               COALESCE(SUM(${amount}), 0)::numeric(18,2) AS total
          FROM ${def.from} WHERE ${where}
@@ -107,7 +109,9 @@ export const buildReport = async (moduleKey, siteId, from, to, { rowLimit = 500 
     kpis,
     trend: trend.rows.map((r) => ({ bucket: r.bucket, count: r.count, total: Number(r.total) })),
     breakdown: breakdown.rows.map((r) => ({ label: r.label, count: r.count, total: Number(r.total) })),
-    dimension_label: def.dimension.label,
+    dimension_label: dim.label,
+    dimension_key: dim.key || null,
+    dimensions: (def.dimensions || []).map(({ key, label }) => ({ key, label })),
     columns: def.columns.map(({ key, label, type }) => ({ key, label, type: type || 'text' })),
     rows: rows.rows,
     row_limit_hit: rows.rows.length >= Math.min(rowLimit, MAX_ROWS),
@@ -150,6 +154,7 @@ export const getReport = asyncHandler(async (req, res) => {
   if (!parsed) return;
   const report = await buildReport(parsed.moduleKey, parsed.siteId, parsed.from, parsed.to, {
     rowLimit: parseInt(req.query.limit, 10) || 500,
+    dimension: req.query.dimension ? String(req.query.dimension) : undefined,
   });
   res.json({ report });
 });
@@ -179,7 +184,7 @@ export const aiReportSummary = asyncHandler(async (req, res) => {
   const parsed = await parseRequest(req, res, req.body);
   if (!parsed) return;
 
-  const report = await buildReport(parsed.moduleKey, parsed.siteId, parsed.from, parsed.to, { rowLimit: 500 });
+  const report = await buildReport(parsed.moduleKey, parsed.siteId, parsed.from, parsed.to, { rowLimit: 500, dimension: req.body.dimension ? String(req.body.dimension) : undefined });
   if (!report.rows.length) {
     return res.json({ insight: { headline: 'No data in this period', summary: 'There are no records for the selected module and date range, so there is nothing to analyse yet.', highlights: [], risks: [], actions: [] }, empty: true });
   }

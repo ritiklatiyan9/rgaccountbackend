@@ -27,3 +27,15 @@ test('falls back to the legacy single category, and to no clause at all', () => 
   assert.deepEqual(params, ['FUEL']);
   assert.deepEqual(buildCategoryWhere(undefined, undefined, [], 2), { clause: '', pIdx: 2 });
 });
+
+test('the same builder serves the sub-category column', () => {
+  const params = [];
+  const { clause, pIdx } = buildCategoryWhere(['CYLINDER'], undefined, params, 3, 'sub_category');
+  assert.equal(clause, ` AND (u.sub_category ILIKE $3)`);
+  assert.deepEqual(params, ['%CYLINDER%']);
+  assert.equal(pIdx, 4);
+  assert.deepEqual(
+    buildCategoryWhere([], 'CYLINDER', [], 2, 'sub_category'),
+    { clause: ' AND u.sub_category = $2', pIdx: 3 },
+  );
+});

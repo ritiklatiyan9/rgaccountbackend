@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
+import { reviewDocument, combineReviewedDocuments } from '../services/memberKycReview.service.js';
 import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 import {
   deletePlotDoc, getPlotDocBytes, getPlotDocPublicUrl, getPlotDocUrl, uploadPlotDoc,
@@ -73,7 +74,7 @@ const getAccessibleCase = async (caseId, user) => {
 
 const getLatestDocumentResult = async (documentId) => {
   const { rows } = await pool.query(
-    `SELECT d.*, r.extracted_fields, r.confidence_overall,
+    `SELECT d.*, r.raw_text, r.extracted_fields, r.confidence_overall,
             r.confidence_map, r.engine AS result_engine, r.processed_at
        FROM documents d
        LEFT JOIN LATERAL (
@@ -147,7 +148,7 @@ const selectActiveDocuments = (rows = []) => {
 
 const getCaseDocuments = async (caseId) => {
   const { rows } = await pool.query(
-    `SELECT d.*, r.extracted_fields, r.confidence_overall,
+    `SELECT d.*, r.raw_text, r.extracted_fields, r.confidence_overall,
             r.confidence_map, r.engine AS result_engine, r.processed_at
        FROM documents d
        LEFT JOIN LATERAL (
@@ -168,7 +169,7 @@ const getCaseDocuments = async (caseId) => {
       document.file_url = null;
     }
   }));
-  return activeDocuments;
+  return activeDocuments.map(reviewDocument);
 };
 
 const hasValidSignature = (file) => {
@@ -239,7 +240,7 @@ const processKycDocument = async (documentId, preloadedBuffer = null) => {
          VALUES ($1, $2::jsonb, $3::jsonb, $4, $5::jsonb, $6, now())`,
         [
           documentId,
-          JSON.stringify({ text: result.rawText || '' }),
+          JSON.stringify({ text: result.rawText || '', evidence: result.evidence || {} }),
           JSON.stringify(result.fields || {}),
           overallConfidence,
           JSON.stringify(result.confidence || {}),
@@ -734,7 +735,7 @@ export const getDocument = asyncHandler(async (req, res) => {
   } catch {
     document.file_url = null;
   }
-  res.json(document);
+  res.json(reviewDocument(document));
 });
 
 /** POST /member-kyc/document/:id/retry */
@@ -784,10 +785,10 @@ export const extractPreview = asyncHandler(async (req, res) => {
   if (access.denied) return res.status(403).json({ message: 'This KYC case is unavailable to your account' });
   const { rows } = await pool.query(
     `SELECT d.id, d.type, d.member_document_field, d.ocr_status,
-            r.extracted_fields, r.confidence_map
+            r.raw_text, r.extracted_fields, r.confidence_map
        FROM documents d
-       JOIN LATERAL (
-         SELECT extracted_fields, confidence_map FROM ocr_results o
+       LEFT JOIN LATERAL (
+         SELECT raw_text, extracted_fields, confidence_map FROM ocr_results o
           WHERE o.document_id = d.id ORDER BY o.id DESC LIMIT 1
        ) r ON true
       WHERE d.kyc_case_id = $1
@@ -796,23 +797,9 @@ export const extractPreview = asyncHandler(async (req, res) => {
   );
   const activeDocuments = selectActiveDocuments(rows)
     .filter((document) => document.ocr_status === 'DONE');
-  const extracted = {};
-  const selectedConfidence = {};
-  for (const row of activeDocuments) {
-    for (const [field, value] of Object.entries(row.extracted_fields || {})) {
-      if (value === null || value === undefined || String(value).trim() === '') continue;
-      const score = Number(row.confidence_map?.[field]);
-      const confidence = Number.isFinite(score) ? score : 0.5;
-      if (selectedConfidence[field] === undefined || confidence >= selectedConfidence[field]) {
-        extracted[field] = value;
-        selectedConfidence[field] = confidence;
-      }
-    }
-  }
   res.json({
     caseId: access.kycCase.id,
-    extracted,
-    confidence: selectedConfidence,
+    ...combineReviewedDocuments(activeDocuments),
     docCount: activeDocuments.length,
   });
 });
@@ -829,7 +816,13 @@ export const verifyCase = asyncHandler(async (req, res) => {
     let value = typeof memberUpdate[field] === 'string'
       ? memberUpdate[field].trim()
       : memberUpdate[field];
-    if (value === '') continue;
+    if (value === '') {
+      if (field === 'full_name' || field === 'phone') {
+        return res.status(400).json({ message: 'Customer name and mobile number cannot be empty' });
+      }
+      data[field] = null;
+      continue;
+    }
     if (UPPERCASE_MEMBER_FIELDS.has(field) && typeof value === 'string') value = value.toUpperCase();
     data[field] = value;
   }

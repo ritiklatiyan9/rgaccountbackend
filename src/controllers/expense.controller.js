@@ -119,7 +119,7 @@ const syncLinkedVendorInventoryPayments = async (payments, status, approvedBy) =
 export const createExpense = asyncHandler(async (req, res) => {
   const {
     site_id, date, from_entity, to_entity, payment_mode,
-    debit, credit, remark, account_no, branch, category,
+    debit, credit, remark, account_no, branch, category, sub_category,
     assigned_user_id, assigned_admin_id, voucher_url, voucher_urls, bill_url, bill_urls,
     not_sure,
   } = req.body;
@@ -138,6 +138,7 @@ export const createExpense = asyncHandler(async (req, res) => {
     account_no: account_no ? account_no.trim().toUpperCase() : null,
     branch: branch ? branch.trim().toUpperCase() : null,
     category: category ? category.trim().toUpperCase() : null,
+    sub_category: sub_category ? String(sub_category).trim().toUpperCase() : null,
     assigned_user_id: assigned_user_id ? parseInt(assigned_user_id) : null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     ...voucherColumns(voucher_urls, voucher_url),
@@ -254,7 +255,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
   }
   const {
     date, from_entity, to_entity, payment_mode,
-    debit, credit, remark, account_no, branch, category,
+    debit, credit, remark, account_no, branch, category, sub_category,
     assigned_user_id, assigned_admin_id, voucher_url, voucher_urls, bill_url, bill_urls,
     customer_signature_url, authority_signature_url, expense_status
   } = req.body;
@@ -270,6 +271,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
   if (account_no !== undefined) data.account_no = account_no ? account_no.trim().toUpperCase() : null;
   if (branch !== undefined) data.branch = branch ? branch.trim().toUpperCase() : null;
   if (category !== undefined) data.category = category ? category.trim().toUpperCase() : null;
+  if (sub_category !== undefined) data.sub_category = sub_category ? String(sub_category).trim().toUpperCase() : null;
   if (assigned_user_id !== undefined) data.assigned_user_id = assigned_user_id ? parseInt(assigned_user_id) : null;
   if (assigned_admin_id !== undefined) data.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
   // A PUT that names neither key leaves that attachment alone — so the inline
@@ -304,7 +306,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
 
   const postingFields = new Set([
     'date', 'from_entity', 'to_entity', 'payment_mode', 'debit', 'credit',
-    'remark', 'account_no', 'branch', 'category',
+    'remark', 'account_no', 'branch', 'category', 'sub_category',
   ]);
   const changesPostingData = Object.keys(data).some((key) => postingFields.has(key));
   if (changesPostingData) {
