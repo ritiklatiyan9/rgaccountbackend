@@ -10,6 +10,7 @@ router.use(authMiddleware);
 router.use(requireRole('admin', 'sub_admin'));
 
 router.get('/options', getTransferOptions);
+router.post('/options', getTransferOptions);
 router.post('/', transferEntry);
 router.use(handleTransferError);
 

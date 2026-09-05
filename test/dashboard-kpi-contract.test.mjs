@@ -40,21 +40,17 @@ test('Admin Site Balance keeps full custody while only uncommitted cash is distr
 
 test('Main Site Balance card reconciles cash plus bank and itemizes cash custody', async () => {
   const dashboard = await readFrontend('src/pages/Dashboard.jsx');
-  const card = await readFrontend('src/components/dashboard/KpiCard.jsx');
+  const card = await readFrontend('src/components/dashboard/SiteBalanceCard.jsx');
   const management = await readFrontend('src/pages/DashboardManagement.jsx');
 
-  assert.match(card, /label: 'Main Site Balance'/);
-  assert.match(card, /formula: 'Total site money · Cash \+ Bank'/);
-  assert.match(dashboard, /mainSiteBalance = parseFloat\(siteBalanceDetail\?\.balanceBeforeImprest/);
-  assert.match(dashboard, /staffCashByHolder = imprestDistribution\.reduce/);
-  assert.match(dashboard, /adminCash = totalCash - staffCash/);
-  assert.match(dashboard, /kpiKey="siteBalance"[\s\S]*?value=\{mainSiteBalance\}/);
-  assert.match(dashboard, /= Main Site Balance/);
-  assert.match(dashboard, /Cash custody/);
-  assert.match(dashboard, /Site cash/);
-  assert.match(dashboard, /Imprest/);
-  assert.match(dashboard, /= Cash total/);
-  assert.match(dashboard, /imprestDistribution\.map/);
+  assert.match(card, /Main Site Balance/);
+  assert.match(card, /const total = cash \+ bank/);
+  assert.match(card, /value=\{cash - imprest\}/);
+  assert.match(card, /Held by staff · included in Cash/);
+  assert.match(card, /Cash available for imprest/);
+  assert.match(dashboard, /<SiteBalanceCard[\s\S]*?detail=\{siteBalanceDetail\}/);
+  assert.match(dashboard, /<SiteBalanceModal/);
+  assert.doesNotMatch(card, /Admin site balance|Ledger movement|Lifetime money|Personal ledger/);
   assert.match(management, /Main Site Balance Card/);
 });
 

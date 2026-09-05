@@ -2,254 +2,137 @@ import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import permissionModel from '../models/Permission.model.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
+import { canUserViewEntry } from '../services/entryVisibility.service.js';
+import { TransferError, asId, validDate, versionOf, normalizeEntries, editSource } from '../services/transactionTransfer.validation.js';
 
-const TYPES = new Set(['personal_ledger', 'expense', 'farmer_payment', 'plot_payment']);
-const MODULE_BY_TYPE = {
-  personal_ledger: 'cashflow',
-  expense: 'expenses',
-  farmer_payment: 'farmers',
-  plot_payment: 'plot_payments',
+// Table/column identifiers below are application constants, never request text.
+export const MODULES = {
+  personal_ledger: { label: 'Personal Ledger', permission: 'cashflow', table: 'cash_flow_entries', parent: 'cash_flow_month_id' },
+  expense: { label: 'Expenses', permission: 'expenses', table: 'expenses' },
+  farmer_payment: { label: 'Lands / Farmer Payments', permission: 'farmers', table: 'farmer_payments', parent: 'farmer_id', direction: 'debit' },
+  plot_payment: { label: 'Plot Payments', permission: 'plot_payments', table: 'plot_payments', parent: 'plot_id', direction: 'credit' },
+  plot_commission: { label: 'Plot Commission', permission: 'commissions', table: 'plot_commission_payments', parent: 'plot_commission_id' },
+  vendor_payment: { label: 'Vendor Payments', permission: 'vendors', table: 'vendor_payments', parent: 'commitment_id', direction: 'debit' },
+  misc_income: { label: 'Miscellaneous Income', permission: 'misc_income', table: 'misc_income_entries', parent: 'category_id' },
+  registry_payment: { label: 'Registry Payments', permission: 'plot_registry', table: 'plot_registry_payments', parent: 'registry_id', direction: 'credit' },
+  land_sale: { label: 'Land Sale Receipts', permission: 'farmers', table: 'land_deal_payments', parent: 'land_deal_id', direction: 'credit' },
+  daybook: { label: 'Day Book', permission: 'daybook', table: 'day_book' },
+  commission: { label: 'General Commissions', permission: 'commissions', table: 'plot_commissions', direction: 'debit' },
 };
-const LABEL_BY_TYPE = {
-  personal_ledger: 'Personal Ledger',
-  expense: 'Expense',
-  farmer_payment: 'Lands Payment',
-  plot_payment: 'Plot Payment',
-};
-
-class TransferError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
-
-const asId = (value, label = 'id') => {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed <= 0) throw new TransferError(400, `A valid ${label} is required`);
-  return parsed;
-};
-const number = (value) => Number.parseFloat(value) || 0;
+const LABEL_BY_TYPE = Object.fromEntries(Object.entries(MODULES).map(([k,v]) => [k,v.label]));
+const number = (value) => Number(value) || 0;
 const upper = (value) => value ? String(value).trim().toUpperCase() : null;
-const sqlDate = (value) => {
-  if (!value) throw new TransferError(422, 'The entry date is missing');
-  if (typeof value === 'string') {
-    const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    if (match) return `${match[1]}-${match[2]}-${match[3]}`;
-  }
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) throw new TransferError(422, 'The entry date is invalid');
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-};
-const dateParts = (value) => {
-  const [year, month] = sqlDate(value).split('-').map(Number);
-  return { year, month };
-};
-const modeBucket = (value) => {
-  const mode = upper(value) || 'CASH';
-  if (mode.includes('CHEQUE') || mode.includes('CHECK') || mode === 'DD') return 'cheque';
-  return mode === 'CASH' ? 'cash' : 'bank';
-};
-const financials = (debit, credit) => {
-  const net = number(credit) - number(debit);
-  if (Math.abs(net) < 0.005) throw new TransferError(422, 'Zero-value or balanced entries cannot be transferred');
-  return { direction: net > 0 ? 'credit' : 'debit', amount: Math.abs(net) };
-};
-const sameTimestamp = (left, right) => {
-  if (!left || !right) return false;
-  return new Date(left).getTime() === new Date(right).getTime();
-};
-
-const hasPermission = async (req, module, action) => {
-  if (req.user.role === 'admin' || req.user.role === 'super_admin') return true;
+const dateParts = (value) => { const [year, month] = validDate(value).split('-').map(Number); return { year, month }; };
+const hasPermission = async (req, type, action) => {
+  if (!Object.hasOwn(MODULES, type)) return false;
+  if (['admin','super_admin'].includes(req.user.role)) return true;
   if (req.user.role !== 'sub_admin') return false;
-  const permission = await permissionModel.getPermission(req.user.id, module);
-  return permission?.[`can_${action}`] === true;
+  const p = await permissionModel.getPermission(req.user.id, MODULES[type].permission);
+  return p?.[`can_${action}`] === true;
 };
-
 const requirePermission = async (req, type, action) => {
-  if (!TYPES.has(type)) throw new TransferError(400, 'Unsupported transaction module');
-  if (!await hasPermission(req, MODULE_BY_TYPE[type], action)) {
-    throw new TransferError(403, `You do not have permission to ${action} ${LABEL_BY_TYPE[type]} entries`);
-  }
+  if (!Object.hasOwn(MODULES, type)) throw new TransferError(400, 'Unsupported transaction module');
+  if (!await hasPermission(req, type, action)) throw new TransferError(403, `You do not have permission to ${action} ${LABEL_BY_TYPE[type]} entries`);
 };
-
-const ensureSiteAccess = async (client, req, siteId) => {
-  if (req.user.role === 'admin' || req.user.role === 'super_admin') return;
-  const { rows } = await client.query(
-    'SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1',
-    [req.user.id, siteId],
-  );
-  if (!rows[0]) throw new TransferError(403, 'Access denied to this site');
+const ensureSiteAccess = async (db, req, siteId) => {
+  if (['admin','super_admin'].includes(req.user.role)) return;
+  const { rows } = await db.query('SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2', [req.user.id, siteId]);
+  if (!rows.length) throw new TransferError(403, 'Access denied to this site');
 };
-
-const normalizeSource = (type, row) => {
-  let debit = row.mirror_debit;
-  let credit = row.mirror_credit;
-  if (type === 'expense') {
-    debit = row.debit;
-    credit = row.credit;
-  } else if (type === 'farmer_payment' && debit == null) {
-    debit = number(row.amount) >= 0 ? row.amount : 0;
-    credit = number(row.amount) < 0 ? Math.abs(number(row.amount)) : 0;
-  } else if (type === 'plot_payment' && credit == null) {
-    debit = number(row.amount) < 0 ? Math.abs(number(row.amount)) : 0;
-    credit = number(row.amount) >= 0 ? row.amount : 0;
-  }
-  const money = financials(debit, credit);
-  const rawMode = row.payment_mode || row.payment_from || row.payment_type || row.cash_type || row.particular;
-  return {
-    type,
-    id: row.id,
-    site_id: row.site_id,
-    date: sqlDate(row.date),
-    direction: money.direction,
-    amount: money.amount,
-    mode: row.mirror_cash_type || row.cash_type || modeBucket(rawMode),
-    raw_mode: rawMode,
-    particular: row.particular || row.remark || row.payment_from || LABEL_BY_TYPE[type],
-    remarks: row.remarks || row.remark || row.narration || null,
-    voucher_url: row.voucher_url || null,
-    status: row.status || 'pending',
-    approved_by: row.approved_by || null,
-    approved_at: row.approved_at || null,
-    assigned_admin_id: row.assigned_admin_id || null,
-    cheque_status: row.cheque_status || null,
-    cheque_no: row.cheque_no || null,
-    customer_signature_url: row.customer_signature_url || null,
-    authority_signature_url: row.authority_signature_url || null,
-    bank_account_id: row.bank_account_id || null,
-    created_by: row.created_by || null,
-    created_at: row.created_at,
-    updated_at: row.updated_at || row.created_at,
-    parent_id: row.parent_id || null,
-    parent_name: row.parent_name || null,
-    parent_meta: row.parent_meta || null,
-    source_locked: Boolean(row.source_locked),
-    raw: row,
-  };
-};
-
-const loadSource = async (client, type, sourceId, lock = false) => {
-  const suffix = lock ? ' FOR UPDATE OF owner_row' : '';
-  let query;
+const loadSource = async (db, req, type, id, lock = false) => {
+  await requirePermission(req, type, 'delete');
+  const cfg = MODULES[type];
+  const { rows } = await db.query(`SELECT owner_row.*, owner_row.xmin::text AS row_version FROM ${cfg.table} owner_row WHERE id = $1${lock ? ' FOR UPDATE' : ''}`, [id]);
+  const row = rows[0];
+  if (!row || !await canUserViewEntry(req.user, cfg.permission, row.created_by)) throw new TransferError(404, 'Entry not found');
+  let siteId = row.site_id;
+  let parentName = cfg.label;
+  let parentId = cfg.parent ? row[cfg.parent] : null;
   if (type === 'personal_ledger') {
-    query = `
-      SELECT owner_row.*, owner_row.cash_flow_month_id AS parent_id,
-             cfm.ledger_name AS parent_name, cfm.ledger_type, cfm.is_locked AS source_locked,
-             owner_row.debit AS mirror_debit, owner_row.credit AS mirror_credit,
-             owner_row.cash_type AS mirror_cash_type
-        FROM cash_flow_entries owner_row
-        JOIN cash_flow_months cfm ON cfm.id = owner_row.cash_flow_month_id
-       WHERE owner_row.id = $1 AND owner_row.source_module IS NULL
-         AND LOWER(cfm.ledger_type) = 'person' AND owner_row.is_firm_transaction = FALSE${suffix}`;
-  } else if (type === 'expense') {
-    query = `
-      SELECT owner_row.*, owner_row.id AS parent_id, 'Expenses'::text AS parent_name,
-             cfe.debit AS mirror_debit, cfe.credit AS mirror_credit,
-             cfe.cash_type AS mirror_cash_type, cfe.bank_account_id,
-             EXISTS(SELECT 1 FROM compliance_finance_links cfl WHERE cfl.expense_id = owner_row.id) AS has_compliance_link
-        FROM expenses owner_row
-        LEFT JOIN cash_flow_entries cfe ON cfe.source_module = 'expenses' AND cfe.source_id = owner_row.id
-       WHERE owner_row.id = $1${suffix}`;
-  } else if (type === 'farmer_payment') {
-    query = `
-      SELECT owner_row.*, f.site_id, f.id AS parent_id, f.name AS parent_name,
-             cfe.debit AS mirror_debit, cfe.credit AS mirror_credit,
-             cfe.cash_type AS mirror_cash_type, cfe.bank_account_id
-        FROM farmer_payments owner_row
-        JOIN farmers f ON f.id = owner_row.farmer_id
-        LEFT JOIN cash_flow_entries cfe ON cfe.source_module = 'farmer_payments' AND cfe.source_id = owner_row.id
-       WHERE owner_row.id = $1${suffix}`;
-  } else if (type === 'plot_payment') {
-    query = `
-      SELECT owner_row.*, p.id AS parent_id,
-             CONCAT('Plot ', p.plot_no, COALESCE(' · ' || NULLIF(p.buyer_name, ''), '')) AS parent_name,
-             jsonb_build_object('plot_no', p.plot_no, 'buyer_name', p.buyer_name, 'booking_by', p.booking_by) AS parent_meta,
-             cfe.debit AS mirror_debit, cfe.credit AS mirror_credit,
-             cfe.cash_type AS mirror_cash_type, cfe.bank_account_id,
-             EXISTS(SELECT 1 FROM plot_registry_payments prp WHERE prp.source_plot_payment_id = owner_row.id) AS has_registry_link
-        FROM plot_payments owner_row
-        JOIN plots p ON p.id = owner_row.plot_id
-        LEFT JOIN cash_flow_entries cfe ON cfe.source_module = 'plot_payments' AND cfe.source_id = owner_row.id
-       WHERE owner_row.id = $1${suffix}`;
-  } else {
-    throw new TransferError(400, 'Unsupported transaction module');
+    const { rows: months } = await db.query(`SELECT * FROM cash_flow_months WHERE id = $1${lock ? ' FOR UPDATE' : ''}`, [parentId]);
+    const month = months[0];
+    if (!month || month.ledger_type?.toLowerCase() !== 'person' || row.source_module || row.is_firm_transaction) throw new TransferError(409, 'Transfer the original entry from its owning module; this is a synced or firm entry');
+    if (month.is_locked) throw new TransferError(423, 'The source Personal Ledger is locked');
+    parentName = month.ledger_name; siteId = month.site_id;
   }
-  const { rows } = await client.query(query, [sourceId]);
-  if (!rows[0]) throw new TransferError(404, 'Transferable entry not found. Synced mirror and firm-transfer rows must be moved from their owning module.');
-  const source = normalizeSource(type, rows[0]);
-  if (source.source_locked) throw new TransferError(423, 'The source Personal Ledger month is locked');
-  if (String(source.status).toLowerCase() === 'rejected') throw new TransferError(409, 'Rejected entries cannot be transferred');
-  if (['BOUNCED', 'RETURNED'].includes(upper(source.cheque_status))) throw new TransferError(409, 'Bounced or returned cheque entries cannot be transferred');
-  return source;
-};
-
-const transferability = (source, targetType) => {
-  if (source.raw.has_compliance_link) return 'This Expense is linked to a Compliance record and must stay in Expenses';
-  if (source.raw.has_registry_link) return 'This Plot Payment is linked to a Registry record and cannot be transferred';
-  if (targetType === 'expense' && source.type === 'expense') return 'The entry is already an Expense';
-  if (targetType === 'farmer_payment' && source.direction !== 'debit') return 'Farmer Payments accept outgoing (debit) entries';
-  if (targetType === 'plot_payment' && source.direction !== 'credit') return 'Plot Payments accept incoming (credit) entries';
-  if (upper(source.raw.payment_mode) === 'SPLIT' && targetType !== 'farmer_payment') {
-    return 'Split cash/bank Farmer entries can only be moved to another Farmer';
+  if (type === 'farmer_payment') {
+    const { rows: farmers } = await db.query('SELECT site_id, name FROM farmers WHERE id = $1', [parentId]);
+    siteId = farmers[0]?.site_id; parentName = farmers[0]?.name;
   }
-  return null;
-};
-
-const targetOptions = async (client, source) => {
-  const { month, year } = dateParts(source.date);
-  const [farmers, plots, ledgers] = await Promise.all([
-    client.query(`SELECT id, name AS label, phone AS meta FROM farmers WHERE site_id = $1 AND id <> COALESCE($2, -1) ORDER BY name`, [source.site_id, source.type === 'farmer_payment' ? source.parent_id : null]),
-    client.query(`SELECT id, CONCAT('Plot ', plot_no) AS label, CONCAT_WS(' · ', NULLIF(buyer_name, ''), NULLIF(status, '')) AS meta FROM plots WHERE site_id = $1 AND id <> COALESCE($2, -1) AND COALESCE(status, '') <> 'CANCELLED' ORDER BY plot_no`, [source.site_id, source.type === 'plot_payment' ? source.parent_id : null]),
-    client.query(`SELECT id, ledger_name AS label, CONCAT('Personal ledger · ', TO_CHAR(MAKE_DATE(year, month, 1), 'Mon YYYY')) AS meta FROM cash_flow_months WHERE site_id = $1 AND LOWER(ledger_type) = 'person' AND month = $2 AND year = $3 AND is_locked = FALSE AND id <> COALESCE($4, -1) ORDER BY ledger_name`, [source.site_id, month, year, source.type === 'personal_ledger' ? source.parent_id : null]),
-  ]);
+  if (type === 'daybook' && (row.farmer_payment_id || row.commission_id || row.cash_flow_entry_id || row.firm_transaction_id || row.plot_payment_id || row.vendor_payment_id || row.imprest_allocation_id || row.is_imprest_internal || row.is_financial_projection)) throw new TransferError(409, 'This is a linked or internal Day Book row. Transfer the original entry from its owning module');
+  await ensureSiteAccess(db, req, siteId);
+  if (['rejected','cancelled','void','voided','deleted'].includes(String(row.status).toLowerCase())) throw new TransferError(409, 'Rejected, cancelled or void entries cannot be transferred');
+  if (['BOUNCED','RETURNED'].includes(upper(row.cheque_status))) throw new TransferError(409, 'Bounced or returned entries cannot be transferred');
+  if (row.source_plot_payment_id || row.include_in_noc) throw new TransferError(409, 'This entry is linked to a Plot Payment or NOC and cannot be transferred');
+  if (type === 'expense') {
+    const linked = await db.query('SELECT 1 FROM compliance_finance_links WHERE expense_id = $1 LIMIT 1', [id]);
+    if (linked.rows.length) throw new TransferError(409, 'This expense is linked to Compliance and cannot be transferred');
+  }
+  if (type === 'plot_payment') {
+    const linked = await db.query('SELECT 1 FROM plot_registry_payments WHERE source_plot_payment_id = $1 LIMIT 1', [id]);
+    if (linked.rows.length) throw new TransferError(409, 'This Plot Payment is linked to Registry / NOC and cannot be transferred');
+  }
+  const { rows: mirrors } = type === 'personal_ledger' ? { rows: [row] } : await db.query('SELECT * FROM cash_flow_entries WHERE source_module = $1 AND source_id = $2' + (lock ? ' FOR UPDATE' : ''), [cfg.table, id]);
+  const mirror = mirrors[0] || {};
+  const reconciled = await db.query(`SELECT 1 FROM bank_reconciliation_links WHERE site_id = $1 AND candidate_entry_id = $2 AND candidate_source = ANY($3::text[]) LIMIT 1`, [siteId,id,[type,cfg.table,type === 'plot_commission' ? 'plot_commission_payment' : type]]);
+  if (reconciled.rows.length) throw new TransferError(409, 'This entry is bank-reconciled. Remove its reconciliation link before transferring');
+  let debit = row.debit, credit = row.credit;
+  if (debit == null && credit == null) {
+    const incoming = ['plot_payment','registry_payment','land_sale'].includes(type) || (type === 'misc_income' && row.direction === 'credit');
+    const signed = number(row.amount) * (incoming ? 1 : -1);
+    debit = Math.max(-signed,0); credit = Math.max(signed,0);
+  }
+  if (number(debit) > 0 && number(credit) > 0) throw new TransferError(422, 'Separate entries containing both debit and credit before transferring');
+  const net = number(credit) - number(debit);
+  if (!net) throw new TransferError(422, 'Zero-value entries cannot be transferred');
+  const paymentMode = row.payment_mode || (type === 'commission' ? row.by_note : null) || row.payment_from || row.cash_type || row.payment_type || mirror.cash_type || 'CASH';
   return {
-    farmer_payment: farmers.rows,
-    plot_payment: plots.rows,
-    personal_ledger: ledgers.rows,
-    expense: [],
+    type, id, site_id: siteId, parent_id: parentId, parent_name: parentName,
+    date: validDate(row.date || row.payment_date), direction: net > 0 ? 'credit' : 'debit', amount: Math.abs(net),
+    mode: row.cheque_status || /CHEQUE|CHECK|^DD$/i.test(paymentMode) ? 'cheque' : upper(paymentMode) === 'CASH' ? 'cash' : 'bank',
+    payment_mode: paymentMode, raw_mode: paymentMode,
+    particular: row.particular || row.party_name || row.to_entity || row.from_entity || row.remark || row.narration || parentName,
+    remarks: row.remarks || row.remark || row.narration || row.note || row.notes || '',
+    from_entity: row.from_entity || '', to_entity: row.to_entity || '', category: row.category || '',
+    bank_name: row.bank_name || '', bank_account_no: row.bank_account_no || row.account_no || row.bank_details || '',
+    bank_reference: row.bank_reference || row.transaction_id || row.reference_no || '', bank_ifsc: row.bank_ifsc || row.branch || '',
+    voucher_url: row.voucher_url || null, status: row.status, approved_by: row.approved_by, approved_at: row.approved_at,
+    assigned_admin_id: row.assigned_admin_id || null, cheque_status: row.cheque_status || null, cheque_no: row.cheque_no || null,
+    bank_account_id: row.bank_account_id || mirror.bank_account_id || null, created_by: row.created_by || null,
+    customer_signature_url: row.customer_signature_url || null, authority_signature_url: row.authority_signature_url || null,
+    version: versionOf({ row, mirror }), raw: row,
   };
 };
-
-const publicSource = (source) => ({
-  id: source.id,
-  type: source.type,
-  type_label: LABEL_BY_TYPE[source.type],
-  date: source.date,
-  direction: source.direction,
-  amount: source.amount,
-  mode: source.mode,
-  particular: source.particular,
-  remarks: source.remarks,
-  parent_id: source.parent_id,
-  parent_name: source.parent_name,
-  version: source.updated_at,
-});
-
-/** GET /transaction-transfers/options?source_type=&source_id= */
-export const getTransferOptions = asyncHandler(async (req, res) => {
-  const sourceType = String(req.query.source_type || '');
-  const sourceId = asId(req.query.source_id, 'source id');
-  await requirePermission(req, sourceType, 'delete');
-  const source = await loadSource(pool, sourceType, sourceId, false);
-  await ensureSiteAccess(pool, req, source.site_id);
-  const options = await targetOptions(pool, source);
-
+const publicSource = ({raw, ...source}) => ({...source, type_label: LABEL_BY_TYPE[source.type]});
+const targetOptions = async (db, siteId) => {
+  const queries = {
+    personal_ledger: `SELECT id, ledger_name AS label, CONCAT(year,'-',LPAD(month::text,2,'0')) AS period, CONCAT(ledger_name, ' · ', TO_CHAR(MAKE_DATE(year,month,1),'Mon YYYY')) AS meta FROM cash_flow_months WHERE site_id = $1 AND LOWER(ledger_type) = 'person' AND NOT is_locked ORDER BY year DESC,month DESC,ledger_name`,
+    farmer_payment: `SELECT id,name AS label FROM farmers WHERE site_id = $1 ORDER BY name`,
+    plot_payment: `SELECT id, CONCAT('Plot ',plot_no,' · ',buyer_name) AS label FROM plots WHERE site_id = $1 AND UPPER(COALESCE(status,'')) <> 'CANCELLED' ORDER BY plot_no`,
+    plot_commission: `SELECT pc.id, CONCAT('Plot ',p.plot_no,' · ',m.full_name) AS label FROM plot_commissions_v2 pc JOIN plots p ON p.id=pc.plot_id JOIN members m ON m.id=pc.agent_id WHERE pc.site_id=$1 AND UPPER(COALESCE(p.status,'')) <> 'CANCELLED' ORDER BY p.plot_no,m.full_name`,
+    vendor_payment: `SELECT id, CONCAT(vendor_name,' · ',work_title) AS label FROM vendor_commitments WHERE site_id=$1 ORDER BY vendor_name`,
+    misc_income: `SELECT id,name AS label FROM misc_income_categories WHERE is_active AND $1::int IS NOT NULL ORDER BY name`,
+    registry_payment: `SELECT id,CONCAT('Plot ',plot_no,' · ',customer_name) AS label FROM plot_registries WHERE site_id=$1 ORDER BY plot_no`,
+    land_sale: `SELECT id,CONCAT(COALESCE(deal_no,''),' · ',buyer_name) AS label FROM land_deals WHERE site_id=$1 AND status <> 'cancelled' ORDER BY buyer_name`,
+  };
+  const options = {};
+  // One connection, sequential SQL to avoid filling the pool per selected row.
+  for (const [type, query] of Object.entries(queries)) options[type] = (await db.query(query,[siteId])).rows;
+  return options;
+};
+export const getTransferOptions = asyncHandler(async (req,res) => {
+  const entries = normalizeEntries(req.method === 'GET' ? req.query : req.body);
+  const sources = [];
+  for (const entry of entries) sources.push(await loadSource(pool,req,entry.source_type,entry.source_id));
+  if (new Set(sources.map(s=>s.site_id)).size !== 1) throw new TransferError(422,'Select entries from one site per batch');
+  const options = await targetOptions(pool,sources[0].site_id);
   const targets = [];
-  for (const type of TYPES) {
-    if (!await hasPermission(req, MODULE_BY_TYPE[type], 'write')) continue;
-    const disabledReason = transferability(source, type)
-      || ((type !== 'expense' && options[type].length === 0) ? `No eligible ${LABEL_BY_TYPE[type]} destination exists for ${source.date}` : null);
-    targets.push({
-      type,
-      label: LABEL_BY_TYPE[type],
-      requires_selection: type !== 'expense',
-      disabled_reason: disabledReason,
-      options: options[type],
-    });
+  for (const [type,cfg] of Object.entries(MODULES)) {
+    if (!await hasPermission(req,type,'write')) continue;
+    targets.push({type,label:cfg.label,requires_selection:Boolean(cfg.parent),direction:cfg.direction || null,
+      disabled_reason: cfg.parent && !options[type]?.length ? `No eligible destination exists in ${cfg.label} for this site` : null, options:options[type] || []});
   }
-  res.json({ source: publicSource(source), targets });
+  res.json({source:publicSource(sources[0]),sources:sources.map(publicSource),targets});
 });
 
 const insertPersonalLedger = async (client, source, targetId, userId) => {
@@ -285,8 +168,8 @@ const insertPersonalLedger = async (client, source, targetId, userId) => {
 
 const insertExpense = async (client, source, userId) => {
   const party = source.parent_name || source.particular || 'TRANSFERRED ENTRY';
-  const sourceExpense = source.type === 'expense' ? source.raw : {};
-  const sourceBank = source.raw || {};
+  const sourceExpense = { ...source.raw, from_entity: source.from_entity, to_entity: source.to_entity, category: source.category, remark: source.particular, account_no: source.bank_account_no, branch: source.bank_ifsc };
+  const sourceBank = { ...source.raw, bank_name: source.bank_name, bank_account_no: source.bank_account_no, bank_details: source.bank_account_no, account_no: source.bank_account_no, bank_reference: source.bank_reference, bank_ifsc: source.bank_ifsc, branch: source.bank_ifsc };
   const paymentMode = upper(source.raw_mode) || upper(source.mode) || 'CASH';
   const { rows } = await client.query(
     `INSERT INTO expenses
@@ -322,8 +205,8 @@ const insertFarmerPayment = async (client, source, targetId, userId) => {
   const farmer = farmers[0];
   if (!farmer) throw new TransferError(404, 'Destination Farmer not found');
   const old = source.type === 'farmer_payment' ? source.raw : {};
-  const sourceBank = source.raw || {};
-  const mode = source.type === 'farmer_payment' ? upper(old.payment_mode) : (source.mode === 'cash' ? 'CASH' : source.mode === 'cheque' ? 'CHEQUE' : 'BANK');
+  const sourceBank = { ...source.raw, bank_name: source.bank_name, bank_account_no: source.bank_account_no, bank_details: source.bank_account_no, account_no: source.bank_account_no, bank_reference: source.bank_reference, bank_ifsc: source.bank_ifsc, branch: source.bank_ifsc };
+  const mode = source.payment_mode;
   const cashAmount = mode === 'SPLIT' ? number(old.cash_amount) : mode === 'CASH' ? source.amount : 0;
   const bankAmount = mode === 'SPLIT' ? number(old.bank_amount) : mode === 'CASH' ? 0 : source.amount;
   const { rows } = await client.query(
@@ -335,11 +218,11 @@ const insertFarmerPayment = async (client, source, targetId, userId) => {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
      RETURNING *`,
     [
-      farmer.id, source.date, old.particular || upper(source.raw_mode) || 'PAYMENT',
-      source.amount, old.by_note || source.particular, number(old.interest_rate), number(old.interest_amount),
-      source.remarks, mode, cashAmount, bankAmount, old.bank_name || sourceBank.bank_name || null,
-      old.bank_account_no || sourceBank.account_no || sourceBank.bank_details || null,
-      old.bank_reference || null, old.bank_ifsc || sourceBank.branch || null,
+      farmer.id, source.date, source.particular,
+      source.amount, source.particular, number(old.interest_rate), number(old.interest_amount),
+      source.remarks, mode, cashAmount, bankAmount, sourceBank.bank_name || null,
+      sourceBank.account_no || sourceBank.bank_details || null,
+      source.bank_reference || null, sourceBank.branch || null,
       source.voucher_url, source.status, source.approved_by, source.approved_at,
       source.assigned_admin_id, source.cheque_status, source.cheque_no, source.created_by || userId,
       source.customer_signature_url, source.authority_signature_url,
@@ -365,11 +248,12 @@ const insertFarmerPayment = async (client, source, targetId, userId) => {
 };
 
 const insertPlotPayment = async (client, source, targetId, userId) => {
-  const { rows: plots } = await client.query('SELECT id, site_id, plot_no, buyer_name, booking_by FROM plots WHERE id = $1 AND site_id = $2 FOR UPDATE', [targetId, source.site_id]);
+  const { rows: plots } = await client.query('SELECT id, site_id, plot_no, buyer_name, booking_by, status FROM plots WHERE id = $1 AND site_id = $2 FOR UPDATE', [targetId, source.site_id]);
   const plot = plots[0];
   if (!plot) throw new TransferError(404, 'Destination Plot not found');
+  if (upper(plot.status) === 'CANCELLED') throw new TransferError(409, 'Destination Plot is cancelled');
   const old = source.type === 'plot_payment' ? source.raw : {};
-  const sourceBank = source.raw || {};
+  const sourceBank = { ...source.raw, bank_name: source.bank_name, bank_account_no: source.bank_account_no, bank_details: source.bank_account_no, account_no: source.bank_account_no, bank_reference: source.bank_reference, bank_ifsc: source.bank_ifsc, branch: source.bank_ifsc };
   const paymentType = source.mode === 'cash' ? 'CASH' : 'BANK';
   const { rows } = await client.query(
     `INSERT INTO plot_payments
@@ -380,10 +264,10 @@ const insertPlotPayment = async (client, source, targetId, userId) => {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
      RETURNING *`,
     [
-      plot.id, source.site_id, source.date, old.payment_from || upper(source.raw_mode) || 'TRANSFER',
-      paymentType, old.bank_name || sourceBank.bank_name || null,
-      old.branch || sourceBank.bank_ifsc || sourceBank.branch || null,
-      old.bank_details || sourceBank.bank_account_no || sourceBank.account_no || null,
+      plot.id, source.site_id, source.date, source.payment_mode,
+      paymentType, sourceBank.bank_name || null,
+      sourceBank.bank_ifsc || sourceBank.branch || null,
+      sourceBank.bank_account_no || sourceBank.account_no || null,
       source.remarks || source.particular, old.received_by || null, plot.buyer_name, plot.booking_by,
       source.amount, source.voucher_url, source.status, source.approved_by, source.approved_at,
       source.assigned_admin_id, source.cheque_status, source.cheque_no, source.created_by || userId,
@@ -394,107 +278,138 @@ const insertPlotPayment = async (client, source, targetId, userId) => {
   return { row: rows[0], parent: { ...plot, name: `Plot ${plot.plot_no}` }, path: `/plot-payments/${plot.id}` };
 };
 
-const copyBankMapping = async (client, source, targetType, targetId) => {
-  if (!source.bank_account_id || targetType === 'personal_ledger') return;
-  const sourceModule = targetType === 'expense' ? 'expenses' : targetType === 'farmer_payment' ? 'farmer_payments' : 'plot_payments';
-  await client.query(
-    `UPDATE cash_flow_entries cfe
-        SET bank_account_id = ba.id
-       FROM bank_accounts ba
-      WHERE ba.id = $1
-        AND ba.site_id = cfe.site_id
-        AND cfe.source_module = $2
-        AND cfe.source_id = $3`,
-    [source.bank_account_id, sourceModule, targetId],
-  );
+const insertRow = async (db, table, data) => {
+  const keys = Object.keys(data);
+  const { rows } = await db.query(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${keys.map((_,i)=>`$${i+1}`).join(',')}) RETURNING *`, Object.values(data));
+  return rows[0];
+};
+const insertOther = async (db, source, type, targetId, userId) => {
+  const cfg = MODULES[type];
+  const common = { site_id:source.site_id, date:source.date, amount:source.amount, payment_mode:source.payment_mode,
+    remarks:source.remarks || source.particular, voucher_url:source.voucher_url, status:source.status,
+    approved_by:source.approved_by, approved_at:source.approved_at, assigned_admin_id:source.assigned_admin_id,
+    cheque_status:source.cheque_status, cheque_no:source.cheque_no, created_by:source.created_by || userId };
+  const bank = {bank_name:source.bank_name,bank_account_no:source.bank_account_no,bank_reference:source.bank_reference,bank_ifsc:source.bank_ifsc};
+  let data, parent = {id:null,name:cfg.label}, path;
+  if (type === 'plot_commission') {
+    const {rows} = await db.query(`SELECT pc.*,p.plot_no,p.status AS plot_status FROM plot_commissions_v2 pc JOIN plots p ON p.id=pc.plot_id WHERE pc.id=$1 AND pc.site_id=$2 FOR UPDATE OF pc,p`,[targetId,source.site_id]);
+    const master = rows[0];
+    if (!master || upper(master.plot_status)==='CANCELLED') throw new TransferError(409,'Choose an active commission destination');
+    const totals = await db.query(`SELECT COALESCE(SUM(amount),0) AS paid FROM plot_commission_payments WHERE plot_commission_id=$1 AND LOWER(COALESCE(status,'pending')) <> 'rejected' AND COALESCE(cheque_status,'') NOT IN ('BOUNCED','RETURNED')`,[targetId]);
+    const amount = source.direction==='debit' ? source.amount : -source.amount;
+    const paid = number(totals.rows[0].paid);
+    if (amount>0 && paid+amount>number(master.total_commission)+0.005) throw new TransferError(422,`Commission would exceed the agreed amount. Remaining: ${Math.max(0,number(master.total_commission)-paid).toFixed(2)}`);
+    data = {...common,plot_commission_id:targetId,amount,balance_after_payment:number(master.total_commission)-paid-amount,bank_name:source.bank_name,transaction_id:source.bank_reference};
+    parent = {id:targetId,name:`Plot ${master.plot_no}`}; path=`/plot-commission/plot/${master.plot_id}?site_id=${source.site_id}`;
+  } else if (type === 'vendor_payment') {
+    const {rows} = await db.query('SELECT * FROM vendor_commitments WHERE id=$1 AND site_id=$2 FOR UPDATE',[targetId,source.site_id]);
+    if (!rows[0] || ['CANCELLED','CANCELED'].includes(upper(rows[0].status))) throw new TransferError(409,'Choose an active vendor commitment');
+    data={...common,commitment_id:targetId,payment_date:source.date,reference_no:source.bank_reference,note:common.remarks};
+    delete data.date; delete data.remarks;
+    parent={id:targetId,name:rows[0].vendor_name}; path=`/vendors/${targetId}`;
+  } else if (type === 'misc_income') {
+    const {rows} = await db.query('SELECT id,name FROM misc_income_categories WHERE id=$1 AND is_active FOR SHARE',[targetId]);
+    if (!rows[0]) throw new TransferError(409,'Choose an active income category');
+    data={...common,...bank,category_id:targetId,direction:source.direction,party_name:source.particular};
+    parent=rows[0]; path='/misc-income';
+  } else if (type === 'registry_payment') {
+    const {rows} = await db.query('SELECT * FROM plot_registries WHERE id=$1 AND site_id=$2 FOR UPDATE',[targetId,source.site_id]);
+    if (!rows[0]) throw new TransferError(404,'Destination registry not found');
+    data={...common,registry_id:targetId,payment_date:source.date,notes:common.remarks,source_plot_payment_id:null,include_in_noc:false};
+    delete data.date; delete data.remarks;
+    parent={id:targetId,name:`Plot ${rows[0].plot_no}`}; path=`/plot-registry/${targetId}`;
+  } else if (type === 'land_sale') {
+    const {rows} = await db.query("SELECT id,buyer_name FROM land_deals WHERE id=$1 AND site_id=$2 AND status <> 'cancelled' FOR UPDATE",[targetId,source.site_id]);
+    if (!rows[0]) throw new TransferError(409,'Choose an active land sale');
+    data={...common,...bank,land_deal_id:targetId}; parent={id:targetId,name:rows[0].buyer_name}; path=`/farmers/land-profit/${targetId}`;
+  } else if (type === 'daybook') {
+    data={...common,particular:source.particular,entry_type:'TRANSFERRED ENTRY',debit:source.direction==='debit'?source.amount:0,credit:source.direction==='credit'?source.amount:0,
+      category:source.category || 'TRANSFERRED ENTRY',from_entity:source.from_entity,to_entity:source.to_entity,account_no:source.bank_account_no,branch:source.bank_ifsc};
+    delete data.amount; path='/daybook';
+  } else if (type === 'commission') {
+    data={...common,particular:source.particular,by_note:source.payment_mode}; delete data.payment_mode; path='/commissions';
+  } else throw new TransferError(400,'Unsupported destination');
+  return {row:await insertRow(db,cfg.table,data),parent,path};
+};
+const refreshCommission = async (db,id) => {
+  await db.query(`UPDATE plot_commissions_v2 pc SET status=CASE WHEN a.paid>=pc.total_commission THEN 'Completed' WHEN a.paid>0 THEN 'Partial' ELSE 'Pending' END, updated_at=NOW()
+    FROM (SELECT COALESCE(SUM(amount),0) AS paid FROM plot_commission_payments WHERE plot_commission_id=$1 AND financial_transaction_posts(CASE WHEN amount<0 THEN 'credit' ELSE 'debit' END,status,payment_mode,cheque_status)) a WHERE pc.id=$1`,[id]);
+};
+const deleteSource = async (db, source) => {
+  const key = {personal_ledger:'cash_flow_entry_id',farmer_payment:'farmer_payment_id',plot_payment:'plot_payment_id',vendor_payment:'vendor_payment_id',commission:'commission_id'}[source.type];
+  if (key) await db.query(`DELETE FROM day_book WHERE ${key}=$1`,[source.id]);
+  await db.query(`DELETE FROM ${MODULES[source.type].table} WHERE id=$1`,[source.id]);
 };
 
-const deleteSource = async (client, source) => {
-  if (source.type === 'personal_ledger') {
-    await client.query('DELETE FROM day_book WHERE cash_flow_entry_id = $1', [source.id]);
-    await client.query('DELETE FROM cash_flow_entries WHERE id = $1', [source.id]);
-  } else if (source.type === 'expense') {
-    const { rows } = await client.query('SELECT 1 FROM compliance_finance_links WHERE expense_id = $1 LIMIT 1', [source.id]);
-    if (rows[0]) throw new TransferError(409, 'This Expense is linked to a Compliance record and cannot be transferred');
-    await client.query('DELETE FROM expenses WHERE id = $1', [source.id]);
-  } else if (source.type === 'farmer_payment') {
-    await client.query('DELETE FROM day_book WHERE farmer_payment_id = $1', [source.id]);
-    await client.query('DELETE FROM farmer_payments WHERE id = $1', [source.id]);
-  } else if (source.type === 'plot_payment') {
-    const { rows } = await client.query('SELECT 1 FROM plot_registry_payments WHERE source_plot_payment_id = $1 LIMIT 1', [source.id]);
-    if (rows[0]) throw new TransferError(409, 'This Plot Payment is linked to a Registry record and cannot be transferred');
-    await client.query('DELETE FROM day_book WHERE plot_payment_id = $1', [source.id]);
-    await client.query('DELETE FROM plot_payments WHERE id = $1', [source.id]);
-  }
-};
-
-/** POST /transaction-transfers */
-export const transferEntry = asyncHandler(async (req, res) => {
-  const sourceType = String(req.body.source_type || '');
+// Exported transaction runner permits behavioral testing with an isolated database.
+export const executeTransfer = async (db, req) => {
+  const entries = normalizeEntries(req.body);
   const targetType = String(req.body.target_type || '');
-  const sourceId = asId(req.body.source_id, 'source id');
-  const targetId = targetType === 'expense' ? null : asId(req.body.target_id, 'destination');
-  const reason = String(req.body.reason || '').trim();
-  if (reason.length < 5 || reason.length > 500) throw new TransferError(400, 'Enter a transfer reason between 5 and 500 characters');
-  await requirePermission(req, sourceType, 'delete');
-  await requirePermission(req, targetType, 'write');
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const source = await loadSource(client, sourceType, sourceId, true);
-    await ensureSiteAccess(client, req, source.site_id);
-    if (!sameTimestamp(source.updated_at, req.body.source_version)) {
-      throw new TransferError(409, 'This entry changed after the transfer window opened. Review it and try again.');
-    }
-    const disabled = transferability(source, targetType);
-    if (disabled) throw new TransferError(422, disabled);
-    if (source.type === targetType && source.parent_id === targetId) {
-      throw new TransferError(422, 'Choose a different destination');
-    }
-
-    // Release the source debit before creating its replacement. Both actions
-    // remain in this transaction, so a failed destination insert restores the
-    // source on rollback, while a valid transfer never needs double imprest.
-    await deleteSource(client, source);
-
-    let target;
-    if (targetType === 'personal_ledger') target = await insertPersonalLedger(client, source, targetId, req.user.id);
-    else if (targetType === 'expense') target = await insertExpense(client, source, req.user.id);
-    else if (targetType === 'farmer_payment') target = await insertFarmerPayment(client, source, targetId, req.user.id);
-    else target = await insertPlotPayment(client, source, targetId, req.user.id);
-
-    await copyBankMapping(client, source, targetType, target.row.id);
-    const { rows: auditRows } = await client.query(
-      `INSERT INTO transaction_entry_transfers
-       (site_id,source_type,source_record_id,source_parent_id,source_parent_name,
-        target_type,target_record_id,target_parent_id,target_parent_name,entry_date,
-        direction,amount,reason,source_snapshot,target_snapshot,transferred_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-       RETURNING id, created_at`,
-      [
-        source.site_id, source.type, source.id, source.parent_id, source.parent_name,
-        targetType, target.row.id, target.parent.id, target.parent.name || target.parent.ledger_name,
-        source.date, source.direction, source.amount, reason, source.raw, target.row, req.user.id,
-      ],
-    );
-    await client.query('COMMIT');
-    clearCacheByPrefixes(['cashflow', 'expenses', 'farmers', 'plots', 'daybook', 'dashboard']).catch(() => {});
-    res.status(201).json({
-      message: `Entry transferred to ${LABEL_BY_TYPE[targetType]}`,
-      transfer: auditRows[0],
-      target: { type: targetType, id: target.row.id, parent_id: target.parent.id, path: target.path },
-    });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    if (error instanceof TransferError) return res.status(error.status).json({ message: error.message });
-    throw error;
-  } finally {
-    client.release();
+  await requirePermission(req,targetType,'write');
+  const targetId = MODULES[targetType].parent ? asId(req.body.target_id,'destination') : null;
+  const reason=String(req.body.reason || '').trim();
+  if (reason.length<5 || reason.length>500) throw new TransferError(422,'Enter a transfer reason between 5 and 500 characters');
+  const sources = [];
+  // Lock in a consistent order; competing batches cannot consume a source twice.
+  const ordered = [...entries].sort((a,b)=>a.source_type.localeCompare(b.source_type)||a.source_id-b.source_id);
+  for (const entry of ordered) {
+    const source=await loadSource(db,req,entry.source_type,entry.source_id,true);
+    if (source.version!==entry.source_version) throw new TransferError(409,`Entry #${source.id} changed. Reload the transfer window and review it again`);
+    if (source.type===targetType && Number(source.parent_id || 0)===Number(targetId || 0)) throw new TransferError(422,'Choose a different module or destination');
+    const edited=editSource(source,entry.edits);
+    if (MODULES[targetType].direction && edited.direction!==MODULES[targetType].direction) throw new TransferError(422,`${LABEL_BY_TYPE[targetType]} requires ${MODULES[targetType].direction} entries. Review the direction for entry #${source.id}`);
+    sources.push({source,edited});
   }
+  if (new Set(sources.map(({source})=>source.site_id)).size!==1) throw new TransferError(422,'Select entries from one site per batch');
+  // All source debits are released before destination inserts. A rollback restores
+  // the complete batch, including database-owned ledger/imprest projections.
+  for (const {source} of sources) await deleteSource(db,source);
+  const transfers=[];
+  for (const {source,edited} of sources) {
+    let target;
+    if (targetType==='personal_ledger') target=await insertPersonalLedger(db,edited,targetId,req.user.id);
+    else if (targetType==='expense') target=await insertExpense(db,edited,req.user.id);
+    else if (targetType==='farmer_payment') target=await insertFarmerPayment(db,edited,targetId,req.user.id);
+    else if (targetType==='plot_payment') target=await insertPlotPayment(db,edited,targetId,req.user.id);
+    else target=await insertOther(db,edited,targetType,targetId,req.user.id);
+    if (edited.bank_account_id && targetType!=='personal_ledger') await db.query(`UPDATE cash_flow_entries cfe SET bank_account_id=ba.id FROM bank_accounts ba WHERE ba.id=$1 AND ba.site_id=cfe.site_id AND cfe.source_module=$2 AND cfe.source_id=$3`,[edited.bank_account_id,MODULES[targetType].table,target.row.id]);
+    const {rows}=await db.query(`INSERT INTO transaction_entry_transfers (site_id,source_type,source_record_id,source_parent_id,source_parent_name,target_type,target_record_id,target_parent_id,target_parent_name,entry_date,direction,amount,reason,source_snapshot,target_snapshot,transferred_by)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id,created_at`,
+      [source.site_id,source.type,source.id,source.parent_id,source.parent_name,targetType,target.row.id,target.parent.id,target.parent.name || target.parent.ledger_name,edited.date,edited.direction,edited.amount,reason,source.raw,{...target.row,transfer_fields:edited},req.user.id]);
+    transfers.push({transfer:rows[0],source:{type:source.type,id:source.id},target:{type:targetType,id:target.row.id,parent_id:target.parent.id,path:target.path}});
+  }
+  const commissions = new Set(sources.filter(({source})=>source.type==='plot_commission').map(({source})=>source.parent_id));
+  if (targetType==='plot_commission') commissions.add(targetId);
+  for (const id of commissions) await refreshCommission(db,id);
+  return {message:`${transfers.length} ${transfers.length===1?'entry':'entries'} transferred to ${LABEL_BY_TYPE[targetType]}`,transfers,...(transfers.length===1?transfers[0]:{})};
+};
+export const transferEntry = asyncHandler(async (req,res) => {
+  const requestId=req.body.request_id;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId || '')) throw new TransferError(400,'A valid transfer request id is required. Reopen the transfer window');
+  const db=await pool.connect();
+  try {
+    await db.query('BEGIN');
+    await db.query("SET LOCAL lock_timeout = '8s'");
+    await db.query("SET LOCAL statement_timeout = '45s'");
+    const hash=versionOf(req.body);
+    await db.query('INSERT INTO transaction_transfer_batches (request_id,request_hash,transferred_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',[requestId,hash,req.user.id]);
+    const {rows}=await db.query('SELECT * FROM transaction_transfer_batches WHERE request_id=$1 FOR UPDATE',[requestId]);
+    const batch=rows[0];
+    if (Number(batch.transferred_by)!==Number(req.user.id) || batch.request_hash!==hash) throw new TransferError(409,'This request id has already been used for a different transfer');
+    const result=batch.response || await executeTransfer(db,req);
+    if (!batch.response) await db.query('UPDATE transaction_transfer_batches SET response=$2 WHERE request_id=$1',[requestId,result]);
+    await db.query('COMMIT');
+    await clearCacheByPrefixes(['cashflow','expenses','farmers','plots','plot-commission','plotCommission','commissions','vendors','misc-income','misc_income','registries','land-deals','daybook','dashboard','imprest','balance','graphql','analytics']).catch(()=>{});
+    res.status(batch.response?200:201).json(result);
+  } catch(error) {
+    await db.query('ROLLBACK');
+    throw error;
+  } finally { db.release(); }
 });
-
-export const handleTransferError = (error, req, res, next) => {
-  if (error instanceof TransferError) return res.status(error.status).json({ message: error.message });
+export const handleTransferError = (error,req,res,next) => {
+  if (error instanceof TransferError) return res.status(error.status).json({message:error.message});
+  if (['23503','23514','23505'].includes(error.code)) return res.status(409).json({message:'A destination rule or linked record prevents this transfer. No entries were changed. Review the destination and try again.'});
+  if (['40P01','55P03','57014','40001'].includes(error.code)) return res.status(409).json({message:'An entry is being changed by another request. No entries were transferred. Please retry.'});
+  if (['42P01','42703'].includes(error.code)) return res.status(503).json({message:'Transfer database update is required. Run migrate:universal-transfers on the backend.'});
   return next(error);
 };

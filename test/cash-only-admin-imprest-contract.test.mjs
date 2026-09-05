@@ -64,13 +64,14 @@ test('Imprest screens show cash-only distribution and no Admin self-draw', async
   const management = await readFrontend('src/pages/ImprestManagement.jsx');
   const ui = await readFrontend('src/components/imprest/ui.jsx');
 
-  assert.match(dashboard, /adminUsesSiteBalance[\s\S]*?site\?\.site_balance/);
-  assert.match(dashboard, /There is no Admin personal float/);
+  assert.match(dashboard, /displayedFloatBalance = adminUsesSiteBalance \? num\(site\?\.available\)/);
+  assert.match(dashboard, /Cash available for imprest/);
   assert.match(dashboard, /Cash available to distribute/);
+  assert.doesNotMatch(dashboard, /site\?\.site_balance|bank_balance|Bank · not distributable|modes=\{\['CASH', 'BANK'/);
   assert.doesNotMatch(dashboard, /Myself — draw|giveSelfDraw|override_reason/);
   assert.match(management, /CASH ONLY/);
   assert.doesNotMatch(management, /Myself — draw|value="self"/);
-  assert.match(ui, /Bank · not distributable/);
-  assert.match(ui, /\['Staff floats', money\(staffFloat\), '−'\]/);
+  assert.doesNotMatch(ui, /site\.site_balance|site\.bank_balance|Bank · not distributable/);
+  assert.match(ui, /\['Staff imprest', money\(staffFloat\), '−'\]/);
   assert.doesNotMatch(ui, /label="Admin float"|\['Admin float'/);
 });

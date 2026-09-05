@@ -98,7 +98,9 @@
     "worker:client-messages": "node src/workers/clientMessagingWorker.js",
     "test:spreadsheets": "node --test test/spreadsheet-ops.test.mjs test/spreadsheet-security-contract.test.mjs",
     "import:bank-daybook-statement-view": "node src/scripts/importBankDaybookStatementView.mjs",
-    "migrate:plot-nominee": "node src/migrations/145_plot_nominee.js"
+    "migrate:plot-nominee": "node src/migrations/145_plot_nominee.js",
+    "migrate:universal-transfers": "node src/migrations/146_universal_transaction_transfers.js",
+    "test:transfers": "node --test test/transaction-transfer*.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

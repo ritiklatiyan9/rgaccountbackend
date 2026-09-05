@@ -53,6 +53,11 @@ const lockImprestAccounts = async (db, ...userIds) => {
 // Admins never have a separate personal imprest float; Super Admin observes.
 const DISTRIBUTOR_ROLES = new Set(['admin']);
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);
+const isCashImprestMode = (mode) => (String(mode ?? '').trim().toUpperCase() || 'CASH') === 'CASH';
+const CASH_ONLY_EXPENSE_ERROR = {
+  code: 'IMPREST_CASH_ONLY',
+  message: 'Imprest expenses must be paid in cash. Record bank or UPI payments in the Expenses module.',
+};
 const FUNDING_HINT = 'Bring cash into the site first — or accept a staff imprest return — then distribute.';
 const canReviewImprestRequest = (user, request) => ADMIN_ROLES.has(user?.role)
   || (
@@ -899,7 +904,7 @@ export const getAllBalances = asyncHandler(async (req, res) => {
 export const createExpenseFromImprest = asyncHandler(async (req, res) => {
   const {
     site_id, date, from_entity, to_entity, payment_mode,
-    debit, credit, remark, account_no, branch, category, assigned_admin_id,
+    debit, credit, remark, category, assigned_admin_id,
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -912,6 +917,7 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
 
   const expenseAmount = parseFloat(debit) || 0;
   if (expenseAmount <= 0) return res.status(400).json({ message: 'Expense amount must be positive' });
+  if (!isCashImprestMode(payment_mode)) return res.status(400).json(CASH_ONLY_EXPENSE_ERROR);
 
   const proofKey = await uploadProof(req.file);
   const client = await pool.connect();
@@ -941,12 +947,12 @@ export const createExpenseFromImprest = asyncHandler(async (req, res) => {
       date: expenseDate,
       from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
       to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
-      payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : null,
+      payment_mode: 'CASH',
       debit: expenseAmount,
       credit: parseFloat(credit) || 0,
       remark: remark ? remark.trim().toUpperCase() : null,
-      account_no: account_no ? account_no.trim().toUpperCase() : null,
-      branch: branch ? branch.trim().toUpperCase() : null,
+      account_no: null,
+      branch: null,
       category: category ? category.trim().toUpperCase() : null,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       imprest_proof_key: proofKey,
@@ -1009,18 +1015,19 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
   const requestType = explicitType === 'IMPREST' || explicitType === 'EXPENSE'
     ? explicitType
     : hasExpenseFields ? 'EXPENSE' : 'IMPREST';
+  if (!isCashImprestMode(payment_mode)) return res.status(400).json(CASH_ONLY_EXPENSE_ERROR);
 
   const expenseData = {
     site_id: parsedSiteId,
     date: date || new Date().toISOString().split('T')[0],
     from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
     to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
-    payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : null,
+    payment_mode: 'CASH',
     debit: requestAmount,
     credit: parseFloat(credit) || 0,
     remark: remark ? remark.trim().toUpperCase() : null,
-    account_no: account_no ? account_no.trim().toUpperCase() : null,
-    branch: branch ? branch.trim().toUpperCase() : null,
+    account_no: null,
+    branch: null,
     category: category ? category.trim().toUpperCase() : null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
   };
@@ -1248,9 +1255,13 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     const storedExpenseData = typeof request.expense_data === 'string'
       ? JSON.parse(request.expense_data)
       : request.expense_data;
+    if (!isCashImprestMode(storedExpenseData?.payment_mode)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json(CASH_ONLY_EXPENSE_ERROR);
+    }
     // The request row owns the authoritative site. Never trust a stale or
     // legacy JSON payload to direct the approved expense into another site.
-    const expenseData = { ...storedExpenseData, site_id: request.site_id };
+    const expenseData = { ...storedExpenseData, site_id: request.site_id, payment_mode: 'CASH', account_no: null, branch: null };
     const expenseAmount = parseFloat(expenseData.debit) || requestAmount;
 
     // 2b. Create the expense

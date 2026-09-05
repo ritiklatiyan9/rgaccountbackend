@@ -3,6 +3,7 @@ import applicationSettingModel from '../models/ApplicationSetting.model.js';
 export const RECEIPT_DESIGN_KEY = 'receipt_design_v1';
 
 export const RECEIPT_TEMPLATE_IDS = Object.freeze([
+  'cash-simple', 'cash-lined', 'cash-compact',
   'executive-classic', 'emerald-ledger', 'midnight-corporate', 'royal-indigo',
   'sandstone-legal', 'ocean-blue', 'minimal-mono', 'maroon-deed',
   'teal-modern', 'copper-vintage', 'graphite-grid', 'forest-bond',
@@ -13,7 +14,7 @@ export const RECEIPT_TEMPLATE_IDS = Object.freeze([
 ]);
 
 export const RECEIPT_FIELD_KEYS = Object.freeze([
-  'organization', 'address', 'receipt_number', 'date', 'party', 'amount_words',
+  'organization', 'address', 'broker_name', 'broker_phone', 'broker_team', 'receipt_number', 'date', 'party', 'amount_words',
   'payment_mode', 'details', 'declaration', 'qr', 'customer_signature',
   'authority_signature', 'printed_at', 'evidence',
 ]);
@@ -33,6 +34,9 @@ const PAGE_SIZES = Object.freeze(['A4', 'A5']);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 const COMMON_FIELDS = Object.freeze({
+  broker_name: true,
+  broker_phone: true,
+  broker_team: true,
   organization: true,
   address: true,
   receipt_number: true,
@@ -72,31 +76,40 @@ const modeDefaults = (mode) => {
 };
 
 const baseModeDefaults = (mode) => ({
-  template_id: mode === 'cash' ? 'copper-vintage' : 'executive-classic',
+  template_id: mode === 'cash' ? 'cash-simple' : 'executive-classic',
   page_size: mode === 'cash' ? 'A5' : 'A4',
-  font_family: mode === 'cash' ? 'Georgia' : 'Inter',
+  font_family: mode === 'cash' ? 'Arial' : 'Inter',
   base_font_size: mode === 'cash' ? 11 : 12,
   heading_size: mode === 'cash' ? 26 : 30,
   amount_size: mode === 'cash' ? 34 : 48,
   colors: {
     primary: mode === 'cash' ? '#0f172a' : '#0f172a',
-    accent: mode === 'cash' ? '#b7791f' : '#047857',
+    accent: mode === 'cash' ? '#334155' : '#047857',
     text: '#111827',
     muted: '#64748b',
-    background: mode === 'cash' ? '#fffdf7' : '#ffffff',
+    background: '#ffffff',
   },
   fields: {
     ...COMMON_FIELDS,
-    qr: mode !== 'cash',
+    organization: mode !== 'cash',
+    address: mode !== 'cash',
+    qr: true,
     evidence: mode !== 'cash',
   },
-  detail_items: RECEIPT_DETAIL_ITEM_DEFAULTS.map((item) => ({
-    ...item,
-    sample: item.key === 'payment_mode' && mode !== 'cash' ? 'Bank Transfer' : item.sample,
-  })),
+  detail_items: [
+    ...(mode === 'cash' ? [
+      { key: 'plot_no', label: 'Plot No.', sample: 'A-18', enabled: true },
+      { key: 'plot_size', label: 'Plot Size', sample: '120 sq. yd.', enabled: true },
+      { key: 'received_by', label: 'Received By', sample: 'Amit Kumar', enabled: true },
+    ] : []),
+    ...RECEIPT_DETAIL_ITEM_DEFAULTS.map((item) => ({
+      ...item,
+      sample: item.key === 'payment_mode' && mode !== 'cash' ? 'Bank Transfer' : item.sample,
+    })),
+  ],
   content: {
     title: mode === 'cash' ? 'Cash Receipt' : 'Payment Receipt',
-    party_label: mode === 'cash' ? 'Party / account' : 'Party / context',
+    party_label: mode === 'cash' ? 'Received from' : 'Party / context',
     amount_label: mode === 'cash' ? 'Cash amount' : 'Transaction amount',
     details_label: 'Transaction particulars',
     declaration: mode === 'cash'
@@ -136,6 +149,12 @@ const normalizeMode = (value, mode) => {
   const normalizedFields = {};
   for (const key of RECEIPT_FIELD_KEYS) {
     normalizedFields[key] = typeof fields[key] === 'boolean' ? fields[key] : defaults.fields[key];
+  }
+
+  // Cash receipts never print the company identity, including legacy designs.
+  if (mode === 'cash') {
+    normalizedFields.organization = false;
+    normalizedFields.address = false;
   }
 
   return {
