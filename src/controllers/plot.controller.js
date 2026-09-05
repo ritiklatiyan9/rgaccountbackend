@@ -3,6 +3,7 @@ import { plotModel, plotPaymentModel, PP_COUNTABLE } from '../models/Plot.model.
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { withCompanyPlotBooking } from '../services/quickPlotBooking.service.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -610,7 +611,22 @@ export const deletePlot = asyncHandler(async (req, res) => {
 //  PLOT PAYMENT ENDPOINTS
 // ══════════════════════════════════════════════════
 
-/** POST /plots/payments — Create a payment */
+/** GET /plots/booking-clients — Lightweight, site-scoped buyer search. */
+export const listBookingClients = asyncHandler(async (req, res) => {
+  const siteId = Number(req.query.site_id);
+  if (!Number.isSafeInteger(siteId) || siteId <= 0) return res.status(400).json({ message: 'A valid site is required.' });
+  const query = String(req.query.q || '').trim().slice(0, 100);
+  const { rows } = await pool.query(
+    `SELECT id, full_name, phone FROM members
+      WHERE site_id = $1 AND status = 'ACTIVE'
+        AND (full_name ILIKE $2 OR phone ILIKE $2)
+      ORDER BY full_name, id LIMIT 50`,
+    [siteId, `%${query}%`],
+  );
+  res.json({ members: rows });
+});
+
+/** POST /plots/payments — Create a payment, optionally booking a company plot. */
 export const createPayment = asyncHandler(async (req, res) => {
   const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id } = req.body;
 
@@ -624,8 +640,9 @@ export const createPayment = asyncHandler(async (req, res) => {
   // Buyer and dealer are fixed to the parent plot so individual payments can
   // never lose or drift away from the selected plot's identities.
   // Was: SELECT plot + INSERT = 2 RTTs.
-  const result = await pool.query(
-    `WITH plot AS (SELECT id, site_id, buyer_name, booking_by FROM plots WHERE id = $1)
+  const savePayment = (db) => db.query(
+    `WITH plot AS (SELECT id, site_id, buyer_name, booking_by FROM plots WHERE id = $1
+       AND ($15::boolean IS NOT TRUE OR COALESCE(UPPER(TRIM(status)), '') <> 'COMPANY'))
      INSERT INTO plot_payments (
        plot_id, site_id, date, payment_from, payment_type, bank_details, bank_name,
        branch, narration, amount, created_by, voucher_url, assigned_admin_id, status,
@@ -650,11 +667,33 @@ export const createPayment = asyncHandler(async (req, res) => {
       assigned_admin_id ? parseInt(assigned_admin_id) : null,             // $12
       req.body.cheque_no ? String(req.body.cheque_no).trim() : null,      // $13
       normalizedPaymentType === 'CHEQUE' ? 'PENDING' : null,              // $14
+      req.body.require_booked_plot === true,                             // $15
     ]
   );
+  let result;
+  let bookedPlot;
+  if (req.body.booking_client_id !== undefined) {
+    if (!Number.isFinite(Number(amount)) || Number(amount) === 0) {
+      return res.status(400).json({ message: 'Enter a valid payment amount.' });
+    }
+    try {
+      ({ result, bookedPlot } = await withCompanyPlotBooking({
+        pool, plotId: plotIdInt, memberId: req.body.booking_client_id,
+        date: date || new Date().toISOString().slice(0, 10), savePayment,
+      }));
+    } catch (error) {
+      if (error.status) return res.status(error.status).json({ code: error.code, message: error.message });
+      throw error;
+    }
+  } else {
+    result = await savePayment(pool);
+  }
   const payment = result.rows[0];
+  if (!payment && req.body.require_booked_plot === true) {
+    return res.status(409).json({ code: 'PLOT_BOOKING_CHANGED', message: 'The plot is unavailable or needs booking. Select it again before saving.' });
+  }
   if (!payment) return res.status(404).json({ message: 'Plot not found' });
-  res.status(201).json({ payment });
+  res.status(201).json({ payment, ...(bookedPlot ? { plot: bookedPlot } : {}) });
 
 });
 

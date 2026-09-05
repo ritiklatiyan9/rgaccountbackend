@@ -3,6 +3,16 @@ import { memberModel } from '../models/Member.model.js';
 import { uploadSingle } from '../utils/upload.js';
 import pool from '../config/db.js';
 import { extractMemberKyc } from '../services/memberKycOcr.service.js';
+import { findPeopleByPlot } from '../services/plotPeople.service.js';
+
+export const searchMembersByPlot = asyncHandler(async (req, res) => {
+  const siteId = Number(req.query.site_id);
+  const plotNo = String(req.query.plot_no || '').trim();
+  if (!Number.isInteger(siteId) || siteId <= 0 || !plotNo || plotNo.length > 50) {
+    return res.status(400).json({ message: 'A valid site and plot number are required.' });
+  }
+  res.json(await findPeopleByPlot(siteId, plotNo, pool));
+});
 
 // ── MEMBER FIELDS (whitelist) ──
 export const MEMBER_FIELDS = [

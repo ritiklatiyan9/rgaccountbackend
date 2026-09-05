@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   createPlot, listPlots, searchPlots, getPlot, updatePlot, deletePlot,
   createPayment, listPayments, getPayment, updatePayment, deletePayment,
-  getAutocomplete, getPlotNocRegistry, createPlotNocRegistry,
+  getAutocomplete, getPlotNocRegistry, createPlotNocRegistry, listBookingClients,
 } from '../controllers/plot.controller.js';
 import {
   updateInstallmentSettings, listInstallments, createInstallments,
@@ -36,8 +36,12 @@ const accessByQueryPlot = requirePlotSiteAccess({ entity: 'plot', source: 'query
 const accessByBodyPlot = requirePlotSiteAccess({ entity: 'plot', source: 'body', key: 'plot_id' });
 const accessByParamPayment = requirePlotSiteAccess({ entity: 'payment', source: 'params', key: 'id' });
 const accessByParamInstallment = requirePlotSiteAccess({ entity: 'installment', source: 'params', key: 'instId' });
+const requireBookingPermission = (req, res, next) => req.body.booking_client_id !== undefined
+  ? requirePermission('plot_payments', 'update')(req, res, next)
+  : next();
 
 // ── Plot endpoints ──
+router.get('/booking-clients', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, listBookingClients);
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, listPlots);                                        // ?site_id=X
 router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, searchPlots);                                 // ?site_id=X&q=A67
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotMetaCache, getAutocomplete);                      // ?site_id=X
@@ -59,7 +63,7 @@ router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot
 // ── Payment endpoints ──
 router.get('/payments/list', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQueryPlot, plotReadCache, listPayments);                        // ?plot_id=X
 router.get('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPayment, plotReadCache, getPayment);
-router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByBodyPlot, bustPlotCache, createPayment);
+router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), requireBookingPermission, accessByBodyPlot, bustPlotCache, createPayment);
 router.put('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPayment, bustPlotCache, updatePayment);
 router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), accessByParamPayment, bustPlotCache, deletePayment);
 
