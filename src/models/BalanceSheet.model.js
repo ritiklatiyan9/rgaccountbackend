@@ -222,11 +222,11 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
   -- Parameter 10 is the timeline grain used by the metadata query. Keep its type
   -- explicit here because this query shares the same 12-parameter contract.
   WHERE $10::text IS NOT NULL
-  -- Date order always wins; saved manual positions only arrange rows WITHIN a
-  -- date. Apply LIMIT before data reaches Node instead of aggregating rows into
-  -- a monolithic JSONB value inside PostgreSQL.
-  ORDER BY entry_date DESC,
-           global_display_position ASC NULLS LAST,
+  -- A saved sequence may move rows across dates. Date order is the fallback
+  -- for entries without a manual position. Apply the order before LIMIT so
+  -- subsequent reads and pages preserve the sequence the user saved.
+  ORDER BY global_display_position ASC NULLS LAST,
+           entry_date DESC,
            display_position ASC NULLS LAST,
            created_at DESC,
            id DESC

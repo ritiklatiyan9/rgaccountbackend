@@ -184,8 +184,8 @@ export async function applyBankDaybookOrder(client, {
           WHERE le.site_id = $1
           GROUP BY 1
          ) ordered
-        ORDER BY ordered.entry_date DESC,
-                 ordered.global_position ASC NULLS LAST,
+        ORDER BY ordered.global_position ASC NULLS LAST,
+                 ordered.entry_date DESC,
                  ordered.local_position ASC NULLS LAST,
                  ordered.created_at DESC,
                  ordered.ledger_id DESC`,
@@ -234,4 +234,3 @@ export async function applyBankDaybookOrder(client, {
     dates: desiredByDate.size,
   };
 }
-

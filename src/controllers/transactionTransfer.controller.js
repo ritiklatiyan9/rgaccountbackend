@@ -387,6 +387,7 @@ export const transferEntry = asyncHandler(async (req,res) => {
   const requestId=req.body.request_id;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId || '')) throw new TransferError(400,'A valid transfer request id is required. Reopen the transfer window');
   const db=await pool.connect();
+  let committed=false;
   try {
     await db.query('BEGIN');
     await db.query("SET LOCAL lock_timeout = '8s'");
@@ -399,10 +400,11 @@ export const transferEntry = asyncHandler(async (req,res) => {
     const result=batch.response || await executeTransfer(db,req);
     if (!batch.response) await db.query('UPDATE transaction_transfer_batches SET response=$2 WHERE request_id=$1',[requestId,result]);
     await db.query('COMMIT');
+    committed=true;
     await clearCacheByPrefixes(['cashflow','expenses','farmers','plots','plot-commission','plotCommission','commissions','vendors','misc-income','misc_income','registries','land-deals','daybook','dashboard','imprest','balance','graphql','analytics']).catch(()=>{});
     res.status(batch.response?200:201).json(result);
   } catch(error) {
-    await db.query('ROLLBACK');
+    if (!committed) {await db.query('ROLLBACK');error.transferRolledBack=true;}
     throw error;
   } finally { db.release(); }
 });
@@ -410,6 +412,10 @@ export const handleTransferError = (error,req,res,next) => {
   if (error instanceof TransferError) return res.status(error.status).json({message:error.message});
   if (['23503','23514','23505'].includes(error.code)) return res.status(409).json({message:'A destination rule or linked record prevents this transfer. No entries were changed. Review the destination and try again.'});
   if (['40P01','55P03','57014','40001'].includes(error.code)) return res.status(409).json({message:'An entry is being changed by another request. No entries were transferred. Please retry.'});
-  if (['42P01','42703'].includes(error.code)) return res.status(503).json({message:'Transfer database update is required. Run migrate:universal-transfers on the backend.'});
+  if (['42P01','42703'].includes(error.code)) return res.status(503).json({message:'Transfer database update is required. Run migrate:universal-transfers on the backend.',transfer_state:'not_applied'});
+  if (error.transferRolledBack) {
+    console.error('Transaction transfer rolled back:', error.code || error.message);
+    return res.status(500).json({message:'Transfer failed. No entries were changed. Please retry.',transfer_state:'not_applied'});
+  }
   return next(error);
 };

@@ -1297,7 +1297,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
 /**
  * PUT /daybook/order
  * Persist the presentation sequence for one or more dates in a site's Day Book.
- * This intentionally writes only daybook_entry_order; owning transaction
+ * This intentionally writes only Day Book presentation tables; owning transaction
  * modules and accounting values are never touched.
  */
 export const updateDayBookOrder = asyncHandler(async (req, res) => {
@@ -1320,8 +1320,8 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
   }
 
   // Presentation-only site-wide sequence; transaction dates remain unchanged.
-  // Date order always dominates the statement — these positions only arrange
-  // entries relative to each other WITHIN their accounting date.
+  // Saved positions take precedence over dates, matching the statement read
+  // order so cross-date moves survive a refresh and subsequent partial saves.
   if (req.body.global_entry_keys !== undefined) {
     const requestedKeys = req.body.global_entry_keys;
     if (!Array.isArray(requestedKeys) || requestedKeys.length === 0 || requestedKeys.length > 100000) {
@@ -1410,8 +1410,8 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
               WHERE le.site_id = $1
               GROUP BY 1
              ) ordered
-            ORDER BY ordered.entry_date DESC,
-                     ordered.global_position ASC NULLS LAST,
+            ORDER BY ordered.global_position ASC NULLS LAST,
+                     ordered.entry_date DESC,
                      ordered.local_position ASC NULLS LAST,
                      ordered.created_at DESC,
                      ordered.ledger_id DESC`,
