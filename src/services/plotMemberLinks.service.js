@@ -3,7 +3,10 @@
 export const PLOT_BUYER_MEMBER_JOIN = `
   LEFT JOIN LATERAL (
     SELECT COALESCE(
-      (SELECT m.id FROM members m WHERE m.id = p.buyer_member_id AND m.site_id = p.site_id),
+      -- Migration 149 may still be pending during deployment. A missing
+      -- optional buyer link must not break member lists or plot searches.
+      (SELECT m.id FROM members m
+        WHERE m.id = (to_jsonb(p)->>'buyer_member_id')::integer AND m.site_id = p.site_id),
       (SELECT m.id
          FROM bookings b JOIN members m ON m.id = b.client_member_id AND m.site_id = p.site_id
         WHERE b.plot_id = p.id AND b.site_id = p.site_id

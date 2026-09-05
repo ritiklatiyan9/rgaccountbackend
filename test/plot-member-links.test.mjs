@@ -93,6 +93,29 @@ test('PostgreSQL resolves recorded buyers, ambiguous names, brokers and KYC with
     assert.equal(await validatePlotBuyerMember(10, 2, db), 2);
     await assert.rejects(validatePlotBuyerMember(10, 6, db), { statusCode: 400 });
     await assert.rejects(validatePlotBuyerMember(10, 999, db), { statusCode: 400 });
+
+    // Reproduce the deployment state where migration 149 has not added the
+    // buyer_member_id column at all (different from a present, NULL column).
+    const legacyFixtures = fixtures.replace(
+      'CASE WHEN id = 109 THEN 2 WHEN id = 110 THEN 1 WHEN id = 105 THEN 6 END AS buyer_member_id,',
+      '',
+    );
+    const legacyDb = { query: (sql, params) => client.query(legacyFixtures + sql, params) };
+    const legacyGrouped = await findMemberPlotNumbers(10, legacyDb);
+    assert.deepEqual(legacyGrouped.get('1'), ['A10', 'B2']);
+    assert.deepEqual(legacyGrouped.get('3'), ['B1', 'D1']);
+    assert.equal(legacyGrouped.has('2'), false);
+    assert.equal(legacyGrouped.has('6'), false);
+    const legacyBuyers = await client.query(`${legacyFixtures}
+      SELECT p.id, plot_buyer.id AS buyer_member_id
+      FROM plots p ${PLOT_BUYER_MEMBER_JOIN}
+      WHERE p.site_id = $1 AND p.id IN (103, 104, 109, 110) ORDER BY p.id`, [10]);
+    assert.deepEqual(legacyBuyers.rows, [
+      { id: 103, buyer_member_id: null },
+      { id: 104, buyer_member_id: 3 },
+      { id: 109, buyer_member_id: 3 },
+      { id: 110, buyer_member_id: null },
+    ]);
   } finally {
     await client.query('ROLLBACK');
     client.release();
