@@ -41,6 +41,11 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
              ) positions
            ) ordered
        ), '[]'::jsonb) AS saved_order_rows,
+       COALESCE((SELECT jsonb_object_agg(
+         CONCAT(COALESCE(cfe.source_module, 'personal_ledger'), ':', COALESCE(cfe.source_id, cfe.id)),
+         cfe.transaction_time)
+         FROM cash_flow_entries cfe WHERE cfe.site_id = $1 AND cfe.date = $2::date
+           AND ($3::int IS NULL OR cfe.created_by = $3::int)), '{}'::jsonb) AS entry_times,
        COALESCE((
          SELECT dos.revision
            FROM daybook_order_state dos
@@ -84,6 +89,7 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
   const row = rows[0] || {};
   return {
     savedOrderRows: row.saved_order_rows || [],
+    entryTimes: row.entry_times || {},
     orderRevision: Number(row.order_revision) || 0,
     siteRow: row.site_row || null,
     dailyBalanceRow: row.daily_balance_row || null,

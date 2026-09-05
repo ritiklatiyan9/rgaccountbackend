@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { farmerModel, farmerPaymentModel } from '../models/Farmer.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
@@ -277,9 +278,9 @@ export const createPayment = asyncHandler(async (req, res) => {
          farmer_id, date, particular, amount, by_note, remarks,
          payment_mode, cash_amount, bank_amount, bank_name, bank_account_no,
          bank_reference, bank_ifsc, voucher_url, assigned_admin_id, status,
-         cheque_no, cheque_status, created_by
+         cheque_no, cheque_status, created_by, transaction_time
        )
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, $17, $18
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, $17, $18, $25::time
        FROM f
        RETURNING *
      ),
@@ -287,7 +288,7 @@ export const createPayment = asyncHandler(async (req, res) => {
        INSERT INTO day_book (
          site_id, date, particular, entry_type, debit, credit, remarks,
          payment_mode, category, from_entity, to_entity,
-         created_by, assigned_admin_id, farmer_payment_id
+         created_by, assigned_admin_id, farmer_payment_id, transaction_time
        )
        SELECT
          f.site_id,
@@ -296,7 +297,7 @@ export const createPayment = asyncHandler(async (req, res) => {
          'FARMER PAYMENT',
          $19::numeric, 0, $20::text,
          'CASH', 'FARMER PAYMENT', NULL, UPPER(f.name),
-         $18::int, $15::int, np.id
+         $18::int, $15::int, np.id, $25::time
        FROM f, new_payment np
        WHERE $19::numeric > 0
        RETURNING *
@@ -305,7 +306,7 @@ export const createPayment = asyncHandler(async (req, res) => {
        INSERT INTO day_book (
          site_id, date, particular, entry_type, debit, credit, remarks,
          payment_mode, category, from_entity, to_entity,
-         account_no, branch, created_by, assigned_admin_id, farmer_payment_id
+         account_no, branch, created_by, assigned_admin_id, farmer_payment_id, transaction_time
        )
        SELECT
          f.site_id,
@@ -314,7 +315,7 @@ export const createPayment = asyncHandler(async (req, res) => {
          'FARMER PAYMENT',
          $21::numeric, 0, $22::text,
          $23::text, 'FARMER PAYMENT', $24::text, UPPER(f.name),
-         $11::text, $13::text, $18::int, $15::int, np.id
+         $11::text, $13::text, $18::int, $15::int, np.id, $25::time
        FROM f, new_payment np
        WHERE $21::numeric > 0
        RETURNING *
@@ -351,6 +352,7 @@ export const createPayment = asyncHandler(async (req, res) => {
       bankRemarks,                  // $22 (bank remarks)
       particularUpper,              // $23 (bank payment_mode)
       bankNameUpper,                // $24 (bank from_entity)
+      transactionTimeForWrite(),    // $25
     ]
   );
 

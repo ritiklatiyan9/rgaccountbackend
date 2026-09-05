@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 // Land Profit — the SELL side of the Farmers module.
 //
 // A `land_deals` row is one parcel (bought from a farmer, tracked in farmers /
@@ -397,13 +398,13 @@ export const createPayment = asyncHandler(async (req, res) => {
     `INSERT INTO land_deal_payments (
        land_deal_id, site_id, date, amount, payment_mode, bank_name, bank_account_no,
        bank_reference, bank_ifsc, cheque_no, cheque_status, remarks, voucher_url,
-       status, assigned_admin_id, created_by
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14,$15)
+       status, assigned_admin_id, created_by, transaction_time
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14,$15,$16::time)
      RETURNING *`,
     [dealId, deal.site_id, data.date, data.amount, data.payment_mode, data.bank_name,
       data.bank_account_no, data.bank_reference, data.bank_ifsc, data.cheque_no,
       data.payment_mode === 'CHEQUE' ? 'PENDING' : null, data.remarks, data.voucher_url,
-      data.assigned_admin_id, req.user.id],
+      data.assigned_admin_id, req.user.id, transactionTimeForWrite()],
   );
   res.status(201).json({ payment: created[0], message: 'Receipt recorded and is pending approval' });
 });
@@ -425,11 +426,11 @@ export const updatePayment = asyncHandler(async (req, res) => {
     `UPDATE land_deal_payments SET
        date=$2, amount=$3, payment_mode=$4, bank_name=$5, bank_account_no=$6, bank_reference=$7,
        bank_ifsc=$8, cheque_no=$9, cheque_status=$10, remarks=$11, voucher_url=$12,
-       assigned_admin_id=$13, status='pending', approved_by=NULL, approved_at=NULL, updated_at=NOW()
+       assigned_admin_id=$13, transaction_time=$14::time, status='pending', approved_by=NULL, approved_at=NULL, updated_at=NOW()
      WHERE id=$1 RETURNING *`,
     [paymentId, data.date, data.amount, data.payment_mode, data.bank_name, data.bank_account_no,
       data.bank_reference, data.bank_ifsc, data.cheque_no,
-      data.payment_mode === 'CHEQUE' ? 'PENDING' : null, data.remarks, data.voucher_url, data.assigned_admin_id],
+      data.payment_mode === 'CHEQUE' ? 'PENDING' : null, data.remarks, data.voucher_url, data.assigned_admin_id, transactionTimeForWrite(existing.transaction_time ?? null)],
   );
   res.json({ payment: updated[0], message: 'Receipt updated and sent for approval' });
 });

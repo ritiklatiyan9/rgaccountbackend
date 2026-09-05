@@ -1,3 +1,4 @@
+import { transactionTimeContext, normalizeTransactionTime, withTransactionTime } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { editRequestModel } from '../models/EditRequest.model.js';
 import { farmerModel, farmerPaymentModel } from '../models/Farmer.model.js';
@@ -114,7 +115,7 @@ const MODULE_MAP = {
       const existing = rows[0];
       if (!existing) throw new Error('Farmer payment no longer exists');
 
-      const allowed = {};
+      const allowed = withTransactionTime('farmer_payments', {});
       for (const key of [
         'date', 'particular', 'by_note', 'interest_rate', 'interest_amount',
         'remarks', 'farmer_id', 'bank_name', 'bank_account_no', 'bank_reference',
@@ -170,7 +171,7 @@ const MODULE_MAP = {
       // Keep cheque metadata in the same write as its payment mode so an
       // approved edit can never leave CHEQUE + NULL cheque_status behind.
       const existing = await plotPaymentModel.findById(parseInt(id), db);
-      const allowed = {};
+      const allowed = withTransactionTime('plot_payments', {});
       if (data.date !== undefined) allowed.date = data.date;
       if (data.payment_from !== undefined) allowed.payment_from = data.payment_from;
       if (data.payment_type !== undefined) allowed.payment_type = data.payment_type;
@@ -197,7 +198,7 @@ const MODULE_MAP = {
     fetchOriginal: async (id, db = pool) => dayBookModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
       // day_book columns: date, particular, entry_type, debit, credit, remarks, payment_mode, category, from_entity, to_entity, account_no, branch
-      const allowed = {};
+      const allowed = withTransactionTime('day_book', {});
       for (const key of ['date', 'particular', 'entry_type', 'debit', 'credit', 'remarks', 'payment_mode', 'category', 'from_entity', 'to_entity', 'account_no', 'branch']) {
         if (data[key] !== undefined) allowed[key] = data[key];
       }
@@ -211,7 +212,7 @@ const MODULE_MAP = {
     fetchOriginal: async (id, db = pool) => expenseModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
       // expenses columns: date, from_entity, to_entity, payment_mode, debit, credit, remark, account_no, branch, category
-      const allowed = {};
+      const allowed = withTransactionTime('expenses', {});
       if (data.date !== undefined) allowed.date = data.date;
       if (data.from_entity !== undefined) allowed.from_entity = data.from_entity;
       if (data.to_entity !== undefined) allowed.to_entity = data.to_entity;
@@ -243,7 +244,7 @@ const MODULE_MAP = {
       // Map Day Book presentation fields back to the canonical owner. Detailed
       // bank methods (RTGS/NEFT/UPI/etc.) stay in particular while the coupled
       // accounting tuple uses the canonical BANK bucket.
-      const fpUpdate = {};
+      const fpUpdate = withTransactionTime('farmer_payments', {});
       if (data.date !== undefined) fpUpdate.date = data.date;
       if (data.payment_mode !== undefined) {
         fpUpdate.particular = data.payment_mode
@@ -324,7 +325,7 @@ const MODULE_MAP = {
     fetchOriginal: async (id, db = pool) => plotCommissionModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
       // Map daybook form fields → plot_commissions columns
-      const pcUpdate = {};
+      const pcUpdate = withTransactionTime('plot_commissions', {});
       if (data.date !== undefined) pcUpdate.date = data.date;
       if (data.particular !== undefined) pcUpdate.particular = data.particular;
       if (data.father_name !== undefined) pcUpdate.father_name = data.father_name;
@@ -342,7 +343,7 @@ const MODULE_MAP = {
       // Sync linked daybook entry
       const linkedDb = await db.query('SELECT id FROM day_book WHERE commission_id = $1', [parseInt(id)]);
       if (linkedDb.rows.length > 0) {
-        const dbUpdate = {};
+        const dbUpdate = withTransactionTime('day_book', {});
         for (const key of ['date', 'particular', 'entry_type', 'debit', 'credit', 'remarks', 'payment_mode', 'category', 'from_entity', 'to_entity', 'account_no', 'branch']) {
           if (data[key] !== undefined) dbUpdate[key] = data[key];
         }
@@ -357,7 +358,7 @@ const MODULE_MAP = {
     fetchOriginal: async (id, db = pool) => cashFlowEntryModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
       // Map daybook form fields → cash_flow_entries columns
-      const cfUpdate = {};
+      const cfUpdate = withTransactionTime('cash_flow_entries', {});
       if (data.date !== undefined) cfUpdate.date = data.date;
       if (data.particular !== undefined) cfUpdate.particular = data.particular;
       if (data.debit !== undefined) cfUpdate.debit = parseFloat(data.debit) || 0;
@@ -371,7 +372,7 @@ const MODULE_MAP = {
       // Sync linked daybook entry
       const linkedDb = await db.query('SELECT id FROM day_book WHERE cash_flow_entry_id = $1', [parseInt(id)]);
       if (linkedDb.rows.length > 0) {
-        const dbUpdate = {};
+        const dbUpdate = withTransactionTime('day_book', {});
         for (const key of ['date', 'particular', 'entry_type', 'debit', 'credit', 'remarks', 'payment_mode', 'category', 'from_entity', 'to_entity', 'account_no', 'branch']) {
           if (data[key] !== undefined) dbUpdate[key] = data[key];
         }
@@ -386,7 +387,7 @@ const MODULE_MAP = {
     fetchOriginal: async (id, db = pool) => firmTransactionModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
       // Map daybook form fields → firm_transactions columns
-      const ftUpdate = {};
+      const ftUpdate = withTransactionTime('firm_transactions', {});
       if (data.date !== undefined) ftUpdate.date = data.date;
       if (data.particular !== undefined) ftUpdate.description = data.particular; // daybook particular → ft description
       if (data.debit !== undefined) ftUpdate.debit = parseFloat(data.debit) || 0;
@@ -403,7 +404,7 @@ const MODULE_MAP = {
       // Sync linked daybook entry
       const linkedDb = await db.query('SELECT id FROM day_book WHERE firm_transaction_id = $1', [parseInt(id)]);
       if (linkedDb.rows.length > 0) {
-        const dbUpdate = {};
+        const dbUpdate = withTransactionTime('day_book', {});
         for (const key of ['date', 'particular', 'entry_type', 'debit', 'credit', 'remarks', 'payment_mode', 'category', 'from_entity', 'to_entity', 'account_no', 'branch']) {
           if (data[key] !== undefined) dbUpdate[key] = data[key];
         }
@@ -419,7 +420,7 @@ const MODULE_MAP = {
     applyUpdate: async (id, data, editReq, db = pool) => {
       // Map daybook form fields → plot_payments columns
       const existing = await plotPaymentModel.findById(parseInt(id), db);
-      const ppUpdate = {};
+      const ppUpdate = withTransactionTime('plot_payments', {});
       if (data.date !== undefined) ppUpdate.date = data.date;
       if (data.pp_payment_from !== undefined) ppUpdate.payment_from = data.pp_payment_from;
       if (data.pp_payment_type !== undefined) ppUpdate.payment_type = data.pp_payment_type;
@@ -446,7 +447,7 @@ const MODULE_MAP = {
       // Sync linked daybook entry
       const linkedDb = await db.query('SELECT id FROM day_book WHERE plot_payment_id = $1', [parseInt(id)]);
       if (linkedDb.rows.length > 0) {
-        const dbUpdate = {};
+        const dbUpdate = withTransactionTime('day_book', {});
         for (const key of ['date', 'particular', 'entry_type', 'debit', 'credit', 'remarks', 'payment_mode', 'category', 'from_entity', 'to_entity', 'account_no', 'branch']) {
           if (data[key] !== undefined) dbUpdate[key] = data[key];
         }
@@ -664,6 +665,13 @@ export const createEditRequest = asyncHandler(async (req, res) => {
     }
     if (!parsedProposed || typeof parsedProposed !== 'object' || Array.isArray(parsedProposed)) {
       return rejectCreateRequest(res, 400, 'proposed_data must be an object');
+    }
+    if (Object.hasOwn(parsedProposed, 'transaction_time')) {
+      try {
+        parsedProposed.transaction_time = normalizeTransactionTime(parsedProposed.transaction_time);
+      } catch (error) {
+        return rejectCreateRequest(res, 400, error.message);
+      }
     }
 
     // Resolve the real record before accepting the caller-supplied site. The
@@ -924,7 +932,10 @@ export const approveEditRequest = asyncHandler(async (req, res) => {
 
     let applied;
     try {
-      applied = await handler.applyUpdate(editReq.record_id, proposedData, editReq, client);
+      applied = await transactionTimeContext.run({
+        supplied: Object.hasOwn(proposedData, 'transaction_time'),
+        value: normalizeTransactionTime(proposedData.transaction_time),
+      }, () => handler.applyUpdate(editReq.record_id, proposedData, editReq, client));
     } catch (error) {
       throw workflowError(400, `Could not apply this request: ${error.message}`);
     }

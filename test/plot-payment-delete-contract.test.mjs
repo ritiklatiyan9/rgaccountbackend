@@ -23,5 +23,9 @@ test('deleting a plot payment also removes its linked registry projection atomic
 
 test('plot mutations invalidate registry caches when a payment is deleted', () => {
   const routes = read('../src/routes/plot.routes.js');
-  assert.match(routes, /invalidateCacheOnSuccess\(\['plots\|', '\/daybook', 'registries\|', 'registries-meta\|'\]\)/);
+  const invalidation = routes.match(/const bustPlotCache = invalidateCacheOnSuccess\(\[([^\]]+)\]\)/)?.[1];
+  assert.ok(invalidation, 'plot writes must invalidate related reads');
+  for (const prefix of ['plots|', 'plots:pageData:', 'members|', '/daybook', 'registries|', 'registries-meta|']) {
+    assert.ok(invalidation.includes(`'${prefix}'`), `Missing invalidation for ${prefix}`);
+  }
 });

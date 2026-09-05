@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotCommissionV2Model, plotCommissionPaymentModel } from '../models/PlotCommissionV2.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
@@ -497,14 +498,14 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
          site_id, plot_commission_id, date, amount, balance_after_payment,
          payment_mode, bank_name, transaction_id, remarks, status,
          voucher_number, voucher_url, assigned_admin_id, created_by,
-         cheque_no, cheque_status
+         cheque_no, cheque_status, transaction_time
        )
        SELECT
          m.site_id, $1, $2::date, $3::numeric,
          (m.total_commission - (m.already_paid + $3::numeric)),
          $4::text, $5::text, $6::text, $7::text, 'pending',
          $8::text, $9::text, $10::int, $11::int,
-         $12::text, $13::text
+         $12::text, $13::text, $14::time
        FROM master m
        RETURNING *
      )
@@ -523,6 +524,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
       req.user.id,                                                // $11
       cheque_no ? cheque_no.trim() : null,                        // $12
       chequeStatus,                                               // $13
+      transactionTimeForWrite(),                                  // $14
     ]
   );
 
@@ -649,6 +651,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   const values = [];
   const add = (col, val) => { fields.push(`${col} = $${fields.length + 1}`); values.push(val); };
 
+  add('transaction_time', transactionTimeForWrite(existing.transaction_time ?? null));
   if (date !== undefined) add('date', date);
   if (amount !== undefined) add('amount', parseFloat(amount));
   if (payment_mode !== undefined) add('payment_mode', payment_mode);

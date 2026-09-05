@@ -109,7 +109,7 @@ export async function getPlotAutocomplete(siteId, creatorId = null) {
     ORDER BY type, val
   `;
   const memberQuery = `
-    SELECT full_name, phone, team, member_type
+    SELECT id, full_name, phone, team, member_type
     FROM members
     WHERE site_id = $1 AND full_name IS NOT NULL AND full_name != ''
     ORDER BY full_name ASC
@@ -149,6 +149,7 @@ export async function getPlotAutocomplete(siteId, creatorId = null) {
 
   // Members
   autocomplete.members = memberRes.rows.map(r => ({
+    id: r.id,
     name: r.full_name,
     phone: r.phone || '',
     team: r.team || '',

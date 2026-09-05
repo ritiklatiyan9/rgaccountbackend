@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import {
   imprestAllocationModel,
@@ -1018,6 +1019,7 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
   if (!isCashImprestMode(payment_mode)) return res.status(400).json(CASH_ONLY_EXPENSE_ERROR);
 
   const expenseData = {
+    transaction_time: transactionTimeForWrite(),
     site_id: parsedSiteId,
     date: date || new Date().toISOString().split('T')[0],
     from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
@@ -1261,7 +1263,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     }
     // The request row owns the authoritative site. Never trust a stale or
     // legacy JSON payload to direct the approved expense into another site.
-    const expenseData = { ...storedExpenseData, site_id: request.site_id, payment_mode: 'CASH', account_no: null, branch: null };
+    const expenseData = { ...storedExpenseData, transaction_time: storedExpenseData?.transaction_time ?? request.transaction_time ?? null, site_id: request.site_id, payment_mode: 'CASH', account_no: null, branch: null };
     const expenseAmount = parseFloat(expenseData.debit) || requestAmount;
 
     // 2b. Create the expense
@@ -1277,6 +1279,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     const dayBookData = {
       site_id: parseInt(request.site_id),
       date: expenseData.date || new Date().toISOString().split('T')[0],
+      transaction_time: expenseData.transaction_time,
       particular: `IMPREST EXPENSE: ${expenseData.remark || expenseData.to_entity || 'ADMIN APPROVED'}`.toUpperCase(),
       // ponytail: entry_type IMPREST — the approved expenses row already reaches
       // ledger_entries; this memo row must stay excluded or the spend counts twice.

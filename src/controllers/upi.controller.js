@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 
@@ -122,9 +123,9 @@ export const createQr = asyncHandler(async (req, res) => {
 
   const txnRef = `DGQ${Date.now().toString(36).toUpperCase()}${Math.floor(Math.random() * 1296).toString(36).toUpperCase()}`;
   const result = await pool.query(
-    `INSERT INTO payment_qrs (site_id, upi_account_id, amount, note, txn_ref, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [parseInt(site_id), acc.id, amt.toFixed(2), note?.trim() || null, txnRef, req.user.id]
+    `INSERT INTO payment_qrs (site_id, upi_account_id, amount, note, txn_ref, created_by, transaction_time)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::time) RETURNING *`,
+    [parseInt(site_id), acc.id, amt.toFixed(2), note?.trim() || null, txnRef, req.user.id, transactionTimeForWrite()]
   );
   res.status(201).json({ qr: { ...result.rows[0], vpa: acc.vpa, payee_name: acc.payee_name, account_label: acc.label } });
 });
@@ -196,6 +197,8 @@ export const updateQr = asyncHandler(async (req, res) => {
     sets.push(`note = $${i++}`);
     params.push(note?.trim() || null);
   }
+  sets.push(`transaction_time = $${i++}::time`);
+  params.push(transactionTimeForWrite(existing.transaction_time ?? null));
   if (!sets.length) return res.status(400).json({ message: 'Nothing to update' });
   params.push(id);
 

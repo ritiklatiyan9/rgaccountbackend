@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 // Miscellaneous Income — maintenance charges, token money, gifts, rent, interest…
 // Entries are CREDIT (money in) or DEBIT (a refund against that income). They mirror into
 // the ledger through the migration-110 trigger, so every total here is what `ledger_entries`
@@ -212,13 +213,13 @@ export const createEntry = asyncHandler(async (req, res) => {
     `INSERT INTO misc_income_entries (
        site_id, category_id, direction, date, amount, payment_mode, party_name,
        bank_name, bank_account_no, bank_reference, bank_ifsc, cheque_no, cheque_status,
-       remarks, voucher_url, status, assigned_admin_id, created_by
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17)
+       remarks, voucher_url, status, assigned_admin_id, created_by, transaction_time
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17,$18::time)
      RETURNING id`,
     [siteId, data.category_id, data.direction, data.date, data.amount, data.payment_mode, data.party_name,
       data.bank_name, data.bank_account_no, data.bank_reference, data.bank_ifsc, data.cheque_no,
       data.payment_mode === 'CHEQUE' ? 'PENDING' : null, data.remarks, data.voucher_url,
-      data.assigned_admin_id, req.user.id],
+      data.assigned_admin_id, req.user.id, transactionTimeForWrite()],
   );
   res.status(201).json({ entry: await loadEntry(rows[0].id), message: `${data.direction === 'debit' ? 'Debit' : 'Credit'} recorded and is pending approval` });
 });
@@ -236,12 +237,12 @@ export const updateEntry = asyncHandler(async (req, res) => {
     `UPDATE misc_income_entries SET
        category_id=$2, direction=$3, date=$4, amount=$5, payment_mode=$6, party_name=$7,
        bank_name=$8, bank_account_no=$9, bank_reference=$10, bank_ifsc=$11, cheque_no=$12, cheque_status=$13,
-       remarks=$14, voucher_url=$15, assigned_admin_id=$16,
+       remarks=$14, voucher_url=$15, assigned_admin_id=$16, transaction_time=$17::time,
        status='pending', approved_by=NULL, approved_at=NULL, updated_at=NOW()
      WHERE id=$1`,
     [id, data.category_id, data.direction, data.date, data.amount, data.payment_mode, data.party_name,
       data.bank_name, data.bank_account_no, data.bank_reference, data.bank_ifsc, data.cheque_no,
-      data.payment_mode === 'CHEQUE' ? 'PENDING' : null, data.remarks, data.voucher_url, data.assigned_admin_id],
+      data.payment_mode === 'CHEQUE' ? 'PENDING' : null, data.remarks, data.voucher_url, data.assigned_admin_id, transactionTimeForWrite(existing.transaction_time ?? null)],
   );
   res.json({ entry: await loadEntry(id), message: 'Entry updated and sent for approval' });
 });

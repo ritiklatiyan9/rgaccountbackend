@@ -2,9 +2,9 @@ import express from 'express';
 const router = express.Router();
 
 import {
-  createPlot, listPlots, searchPlots, getPlot, updatePlot, deletePlot,
+  createPlot, listPlots, searchPlots, getPlot, updatePlot, deletePlot, linkPlotBuyer,
   createPayment, listPayments, getPayment, updatePayment, deletePayment,
-  getAutocomplete, getPlotNocRegistry, createPlotNocRegistry, listBookingClients,
+  getAutocomplete, getPlotNocRegistry, createPlotNocRegistry, listBookingClients, listPlotKycMembers,
 } from '../controllers/plot.controller.js';
 import {
   updateInstallmentSettings, listInstallments, createInstallments,
@@ -27,7 +27,7 @@ const plotReadCache = cacheResponse({ ttlSeconds: 45, namespace: 'plots' });
 // rarely changes; long-TTL meta cache that survives plot/payment writes.
 const plotMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'plots-meta' });
 // Anchored prefix so 'plots-meta|...' isn't busted by writes.
-const bustPlotCache = invalidateCacheOnSuccess(['plots|', 'members|', '/daybook', 'registries|', 'registries-meta|']);
+const bustPlotCache = invalidateCacheOnSuccess(['plots|', 'plots:pageData:', 'members|', '/daybook', 'registries|', 'registries-meta|']);
 
 const accessByQuerySite = requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' });
 const accessByBodySite = requirePlotSiteAccess({ entity: 'site', source: 'body', key: 'site_id' });
@@ -42,6 +42,7 @@ const requireBookingPermission = (req, res, next) => req.body.booking_client_id 
 
 // ── Plot endpoints ──
 router.get('/booking-clients', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, listBookingClients);
+router.get('/kyc-members', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, listPlotKycMembers);
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, listPlots);                                        // ?site_id=X
 router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, searchPlots);                                 // ?site_id=X&q=A67
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotMetaCache, getAutocomplete);                      // ?site_id=X
@@ -58,6 +59,7 @@ router.post('/:id/noc-workspace', requireRole('admin', 'sub_admin'), requirePerm
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, plotReadCache, getPlot);
 router.post('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByBodySite, bustPlotCache, createPlot);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, updatePlot);
+router.put('/:id/kyc-member', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, linkPlotBuyer);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), accessByParamPlot, bustPlotCache, deletePlot);
 
 // ── Payment endpoints ──

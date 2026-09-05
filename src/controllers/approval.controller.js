@@ -89,9 +89,10 @@ async function ensureInboundFirmTransferForApproval(entry, approverId) {
       transfer_to_site_id,
       transfer_to_firm_id,
       transfer_group_id,
-      transfer_direction
+      transfer_direction,
+      transaction_time
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'approved',$15,NOW(),true,$16,$17,$18,'IN'
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'approved',$15,NOW(),true,$16,$17,$18,'IN',$19
     )`,
     [
       targetFirm.id,
@@ -112,6 +113,7 @@ async function ensureInboundFirmTransferForApproval(entry, approverId) {
       entry.site_id,
       entry.firm_id,
       entry.transfer_group_id,
+      entry.transaction_time ?? null,
     ]
   );
 }

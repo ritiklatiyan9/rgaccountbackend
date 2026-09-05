@@ -433,7 +433,7 @@ class ExpenseModel extends MasterModel {
           -- bill_url, so fall back to those here instead of in every reader.
           COALESCE(voucher_urls, ARRAY_REMOVE(ARRAY[voucher_url], NULL)) as voucher_urls,
           COALESCE(bill_urls, ARRAY_REMOVE(ARRAY[bill_url], NULL)) as bill_urls,
-          display_order,
+          display_order, transaction_time,
           'expenses' as source
         FROM expenses
         WHERE site_id = $1
@@ -450,7 +450,7 @@ class ExpenseModel extends MasterModel {
           NULL::int as assigned_user_id, fp.assigned_admin_id, fp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[fp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order,
+          NULL::int as display_order, fp.transaction_time,
           'farmer_payment' as source
         FROM farmer_payments fp
         JOIN farmers f ON f.id = fp.farmer_id
@@ -468,7 +468,7 @@ class ExpenseModel extends MasterModel {
           NULL::int as assigned_user_id, pcp.assigned_admin_id, pcp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[pcp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order,
+          NULL::int as display_order, pcp.transaction_time,
           'commission' as source
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
@@ -488,7 +488,7 @@ class ExpenseModel extends MasterModel {
           NULL::int as assigned_user_id, vp.assigned_admin_id, vp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[vp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order,
+          NULL::int as display_order, vp.transaction_time,
           'vendor_payment' as source
         FROM vendor_payments vp
         JOIN vendor_commitments vc ON vp.commitment_id = vc.id
@@ -506,7 +506,7 @@ class ExpenseModel extends MasterModel {
           NULL::int as assigned_user_id, NULL::int as assigned_admin_id, cfe.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[cfe.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order,
+          NULL::int as display_order, cfe.transaction_time,
           'personal_ledger' as source
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
@@ -525,7 +525,7 @@ class ExpenseModel extends MasterModel {
           d.assigned_user_id, d.assigned_admin_id, d.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[d.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order,
+          NULL::int as display_order, d.transaction_time,
           'daybook' as source
         FROM day_book d
         WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'

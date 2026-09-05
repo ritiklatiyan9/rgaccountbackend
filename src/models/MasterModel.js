@@ -1,3 +1,5 @@
+import { withTransactionTime } from '../services/transactionTime.service.js';
+
 class MasterModel {
   constructor(tableName) {
     this.tableName = tableName;
@@ -16,6 +18,7 @@ class MasterModel {
   }
 
   async create(data, pool) {
+    data = withTransactionTime(this.tableName, data);
     const keys = Object.keys(data);
     const values = Object.values(data);
     const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
@@ -25,6 +28,7 @@ class MasterModel {
   }
 
   async update(id, data, pool) {
+    data = withTransactionTime(this.tableName, data);
     const keys = Object.keys(data);
     const setClause = keys.map((key, i) => `${key} = $${i + 1}`).join(', ');
     const values = [...Object.values(data), id];

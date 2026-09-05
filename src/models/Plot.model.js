@@ -22,6 +22,8 @@ class PlotModel extends MasterModel {
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT p.*,
+        plot_buyer.id AS buyer_member_id,
+        ${PLOT_BUYER_KYC_STATUS} AS buyer_kyc_status,
         COALESCE(agg.total_received,    0) AS total_received,
         COALESCE(agg.received_bank,     0) AS received_bank,
         COALESCE(agg.received_cash,     0) AS received_cash,
@@ -29,6 +31,8 @@ class PlotModel extends MasterModel {
         COALESCE(agg.payment_buyer_names, '') AS payment_buyer_names,
         COALESCE(agg.payment_booked_bys,  '') AS payment_booked_bys
       FROM plots p
+      ${PLOT_BUYER_MEMBER_JOIN}
+      ${PLOT_BUYER_KYC_JOIN}
       LEFT JOIN LATERAL (
         -- Same three guards ledger_entries applies (migration 079): approved
         -- only, no bounced/returned cheques, sane date. Without them this

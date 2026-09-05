@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  groupMemberPlotNumbers, findMemberPlotNumbers,
+  groupMemberPlotNumbers, findMemberPlotNumbers, groupMemberPlots, validatePlotBuyerMember,
   PLOT_BUYER_MEMBER_JOIN, PLOT_BUYER_KYC_JOIN, PLOT_BUYER_KYC_STATUS,
 } from '../src/services/plotMemberLinks.service.js';
 
@@ -41,14 +41,17 @@ const fixtures = `WITH
     FROM (VALUES (1,10,'Buyer One'),(2,10,'Duplicate Buyer'),(3,10,'Duplicate Buyer'),
       (4,10,'Broker'),(5,10,'Buyer Renamed'),(6,20,'Buyer One'),(7,10,'Agent')) v(id,site_id,full_name)
   ),
-  plots(id,site_id,plot_no,buyer_name,booking_by) AS (VALUES
+  plot_data(id,site_id,plot_no,buyer_name,booking_by) AS (VALUES
     (101,10,'A2','Buyer One','Broker'),(102,10,'A10',' buyer one ',NULL),
     (103,10,'A3','Duplicate Buyer',NULL),(104,10,'B1','Duplicate Buyer',NULL),
     (105,10,'B2','Buyer One',NULL),(106,10,'C1',NULL,' broker '),
-    (107,20,'OTHER SITE','Buyer One',NULL),(108,10,'C2','Nobody',NULL)),
+    (107,20,'OTHER SITE','Buyer One',NULL),(108,10,'C2','Nobody',NULL),
+    (109,10,'D1','Duplicate Buyer',NULL),(110,10,'D2','Old spelling',NULL)),
+  plots AS (SELECT *, CASE WHEN id = 109 THEN 2 WHEN id = 110 THEN 1 WHEN id = 105 THEN 6 END AS buyer_member_id,
+    NULL::text AS plot_tag FROM plot_data),
   bookings(id,site_id,plot_id,client_member_id,status) AS (VALUES
     (1,10,101,5,'BOOKED'),(2,10,101,1,'CANCELLED'),(3,10,104,3,'BOOKED'),
-    (4,10,105,6,'BOOKED'),(5,10,108,1,'CANCELLED')),
+    (4,10,105,6,'BOOKED'),(5,10,108,1,'CANCELLED'),(6,10,109,3,'BOOKED')),
   kyc_cases(id,site_id,client_member_id,status,updated_at) AS (VALUES
     (1,10,1,'VERIFIED',DATE '2026-01-01'),(2,10,1,'OPEN',DATE '2026-09-01'),
     (3,10,5,'OCR_DONE',DATE '2026-09-01'),(4,20,3,'VERIFIED',DATE '2026-09-01')),
@@ -75,18 +78,48 @@ test('PostgreSQL resolves recorded buyers, ambiguous names, brokers and KYC with
       { id: 105, buyer_member_id: 1, kyc_status: 'VERIFIED' },
       { id: 106, buyer_member_id: null, kyc_status: null },
       { id: 108, buyer_member_id: null, kyc_status: null },
+      { id: 109, buyer_member_id: 2, kyc_status: 'INCOMPLETE' },
+      { id: 110, buyer_member_id: 1, kyc_status: 'VERIFIED' },
     ]);
     const grouped = await findMemberPlotNumbers(10, { query: (sql, params) => client.query(fixtures + sql, params) });
-    assert.deepEqual(grouped.get('1'), ['A10', 'B2']);
+    assert.deepEqual(grouped.get('1'), ['A10', 'B2', 'D2']);
     assert.deepEqual(grouped.get('3'), ['B1']);
     assert.deepEqual(grouped.get('4'), ['A2', 'C1']);
     assert.deepEqual(grouped.get('5'), ['A2']);
     assert.deepEqual(grouped.get('7'), ['A10']);
-    assert.equal(grouped.has('2'), false);
+    assert.deepEqual(grouped.get('2'), ['D1']);
     assert.equal(grouped.has('6'), false);
+    const db = { query: (sql, params) => client.query(fixtures + sql, params) };
+    assert.equal(await validatePlotBuyerMember(10, 2, db), 2);
+    await assert.rejects(validatePlotBuyerMember(10, 6, db), { statusCode: 400 });
+    await assert.rejects(validatePlotBuyerMember(10, 999, db), { statusCode: 400 });
   } finally {
     await client.query('ROLLBACK');
     client.release();
     await pool.end();
+  }
+});
+
+test('plot links retain distinct resale records and navigate with IDs, not plot numbers', () => {
+  const grouped = groupMemberPlots([
+    { id: 420, plot_no: 'A12', plot_tag: 'OLD', buyer_member_id: 1, broker_member_ids: [1, 2] },
+    { id: 800, plot_no: 'A12', plot_tag: 'NEW', buyer_member_id: 1 },
+    { id: 420, plot_no: 'A12', plot_tag: 'OLD', buyer_member_id: 1 },
+    { id: 100, plot_no: ' A2 ', buyer_member_id: 1 },
+    { id: null, plot_no: 'A9', buyer_member_id: 1 },
+  ]);
+  assert.deepEqual(grouped.get('1'), [
+    { id: 100, plot_no: 'A2', plot_tag: null },
+    { id: 420, plot_no: 'A12', plot_tag: 'OLD' },
+    { id: 800, plot_no: 'A12', plot_tag: 'NEW' },
+  ]);
+  assert.deepEqual(grouped.get('2'), [{ id: 420, plot_no: 'A12', plot_tag: 'OLD' }]);
+});
+
+test('malformed member IDs cannot create a KYC association', async () => {
+  for (const id of [null, '', 0, -1, 2.5, true, [1], '1abc', Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(validatePlotBuyerMember(10, id, {
+      query: () => assert.fail('Invalid IDs must not reach the database'),
+    }), { statusCode: 400 });
   }
 });

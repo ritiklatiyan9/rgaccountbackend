@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
@@ -788,8 +789,8 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
 
   const vendorPayMode = (payment_mode || 'cash').toLowerCase();
   const paymentResult = await pool.query(
-    `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status, transaction_time)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::time)
      RETURNING *`,
     [
       commitmentId,
@@ -807,6 +808,7 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
         ? String(req.body.cheque_no || reference_no || '').trim() || null
         : null,
       vendorPayMode === 'cheque' ? 'PENDING' : null,
+      transactionTimeForWrite(),
     ]
   );
 
@@ -846,7 +848,7 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
   // a tx but didn't actually enforce any invariant, so all that latency was
   // wasted. We compose the WHERE on the UPDATE so it stays atomic.
   const existingResult = await pool.query(
-    `SELECT id, site_id, commitment_id, assigned_admin_id, created_by, status, amount
+    `SELECT id, site_id, commitment_id, assigned_admin_id, created_by, status, amount, transaction_time
      FROM vendor_payments WHERE id = $1`,
     [paymentId]
   );
@@ -860,7 +862,7 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
 
   const updatedPaymentResult = await pool.query(
     `UPDATE vendor_payments
-        SET payment_date = $1, amount = $2, payment_mode = $3,
+        SET payment_date = $1, amount = $2, payment_mode = $3, transaction_time = $10::time,
             reference_no = $4, note = $5, voucher_url = $6,
             assigned_admin_id = $7, status = 'pending',
             approved_by = NULL, approved_at = NULL,
@@ -879,12 +881,14 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
       assigned_admin_id !== undefined ? (assigned_admin_id ? parseInt(assigned_admin_id) : null) : existing.assigned_admin_id,
       paymentId,
       siteId,
+      transactionTimeForWrite(existing.transaction_time ?? null),
     ]
   );
 
   await pool.query(
     `UPDATE vendor_inventory_payments
         SET payment_date = $2, payment_mode = $3, reference_no = $4,
+            transaction_time = (SELECT transaction_time FROM vendor_payments WHERE id = $1),
             cheque_no = CASE WHEN $3 = 'cheque' THEN $4 ELSE NULL END,
             cheque_status = CASE WHEN $3 = 'cheque' THEN 'PENDING' ELSE NULL END,
             note = $5, voucher_url = $6, assigned_admin_id = $7,
@@ -1037,7 +1041,7 @@ export const distributePaymentToItems = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Source vendor payment is invalid' });
   }
 
-  const COLS = 14;
+  const COLS = 15;
   const values = [];
   const placeholders = [];
   const txDate = sourcePayment?.payment_date || payment_date || new Date().toISOString().split('T')[0];
@@ -1049,7 +1053,7 @@ export const distributePaymentToItems = asyncHandler(async (req, res) => {
     const b = i * COLS;
     placeholders.push(
       `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},
-        $${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14})`
+        $${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14},$${b + 15})`
     );
     values.push(
       orderId, siteId, txDate, amount, mode, ref,
@@ -1058,7 +1062,8 @@ export const distributePaymentToItems = asyncHandler(async (req, res) => {
       memo, sourcePayment?.voucher_url || null, req.user.id,
       sourcePayment?.assigned_admin_id || null,
       sourcePayment?.id || null,
-      sourcePayment?.status || 'pending'
+      sourcePayment?.status || 'pending',
+      sourcePayment ? sourcePayment.transaction_time ?? null : transactionTimeForWrite()
     );
   });
 
@@ -1066,7 +1071,7 @@ export const distributePaymentToItems = asyncHandler(async (req, res) => {
     `INSERT INTO vendor_inventory_payments
        (order_id, site_id, payment_date, amount, payment_mode, reference_no,
         cheque_no, cheque_status, note, voucher_url, created_by, assigned_admin_id,
-        source_vendor_payment_id, status)
+        source_vendor_payment_id, status, transaction_time)
      VALUES ${placeholders.join(',')}
      RETURNING *`,
     values

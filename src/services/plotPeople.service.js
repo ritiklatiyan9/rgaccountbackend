@@ -1,3 +1,5 @@
+import { PLOT_BUYER_MEMBER_JOIN } from './plotMemberLinks.service.js';
+
 /** Group the same client across multiple plot records and relationship roles. */
 export function groupPlotPeople(rows) {
   const members = new Map();
@@ -22,19 +24,23 @@ export async function findPeopleByPlot(siteId, plotNo, pool) {
   if (!term) return { members: [], contacts: [] };
   const { rows } = await pool.query(`
     WITH matched_plots AS (
-      SELECT p.* FROM plots p WHERE p.site_id = $1 AND UPPER(p.plot_no) = UPPER($2)
+      SELECT p.*, plot_buyer.id AS linked_buyer_member_id FROM plots p
+      ${PLOT_BUYER_MEMBER_JOIN}
+      WHERE p.site_id = $1 AND UPPER(p.plot_no) = UPPER($2)
     ),
     plot_owners AS (
       SELECT DISTINCT m.* FROM members m
       WHERE m.site_id = $1 AND (
-        EXISTS (SELECT 1 FROM matched_plots p WHERE UPPER(BTRIM(p.buyer_name)) = UPPER(BTRIM(m.full_name)))
+        EXISTS (SELECT 1 FROM matched_plots p WHERE p.linked_buyer_member_id = m.id)
         OR EXISTS (SELECT 1 FROM bookings b JOIN matched_plots p ON p.id = b.plot_id WHERE b.client_member_id = m.id)
       )
     ),
     related_people AS (
+      SELECT p.linked_buyer_member_id AS member_id, p.buyer_name AS name, NULL::text AS phone, 'Buyer'::text AS role
+      FROM matched_plots p
+      UNION ALL
       SELECT NULL::integer AS member_id, v.name, v.phone, v.role
       FROM matched_plots p CROSS JOIN LATERAL (VALUES
-        (p.buyer_name, NULL::text, 'Buyer'),
         (p.booking_by, NULL::text, 'Booked by'),
         (p.co_applicant_name, p.co_applicant_phone, 'Co-applicant'),
         (p.nominee_name, p.nominee_phone, 'Plot nominee')

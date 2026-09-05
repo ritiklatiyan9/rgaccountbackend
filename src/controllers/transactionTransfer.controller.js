@@ -909,6 +909,10 @@ export const executeTransfer = async (db, req) => {
       target = await insertPlotPayment(db, edited, targetId, req.user.id);
     else
       target = await insertOther(db, edited, targetType, targetId, req.user.id);
+    // A transfer carries the original time; it is not a new timed payment.
+    await db.query(`UPDATE ${MODULES[targetType].table} SET transaction_time = $2::time WHERE id = $1`,
+      [target.row.id, source.raw.transaction_time ?? null]);
+    target.row.transaction_time = source.raw.transaction_time ?? null;
     if (edited.bank_account_id && targetType !== 'personal_ledger')
       await db.query(
         `UPDATE cash_flow_entries cfe SET bank_account_id=ba.id FROM bank_accounts ba WHERE ba.id=$1 AND ba.site_id = cfe.site_id AND cfe.source_module=$2 AND cfe.source_id=$3`,

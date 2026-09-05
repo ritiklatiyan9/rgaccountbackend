@@ -4,7 +4,8 @@ import { uploadSingle } from '../utils/upload.js';
 import pool from '../config/db.js';
 import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 import { findPeopleByPlot } from '../services/plotPeople.service.js';
-import { findMemberPlotNumbers } from '../services/plotMemberLinks.service.js';
+import { findMemberPlots } from '../services/plotMemberLinks.service.js';
+import { uniqueMemberNameMatch, memberTransactionMatch, LEDGER_PLOT_BUYER_JOIN, MEMBER_PLOT_PAYMENT_MATCH } from '../services/memberLedgerIdentity.service.js';
 import {
   assertMemberSiteAccess,
   findAccessiblePhoneMatches,
@@ -530,9 +531,12 @@ export const listMembers = asyncHandler(async (req, res) => {
   const [members, summary, plotNumbers] = await Promise.all([
     memberModel.findBySiteIdList(parseInt(site_id), pool, type || null),
     memberModel.getSummary(parseInt(site_id), pool),
-    findMemberPlotNumbers(parseInt(site_id), pool),
+    findMemberPlots(parseInt(site_id), pool),
   ]);
-  res.json({ members: members.map((member) => ({ ...member, plot_numbers: plotNumbers.get(String(member.id)) || [] })), summary });
+  res.json({ members: members.map((member) => {
+    const plots = plotNumbers.get(String(member.id)) || [];
+    return { ...member, plots, plot_numbers: [...new Set(plots.map((plot) => plot.plot_no))] };
+  }), summary });
 });
 
 /** GET /members/search?site_id=X&q=... */
@@ -663,9 +667,8 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
   if (!member) return res.status(404).json({ message: 'Member not found' });
 
   const siteId = parseInt(site_id);
-  const memberName = member.full_name;
 
-  // Fetch expenses linked by assigned_user_id OR by name match
+  // Explicit client links take precedence; legacy names must be unique in the site.
   const expensesQuery = `
     SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
            e.debit, e.credit, e.remark, e.category, e.account_no, e.branch,
@@ -673,11 +676,11 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
            'EXPENSE' as source
     FROM expenses e
     WHERE e.site_id = $1
-      AND (e.assigned_user_id = $2 OR UPPER(e.to_entity) = UPPER($3) OR UPPER(e.from_entity) = UPPER($3))
+      AND ${memberTransactionMatch('e', ['e.to_entity', 'e.from_entity'], { assigned: true })}
     ORDER BY e.date DESC, e.id DESC
   `;
 
-  // Fetch daybook entries linked by assigned_user_id OR by name match
+  // Apply the same client identity rules to daybook entries.
   const daybookQuery = `
     SELECT d.id, d.date, d.from_entity, d.to_entity, d.payment_mode,
            d.debit, d.credit, d.remarks AS remark, d.category, d.account_no, d.branch,
@@ -686,13 +689,13 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
     FROM day_book d
     WHERE d.site_id = $1
       AND d.entry_type != 'EXPENSE'
-      AND (d.assigned_user_id = $2 OR UPPER(d.to_entity) = UPPER($3) OR UPPER(d.from_entity) = UPPER($3))
+      AND ${memberTransactionMatch('d', ['d.to_entity', 'd.from_entity'], { assigned: true })}
     ORDER BY d.date DESC, d.id DESC
   `;
 
   const [expResult, dbResult] = await Promise.all([
-    pool.query(expensesQuery, [siteId, memberId, memberName]),
-    pool.query(daybookQuery, [siteId, memberId, memberName]),
+    pool.query(expensesQuery, [siteId, memberId]),
+    pool.query(daybookQuery, [siteId, memberId]),
   ]);
 
   const expenses = expResult.rows;
@@ -729,28 +732,27 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
   if (!member) return res.status(404).json({ message: 'Member not found' });
 
   const siteId = parseInt(site_id);
-  const memberName = member.full_name;
 
-  // Run all queries in parallel using name matching + FK where available
-  const [expRes, commRes, plotPayRes, farmerPayRes, firmRes, commPayRes] = await Promise.all([
-    // 1. Expenses — by assigned_user_id or name match
+  // Use recorded client links, with name fallback only for unambiguous legacy rows.
+  const [expRes, commRes, plotPayRes, farmerPayRes, firmRes, commPayRes, identityRes] = await Promise.all([
+    // 1. Expenses — assigned/mapped client, then an unambiguous legacy name.
     pool.query(
       `SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
               e.debit, e.credit, e.remark, e.category, e.status, e.voucher_url
        FROM expenses e
        WHERE e.site_id = $1
-         AND (e.assigned_user_id = $2 OR UPPER(e.to_entity) = UPPER($3) OR UPPER(e.from_entity) = UPPER($3))
+         AND ${memberTransactionMatch('e', ['e.to_entity', 'e.from_entity'], { assigned: true })}
        ORDER BY e.date DESC, e.id DESC`,
-      [siteId, memberId, memberName]
+      [siteId, memberId]
     ),
     // 2. Plot Commissions (legacy v1) — by particular (person name)
     pool.query(
       `SELECT pc.id, pc.date, pc.particular, pc.amount, pc.plot_no, pc.plot_size,
               pc.by_note, pc.remarks, pc.status, pc.voucher_url
        FROM plot_commissions pc
-       WHERE pc.site_id = $1 AND UPPER(pc.particular) = UPPER($2)
+       WHERE pc.site_id = $1 AND ${uniqueMemberNameMatch('pc.particular')}
        ORDER BY pc.date DESC, pc.id DESC`,
-      [siteId, memberName]
+      [siteId, memberId]
     ),
     // 3. Plot Payments — payments on plots this member BOUGHT.
     // Match the buyer only. pp.payment_from holds the payment MODE in this
@@ -763,11 +765,12 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
               pp.status, pp.cheque_no, pp.cheque_status,
               p.plot_no, p.block, COALESCE(pp.buyer_name, p.buyer_name) AS buyer_name
        FROM plot_payments pp
-       JOIN plots p ON p.id = pp.plot_id
+       JOIN plots p ON p.id = pp.plot_id AND p.site_id = pp.site_id
+       ${LEDGER_PLOT_BUYER_JOIN}
        WHERE pp.site_id = $1
-         AND UPPER(COALESCE(NULLIF(BTRIM(pp.buyer_name), ''), p.buyer_name, '')) = UPPER($2)
+         AND ${MEMBER_PLOT_PAYMENT_MATCH}
        ORDER BY pp.date DESC, pp.id DESC`,
-      [siteId, memberName]
+      [siteId, memberId]
     ),
     // 4. Farmer Payments — via farmers.member_id
     pool.query(
@@ -780,16 +783,16 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
        ORDER BY fp.date DESC, fp.id DESC`,
       [siteId, memberId]
     ),
-    // 5. Firm Transactions — by name
+    // 5. Firm Transactions — mapped client, then an unambiguous legacy name.
     pool.query(
       `SELECT ft.id, ft.date, ft.debit, ft.credit, ft.description, ft.purpose,
               ft.remark, ft.cheque_no, ft.name,
               fi.name AS firm_name
        FROM firm_transactions ft
        JOIN firms fi ON fi.id = ft.firm_id
-       WHERE fi.site_id = $1 AND UPPER(ft.name) = UPPER($2)
+       WHERE fi.site_id = $1 AND ${memberTransactionMatch('ft', ['ft.name'])}
        ORDER BY ft.date DESC, ft.id DESC`,
-      [siteId, memberName]
+      [siteId, memberId]
     ),
     // 6. Commission Payments (v2) — member is the plot's commission agent
     pool.query(
@@ -803,6 +806,12 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
        ORDER BY pcp.date DESC, pcp.id DESC`,
       [siteId, memberId]
     ),
+    pool.query(`SELECT EXISTS (
+      SELECT 1 FROM members m JOIN members other
+        ON other.site_id = m.site_id AND other.id <> m.id
+       AND UPPER(BTRIM(other.full_name)) = UPPER(BTRIM(m.full_name))
+      WHERE m.id = $2 AND m.site_id = $1
+    ) AS ambiguous_legacy_name`, [siteId, memberId]),
   ]);
 
   const expenses = expRes.rows;
@@ -821,6 +830,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
   const commPayTotal = commissionPayments.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
 
   res.json({
+    ambiguous_legacy_name: identityRes.rows[0].ambiguous_legacy_name,
     expenses,
     commissions,
     plot_payments: plotPayments,

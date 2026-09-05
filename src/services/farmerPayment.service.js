@@ -253,7 +253,7 @@ export const rebuildFarmerPaymentDayBook = async (db, paymentId) => {
        site_id, date, particular, entry_type, debit, credit, remarks,
        payment_mode, category, from_entity, to_entity, account_no, branch,
        voucher_url, status, approved_by, approved_at, cheque_no, cheque_status,
-       created_by, assigned_admin_id, farmer_payment_id
+       created_by, assigned_admin_id, farmer_payment_id, transaction_time
      )
      SELECT
        l.site_id,
@@ -282,7 +282,8 @@ export const rebuildFarmerPaymentDayBook = async (db, paymentId) => {
        CASE WHEN UPPER(COALESCE(l.payment_mode, '')) = 'CHEQUE' THEN l.cheque_status END,
        l.created_by,
        l.assigned_admin_id,
-       l.id
+       l.id,
+       l.transaction_time
      FROM legs l
      WHERE l.leg_amount > 0
      ORDER BY CASE WHEN l.leg_type = 'CASH' THEN 1 ELSE 2 END

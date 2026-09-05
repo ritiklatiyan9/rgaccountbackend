@@ -449,6 +449,7 @@ const ExpensesBreakdownType = new GraphQLObjectType({
 const PlotMemberType = new GraphQLObjectType({
   name: 'PlotMember',
   fields: {
+    id:         { type: GraphQLInt },
     name:       { type: new GraphQLNonNull(GraphQLString) },
     phone:      { type: GraphQLString },
     team:       { type: GraphQLString },

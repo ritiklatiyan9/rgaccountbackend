@@ -1,8 +1,9 @@
-// Prefer the recorded booking client. Older plots have only a buyer name;
+// Prefer an explicitly selected member, then the recorded booking client. Older plots have only a buyer name;
 // resolve that only when it identifies exactly one member in the same site.
 export const PLOT_BUYER_MEMBER_JOIN = `
   LEFT JOIN LATERAL (
     SELECT COALESCE(
+      (SELECT m.id FROM members m WHERE m.id = p.buyer_member_id AND m.site_id = p.site_id),
       (SELECT m.id
          FROM bookings b JOIN members m ON m.id = b.client_member_id AND m.site_id = p.site_id
         WHERE b.plot_id = p.id AND b.site_id = p.site_id
@@ -59,9 +60,9 @@ export function groupMemberPlotNumbers(rows) {
 }
 
 /** Resolve all member plot numbers in one site query, including commission brokers. */
-export async function findMemberPlotNumbers(siteId, pool) {
+export async function findMemberPlots(siteId, pool) {
   const { rows } = await pool.query(`
-    SELECT p.plot_no, plot_buyer.id AS buyer_member_id,
+    SELECT p.id, p.plot_no, p.plot_tag, plot_buyer.id AS buyer_member_id,
       ARRAY(
         SELECT m.id FROM members m
         WHERE m.site_id = p.site_id AND NULLIF(BTRIM(p.booking_by), '') IS NOT NULL
@@ -87,5 +88,38 @@ export async function findMemberPlotNumbers(siteId, pool) {
     ${PLOT_BUYER_MEMBER_JOIN}
     WHERE p.site_id = $1
   `, [siteId]);
-  return groupMemberPlotNumbers(rows);
+  return groupMemberPlots(rows);
+}
+
+export function groupMemberPlots(rows) {
+  const members = new Map();
+  for (const row of rows) {
+    const plotNo = String(row.plot_no || '').trim();
+    if (row.id == null || !plotNo) continue;
+    for (const memberId of [row.buyer_member_id, ...(row.broker_member_ids || [])]) {
+      if (memberId == null) continue;
+      const key = String(memberId);
+      if (!members.has(key)) members.set(key, new Map());
+      members.get(key).set(String(row.id), { id: row.id, plot_no: plotNo, plot_tag: row.plot_tag || null });
+    }
+  }
+  return new Map([...members].map(([id, plots]) => [id, [...plots.values()].sort((a, b) =>
+    a.plot_no.localeCompare(b.plot_no, 'en', { numeric: true }) || Number(a.id) - Number(b.id)
+  )]));
+}
+
+export async function findMemberPlotNumbers(siteId, pool) {
+  const plots = await findMemberPlots(siteId, pool);
+  return new Map([...plots].map(([id, links]) => [id, [...new Set(links.map((plot) => plot.plot_no))]]));
+}
+
+export async function validatePlotBuyerMember(siteId, memberId, pool) {
+  if (!['string', 'number'].includes(typeof memberId) || !Number.isSafeInteger(Number(memberId)) || Number(memberId) <= 0) {
+    throw Object.assign(new Error('Select a KYC user to link to this plot.'), { statusCode: 400 });
+  }
+  const { rows: [member] } = await pool.query(
+    'SELECT id FROM members WHERE id = $1 AND site_id = $2', [Number(memberId), siteId],
+  );
+  if (!member) throw Object.assign(new Error('Select a user registered in the same site as this plot.'), { statusCode: 400 });
+  return member.id;
 }

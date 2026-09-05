@@ -15,6 +15,7 @@ const SCOPED = `
   WITH scoped_entries AS (
     SELECT
       le.*,
+      creator_cfe.transaction_time,
       plot.id AS plot_id,
       plot.plot_no,
       plot.block AS plot_block,
@@ -217,7 +218,7 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
     bank_account_id, bank_account_name,
     plot_id, plot_no, plot_block,
     assigned_admin_id, approval_assignee_name,
-    display_position, global_display_position
+    display_position, global_display_position, transaction_time
   FROM period_entries
   -- Parameter 10 is the timeline grain used by the metadata query. Keep its type
   -- explicit here because this query shares the same 12-parameter contract.
@@ -228,6 +229,7 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
   ORDER BY entry_date DESC,
            display_position ASC NULLS LAST,
            global_display_position ASC NULLS LAST,
+           transaction_time DESC NULLS LAST,
            created_at DESC,
            id DESC
   LIMIT $9::int

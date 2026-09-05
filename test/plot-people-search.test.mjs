@@ -7,7 +7,7 @@ test('plot lookup is exact, parameterized and site-scoped across relationship so
     query: async (sql, params) => {
       assert.deepEqual(params, [10, 'A32']);
       assert.match(sql, /p\.site_id = \$1 AND UPPER\(p\.plot_no\) = UPPER\(\$2\)/);
-      assert.doesNotMatch(sql, /ILIKE/);
+      assert.doesNotMatch(sql, /plot_no\s+ILIKE/);
       assert.match(sql, /LEFT JOIN members m ON m\.site_id = \$1/);
       for (const source of ['bookings', 'plot_commissions_v2', 'plot_payments', 'plot_registries', 'plot_owners']) {
         assert.ok(sql.includes(source));

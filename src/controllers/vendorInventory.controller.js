@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
@@ -437,8 +438,8 @@ export const addInventoryPayment = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `INSERT INTO vendor_inventory_payments
        (order_id, site_id, payment_date, amount, payment_mode, reference_no, cheque_no,
-        cheque_status, note, voucher_url, created_by, assigned_admin_id, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending')
+        cheque_status, note, voucher_url, created_by, assigned_admin_id, status, transaction_time)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13::time)
      RETURNING *`,
     [
       orderId,
@@ -453,6 +454,7 @@ export const addInventoryPayment = asyncHandler(async (req, res) => {
       (voucher_url || '').trim() || null,
       req.user.id,
       assigned_admin_id ? parseInt(assigned_admin_id, 10) : null,
+      transactionTimeForWrite(),
     ]
   );
 
@@ -466,7 +468,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
   if (!Number.isInteger(paymentId)) return res.status(400).json({ message: 'Invalid payment id' });
   const visibility = await resolveEntryVisibility(req.user, 'vendors', null);
   const existingRes = await pool.query(
-    `SELECT id, site_id, status, amount, created_by
+    `SELECT id, site_id, status, amount, created_by, transaction_time
        FROM vendor_inventory_payments
       WHERE id = $1 AND site_id = $2
         AND ($3::int IS NULL OR created_by = $3::int)`,
@@ -485,6 +487,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `UPDATE vendor_inventory_payments p
      SET payment_date = $3,
+         transaction_time = $12::time,
          amount = $4,
          payment_mode = $5,
          reference_no = $6,
@@ -515,6 +518,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
       (voucher_url || '').trim() || null,
       assigned_admin_id ? parseInt(assigned_admin_id, 10) : null,
       visibility.creatorId,
+      transactionTimeForWrite(existing.transaction_time ?? null),
     ]
   );
 

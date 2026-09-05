@@ -23,9 +23,9 @@ export async function withCompanyPlotBooking({ pool, plotId, memberId, date, sav
       throw bookingError(400, 'BOOKING_CLIENT_UNAVAILABLE', 'Select an active user registered in this site.');
     }
     const { rows: [bookedPlot] } = await client.query(
-      `UPDATE plots SET buyer_name = $2, status = 'BOOKED', booking_date = $3::date, updated_at = NOW()
+      `UPDATE plots SET buyer_name = $2, buyer_member_id = $4, status = 'BOOKED', booking_date = $3::date, updated_at = NOW()
         WHERE id = $1 RETURNING *`,
-      [plotId, member.full_name.trim().toUpperCase(), date],
+      [plotId, member.full_name.trim().toUpperCase(), date, member.id],
     );
     const result = await savePayment(client);
     if (!result.rows[0]) throw bookingError(409, 'PLOT_BOOKING_CHANGED', 'The plot changed. Select it again before saving.');

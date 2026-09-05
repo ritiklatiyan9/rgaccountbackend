@@ -21,6 +21,7 @@ const original = (id) => ({
   created_by: 1,
   status: 'approved',
   row_version: '7',
+  transaction_time: id === 1 ? '09:13:45' : null,
 });
 function fixture({
   failInsert = 0,
@@ -97,6 +98,10 @@ function fixture({
         audit.push(args);
         return { rows: [{ id: audit.length, created_at: '2026-09-05' }] };
       }
+      if (sql.startsWith('UPDATE misc_income_entries SET transaction_time')) {
+        destinations.find(row => row.id === args[0]).transaction_time = args[1];
+        return { rows: [] };
+      }
       throw new Error('Unexpected query: ' + sql);
     },
   };
@@ -149,6 +154,8 @@ test('bulk transfer creates every destination and audit with edited fields', asy
   assert.equal(f.state().destinations.length, 2);
   assert.equal(f.state().destinations[0].amount, 150);
   assert.equal(f.state().destinations[0].status, 'pending');
+  assert.equal(f.state().destinations[0].transaction_time, '09:13:45');
+  assert.equal(f.state().destinations[1].transaction_time, null);
   assert.equal(f.state().audit.length, 2);
   assert.equal(f.state().audit[0][13].credit, '100');
   assert.ok(

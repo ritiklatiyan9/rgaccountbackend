@@ -1,9 +1,11 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotModel, plotPaymentModel, PP_COUNTABLE } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { withCompanyPlotBooking } from '../services/quickPlotBooking.service.js';
+import { validatePlotBuyerMember } from '../services/plotMemberLinks.service.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -323,6 +325,10 @@ export const createPlot = asyncHandler(async (req, res) => {
     created_by: req.user.id,
   };
 
+  if (req.body.buyer_member_id != null) {
+    data.buyer_member_id = await validatePlotBuyerMember(data.site_id, req.body.buyer_member_id, pool);
+  }
+
   // Set plot_tag if this is a RESALE duplicate
   if (typeof newPlotTag !== 'undefined') {
     data.plot_tag = newPlotTag;
@@ -414,6 +420,20 @@ export const getPlot = asyncHandler(async (req, res) => {
   res.json({ plot });
 });
 
+/** Link identity only; this must not trigger booking, pricing or commission updates. */
+export const linkPlotBuyer = asyncHandler(async (req, res) => {
+  const plot = await plotModel.findById(Number(req.params.id), pool);
+  if (!plot) return res.status(404).json({ message: 'Plot not found' });
+  const memberId = await validatePlotBuyerMember(plot.site_id, req.body.buyer_member_id, pool);
+  const { rows: [updated] } = await pool.query(`
+    UPDATE plots p SET buyer_member_id = m.id, updated_at = NOW()
+    FROM members m WHERE p.id = $1 AND m.id = $2 AND m.site_id = p.site_id
+    RETURNING p.*
+  `, [plot.id, memberId]);
+  if (!updated) return res.status(409).json({ message: 'The plot or user changed. Refresh and try again.' });
+  res.json({ plot: updated });
+});
+
 /** PUT /plots/:id — Update plot details */
 export const updatePlot = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -423,6 +443,12 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
 
   const updateData = {};
+  if (req.body.buyer_member_id != null) {
+    updateData.buyer_member_id = await validatePlotBuyerMember(existing.site_id, req.body.buyer_member_id, pool);
+  } else if (buyer_name !== undefined && String(buyer_name || '').trim().toUpperCase() !== String(existing.buyer_name || '').trim().toUpperCase()) {
+    // A caller changing the buyer by name must not retain another person's explicit KYC link.
+    updateData.buyer_member_id = null;
+  }
   if (plot_no !== undefined) {
     const trimmed = String(plot_no || '').trim().toUpperCase();
     if (!trimmed) return res.status(400).json({ message: 'Plot number is required' });
@@ -626,6 +652,19 @@ export const listBookingClients = asyncHandler(async (req, res) => {
   res.json({ members: rows });
 });
 
+/** Search existing KYC profiles without excluding historical/inactive buyers. */
+export const listPlotKycMembers = asyncHandler(async (req, res) => {
+  const siteId = Number(req.query.site_id);
+  if (!Number.isSafeInteger(siteId) || siteId <= 0) return res.status(400).json({ message: 'A valid site is required.' });
+  const query = String(req.query.q || '').trim().slice(0, 100);
+  const { rows } = await pool.query(`
+    SELECT id, full_name, phone, father_name, city, status FROM members
+    WHERE site_id = $1 AND (full_name ILIKE $2 OR phone ILIKE $2 OR id::text = $3)
+    ORDER BY full_name, id LIMIT 50
+  `, [siteId, `%${query}%`, query]);
+  res.json({ members: rows });
+});
+
 /** POST /plots/payments — Create a payment, optionally booking a company plot. */
 export const createPayment = asyncHandler(async (req, res) => {
   const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id } = req.body;
@@ -646,10 +685,10 @@ export const createPayment = asyncHandler(async (req, res) => {
      INSERT INTO plot_payments (
        plot_id, site_id, date, payment_from, payment_type, bank_details, bank_name,
        branch, narration, amount, created_by, voucher_url, assigned_admin_id, status,
-       cheque_no, cheque_status, buyer_name, booked_by
+       cheque_no, cheque_status, buyer_name, booked_by, transaction_time
      )
      SELECT $1, plot.site_id, $2::date, $3, $4, $5, $6, $7, $8, $9::numeric,
-            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by
+            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by, $16::time
        FROM plot
      RETURNING *`,
     [
@@ -668,6 +707,7 @@ export const createPayment = asyncHandler(async (req, res) => {
       req.body.cheque_no ? String(req.body.cheque_no).trim() : null,      // $13
       normalizedPaymentType === 'CHEQUE' ? 'PENDING' : null,              // $14
       req.body.require_booked_plot === true,                             // $15
+      transactionTimeForWrite(),                                        // $16
     ]
   );
   let result;
@@ -903,11 +943,11 @@ export const getAutocomplete = asyncHandler(async (req, res) => {
   const [data, membersResult] = await Promise.all([
     plotPaymentModel.getAutocomplete(parseInt(site_id), pool),
     pool.query(
-      `SELECT full_name, phone, team, member_type FROM members WHERE site_id = $1 AND full_name IS NOT NULL AND full_name != '' ORDER BY full_name ASC`,
+      `SELECT id, full_name, phone, team, member_type FROM members WHERE site_id = $1 AND full_name IS NOT NULL AND full_name != '' ORDER BY full_name ASC`,
       [parseInt(site_id)]
     ),
   ]);
-  data.members = membersResult.rows.map(r => ({ name: r.full_name, phone: r.phone || '', team: r.team || '', member_type: r.member_type || '' }));
+  data.members = membersResult.rows.map(r => ({ id: r.id, name: r.full_name, phone: r.phone || '', team: r.team || '', member_type: r.member_type || '' }));
   res.json(data);
 });
 

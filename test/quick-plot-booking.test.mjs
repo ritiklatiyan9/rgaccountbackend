@@ -21,7 +21,7 @@ function fixture({ status = 'COMPANY', member = { id: 8, full_name: ' New Buyer 
         assert.deepEqual(params, [8, 4]);
         return { rows: member ? [member] : [] };
       } else if (sql.startsWith('UPDATE plots')) {
-        pending.plot = { ...pending.plot, status: 'BOOKED', buyer_name: params[1], booking_date: params[2] };
+        pending.plot = { ...pending.plot, status: 'BOOKED', buyer_name: params[1], booking_date: params[2], buyer_member_id: params[3] };
         return { rows: [pending.plot] };
       } else throw new Error(`Unexpected query: ${sql}`);
       return { rows: [] };
@@ -50,6 +50,7 @@ test('books the selected user and saves payment in the same transaction', async 
   const { bookedPlot, result } = await withCompanyPlotBooking(f.options);
   assert.equal(bookedPlot.status, 'BOOKED');
   assert.equal(bookedPlot.booking_date, '2026-09-05');
+  assert.equal(bookedPlot.buyer_member_id, 8);
   assert.equal(result.rows[0].buyer_name, 'NEW BUYER');
   assert.equal(result.rows[0].booked_by, 'EXISTING DEALER');
   assert.equal(f.state().payments.length, 1);

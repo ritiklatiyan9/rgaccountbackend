@@ -1,3 +1,4 @@
+import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import { dayBookDailyBalanceModel } from '../models/DayBookDailyBalance.model.js';
@@ -680,6 +681,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
 
   const {
     savedOrderRows,
+    entryTimes,
     orderRevision,
     siteRow,
     dailyBalanceRow,
@@ -695,6 +697,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     expense_id: exp.id,
     site_id: exp.site_id,
     date: exp.date,
+    transaction_time: exp.transaction_time,
     particular: exp.remark || '—',
     entry_type: 'EXPENSE',
     debit: exp.debit,
@@ -735,6 +738,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       farmer_name: fp.farmer_name,
       site_id: fp.site_id,
       date: fp.date,
+      transaction_time: fp.transaction_time,
       particular: `FARMER PAYMENT - ${fp.farmer_name}`,
       entry_type: 'FARMER PAYMENT',
       debit: fp.amount,
@@ -780,6 +784,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (fp) {
         return {
           ...e,
+          transaction_time: fp.transaction_time ?? null,
           farmer_id: fp.farmer_id,
           farmer_name: fp.farmer_name,
           by_note: fp.by_note,
@@ -799,6 +804,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (pc) {
         return {
           ...e,
+          transaction_time: pc.transaction_time ?? null,
           plot_no: pc.plot_no,
           plot_size: pc.plot_size,
           plot_rate: pc.plot_rate,
@@ -814,6 +820,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (cf) {
         return {
           ...e,
+          transaction_time: cf.transaction_time ?? null,
           ledger_name: cf.ledger_name,
           ledger_type: cf.ledger_type,
           cf_month: cf.cf_month,
@@ -828,6 +835,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (ft) {
         return {
           ...e,
+          transaction_time: ft.transaction_time ?? null,
           firm_id: ft.firm_id,
           firm_name: ft.firm_name,
           firm_description: ft.description,
@@ -844,6 +852,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (pp) {
         return {
           ...e,
+          transaction_time: pp.transaction_time ?? null,
           pp_plot_id: pp.plot_id,
           pp_plot_no: pp.plot_no,
           pp_block: pp.block,
@@ -877,6 +886,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       commission_id: c.id,
       site_id: c.site_id,
       date: c.date,
+      transaction_time: c.transaction_time,
       particular: c.particular,
       father_name: c.father_name_resolved || c.father_name,
       entry_type: 'PLOT COMMISSION',
@@ -926,6 +936,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       cash_flow_month_id: cf.cash_flow_month_id,
       site_id: cf.site_id,
       date: cf.date,
+      transaction_time: cf.transaction_time,
       particular: cf.particular,
       entry_type: 'CASH FLOW',
       debit: cf.debit,
@@ -969,6 +980,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       firm_name: ft.firm_name,
       site_id: ft.site_id,
       date: ft.date,
+      transaction_time: ft.transaction_time,
       particular: ft.description,
       entry_type: 'FIRM TRANSACTION',
       debit: ft.debit,
@@ -1023,6 +1035,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       pp_cheque_no: pp.cheque_no,
       site_id: pp.site_id,
       date: pp.date,
+      transaction_time: pp.transaction_time,
       particular: `PLOT PAYMENT - ${pp.plot_no}${pp.buyer_name ? ' (' + pp.buyer_name + ')' : ''}`,
       entry_type: 'PLOT PAYMENT',
       debit: 0,
@@ -1068,6 +1081,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         id: `${meta.prefix}_${m.source_id}`,
         site_id: m.site_id,
         date: m.date,
+        transaction_time: m.transaction_time,
         particular: m.particular,
         plot_no: m.linked_plot_no || null,
         entry_type: meta.entry_type,
@@ -1109,9 +1123,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     .filter((entry) => !visibility.creatorId || Number(entry.created_by) === Number(visibility.creatorId))
     .sort((a, b) => sortId(a) - sortId(b));
 
-  // Apply a saved Day Book-only sequence. Rows with no saved position (usually
-  // newly created entries) append in the existing fallback order. No source
-  // table is updated or re-sorted.
+  // Saved positions take priority within the day. Remaining entries use their
+  // recorded time, then the legacy order. Dragging never changes stored times.
   const positionByKey = new Map(
     savedOrderRows
       .filter((row) => row.entry_key)
@@ -1121,6 +1134,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     .map((entry, fallbackIndex) => ({
       ...entry,
       order_key: dayBookOrderKey(entry),
+      transaction_time: Object.hasOwn(entryTimes || {}, dayBookOrderKey(entry))
+        ? entryTimes[dayBookOrderKey(entry)] : entry.transaction_time ?? null,
       _fallback_order: fallbackIndex,
     }))
     .sort((a, b) => {
@@ -1129,6 +1144,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (aPosition != null && bPosition != null) return aPosition - bPosition;
       if (aPosition != null) return -1;
       if (bPosition != null) return 1;
+      const timeComparison = String(b.transaction_time || '').localeCompare(String(a.transaction_time || ''));
+      if (timeComparison) return timeComparison;
       return a._fallback_order - b._fallback_order;
     })
     .map(({ _fallback_order, ...entry }, index) => normalizeDayBookAmounts({
@@ -1389,9 +1406,11 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
                  MIN(dgo.position) AS global_position,
                  MAX(le.entry_date) AS entry_date,
                  MIN(dbo.position) AS local_position,
+                 MAX(cfe.transaction_time) AS transaction_time,
                  MAX(le.created_at) AS created_at,
                  MAX(le.id) AS ledger_id
                FROM ledger_entries le
+               LEFT JOIN cash_flow_entries cfe ON cfe.id = SPLIT_PART(le.id, ':', 1)::int
                LEFT JOIN daybook_global_order dgo
                  ON dgo.site_id = le.site_id
                 AND dgo.entry_key = CONCAT(
@@ -1413,6 +1432,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
             ORDER BY ordered.entry_date DESC,
                      ordered.local_position ASC NULLS LAST,
                      ordered.global_position ASC NULLS LAST,
+                     ordered.transaction_time DESC NULLS LAST,
                      ordered.created_at DESC,
                      ordered.ledger_id DESC`,
           [siteId]
@@ -1597,9 +1617,11 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
                  ) AS entry_key,
                  MIN(dbo.position) AS display_position,
                  MIN(dgo.position) AS global_position,
+                 MAX(cfe.transaction_time) AS transaction_time,
                  MAX(le.created_at) AS created_at,
                  MAX(le.id) AS ledger_id
                FROM ledger_entries le
+               LEFT JOIN cash_flow_entries cfe ON cfe.id = SPLIT_PART(le.id, ':', 1)::int
                LEFT JOIN daybook_entry_order dbo
                  ON dbo.site_id = le.site_id
                 AND dbo.entry_date = le.entry_date
@@ -1616,6 +1638,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
              ) ordered
             ORDER BY ordered.display_position ASC NULLS LAST,
                      ordered.global_position ASC NULLS LAST,
+                     ordered.transaction_time DESC NULLS LAST,
                      ordered.created_at DESC,
                      ordered.ledger_id DESC`,
           [siteId, date]
@@ -2125,7 +2148,7 @@ export const updateModuleEntryFromDayBook = asyncHandler(async (req, res) => {
 
     const { rows } = await client.query(
       `UPDATE ${source}
-          SET ${cfg.date} = $1, ${cfg.amount} = $2, ${cfg.mode} = $3, ${cfg.remarks} = $4
+          SET ${cfg.date} = $1, ${cfg.amount} = $2, ${cfg.mode} = $3, ${cfg.remarks} = $4, transaction_time = $6::time
         WHERE id = $5
         RETURNING *`,
       [
@@ -2134,6 +2157,7 @@ export const updateModuleEntryFromDayBook = asyncHandler(async (req, res) => {
         nextMode,
         remarks !== undefined ? (remarks || null) : row[cfg.remarks],
         id,
+        transactionTimeForWrite(row.transaction_time ?? null),
       ]
     );
 

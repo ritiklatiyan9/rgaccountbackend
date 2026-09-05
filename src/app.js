@@ -8,6 +8,7 @@ import pool from './config/db.js';
 import authMiddleware from './middlewares/auth.middleware.js';
 import errorMiddleware from './middlewares/error.middleware.js';
 import auditRequestMiddleware from './middlewares/audit.middleware.js';
+import { transactionTimeMiddleware } from './services/transactionTime.service.js';
 
 const app = express();
 
@@ -16,6 +17,7 @@ app.use(morgan('combined'));
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use(transactionTimeMiddleware);
 // Register before authenticated routes. The middleware records on response
 // completion, after route-level auth has attached the actor to req.user.
 app.use(auditRequestMiddleware);
