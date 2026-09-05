@@ -2,7 +2,7 @@ import express from 'express';
 const router = express.Router();
 
 import {
-  createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete,
+  getMemberPlotOptions, createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete,
   getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo,
   extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites,
 } from '../controllers/member.controller.js';
@@ -60,6 +60,7 @@ const memberUpload = upload.fields([
 ]);
 
 // Static routes first
+router.get('/plot-options', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberPlotOptions);
 router.get('/lookup-by-phone', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'),
   requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' }), lookupMemberByPhone);
 router.get('/by-plot', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'),

@@ -1,3 +1,4 @@
+import { linkSelectedMemberPlot } from '../services/memberPlotSelection.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { memberModel } from '../models/Member.model.js';
 import { uploadSingle } from '../utils/upload.js';
@@ -228,6 +229,18 @@ export const lookupMemberByPhone = asyncHandler(async (req, res) => {
   });
 });
 
+/** Optional plot choices for the Add/Edit User dialog. */
+export const getMemberPlotOptions = asyncHandler(async (req, res) => {
+  const siteId = Number(req.query.site_id);
+  if (!Number.isSafeInteger(siteId) || siteId <= 0) return res.status(400).json({ message: 'A valid site is required.' });
+  const site = await assertMemberSiteAccess(pool, req.user, siteId);
+  if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
+  const { rows } = await pool.query(`SELECT p.id, p.plot_no, p.block, p.plot_tag, p.buyer_name,
+    (to_jsonb(p)->>'buyer_member_id')::integer AS buyer_member_id
+    FROM plots p WHERE p.site_id = $1 ORDER BY p.plot_no, p.id`, [siteId]);
+  res.json({ plots: rows });
+});
+
 /** POST /members — Create a new member */
 export const createMember = asyncHandler(async (req, res) => {
   const siteId = Number.parseInt(req.body.site_id, 10);
@@ -328,6 +341,7 @@ export const createMember = asyncHandler(async (req, res) => {
     Object.assign(data, docUrls);
 
     const member = await memberModel.create(data, client);
+    await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId: member.id, siteId });
     if (reuseSource) {
       await client.query(
         `INSERT INTO kyc_cases
@@ -633,6 +647,21 @@ export const updateMember = asyncHandler(async (req, res) => {
 
   if (Object.keys(data).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
+  if (req.body.plot_id != null && req.body.plot_id !== '') {
+    const site = await assertMemberSiteAccess(pool, req.user, existing.site_id);
+    if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const updated = await memberModel.update(memberId, data, client);
+      await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId, siteId: existing.site_id });
+      await client.query('COMMIT');
+      return res.json({ member: updated });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
   const updated = await memberModel.update(memberId, data, pool);
   res.json({ member: updated });
 });
