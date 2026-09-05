@@ -60,7 +60,10 @@ class MemberModel extends MasterModel {
               shared_kyc.reused_from_case_id AS shared_kyc_reused_from_case_id
          FROM members m
          LEFT JOIN LATERAL (
-           SELECT k.id, k.status, k.reused_from_case_id
+           SELECT k.id, k.status,
+                  -- Optional audit metadata must not break every profile
+                  -- while migration 147 is still pending during deployment.
+                  (to_jsonb(k)->>'reused_from_case_id')::integer AS reused_from_case_id
              FROM kyc_cases k
             WHERE k.client_member_id = m.id
             ORDER BY CASE k.status WHEN 'VERIFIED' THEN 4 WHEN 'OCR_DONE' THEN 3 WHEN 'OCR_PENDING' THEN 2 ELSE 1 END DESC,
