@@ -28,6 +28,9 @@ import {
   loadDayBookModeBalanceData,
   loadSiteBalanceAsOf,
 } from '../services/daybookRead.service.js';
+import {
+  loadGlobalSequence, projectDatesFromGlobal, projectGlobalFromDate, replaceScopedOrder,
+} from '../services/daybookOrderSync.service.js';
 
 // ══════════════════════════════════════════════════
 //  OPENING BALANCE HELPERS
@@ -1389,55 +1392,15 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
         });
       }
 
+      // The base every save edits is exactly the sequence readers show: saved
+      // cross-date positions first, never-positioned entries slotted in by
+      // date. Replacing only the submitted slots keeps every other row's
+      // relative order and stores the placement readers already used.
+      const sequence = await loadGlobalSequence(client, siteId);
+      const currentKeys = sequence.map((row) => row.entry_key);
+      const dateByKey = new Map(sequence.map((row) => [row.entry_key, row.entry_date]));
       let entryKeys = normalizedKeys;
       if (partial) {
-        // Build the full current presentation sequence, then replace only the
-        // submitted page's slots. Rows on every other page retain their exact
-        // relative order.
-        const currentKeys = (await client.query(
-          `SELECT ordered.entry_key
-             FROM (
-               SELECT
-                 CONCAT(
-                   le.source_key,
-                   ':',
-                   COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
-                 ) AS entry_key,
-                 MIN(dgo.position) AS global_position,
-                 MAX(le.entry_date) AS entry_date,
-                 MIN(dbo.position) AS local_position,
-                 MAX(cfe.transaction_time) AS transaction_time,
-                 MAX(le.created_at) AS created_at,
-                 MAX(le.id) AS ledger_id
-               FROM ledger_entries le
-               LEFT JOIN cash_flow_entries cfe ON cfe.id = SPLIT_PART(le.id, ':', 1)::int
-               LEFT JOIN daybook_global_order dgo
-                 ON dgo.site_id = le.site_id
-                AND dgo.entry_key = CONCAT(
-                  le.source_key,
-                  ':',
-                  COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
-                )
-               LEFT JOIN daybook_entry_order dbo
-                 ON dbo.site_id = le.site_id
-                AND dbo.entry_date = le.entry_date
-                AND dbo.entry_key = CONCAT(
-                  le.source_key,
-                  ':',
-                  COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
-                )
-              WHERE le.site_id = $1
-              GROUP BY 1
-             ) ordered
-            ORDER BY ordered.entry_date DESC,
-                     ordered.local_position ASC NULLS LAST,
-                     ordered.global_position ASC NULLS LAST,
-                     ordered.transaction_time DESC NULLS LAST,
-                     ordered.created_at DESC,
-                     ordered.ledger_id DESC`,
-          [siteId]
-        )).rows.map((row) => row.entry_key);
-
         const currentKeySet = new Set(currentKeys);
         const missingKeys = entryKeys.filter((key) => !currentKeySet.has(key));
         if (missingKeys.length > 0) {
@@ -1445,12 +1408,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
           error.statusCode = 409;
           throw error;
         }
-
-        const scopedKeySet = new Set(entryKeys);
-        let scopedIndex = 0;
-        entryKeys = currentKeys.map((key) => (
-          scopedKeySet.has(key) ? entryKeys[scopedIndex++] : key
-        ));
+        entryKeys = replaceScopedOrder(currentKeys, entryKeys);
       }
 
       const upserted = await client.query(
@@ -1486,6 +1444,13 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
            (SELECT revision FROM revision_row) AS revision`,
         [siteId, entryKeys, requestId, req.user.id]
       )).rows[0];
+      // Keep the daily view's per-date positions in step for the dates touched.
+      await projectDatesFromGlobal(client, {
+        siteId,
+        userId: req.user.id,
+        sequence: entryKeys.map((key) => ({ entry_key: key, entry_date: dateByKey.get(key) })),
+        dates: new Set(normalizedKeys.map((key) => dateByKey.get(key)).filter(Boolean)),
+      });
       await client.query('COMMIT');
       await clearCacheByPrefixes(['daybook|', 'balance-sheet|']);
 
@@ -1713,6 +1678,9 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
       changed += Number(finalized.deleted_count);
       totalChanged += changed;
       order.savedRevision = Number(finalized.revision);
+      // Mirror the day's new relative order into the cross-date sequence the
+      // period statements read, so both views agree.
+      await projectGlobalFromDate(client, { siteId, orderedKeys: entryKeys, userId: req.user.id });
     }
 
     await client.query('COMMIT');

@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import { SEQUENCE_ORDER_BY } from '../services/daybookOrderSync.service.js';
 
 /**
  * Balance Sheet reads `ledger_entries` — the canonical money view created in
@@ -223,15 +224,9 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
   -- Parameter 10 is the timeline grain used by the metadata query. Keep its type
   -- explicit here because this query shares the same 12-parameter contract.
   WHERE $10::text IS NOT NULL
-  -- Dates always own the outer sequence, including after an entry is edited.
-  -- Daily and period views share the same saved order. Legacy global positions
-  -- are a fallback for entries that have not been reordered by date yet.
-  ORDER BY entry_date DESC,
-           display_position ASC NULLS LAST,
-           global_display_position ASC NULLS LAST,
-           transaction_time DESC NULLS LAST,
-           created_at DESC,
-           id DESC
+  -- The sequence users arrange across dates in the period statements; entries
+  -- never positioned slot in by date (see SEQUENCE_ORDER_BY).
+  ${SEQUENCE_ORDER_BY}
   LIMIT $9::int
 `;
 

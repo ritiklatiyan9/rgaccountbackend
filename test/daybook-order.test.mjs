@@ -4,7 +4,12 @@ import pool from '../src/config/db.js';
 import balanceSheet from '../src/models/BalanceSheet.model.js';
 import { updateDayBookOrder } from '../src/controllers/daybook.controller.js';
 
-test('period reads keep dates first and share daily positions before legacy order and pagination', async (t) => {
+// Users arrange entries across dates in the period statements. That saved
+// sequence leads; an entry never positioned slots in by its date instead of
+// sinking to the end, and dates only break ties after that.
+const ANCHORED_SEQUENCE = /ORDER BY COALESCE\(\s+global_display_position::numeric,[\s\S]*PARTITION BY entry_date[\s\S]*ASC NULLS LAST,\s+entry_date DESC,\s+display_position ASC NULLS LAST/;
+
+test('period reads follow the saved cross-date sequence, slot new entries in by date, and paginate', async (t) => {
   const calls = [];
   t.mock.method(pool, 'query', async (sql, params) => {
     calls.push({ sql, params });
@@ -12,7 +17,8 @@ test('period reads keep dates first and share daily positions before legacy orde
   });
   await balanceSheet.getReport({ siteId: 9, scope: 'bank', limit: 50 });
   assert.equal(calls.length, 2);
-  assert.match(calls[1].sql, /ORDER BY entry_date DESC,\s+display_position ASC NULLS LAST,\s+global_display_position ASC NULLS LAST,[\s\S]*LIMIT \$9::int/);
+  assert.match(calls[1].sql, ANCHORED_SEQUENCE);
+  assert.match(calls[1].sql, /LIMIT \$9::int/);
   assert.equal(calls[1].params[8], 50);
 });
 
@@ -27,8 +33,9 @@ test('a partial cross-date save shifts selected entries and preserves other book
         return { rows: [{ revision: 2, last_request_id: null }] };
       }
       if (sql.includes('SELECT ordered.entry_key')) {
-        assert.match(sql, /ORDER BY ordered.entry_date DESC,\s+ordered.local_position ASC NULLS LAST,\s+ordered.global_position ASC NULLS LAST/);
-        return { rows: currentKeys.map(entry_key => ({ entry_key })) };
+        // The base a save edits is the very sequence readers show.
+        assert.match(sql, ANCHORED_SEQUENCE);
+        return { rows: currentKeys.map(entry_key => ({ entry_key, entry_date: '2026-09-05' })) };
       }
       if (sql.includes('WITH deleted AS')) return { rows: [{ deleted_count: 0, revision: 3 }] };
       return { rows: [], rowCount: 4 };
@@ -43,6 +50,11 @@ test('a partial cross-date save shifts selected entries and preserves other book
   });
   const write = calls.find(({ sql }) => sql.includes('INSERT INTO daybook_global_order\n'));
   assert.deepEqual(write.params[2], ['expenses:1', 'day_book:2', 'expenses:3', 'day_book:4']);
+  // The daily view's per-date positions follow, for the dates that were touched.
+  const dayWrite = calls.find(({ sql }) => sql.includes('INSERT INTO daybook_entry_order'));
+  assert.deepEqual(dayWrite.params[2], ['2026-09-05', '2026-09-05', '2026-09-05', '2026-09-05']);
+  assert.deepEqual(dayWrite.params[3], ['expenses:1', 'day_book:2', 'expenses:3', 'day_book:4']);
+  assert.deepEqual(dayWrite.params[4], [1, 2, 3, 4]);
   assert.equal(response.order_revision, 3);
   assert.equal(calls.at(-1).sql, 'COMMIT');
   assert.ok(calls.every(({ sql }) => !/(?:UPDATE|DELETE FROM|INSERT INTO)\s+(?:ledger_entries|cash_flow_entries|expenses|day_book)\b/i.test(sql)));

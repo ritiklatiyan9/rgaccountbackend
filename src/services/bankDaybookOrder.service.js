@@ -1,3 +1,5 @@
+import { loadGlobalSequence } from './daybookOrderSync.service.js';
+
 const mergeUnique = (...groups) => {
   const seen = new Set();
   const output = [];
@@ -163,34 +165,9 @@ export async function applyBankDaybookOrder(client, {
         ORDER BY position, entry_key`,
       [siteId]
     ),
-    client.query(
-      `SELECT ordered.entry_key
-         FROM (
-           SELECT
-             CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))) AS entry_key,
-             MIN(dgo.position) AS global_position,
-             MIN(dbo.position) AS local_position,
-             MAX(le.entry_date) AS entry_date,
-             MAX(le.created_at) AS created_at,
-             MAX(le.id) AS ledger_id
-           FROM ledger_entries le
-           LEFT JOIN daybook_global_order dgo
-             ON dgo.site_id = le.site_id
-            AND dgo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))
-           LEFT JOIN daybook_entry_order dbo
-             ON dbo.site_id = le.site_id
-            AND dbo.entry_date = le.entry_date
-            AND dbo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))
-          WHERE le.site_id = $1
-          GROUP BY 1
-         ) ordered
-        ORDER BY ordered.global_position ASC NULLS LAST,
-                 ordered.entry_date DESC,
-                 ordered.local_position ASC NULLS LAST,
-                 ordered.created_at DESC,
-                 ordered.ledger_id DESC`,
-      [siteId]
-    ),
+    // The same base the Day Book's own saves edit, so unmatched entries keep
+    // the date-anchored place readers already show instead of sinking to the end.
+    loadGlobalSequence(client, siteId).then((rows) => ({ rows })),
   ]);
   const fullGlobalKeys = mergeUnique(
     savedGlobalRows.rows.map((row) => row.entry_key),
