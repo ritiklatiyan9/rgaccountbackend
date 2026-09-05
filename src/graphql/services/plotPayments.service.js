@@ -3,6 +3,7 @@
  * Optimized SQL queries replacing multiple REST endpoints with single GraphQL calls.
  */
 import pool from '../../config/db.js';
+import { PLOT_BUYER_MEMBER_JOIN, PLOT_BUYER_KYC_JOIN, PLOT_BUYER_KYC_STATUS } from '../../services/plotMemberLinks.service.js';
 
 const PP_POSTS = `financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)`;
 const PIP_POSTS = `financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)`;
@@ -19,6 +20,8 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
   const query = `
     SELECT
       p.*,
+      plot_buyer.id AS buyer_member_id,
+      ${PLOT_BUYER_KYC_STATUS} AS buyer_kyc_status,
       -- booking_date is a DATE column → pg hands it back as a JS Date, which the
       -- GraphQLString field then serializes as epoch-millis (unparseable on the
       -- client). Emit a stable 'YYYY-MM-DD' string instead. The duplicate column
@@ -65,6 +68,8 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
       WHERE pip.plot_id = p.id
         AND ($2::int IS NULL OR pip.created_by = $2::int)
     ) ip_agg ON true
+    ${PLOT_BUYER_MEMBER_JOIN}
+    ${PLOT_BUYER_KYC_JOIN}
     WHERE p.site_id = $1
     ORDER BY p.plot_no ASC
   `;

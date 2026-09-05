@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete,
   getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo,
-  extractKycDocument, registerMemberInSites, registerMembersInSites,
+  extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites,
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -20,7 +20,7 @@ const memberReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'members' });
 // by every member write. The bust prefix below is anchored with `|` so the
 // "members-ac" namespace doesn't accidentally match.
 const autocompleteCache = cacheResponse({ ttlSeconds: 300, namespace: 'members-ac' });
-const bustMemberCache = invalidateCacheOnSuccess(['members|', 'plots|', 'member-kyc-pending|']);
+const bustMemberCache = invalidateCacheOnSuccess(['members|', 'plots|', 'plots:pageData:', 'member-kyc-pending|']);
 const kycUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -60,6 +60,8 @@ const memberUpload = upload.fields([
 ]);
 
 // Static routes first
+router.get('/lookup-by-phone', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'),
+  requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' }), lookupMemberByPhone);
 router.get('/by-plot', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'),
   requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' }), searchMembersByPlot);
 router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, searchMembers);
@@ -68,7 +70,8 @@ router.post('/kyc/extract', requireRole('admin', 'sub_admin'), requirePermission
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, listMembers);
 
 // With file upload for documents
-router.post('/', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'write'), bustMemberCache, createMember);
+router.post('/', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'write'),
+  requirePlotSiteAccess({ entity: 'site', source: 'body', key: 'site_id' }), bustMemberCache, createMember);
 router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, requirePermission('clients', 'update'), bustMemberCache, updateMember);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), bustMemberCache, deleteMember);
 router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), bustMemberCache, bulkDeleteMembers);

@@ -525,6 +525,8 @@ const PlotType = new GraphQLObjectType({
     payment_count:         { type: GraphQLInt },
     payment_buyer_names:   { type: GraphQLString },
     payment_booked_bys:    { type: GraphQLString },
+    buyer_member_id:       { type: GraphQLInt },
+    buyer_kyc_status:      { type: GraphQLString },
   },
 });
 

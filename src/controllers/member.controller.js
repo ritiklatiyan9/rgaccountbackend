@@ -5,6 +5,14 @@ import pool from '../config/db.js';
 import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 import { findPeopleByPlot } from '../services/plotPeople.service.js';
 import { findMemberPlotNumbers } from '../services/plotMemberLinks.service.js';
+import {
+  assertMemberSiteAccess,
+  findAccessiblePhoneMatches,
+  findVerifiedReuseSource,
+  mergeVerifiedKycProfile,
+  normalizeMemberName,
+  normalizeMemberPhone,
+} from '../services/memberPhoneReuse.service.js';
 
 export const searchMembersByPlot = asyncHandler(async (req, res) => {
   const siteId = Number(req.query.site_id);
@@ -86,8 +94,11 @@ export const applyMemberTypes = (data, body, current = {}) => {
   return data;
 };
 
-// Digits only, so '+91 99276-69955' and '9927669955 ' are the same number.
-export const samePhone = (a, b) => String(a || '').replace(/\D/g, '') === String(b || '').replace(/\D/g, '');
+// Country code, leading zero, spaces and punctuation do not create a second identity.
+export const samePhone = (a, b) => {
+  const first = normalizeMemberPhone(a);
+  return Boolean(first) && first === normalizeMemberPhone(b);
+};
 
 const GEO_COORD = { latitude: 90, longitude: 180 };
 const coerceCoord = (val, max) => {
@@ -160,43 +171,184 @@ const uploadDocuments = async (files) => {
   return urls;
 };
 
+/** GET /members/lookup-by-phone?site_id=X&phone=... */
+export const lookupMemberByPhone = asyncHandler(async (req, res) => {
+  const siteId = Number.parseInt(req.query.site_id, 10);
+  const phone = normalizeMemberPhone(req.query.phone);
+  if (!Number.isInteger(siteId) || siteId <= 0) {
+    return res.status(400).json({ message: 'A valid site is required' });
+  }
+  if (!phone) {
+    return res.status(400).json({ message: 'Enter a complete 10-digit mobile number' });
+  }
+  const targetSite = await assertMemberSiteAccess(pool, req.user, siteId);
+  if (!targetSite) return res.status(403).json({ message: 'This site is unavailable to your account' });
+
+  const matches = await findAccessiblePhoneMatches(pool, {
+    user: req.user, siteId, phone,
+  });
+  const currentSiteMember = matches.find((member) => Number(member.site_id) === siteId) || null;
+  const otherRegistrations = matches.filter((member) => Number(member.site_id) !== siteId);
+  const source = otherRegistrations[0] || null;
+  const sites = [...new Map(matches.map((member) => [Number(member.site_id), {
+    id: Number(member.site_id),
+    name: member.site_name,
+    code: member.site_code || null,
+    kyc_verified: Boolean(member.verified_kyc_case_id),
+  }])).values()];
+
+  const toSummary = (member) => member ? {
+    member_id: Number(member.id),
+    full_name: member.full_name,
+    phone: normalizeMemberPhone(member.phone),
+    email: member.email || '',
+    site_id: Number(member.site_id),
+    site_name: member.site_name,
+    kyc_verified: Boolean(member.verified_kyc_case_id),
+    kyc_verified_at: member.kyc_verified_at || null,
+    prefill: member.verified_kyc_case_id ? {
+      full_name: member.full_name || '',
+      phone: normalizeMemberPhone(member.phone),
+      email: member.email || '',
+      co_applicant_name: member.co_applicant_name || '',
+      co_applicant_relation: member.co_applicant_relation || '',
+      co_applicant_phone: member.co_applicant_phone || '',
+      co_applicant_aadhar: member.co_applicant_aadhar || '',
+      co_applicant_pan: member.co_applicant_pan || '',
+    } : null,
+  } : null;
+
+  return res.json({
+    phone,
+    found: matches.length > 0,
+    current_site_member: toSummary(currentSiteMember),
+    source: toSummary(source),
+    sites,
+  });
+});
+
 /** POST /members — Create a new member */
 export const createMember = asyncHandler(async (req, res) => {
-  const { site_id } = req.body;
-  if (!site_id) return res.status(400).json({ message: 'Site is required' });
-
-  const data = sanitize(req.body);
-  if (!data.full_name) return res.status(400).json({ message: 'Full name is required' });
-
-  data.site_id = parseInt(site_id);
-  data.created_by = req.user.id;
-  applyMemberTypes(data, req.body);
-  if (!data.member_types) { data.member_type = data.member_type || 'CLIENT'; data.member_types = [data.member_type]; }
-
-  // Run phone uniqueness check + document uploads in PARALLEL
-  const phoneCheckPromise = data.phone
-    ? pool.query(
-        `SELECT id, full_name FROM members WHERE site_id = $1 AND phone = $2 LIMIT 1`,
-        [data.site_id, data.phone]
-      )
-    : Promise.resolve({ rows: [] });
-
-  const [phoneCheck, docUrls] = await Promise.all([
-    phoneCheckPromise,
-    uploadDocuments(req.files),
-  ]);
-
-  if (phoneCheck.rows.length > 0) {
-    return res.status(409).json({
-      message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name} — open that client and add the extra role there instead of creating a second record`,
-      member_id: phoneCheck.rows[0].id,
-    });
+  const siteId = Number.parseInt(req.body.site_id, 10);
+  if (!Number.isInteger(siteId) || siteId <= 0) {
+    return res.status(400).json({ message: 'Site is required' });
   }
 
-  Object.assign(data, docUrls);
+  let data = sanitize(req.body);
+  if (!data.full_name) return res.status(400).json({ message: 'Full name is required' });
+  if (data.phone) {
+    const phone = normalizeMemberPhone(data.phone);
+    if (!phone) return res.status(400).json({ message: 'Enter a valid 10-digit mobile number' });
+    data.phone = phone;
+  }
 
-  const member = await memberModel.create(data, pool);
-  res.status(201).json({ member });
+  const reuseWasRequested = req.body.reuse_member_id !== undefined && req.body.reuse_member_id !== '';
+  const requestedMemberId = Number.parseInt(req.body.reuse_member_id, 10);
+  if (reuseWasRequested && (!Number.isInteger(requestedMemberId) || requestedMemberId <= 0)) {
+    return res.status(400).json({ message: 'The selected existing user is invalid' });
+  }
+
+  data.site_id = siteId;
+  data.created_by = req.user.id;
+  applyMemberTypes(data, req.body);
+  if (!data.member_types) {
+    data.member_type = data.member_type || 'CLIENT';
+    data.member_types = [data.member_type];
+  }
+
+  const [targetSite, docUrls] = await Promise.all([
+    assertMemberSiteAccess(pool, req.user, siteId),
+    uploadDocuments(req.files),
+  ]);
+  if (!targetSite) return res.status(403).json({ message: 'This site is unavailable to your account' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (data.phone) {
+      // This lock makes the application-level uniqueness check race-safe even
+      // while legacy duplicates prevent a database UNIQUE index.
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1))',
+        [`accounts-member-phone:${siteId}:${data.phone}`]
+      );
+      const { rows: duplicates } = await client.query(
+        `SELECT id, full_name FROM members
+          WHERE site_id = $1
+            AND RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = $2
+          ORDER BY id DESC LIMIT 1 FOR SHARE`,
+        [siteId, data.phone]
+      );
+      if (duplicates[0]) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'MEMBER_ALREADY_REGISTERED',
+          message: `Mobile number ${data.phone} is already registered to ${duplicates[0].full_name} in this site`,
+          member_id: duplicates[0].id,
+        });
+      }
+    }
+
+    const reuseSource = data.phone
+      ? await findVerifiedReuseSource(client, {
+          user: req.user,
+          siteId,
+          phone: data.phone,
+          fullName: data.full_name,
+          requestedMemberId: reuseWasRequested ? requestedMemberId : null,
+        })
+      : null;
+
+    if (reuseWasRequested && !reuseSource) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'KYC_REUSE_UNAVAILABLE',
+        message: 'Verified KYC is no longer available from that registration. Please check the mobile number again.',
+      });
+    }
+    if (reuseSource && normalizeMemberName(reuseSource.full_name) !== normalizeMemberName(data.full_name)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'KYC_NAME_MISMATCH',
+        message: `This mobile number is verified for ${reuseSource.full_name}. Use the registered details before adding this user.`,
+        registered_name: reuseSource.full_name,
+      });
+    }
+
+    if (reuseSource) data = mergeVerifiedKycProfile(data, reuseSource);
+    // A document deliberately uploaded in this request takes precedence over
+    // the reusable source copy.
+    Object.assign(data, docUrls);
+
+    const member = await memberModel.create(data, client);
+    if (reuseSource) {
+      await client.query(
+        `INSERT INTO kyc_cases
+           (booking_id, client_member_id, site_id, mode, status, created_by,
+            verified_by, verified_at, created_at, updated_at, reused_from_case_id)
+         VALUES
+           (NULL, $1, $2, 'MANUAL_OCR', 'VERIFIED', $3,
+            $4, COALESCE($5, now()), now(), now(), $6)`,
+        [
+          member.id, siteId, req.user.id,
+          reuseSource.kyc_verified_by || req.user.id,
+          reuseSource.kyc_verified_at,
+          reuseSource.verified_kyc_case_id,
+        ]
+      );
+    }
+    await client.query('COMMIT');
+    return res.status(201).json({
+      member,
+      kyc_reused: Boolean(reuseSource),
+      kyc_source_site: reuseSource?.source_site_name || null,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 /** POST /members/kyc/extract — OCR a document and return reviewable member fields. */
