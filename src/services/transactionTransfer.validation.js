@@ -71,7 +71,8 @@ export const editSource = (source, edits = {}) => {
   const instrumentChanged = result.mode !== source.mode || result.cheque_no !== source.cheque_no
     || result.amount !== source.amount || result.date !== source.date || result.direction !== source.direction
     || result.payment_mode !== String(source.payment_mode || '').toUpperCase()
-    || result.bank_account_no !== source.bank_account_no || result.bank_name !== source.bank_name;
+    || String(result.bank_account_no || '') !== String(source.bank_account_no || '')
+    || String(result.bank_name || '') !== String(source.bank_name || '');
   result.cheque_status = result.mode === 'cheque' ? (instrumentChanged ? 'PENDING' : source.cheque_status || 'PENDING') : null;
   if (result.mode === 'cash') result.bank_account_id = null;
   // A new module must follow its approval workflow; old approval/signatures do

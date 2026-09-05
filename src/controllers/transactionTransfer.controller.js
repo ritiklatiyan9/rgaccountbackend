@@ -372,7 +372,7 @@ export const executeTransfer = async (db, req) => {
     else if (targetType==='farmer_payment') target=await insertFarmerPayment(db,edited,targetId,req.user.id);
     else if (targetType==='plot_payment') target=await insertPlotPayment(db,edited,targetId,req.user.id);
     else target=await insertOther(db,edited,targetType,targetId,req.user.id);
-    if (edited.bank_account_id && targetType!=='personal_ledger') await db.query(`UPDATE cash_flow_entries cfe SET bank_account_id=ba.id FROM bank_accounts ba WHERE ba.id=$1 AND ba.site_id=cfe.site_id AND cfe.source_module=$2 AND cfe.source_id=$3`,[edited.bank_account_id,MODULES[targetType].table,target.row.id]);
+    if (edited.bank_account_id && targetType!=='personal_ledger') await db.query(`UPDATE cash_flow_entries cfe SET bank_account_id=ba.id FROM bank_accounts ba WHERE ba.id=$1 AND ba.site_id = cfe.site_id AND cfe.source_module=$2 AND cfe.source_id=$3`,[edited.bank_account_id,MODULES[targetType].table,target.row.id]);
     const {rows}=await db.query(`INSERT INTO transaction_entry_transfers (site_id,source_type,source_record_id,source_parent_id,source_parent_name,target_type,target_record_id,target_parent_id,target_parent_name,entry_date,direction,amount,reason,source_snapshot,target_snapshot,transferred_by)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id,created_at`,
       [source.site_id,source.type,source.id,source.parent_id,source.parent_name,targetType,target.row.id,target.parent.id,target.parent.name || target.parent.ledger_name,edited.date,edited.direction,edited.amount,reason,source.raw,{...target.row,transfer_fields:edited},req.user.id]);
@@ -388,6 +388,7 @@ export const transferEntry = asyncHandler(async (req,res) => {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId || '')) throw new TransferError(400,'A valid transfer request id is required. Reopen the transfer window');
   const db=await pool.connect();
   let committed=false;
+  let batchClaimed=false;
   try {
     await db.query('BEGIN');
     await db.query("SET LOCAL lock_timeout = '8s'");
@@ -396,6 +397,7 @@ export const transferEntry = asyncHandler(async (req,res) => {
     await db.query('INSERT INTO transaction_transfer_batches (request_id,request_hash,transferred_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',[requestId,hash,req.user.id]);
     const {rows}=await db.query('SELECT * FROM transaction_transfer_batches WHERE request_id=$1 FOR UPDATE',[requestId]);
     const batch=rows[0];
+    batchClaimed=true;
     if (Number(batch.transferred_by)!==Number(req.user.id) || batch.request_hash!==hash) throw new TransferError(409,'This request id has already been used for a different transfer');
     const result=batch.response || await executeTransfer(db,req);
     if (!batch.response) await db.query('UPDATE transaction_transfer_batches SET response=$2 WHERE request_id=$1',[requestId,result]);
@@ -405,10 +407,12 @@ export const transferEntry = asyncHandler(async (req,res) => {
     res.status(batch.response?200:201).json(result);
   } catch(error) {
     if (!committed) {await db.query('ROLLBACK');error.transferRolledBack=true;}
+    if (!batchClaimed && ['55P03','57014'].includes(error.code)) error.transferUnknown=true;
     throw error;
   } finally { db.release(); }
 });
 export const handleTransferError = (error,req,res,next) => {
+  if (error.transferUnknown) return res.status(409).json({message:'This request may still be processing. Retry the same request to check its result.',transfer_state:'unknown'});
   if (error instanceof TransferError) return res.status(error.status).json({message:error.message});
   if (['23503','23514','23505'].includes(error.code)) return res.status(409).json({message:'A destination rule or linked record prevents this transfer. No entries were changed. Review the destination and try again.'});
   if (['40P01','55P03','57014','40001'].includes(error.code)) return res.status(409).json({message:'An entry is being changed by another request. No entries were transferred. Please retry.'});
