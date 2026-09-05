@@ -222,12 +222,12 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
   -- Parameter 10 is the timeline grain used by the metadata query. Keep its type
   -- explicit here because this query shares the same 12-parameter contract.
   WHERE $10::text IS NOT NULL
-  -- A saved sequence may move rows across dates. Date order is the fallback
-  -- for entries without a manual position. Apply the order before LIMIT so
-  -- subsequent reads and pages preserve the sequence the user saved.
-  ORDER BY global_display_position ASC NULLS LAST,
-           entry_date DESC,
+  -- Dates always own the outer sequence, including after an entry is edited.
+  -- Daily and period views share the same saved order. Legacy global positions
+  -- are a fallback for entries that have not been reordered by date yet.
+  ORDER BY entry_date DESC,
            display_position ASC NULLS LAST,
+           global_display_position ASC NULLS LAST,
            created_at DESC,
            id DESC
   LIMIT $9::int

@@ -121,10 +121,13 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     pool.query('SELECT id, name, code, address, city, state FROM sites WHERE id = $1', [siteId]),
     getReportSingleFlight(reportKey, reportArgs),
     pool.query(
-      `SELECT revision
-         FROM daybook_global_order_state
-        WHERE site_id = $1`,
-      [siteId]
+      `SELECT
+         COALESCE((SELECT revision FROM daybook_global_order_state WHERE site_id = $1), 0) AS revision,
+         COALESCE((SELECT jsonb_object_agg(TO_CHAR(entry_date, 'YYYY-MM-DD'), revision)
+           FROM daybook_order_state WHERE site_id = $1
+             AND ($2::date IS NULL OR entry_date >= $2::date)
+             AND ($3::date IS NULL OR entry_date <= $3::date)), '{}'::jsonb) AS revisions`,
+      [siteId, dateFrom, dateTo]
     ),
   ]);
 
@@ -135,6 +138,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     site,
     scope,
     order_revision: Number(orderStateResult.rows[0]?.revision) || 0,
+    order_revisions: orderStateResult.rows[0]?.revisions || {},
     period: { preset, date_from: dateFrom, date_to: dateTo, grain },
     row_limit: limit,
     filters: { source, payment_mode: paymentMode, direction, q: search, plot_id: plotId, created_by: entryVisibility.creatorId },

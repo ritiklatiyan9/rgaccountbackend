@@ -16,13 +16,30 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
        COALESCE((
          SELECT jsonb_agg(
                   jsonb_build_object(
-                    'entry_key', dbo.entry_key,
-                    'position', dbo.position
+                    'entry_key', ordered.entry_key,
+                    'position', ordered.position
                   )
-                  ORDER BY dbo.position
+                  ORDER BY ordered.position
                 )
-           FROM daybook_entry_order dbo
-          WHERE dbo.site_id = $1 AND dbo.entry_date = $2::date
+           FROM (
+             SELECT entry_key, ROW_NUMBER() OVER (
+               ORDER BY local_position ASC NULLS LAST, global_position ASC NULLS LAST
+             ) AS position
+             FROM (
+               SELECT dbo.entry_key, dbo.position AS local_position, NULL::int AS global_position
+               FROM daybook_entry_order dbo
+               WHERE dbo.site_id = $1 AND dbo.entry_date = $2::date
+               UNION ALL
+               SELECT dgo.entry_key, NULL::int, dgo.position
+               FROM daybook_global_order dgo
+               WHERE dgo.site_id = $1
+                 AND NOT EXISTS (SELECT 1 FROM daybook_entry_order dbo
+                   WHERE dbo.site_id = $1 AND dbo.entry_date = $2::date AND dbo.entry_key = dgo.entry_key)
+                 AND EXISTS (SELECT 1 FROM ledger_entries le
+                   WHERE le.site_id = $1 AND le.entry_date = $2::date
+                     AND dgo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))))
+             ) positions
+           ) ordered
        ), '[]'::jsonb) AS saved_order_rows,
        COALESCE((
          SELECT dos.revision

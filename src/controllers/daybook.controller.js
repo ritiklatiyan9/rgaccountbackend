@@ -1319,9 +1319,9 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'expected_revision must be a non-negative integer' });
   }
 
-  // Presentation-only site-wide sequence; transaction dates remain unchanged.
-  // Saved positions take precedence over dates, matching the statement read
-  // order so cross-date moves survive a refresh and subsequent partial saves.
+  // Compatibility for older clients with site-wide saved sequences. Current
+  // clients save date-scoped orders below; reads keep dates together and use
+  // these legacy positions only after the date-scoped order.
   if (req.body.global_entry_keys !== undefined) {
     const requestedKeys = req.body.global_entry_keys;
     if (!Array.isArray(requestedKeys) || requestedKeys.length === 0 || requestedKeys.length > 100000) {
@@ -1410,9 +1410,9 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
               WHERE le.site_id = $1
               GROUP BY 1
              ) ordered
-            ORDER BY ordered.global_position ASC NULLS LAST,
-                     ordered.entry_date DESC,
+            ORDER BY ordered.entry_date DESC,
                      ordered.local_position ASC NULLS LAST,
+                     ordered.global_position ASC NULLS LAST,
                      ordered.created_at DESC,
                      ordered.ledger_id DESC`,
           [siteId]
@@ -1596,6 +1596,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
                    COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
                  ) AS entry_key,
                  MIN(dbo.position) AS display_position,
+                 MIN(dgo.position) AS global_position,
                  MAX(le.created_at) AS created_at,
                  MAX(le.id) AS ledger_id
                FROM ledger_entries le
@@ -1607,10 +1608,14 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
                   ':',
                   COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))
                 )
+               LEFT JOIN daybook_global_order dgo
+                 ON dgo.site_id = le.site_id
+                AND dgo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))
               WHERE le.site_id = $1 AND le.entry_date = $2
               GROUP BY 1
              ) ordered
             ORDER BY ordered.display_position ASC NULLS LAST,
+                     ordered.global_position ASC NULLS LAST,
                      ordered.created_at DESC,
                      ordered.ledger_id DESC`,
           [siteId, date]
@@ -1624,7 +1629,11 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
             fullKeySet.add(key);
           }
         });
-        const missingKeys = entryKeys.filter((key) => !fullKeySet.has(key));
+        // A stale saved position is not proof that an entry still has this
+        // date. Reject a concurrent date edit instead of saving it under its
+        // previous day and letting the preview disagree with the next read.
+        const canonicalKeySet = new Set(canonicalKeys);
+        const missingKeys = entryKeys.filter((key) => !canonicalKeySet.has(key));
         if (missingKeys.length > 0) {
           const error = new Error(`One or more entries for ${date} are no longer available`);
           error.statusCode = 409;
