@@ -262,6 +262,12 @@ export const createMember = asyncHandler(async (req, res) => {
   ]);
   if (!targetSite) return res.status(403).json({ message: 'This site is unavailable to your account' });
 
+  const canReadClientProfiles = ['admin', 'super_admin'].includes(req.user.role)
+    || req.user.permissionsByModule?.get('clients')?.can_read === true;
+  if (reuseWasRequested && !canReadClientProfiles) {
+    return res.status(403).json({ message: 'Read permission is required to reuse KYC from another site' });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -289,7 +295,7 @@ export const createMember = asyncHandler(async (req, res) => {
       }
     }
 
-    const reuseSource = data.phone
+    const reuseSource = data.phone && canReadClientProfiles
       ? await findVerifiedReuseSource(client, {
           user: req.user,
           siteId,
@@ -547,7 +553,7 @@ export const getMemberAutocomplete = asyncHandler(async (req, res) => {
 
 /** GET /members/:id */
 export const getMember = asyncHandler(async (req, res) => {
-  const member = await memberModel.findById(parseInt(req.params.id), pool);
+  const member = await memberModel.findByIdWithKyc(parseInt(req.params.id), pool);
   if (!member) return res.status(404).json({ message: 'Member not found' });
   res.json({ member });
 });
@@ -559,6 +565,11 @@ export const updateMember = asyncHandler(async (req, res) => {
   // Run all 3 in PARALLEL: existence/site lookup, phone uniqueness, document uploads.
   // The phone check runs unconditionally (with `$2 IS NULL` guard) so we don't add a serial step.
   const data = sanitize(req.body);
+  if (data.phone) {
+    const normalizedPhone = normalizeMemberPhone(data.phone);
+    if (!normalizedPhone) return res.status(400).json({ message: 'Enter a valid 10-digit mobile number' });
+    data.phone = normalizedPhone;
+  }
 
   const existingPromise = pool.query(
     `SELECT id, site_id, latitude, longitude, phone, member_type,
@@ -571,7 +582,9 @@ export const updateMember = asyncHandler(async (req, res) => {
         `SELECT m.id, m.full_name
            FROM members m
            JOIN members me ON me.id = $2
-          WHERE m.site_id = me.site_id AND m.phone = $1 AND m.id != $2
+          WHERE m.site_id = me.site_id
+            AND RIGHT(REGEXP_REPLACE(COALESCE(m.phone, ''), '[^0-9]', '', 'g'), 10) = $1
+            AND m.id != $2
           LIMIT 1`,
         [data.phone, memberId]
       )

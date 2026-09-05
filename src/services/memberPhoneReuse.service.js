@@ -6,13 +6,15 @@ export const normalizeMemberPhone = (value) => {
   if (digits.length === 10) return digits;
   if (digits.length === 11 && digits.startsWith('0')) return digits.slice(1);
   if (digits.length === 12 && digits.startsWith('91')) return digits.slice(2);
+  if (digits.length === 14 && digits.startsWith('0091')) return digits.slice(4);
   return '';
 };
 
 export const normalizeMemberName = (value) => String(value || '')
+  .normalize('NFKC')
   .trim()
-  .toUpperCase()
-  .replace(/[^A-Z0-9]/g, '');
+  .toLocaleUpperCase('en-IN')
+  .replace(/[^\p{L}\p{M}\p{N}]/gu, '');
 
 export const REUSABLE_KYC_PROFILE_FIELDS = [
   'full_name', 'father_name', 'mother_name', 'spouse_name', 'gender', 'date_of_birth',
@@ -46,7 +48,8 @@ export const mergeVerifiedKycProfile = (submitted, source) => {
       merged[field] = source[field];
     }
   }
-  const normalizedPhone = normalizeMemberPhone(source?.phone || submitted?.phone);
+  const normalizedPhone = normalizeMemberPhone(source?.phone)
+    || normalizeMemberPhone(submitted?.phone);
   if (normalizedPhone) merged.phone = normalizedPhone;
   return merged;
 };
@@ -123,9 +126,6 @@ export const findVerifiedReuseSource = async (db, {
   if (Number.isInteger(requestedMemberId)) {
     params.push(requestedMemberId);
     requestedSql = `AND m.id = $${params.length}`;
-  } else {
-    params.push(normalizedName);
-    requestedSql = `AND UPPER(REGEXP_REPLACE(COALESCE(m.full_name, ''), '[^A-Za-z0-9]', '', 'g')) = $${params.length}`;
   }
   const { rows } = await db.query(
     `SELECT m.*, verified.id AS verified_kyc_case_id,
@@ -147,8 +147,9 @@ export const findVerifiedReuseSource = async (db, {
         ${siteAccessSql('source_site')}
         ${requestedSql}
       ORDER BY verified.verified_at DESC NULLS LAST, m.updated_at DESC NULLS LAST, m.id DESC
-      LIMIT 1`,
+      LIMIT ${Number.isInteger(requestedMemberId) ? 1 : 25}`,
     params
   );
-  return rows[0] || null;
+  if (Number.isInteger(requestedMemberId)) return rows[0] || null;
+  return rows.find((row) => normalizeMemberName(row.full_name) === normalizedName) || null;
 };

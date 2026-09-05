@@ -51,6 +51,28 @@ class MemberModel extends MasterModel {
     return result.rows;
   }
 
+  /** Full profile plus its strongest KYC state for the profile header. */
+  async findByIdWithKyc(id, pool) {
+    const result = await pool.query(
+      `SELECT m.*,
+              shared_kyc.id AS shared_kyc_case_id,
+              shared_kyc.status AS shared_kyc_status,
+              shared_kyc.reused_from_case_id AS shared_kyc_reused_from_case_id
+         FROM members m
+         LEFT JOIN LATERAL (
+           SELECT k.id, k.status, k.reused_from_case_id
+             FROM kyc_cases k
+            WHERE k.client_member_id = m.id
+            ORDER BY CASE k.status WHEN 'VERIFIED' THEN 4 WHEN 'OCR_DONE' THEN 3 WHEN 'OCR_PENDING' THEN 2 ELSE 1 END DESC,
+                     k.updated_at DESC NULLS LAST, k.id DESC
+            LIMIT 1
+         ) shared_kyc ON true
+        WHERE m.id = $1`,
+      [id]
+    );
+    return result.rows[0];
+  }
+
   /** Search members */
   async search(siteId, q, pool) {
     const query = `

@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  assertMemberSiteAccess,
+  findAccessiblePhoneMatches,
+  findVerifiedReuseSource,
   mergeVerifiedKycProfile,
   normalizeMemberName,
   normalizeMemberPhone,
@@ -11,6 +14,7 @@ test('mobile normalization accepts local, leading-zero and +91 formats only when
   assert.equal(normalizeMemberPhone('98765 43210'), '9876543210');
   assert.equal(normalizeMemberPhone('09876543210'), '9876543210');
   assert.equal(normalizeMemberPhone('+91 98765-43210'), '9876543210');
+  assert.equal(normalizeMemberPhone('0091 98765-43210'), '9876543210');
   assert.equal(normalizeMemberPhone('987654321'), '');
   assert.equal(normalizeMemberPhone('+1 9876543210'), '');
 });
@@ -18,6 +22,7 @@ test('mobile normalization accepts local, leading-zero and +91 formats only when
 test('name matching ignores case, spaces and punctuation', () => {
   assert.equal(normalizeMemberName(' Rajesh-Kumar '), 'RAJESHKUMAR');
   assert.equal(normalizeMemberName('RAJESH KUMAR'), 'RAJESHKUMAR');
+  assert.equal(normalizeMemberName(' ऋतिक-कुमार '), 'ऋतिककुमार');
 });
 
 test('verified KYC fields replace retyped identity data without changing site roles', () => {
@@ -57,4 +62,46 @@ test('blank source values do not erase useful submitted values', () => {
     { full_name: 'ANITA DEVI', phone: '9123456789', email: '' }
   );
   assert.equal(merged.email, 'anita@example.com');
+});
+
+test('lookup queries are organization and site-access scoped', async () => {
+  const calls = [];
+  const db = { query: async (sql, values) => { calls.push({ sql, values }); return { rows: [] }; } };
+  await findAccessiblePhoneMatches(db, {
+    user: { id: 7, role: 'sub_admin', organization_id: 3 },
+    siteId: 22,
+    phone: '9876543210',
+  });
+  assert.match(calls[0].sql, /s\.organization_id = \$1/);
+  assert.match(calls[0].sql, /permitted_site\.user_id = \$5/);
+  assert.deepEqual(calls[0].values, [3, '9876543210', 22, false, 7]);
+});
+
+test('automatic KYC reuse chooses the verified registration with the same normalized name', async () => {
+  const db = {
+    query: async (_sql, values) => {
+      assert.deepEqual(values, [3, '9876543210', 22, true, 7]);
+      return { rows: [
+        { id: 1, full_name: 'ANITA SHARMA' },
+        { id: 2, full_name: 'RITIK-KUMAR' },
+      ] };
+    },
+  };
+  const source = await findVerifiedReuseSource(db, {
+    user: { id: 7, role: 'admin', organization_id: 3 },
+    siteId: 22,
+    phone: '+91 9876543210',
+    fullName: 'Ritik Kumar',
+  });
+  assert.equal(source.id, 2);
+});
+
+test('target-site checks use the organization and sub-admin site assignment', async () => {
+  const calls = [];
+  const db = { query: async (sql, values) => { calls.push({ sql, values }); return { rows: [{ id: 22 }] }; } };
+  assert.deepEqual(await assertMemberSiteAccess(db, {
+    id: 7, role: 'sub_admin', organization_id: 3,
+  }, 22), { id: 22 });
+  assert.match(calls[0].sql, /permitted_site\.user_id = \$3/);
+  assert.deepEqual(calls[0].values, [22, 3, 7]);
 });
