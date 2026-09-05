@@ -36,3 +36,47 @@ test('legacy cash designs gain broker settings without losing customization', ()
   assert.equal(design.cheque.fields.organization, true);
   assert.equal(DEFAULT_RECEIPT_DESIGN.cash.template_id, 'cash-simple');
 });
+
+test('plain cash formats retain small uniform text and optional fields after save and reload', () => {
+  for (const template_id of ['cash-plain-note', 'cash-plain-slip', 'cash-plain-letter']) {
+    const saved = normalizeReceiptDesign({ cash: {
+      template_id, base_font_size: 12, heading_size: 12, amount_size: 12,
+      fields: { qr: false, declaration: false, printed_at: false, evidence: false, broker_phone: false, broker_team: false },
+    } });
+    assert.equal(saved.cash.template_id, template_id);
+    assert.equal(saved.cash.heading_size, 12);
+    assert.equal(saved.cash.amount_size, 12);
+    assert.equal(saved.cash.fields.qr, false);
+    assert.equal(saved.cash.fields.declaration, false);
+    assert.equal(saved.cash.fields.printed_at, false);
+    assert.equal(saved.cash.fields.customer_signature, true);
+    assert.equal(saved.cash.fields.authority_signature, true);
+    assert.deepEqual(normalizeReceiptDesign(saved), saved);
+    assert.deepEqual(saved.non_cash, DEFAULT_RECEIPT_DESIGN.non_cash);
+    assert.deepEqual(saved.cheque, DEFAULT_RECEIPT_DESIGN.cheque);
+  }
+});
+
+test('plain cash formats are exclusive to cash receipts', () => {
+  const saved = normalizeReceiptDesign({
+    non_cash: { template_id: 'cash-plain-note' },
+    cheque: { template_id: 'cash-plain-slip' },
+  });
+  assert.equal(saved.non_cash.template_id, DEFAULT_RECEIPT_DESIGN.non_cash.template_id);
+  assert.equal(saved.cheque.template_id, DEFAULT_RECEIPT_DESIGN.cheque.template_id);
+});
+
+test('broker labels, sample names and plot buyer settings survive normalization', () => {
+  const saved = normalizeReceiptDesign({ cash: {
+    name_items: [{ key: 'broker_name', label: '  Dealer  ', sample: 'Preview Broker' }],
+    detail_items: [{ key: 'plot_buyer', label: 'Purchaser', sample: 'Preview Buyer', enabled: false }],
+  } });
+  assert.deepEqual(saved.cash.name_items[0], { key: 'broker_name', label: 'Dealer', sample: 'Preview Broker' });
+  assert.equal(saved.cash.name_items.length, 3);
+  assert.deepEqual(saved.cash.detail_items.find((item) => item.key === 'plot_buyer'), {
+    key: 'plot_buyer', label: 'Purchaser', sample: 'Preview Buyer', enabled: false,
+  });
+  assert.deepEqual(normalizeReceiptDesign(saved), saved);
+  assert.deepEqual(saved.non_cash, DEFAULT_RECEIPT_DESIGN.non_cash);
+  assert.deepEqual(normalizeReceiptDesign({ cash: {} }).cash.name_items, DEFAULT_RECEIPT_DESIGN.cash.name_items);
+});

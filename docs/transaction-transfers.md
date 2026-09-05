@@ -27,6 +27,9 @@ Deploy the backend routes/service and run:
 npm run migrate:universal-transfers
 ```
 
+Migration 146 was applied to the configured database during implementation on 2026-09-05.
+For other environments, run the command above before enabling the frontend.
+
 Migration 146 extends the existing migration-097 audit constraints and adds the
 idempotency batch table. It does not move or rewrite accounting entries. The
 updated frontend requires the updated backend; an old backend will not accept

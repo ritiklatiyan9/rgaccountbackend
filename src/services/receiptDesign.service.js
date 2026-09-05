@@ -3,6 +3,7 @@ import applicationSettingModel from '../models/ApplicationSetting.model.js';
 export const RECEIPT_DESIGN_KEY = 'receipt_design_v1';
 
 export const RECEIPT_TEMPLATE_IDS = Object.freeze([
+  'cash-plain-note', 'cash-plain-slip', 'cash-plain-letter',
   'cash-simple', 'cash-lined', 'cash-compact',
   'executive-classic', 'emerald-ledger', 'midnight-corporate', 'royal-indigo',
   'sandstone-legal', 'ocean-blue', 'minimal-mono', 'maroon-deed',
@@ -20,10 +21,17 @@ export const RECEIPT_FIELD_KEYS = Object.freeze([
 ]);
 
 export const RECEIPT_DETAIL_ITEM_DEFAULTS = Object.freeze([
+  { key: 'plot_buyer', label: 'Plot Buyer', sample: 'Sample Account Holder', enabled: true },
   { key: 'module', label: 'Account / Module', sample: 'Plot Payment · Plot A-18', enabled: true },
   { key: 'payment_mode', label: 'Payment Mode', sample: 'Cash', enabled: true },
   { key: 'reference', label: 'Reference', sample: 'Cash Book 18', enabled: true },
   { key: 'particulars', label: 'Particulars', sample: 'Installment received against account', enabled: true },
+]);
+
+const RECEIPT_NAME_ITEM_DEFAULTS = Object.freeze([
+  { key: 'broker_name', label: 'Broker', sample: 'Rajesh Sharma' },
+  { key: 'broker_phone', label: 'Phone', sample: '98765 43210' },
+  { key: 'broker_team', label: 'Team', sample: 'North Team' },
 ]);
 
 const FONT_FAMILIES = Object.freeze([
@@ -96,6 +104,7 @@ const baseModeDefaults = (mode) => ({
     qr: true,
     evidence: mode !== 'cash',
   },
+  name_items: mode === 'cash' ? RECEIPT_NAME_ITEM_DEFAULTS.map((item) => ({ ...item })) : [],
   detail_items: [
     ...(mode === 'cash' ? [
       { key: 'plot_no', label: 'Plot No.', sample: 'A-18', enabled: true },
@@ -145,6 +154,9 @@ const normalizeMode = (value, mode) => {
   const fields = isObject(input.fields) ? input.fields : {};
   const content = isObject(input.content) ? input.content : {};
   const detailItems = Array.isArray(input.detail_items) ? input.detail_items : [];
+  const nameItems = Array.isArray(input.name_items) ? input.name_items : [];
+  const plainCashTemplate = ['cash-plain-note', 'cash-plain-slip', 'cash-plain-letter'].includes(input.template_id);
+  const isPlainCash = mode === 'cash' && plainCashTemplate;
 
   const normalizedFields = {};
   for (const key of RECEIPT_FIELD_KEYS) {
@@ -158,19 +170,27 @@ const normalizeMode = (value, mode) => {
   }
 
   return {
-    template_id: RECEIPT_TEMPLATE_IDS.includes(input.template_id)
+    template_id: RECEIPT_TEMPLATE_IDS.includes(input.template_id) && (!plainCashTemplate || isPlainCash)
       ? input.template_id
       : defaults.template_id,
     page_size: PAGE_SIZES.includes(input.page_size) ? input.page_size : defaults.page_size,
     font_family: FONT_FAMILIES.includes(input.font_family) ? input.font_family : defaults.font_family,
     base_font_size: cleanNumber(input.base_font_size, defaults.base_font_size, 8, 18),
-    heading_size: cleanNumber(input.heading_size, defaults.heading_size, 18, 48),
-    amount_size: cleanNumber(input.amount_size, defaults.amount_size, 22, 72),
+    heading_size: cleanNumber(input.heading_size, defaults.heading_size, isPlainCash ? 8 : 18, 48),
+    amount_size: cleanNumber(input.amount_size, defaults.amount_size, isPlainCash ? 8 : 22, 72),
     colors: Object.fromEntries(Object.entries(defaults.colors).map(([key, fallback]) => [
       key,
       typeof colors[key] === 'string' && HEX_COLOR.test(colors[key]) ? colors[key].toLowerCase() : fallback,
     ])),
     fields: normalizedFields,
+    name_items: defaults.name_items.map((fallback) => {
+      const candidate = nameItems.find((item) => isObject(item) && item.key === fallback.key) || {};
+      return {
+        key: fallback.key,
+        label: cleanText(candidate.label, fallback.label, 80),
+        sample: cleanText(candidate.sample, fallback.sample, 140),
+      };
+    }),
     detail_items: defaults.detail_items.map((fallback) => {
       const candidate = detailItems.find((item) => isObject(item) && item.key === fallback.key) || {};
       return {
