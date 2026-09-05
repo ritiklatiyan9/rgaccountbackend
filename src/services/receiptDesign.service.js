@@ -109,6 +109,7 @@ const baseModeDefaults = (mode) => ({
     ...(mode === 'cash' ? [
       { key: 'plot_no', label: 'Plot No.', sample: 'A-18', enabled: true },
       { key: 'plot_size', label: 'Plot Size', sample: '120 sq. yd.', enabled: true },
+      { key: 'plot_rate', label: 'Plot Rate', sample: '₹2,000', enabled: true },
       { key: 'received_by', label: 'Received By', sample: 'Amit Kumar', enabled: true },
     ] : []),
     ...RECEIPT_DETAIL_ITEM_DEFAULTS.map((item) => ({

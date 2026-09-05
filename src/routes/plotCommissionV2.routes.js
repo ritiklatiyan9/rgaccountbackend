@@ -26,7 +26,7 @@ const plotCommissionReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'plot
 // NOT busted by every commission/payment write.
 const plotsForCommissionCache = cacheResponse({ ttlSeconds: 300, namespace: 'plot-commissions-plots' });
 // Anchored prefix so the dedicated cache survives writes.
-const bustPlotCommissionCache = invalidateCacheOnSuccess(['plot-commissions|']);
+const bustPlotCommissionCache = invalidateCacheOnSuccess(['plot-commissions|', 'members|']);
 
 // All routes require auth
 router.use(authMiddleware);

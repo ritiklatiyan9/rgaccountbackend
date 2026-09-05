@@ -80,3 +80,15 @@ test('broker labels, sample names and plot buyer settings survive normalization'
   assert.deepEqual(saved.non_cash, DEFAULT_RECEIPT_DESIGN.non_cash);
   assert.deepEqual(normalizeReceiptDesign({ cash: {} }).cash.name_items, DEFAULT_RECEIPT_DESIGN.cash.name_items);
 });
+
+test('plot rate joins the saved cash detail configuration with a safe default', () => {
+  const saved = normalizeReceiptDesign({ cash: {
+    detail_items: [{ key: 'plot_rate', label: 'Rate per sq. yd.', sample: '₹2,500', enabled: false }],
+  } });
+  assert.deepEqual(saved.cash.detail_items.find((item) => item.key === 'plot_rate'), {
+    key: 'plot_rate', label: 'Rate per sq. yd.', sample: '₹2,500', enabled: false,
+  });
+  assert.deepEqual(normalizeReceiptDesign({ cash: {} }).cash.detail_items.find((item) => item.key === 'plot_rate'), {
+    key: 'plot_rate', label: 'Plot Rate', sample: '₹2,000', enabled: true,
+  });
+});

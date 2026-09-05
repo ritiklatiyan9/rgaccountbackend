@@ -1,4 +1,5 @@
 import MasterModel from './MasterModel.js';
+import { PLOT_BUYER_MEMBER_JOIN, PLOT_BUYER_KYC_JOIN, PLOT_BUYER_KYC_STATUS } from '../services/plotMemberLinks.service.js';
 
 // Plot payments are credits: pending rows count immediately, but cheque rows
 // wait until CLEARED. The sane-date guard stays aligned with the ledger.
@@ -218,6 +219,8 @@ class PlotModel extends MasterModel {
   async findByIdWithTotals(id, pool) {
     const query = `
       SELECT p.*,
+        plot_buyer.id AS buyer_member_id,
+        ${PLOT_BUYER_KYC_STATUS} AS buyer_kyc_status,
         COALESCE(agg.total_received, 0) AS total_received,
         COALESCE(agg.received_bank,  0) AS received_bank,
         COALESCE(agg.received_cash,  0) AS received_cash,
@@ -236,6 +239,8 @@ class PlotModel extends MasterModel {
         FROM plot_payments pp
         WHERE pp.plot_id = p.id
       ) agg ON TRUE
+      ${PLOT_BUYER_MEMBER_JOIN}
+      ${PLOT_BUYER_KYC_JOIN}
       WHERE p.id = $1
     `;
     const result = await pool.query(query, [id]);

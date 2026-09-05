@@ -4,6 +4,7 @@ import { uploadSingle } from '../utils/upload.js';
 import pool from '../config/db.js';
 import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 import { findPeopleByPlot } from '../services/plotPeople.service.js';
+import { findMemberPlotNumbers } from '../services/plotMemberLinks.service.js';
 
 export const searchMembersByPlot = asyncHandler(async (req, res) => {
   const siteId = Number(req.query.site_id);
@@ -368,11 +369,12 @@ export const listMembers = asyncHandler(async (req, res) => {
   const { site_id, type } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  const [members, summary] = await Promise.all([
+  const [members, summary, plotNumbers] = await Promise.all([
     memberModel.findBySiteIdList(parseInt(site_id), pool, type || null),
     memberModel.getSummary(parseInt(site_id), pool),
+    findMemberPlotNumbers(parseInt(site_id), pool),
   ]);
-  res.json({ members, summary });
+  res.json({ members: members.map((member) => ({ ...member, plot_numbers: plotNumbers.get(String(member.id)) || [] })), summary });
 });
 
 /** GET /members/search?site_id=X&q=... */

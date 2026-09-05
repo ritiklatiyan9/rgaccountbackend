@@ -15,7 +15,7 @@ import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const commissionReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'commissions' });
-const bustCommissionCache = invalidateCacheOnSuccess(['/commissions']);
+const bustCommissionCache = invalidateCacheOnSuccess(['/commissions', 'members|']);
 
 // All commission routes require auth
 router.use(authMiddleware);

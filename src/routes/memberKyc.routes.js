@@ -40,7 +40,7 @@ const acceptUpload = (req, res, next) => {
 
 router.use(authMiddleware, requireRole('admin', 'sub_admin'));
 const pendingKycReadCache = cacheResponse({ ttlSeconds: 20, namespace: 'member-kyc-pending' });
-const bustMemberCache = invalidateCacheOnSuccess(['members|', 'member-kyc-pending|']);
+const bustMemberCache = invalidateCacheOnSuccess(['members|', 'plots|', 'member-kyc-pending|']);
 const bustPendingKycCache = invalidateCacheOnSuccess(['member-kyc-pending|']);
 
 const loadClientKycPermissions = async (req, res, next) => {
