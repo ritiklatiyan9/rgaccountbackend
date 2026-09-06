@@ -6,7 +6,7 @@ import { cacheResponse } from '../middlewares/cache.middleware.js';
 import createRateLimiter from '../middlewares/rateLimit.middleware.js';
 import {
   getOverview, getClients, getClientMap, getPaymentBehaviour,
-  getRegistryAnalytics, getExpenseAnalytics, getVendorAnalytics, getConstructionAnalytics,
+  getRegistryAnalytics, getExpenseAnalytics, getVendorAnalytics, getConstructionAnalytics, getLandAnalytics,
 } from '../controllers/managementAnalytics.controller.js';
 import { streamAssistant, generateInsights, chartInsight, runGeocode } from '../controllers/managementAnalyticsAi.controller.js';
 import {
@@ -29,6 +29,7 @@ router.get('/payment-behaviour', cache, getPaymentBehaviour);
 router.get('/registries', cache, getRegistryAnalytics);
 router.get('/expenses', cache, getExpenseAnalytics);
 router.get('/vendors', cache, getVendorAnalytics);
+router.get('/land', cache, getLandAnalytics);
 router.get('/construction', cache, getConstructionAnalytics);
 router.get('/messaging/overview', requirePermission('client_messaging', 'read'), getMessagingOverview);
 router.get('/messaging/recipients', requirePermission('client_messaging', 'read'), listMessageRecipients);

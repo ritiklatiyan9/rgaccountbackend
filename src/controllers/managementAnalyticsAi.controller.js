@@ -13,7 +13,7 @@ import { detectTopics, buildFocus, localAnswer, TOPIC_LABELS } from '../services
 
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);
 const PAGES = new Set(['overview', 'clients', 'payments', 'all']);
-const PAGE_TOPICS = { registries: 'registries', expenses: 'expenses', vendors: 'vendors', construction: 'construction' };
+const PAGE_TOPICS = { registries: 'registries', expenses: 'expenses', vendors: 'vendors', construction: 'construction', land: 'farmers' };
 const SNAPSHOT_TTL = 60;
 const CHART_ROWS_MAX = 80;
 const hashOf = (str) => { let h = 5381; for (let i = 0; i < str.length; i += 1) h = ((h << 5) + h + str.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
@@ -341,7 +341,7 @@ export const runGeocode = asyncHandler(async (req, res) => {
   if (!ADMIN_ROLES.has(req.user?.role)) return res.status(403).json({ message: 'Admin access required' });
   const scope = await scopeOrReject(req, res);
   if (!scope) return;
-  const result = await geocodePendingMembers({ siteId: scope.siteId, limit: Math.min(Number(req.body?.limit) || 100, 300) });
-  if (result.geocoded > 0) await clearCacheByPrefixes(['management-analytics|']);
+  const result = await geocodePendingMembers({ siteId: scope.siteId, limit: req.body?.limit, afterId: req.body?.after_id });
+  if (result.geocoded > 0) await clearCacheByPrefixes(['management-analytics|', 'members|']);
   res.json(result);
 });

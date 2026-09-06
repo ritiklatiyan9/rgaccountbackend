@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 
 process.env.CACHE_ENABLED = 'true';
 
-const { cacheGet, clearCacheByPrefixes } = await import('../config/cache.js');
-const { cacheResponse } = await import('./cache.middleware.js');
+const { cacheGet, cacheSet, clearCacheByPrefixes } = await import('../config/cache.js');
+const { cacheResponse, invalidateCacheOnSuccess } = await import('./cache.middleware.js');
 
 const makeResponse = () => ({
   statusCode: 200,
@@ -83,4 +84,19 @@ test('large responses can opt out of the in-process cache', async () => {
 
   assert.equal(await cacheGet(key), null);
   assert.equal(res.headers['X-Cache'], 'MISS');
+});
+
+// Analytics combines clients, plots and approvals, so each successful domain
+// mutation must expire it even when the route only names its own cache.
+test('successful writes invalidate analytics but rejected writes preserve it', async () => {
+  const key = 'management-analytics|u:7|/clients/map|site_id=3';
+  for (const status of [403, 200]) {
+    await cacheSet(key, { map: { total: 1 } });
+    const res = Object.assign(new EventEmitter(), makeResponse());
+    res.statusCode = status;
+    invalidateCacheOnSuccess(['plots|'])({ method: 'PUT' }, res, () => {});
+    res.json({ ok: status === 200 });
+    res.emit('finish');
+    assert.equal((await cacheGet(key)) !== null, status === 403);
+  }
 });

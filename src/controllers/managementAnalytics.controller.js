@@ -4,6 +4,7 @@
 // receivables reconcile with the Day Book. Raw plot_payments rows are only read for
 // payment BEHAVIOUR facts (who paid when) with the approved/non-bounced predicate applied.
 import pool from '../config/db.js';
+import { CLIENT_MAP_SQL, buildClientMap } from '../services/clientMapAnalytics.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { cleanText } from '../services/openRouterStream.service.js';
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
@@ -129,6 +130,16 @@ const REG_PAY_CTE = `reg_pay AS (
    WHERE pr.site_id = $1
    GROUP BY prp.registry_id)`;
 
+// Farmer payout per farmer ($1 = site_id), from the ledger like every other money figure.
+const FARMER_PAID_CTE = `farmer_paid AS (
+  SELECT fp.farmer_id, SUM(l.debit)::numeric(18,2) AS paid, COUNT(*) FILTER (WHERE l.debit > 0)::int AS payments,
+         MIN(l.entry_date) FILTER (WHERE l.debit > 0) AS first_pay, MAX(l.entry_date) FILTER (WHERE l.debit > 0) AS last_pay
+    FROM ledger_entries l JOIN farmer_payments fp ON fp.id = l.source_id
+   WHERE l.site_id = $1 AND l.source_key = 'farmer_payments' GROUP BY fp.farmer_id)`;
+// Land payables mirror the receivables rule in overviewData: a balance still open and nothing paid for 180+ days.
+const FARMER_STALLED = `f.total_amount - COALESCE(fpd.paid, 0) > 0
+  AND COALESCE(fpd.last_pay, f.created_at::date) < CURRENT_DATE - 180`;
+
 const q = async (sql, params) => (await pool.query(sql, params)).rows;
 
 // ── Overview ────────────────────────────────────────────────────────────────
@@ -184,7 +195,17 @@ const overviewData = async (siteId, { from, to }) => {
                  FROM plots p LEFT JOIN (SELECT plot_id, MAX(total_commission) AS mx FROM plot_commissions_v2 WHERE site_id = $1 AND LOWER(COALESCE(status,'')) <> 'cancelled' GROUP BY plot_id) v ON v.plot_id = p.id
                 WHERE p.site_id = $1)::numeric(18,2) AS decided_total,
               (SELECT COUNT(DISTINCT agent_id) FROM plot_commissions_v2 WHERE site_id = $1)::int AS agents`, [siteId]),
-    q(`SELECT COUNT(*)::int AS count, COALESCE(SUM(total_amount),0)::numeric(18,2) AS liability_total FROM farmers WHERE site_id = $1`, [siteId]),
+    // Per farmer, then summed — a site-level (liability − paid) nets an overpaid farmer against an unpaid one and hides both.
+    q(`WITH ${FARMER_PAID_CTE}
+       SELECT COUNT(*)::int AS count,
+              COALESCE(SUM(f.total_amount),0)::numeric(18,2) AS liability_total,
+              COALESCE(SUM(fpd.paid),0)::numeric(18,2) AS paid_total,
+              COALESCE(SUM(GREATEST(f.total_amount - COALESCE(fpd.paid,0),0)),0)::numeric(18,2) AS unpaid_total,
+              COALESCE(SUM(GREATEST(COALESCE(fpd.paid,0) - f.total_amount,0)),0)::numeric(18,2) AS overpaid_total,
+              COUNT(*) FILTER (WHERE COALESCE(f.total_amount,0) <= 0 AND COALESCE(fpd.paid,0) > 0)::int AS unrecorded_contracts,
+              COUNT(*) FILTER (WHERE ${FARMER_STALLED})::int AS stalled_farmers
+         FROM farmers f LEFT JOIN farmer_paid fpd ON fpd.farmer_id = f.id
+        WHERE f.site_id = $1`, [siteId]),
     q(`SELECT COUNT(*) FILTER (WHERE LOWER(COALESCE(status,'')) = 'open')::int AS commitments_open,
               COALESCE(SUM(contract_amount),0)::numeric(18,2) AS contract_total
          FROM vendor_commitments WHERE site_id = $1`, [siteId]),
@@ -296,7 +317,13 @@ const overviewData = async (siteId, { from, to }) => {
       completeness: { phone_pct: pct(cp.phone, cp.total), address_pct: pct(cp.address, cp.total), occupation_pct: pct(cp.occupation, cp.total), geo_pct: pct(cp.geo, cp.total) },
     },
     commissions: { decided_total: num(co.decided_total), paid_total: num(paid.plot_commission_payments), pending_total: r2(Math.max(num(co.decided_total) - num(paid.plot_commission_payments), 0)), agents: num(co.agents) },
-    farmers: { count: num(fa.count), liability_total: num(fa.liability_total), paid_total: num(paid.farmer_payments), outstanding: r2(Math.max(num(fa.liability_total) - num(paid.farmer_payments), 0)) },
+    farmers: {
+      count: num(fa.count), liability_total: num(fa.liability_total), paid_total: num(paid.farmer_payments),
+      // unpaid/overpaid are summed per farmer and never netted; `outstanding` stays as the net for older readers.
+      unpaid_total: num(fa.unpaid_total), overpaid_total: num(fa.overpaid_total),
+      unrecorded_contracts: num(fa.unrecorded_contracts), stalled_farmers: num(fa.stalled_farmers),
+      outstanding: r2(num(fa.liability_total) - num(paid.farmer_payments)),
+    },
     vendors: {
       commitments_open: num(ve.commitments_open), contract_total: num(ve.contract_total), paid_total: num(paid.vendor_payments),
       outstanding: r2(Math.max(num(ve.contract_total) - num(paid.vendor_payments), 0)), inventory_orders_open: num(inv[0].inventory_orders_open),
@@ -408,43 +435,20 @@ export const getClients = asyncHandler(async (req, res) => {
 export const getClientMap = asyncHandler(async (req, res) => {
   const scope = await scopeOrReject(req, res);
   if (!scope) return;
-  const { siteId } = scope;
-  const MEMBER = `m.site_id = $1 AND LOWER(COALESCE(m.status,'active')) <> 'deleted'`;
-  const [summary, points, unresolved, byCity, byPin] = await Promise.all([
-    q(`SELECT COUNT(*)::int AS total, COUNT(m.latitude)::int AS geocoded,
-              COUNT(*) FILTER (WHERE m.latitude IS NOT NULL AND m.geocode_source = 'manual')::int AS manual,
-              COUNT(*) FILTER (WHERE m.latitude IS NOT NULL AND COALESCE(m.geocode_source,'') <> 'manual')::int AS approx
-         FROM members m WHERE ${MEMBER}`, [siteId]),
-    // ponytail: no server-side filtering/paging; 3000-point cap is far above any site today.
-    q(`WITH ${PAY_CTE}, ${PLOT_PAID_CTE}
-       SELECT m.id, m.full_name AS name, UPPER(COALESCE(m.member_type,'OTHER')) AS member_type, m.city, m.village, m.district, m.pincode,
-              m.latitude::float AS lat, m.longitude::float AS lng, COALESCE(m.geocode_source,'unknown') AS source, COALESCE(m.geocode_precision,'') AS precision,
-              COALESCE((SELECT SUM(pp.collected) FROM plots p JOIN plot_paid pp ON pp.plot_id = p.id
-                         WHERE p.site_id = $1 AND UPPER(TRIM(p.buyer_name)) = UPPER(TRIM(m.full_name))),0)::numeric(18,2) AS total_paid
-         FROM members m WHERE ${MEMBER} AND m.latitude IS NOT NULL AND m.longitude IS NOT NULL
-        ORDER BY m.id LIMIT 3000`, [siteId]),
-    q(`SELECT COUNT(*)::int AS count,
-              COUNT(*) FILTER (WHERE NULLIF(TRIM(m.city),'') IS NULL AND COALESCE(m.pincode,'') !~ '^\\d{6}$')::int AS no_address
-         FROM members m WHERE ${MEMBER} AND m.latitude IS NULL`, [siteId]),
-    q(`SELECT UPPER(TRIM(m.city)) AS label, COUNT(*)::int AS count FROM members m
-        WHERE ${MEMBER} AND m.latitude IS NULL AND NULLIF(TRIM(m.city),'') IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, [siteId]),
-    q(`SELECT TRIM(m.pincode) AS label, COUNT(*)::int AS count FROM members m
-        WHERE ${MEMBER} AND m.latitude IS NULL AND COALESCE(m.pincode,'') ~ '^\\d{6}$' GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, [siteId]),
-  ]);
-  const pts = rowsNum(points, ['total_paid']);
-  const center = pts.length
-    ? { lat: pts.reduce((s, p) => s + p.lat, 0) / pts.length, lng: pts.reduce((s, p) => s + p.lng, 0) / pts.length }
-    : null;
-  res.json({
-    map: {
-      site_id: siteId,
-      summary: summary[0],
-      points: pts,
-      unresolved: { ...unresolved[0], by_city: byCity, by_pincode: byPin },
-      center,
-      generated_at: new Date().toISOString(),
-    },
-  });
+  const { rows } = await pool.query(CLIENT_MAP_SQL, [scope.siteId]);
+  const { members = [], unlinked = {} } = rows[0] || {};
+  const map = buildClientMap(members, { siteId: scope.siteId, unlinked });
+  // Older frontends still request only points. Opt in to the complete dataset
+  // without duplicating thousands of mapped members in the same response.
+  if (req.query.dataset !== 'members') {
+    map.points = map.members.filter((member) => member.lat !== null && member.lng !== null);
+    map.center = map.points.length ? {
+      lat: map.points.reduce((sum, point) => sum + point.lat, 0) / map.points.length,
+      lng: map.points.reduce((sum, point) => sum + point.lng, 0) / map.points.length,
+    } : null;
+    delete map.members;
+  }
+  res.json({ map });
 });
 
 // ── Payment behaviour ───────────────────────────────────────────────────────
@@ -854,6 +858,86 @@ const vendorAnalyticsData = async (siteId, { from, to }) => {
 export const getVendorAnalytics = asyncHandler(async (req, res) => {
   const scope = await scopeOrReject(req, res); if (!scope) return;
   res.json({ vendors: await vendorAnalyticsData(scope.siteId, scope) });
+});
+
+// ── Land / farmer payout analytics ─────────────────────────────────────────
+// Land payout is the largest outflow on every live site and the Expenses view can't see it
+// (that one filters source_key = 'expenses'). Liability lives on farmers.total_amount; money
+// always comes from the ledger, same as vendors.
+const landAnalyticsData = async (siteId, { from, to }) => {
+  const P = [siteId, from, to];
+  const [summary, monthly, modes, farmers, payments, coverage] = await Promise.all([
+    q(`WITH ${FARMER_PAID_CTE}
+       SELECT COUNT(*)::int AS farmers,
+              COALESCE(SUM(f.total_amount),0)::numeric(18,2) AS liability,
+              COALESCE(SUM(fpd.paid),0)::numeric(18,2) AS paid,
+              COALESCE(SUM(GREATEST(f.total_amount - COALESCE(fpd.paid,0),0)),0)::numeric(18,2) AS unpaid,
+              COALESCE(SUM(GREATEST(COALESCE(fpd.paid,0) - f.total_amount,0)),0)::numeric(18,2) AS overpaid,
+              COALESCE(SUM(fpd.payments),0)::int AS payment_count,
+              COUNT(*) FILTER (WHERE COALESCE(f.total_amount,0) <= 0 AND COALESCE(fpd.paid,0) > 0)::int AS unrecorded_contracts,
+              COUNT(*) FILTER (WHERE ${FARMER_STALLED})::int AS stalled_farmers,
+              COALESCE(SUM(GREATEST(f.total_amount - COALESCE(fpd.paid,0),0)) FILTER (WHERE ${FARMER_STALLED}),0)::numeric(18,2) AS stalled_amount,
+              (SELECT COALESCE(SUM(debit),0) FROM ledger_entries
+                WHERE site_id = $1 AND source_key = 'farmer_payments'
+                  AND entry_date >= $2::date AND entry_date <= LEAST($3::date,CURRENT_DATE))::numeric(18,2) AS paid_in_period
+         FROM farmers f LEFT JOIN farmer_paid fpd ON fpd.farmer_id = f.id
+        WHERE f.site_id = $1`, P),
+    q(`SELECT to_char(g.m,'YYYY-MM') AS month, to_char(g.m,'Mon YY') AS label,
+              COALESCE(SUM(l.debit),0)::numeric(18,2) AS amount, COUNT(l.id) FILTER (WHERE l.debit > 0)::int AS count
+         FROM generate_series(date_trunc('month',$2::date),date_trunc('month',LEAST($3::date,CURRENT_DATE)),INTERVAL '1 month') g(m)
+         LEFT JOIN ledger_entries l ON l.site_id = $1 AND l.source_key = 'farmer_payments' AND date_trunc('month',l.entry_date) = g.m
+        GROUP BY g.m ORDER BY g.m`, P),
+    q(`SELECT COALESCE(NULLIF(UPPER(TRIM(raw_mode)),''),UPPER(bucket),'UNKNOWN') AS label,
+              COALESCE(SUM(debit),0)::numeric(18,2) AS amount, COUNT(*) FILTER (WHERE debit > 0)::int AS count
+         FROM ledger_entries WHERE site_id = $1 AND source_key = 'farmer_payments'
+          AND entry_date >= $2::date AND entry_date <= LEAST($3::date,CURRENT_DATE)
+        GROUP BY 1 ORDER BY 2 DESC`, P),
+    q(`WITH ${FARMER_PAID_CTE}
+       SELECT f.id, f.name AS label, COALESCE(f.phone,'') AS phone, COALESCE(f.status,'') AS status,
+              f.total_amount::numeric(18,2) AS liability, COALESCE(fpd.paid,0)::numeric(18,2) AS paid,
+              GREATEST(f.total_amount - COALESCE(fpd.paid,0),0)::numeric(18,2) AS unpaid,
+              GREATEST(COALESCE(fpd.paid,0) - f.total_amount,0)::numeric(18,2) AS overpaid,
+              COALESCE(fpd.payments,0)::int AS payments,
+              fpd.first_pay::text AS first_pay, fpd.last_pay::text AS last_pay,
+              (CURRENT_DATE - COALESCE(fpd.last_pay, f.created_at::date))::int AS silent_days,
+              COALESCE(f.land_size_bigha,0)::float AS land_size_bigha, COALESCE(f.land_rate,0)::numeric(18,2) AS land_rate,
+              CASE WHEN COALESCE(f.total_amount,0) <= 0 AND COALESCE(fpd.paid,0) > 0 THEN 'unrecorded'
+                   WHEN COALESCE(fpd.paid,0) > f.total_amount THEN 'overpaid'
+                   WHEN ${FARMER_STALLED} THEN 'stalled'
+                   WHEN f.total_amount - COALESCE(fpd.paid,0) > 0 THEN 'paying'
+                   ELSE 'settled' END AS flag
+         FROM farmers f LEFT JOIN farmer_paid fpd ON fpd.farmer_id = f.id
+        WHERE f.site_id = $1 ORDER BY unpaid DESC, overpaid DESC, paid DESC LIMIT 60`, [siteId]),
+    q(`SELECT fp.id, l.entry_date::text AS date, f.name AS farmer, COALESCE(fp.particular,'') AS particular,
+              COALESCE(l.raw_mode,fp.payment_mode,'') AS payment_mode, l.debit::numeric(18,2) AS amount,
+              COALESCE(fp.interest_amount,0)::numeric(18,2) AS interest,
+              CASE WHEN NULLIF(fp.voucher_url,'') IS NOT NULL THEN true ELSE false END AS has_voucher
+         FROM ledger_entries l JOIN farmer_payments fp ON fp.id = l.source_id JOIN farmers f ON f.id = fp.farmer_id
+        WHERE l.site_id = $1 AND l.source_key = 'farmer_payments' AND l.debit > 0
+          AND l.entry_date >= $2::date AND l.entry_date <= LEAST($3::date,CURRENT_DATE)
+        ORDER BY l.debit DESC, l.entry_date DESC LIMIT 40`, P),
+    q(`SELECT COUNT(*)::int AS posted,
+              COUNT(*) FILTER (WHERE NULLIF(fp.voucher_url,'') IS NOT NULL)::int AS with_voucher,
+              COUNT(*) FILTER (WHERE NULLIF(fp.customer_signature_url,'') IS NOT NULL)::int AS customer_signed,
+              COUNT(*) FILTER (WHERE NULLIF(fp.authority_signature_url,'') IS NOT NULL)::int AS authority_signed
+         FROM ledger_entries l JOIN farmer_payments fp ON fp.id = l.source_id
+        WHERE l.site_id = $1 AND l.source_key = 'farmer_payments' AND l.debit > 0
+          AND l.entry_date >= $2::date AND l.entry_date <= LEAST($3::date,CURRENT_DATE)`, P),
+  ]);
+  const s = rowsNum(summary, ['farmers', 'liability', 'paid', 'unpaid', 'overpaid', 'payment_count', 'unrecorded_contracts', 'stalled_farmers', 'stalled_amount', 'paid_in_period'])[0];
+  return {
+    summary: { ...s, settled_pct: pct(s.paid, s.liability) },
+    monthly: rowsNum(monthly, ['amount', 'count']), modes: rowsNum(modes, ['amount', 'count']),
+    farmers: rowsNum(farmers, ['liability', 'paid', 'unpaid', 'overpaid', 'payments', 'silent_days', 'land_size_bigha', 'land_rate']),
+    payments: rowsNum(payments, ['amount', 'interest']),
+    coverage: rowsNum(coverage, ['posted', 'with_voucher', 'customer_signed', 'authority_signed'])[0],
+    generated_at: new Date().toISOString(),
+  };
+};
+
+export const getLandAnalytics = asyncHandler(async (req, res) => {
+  const scope = await scopeOrReject(req, res); if (!scope) return;
+  res.json({ land: await landAnalyticsData(scope.siteId, scope) });
 });
 
 // ── Construction analytics ─────────────────────────────────────────────────

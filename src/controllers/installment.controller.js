@@ -73,7 +73,7 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
 
   // 1. All plots in the site with remaining balance
   const plotRes = await pool.query(
-    `SELECT p.id, p.plot_no, p.block, p.buyer_name, p.sale_price,
+    `SELECT p.id, p.unit_type, p.unit_details, p.plot_no, p.block, p.buyer_name, p.sale_price,
             p.booking_date, p.booking_by, p.interest_enabled,
             p.interest_rate, p.interest_type, p.assigned_admin_id
      FROM plots p
@@ -212,6 +212,8 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
           priority: daysOverdue > 90 ? 1 : daysOverdue > 30 ? 2 : 3,
           plot_id: plot.id,
           plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
           block: plot.block,
           buyer_name: plot.buyer_name,
           assigned_admin_id: plot.assigned_admin_id,
@@ -237,6 +239,8 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
           priority: 4,
           plot_id: plot.id,
           plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
           block: plot.block,
           buyer_name: plot.buyer_name,
           assigned_admin_id: plot.assigned_admin_id,
@@ -261,6 +265,8 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
           priority: daysSincePay > 90 ? 1 : daysSincePay > 60 ? 2 : 5,
           plot_id: plot.id,
           plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
           block: plot.block,
           buyer_name: plot.buyer_name,
           assigned_admin_id: plot.assigned_admin_id,
@@ -280,6 +286,8 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
           priority: 1,
           plot_id: plot.id,
           plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
           block: plot.block,
           buyer_name: plot.buyer_name,
           assigned_admin_id: plot.assigned_admin_id,
@@ -301,6 +309,8 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
           priority: pctPaid < 5 ? 1 : 3,
           plot_id: plot.id,
           plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
           block: plot.block,
           buyer_name: plot.buyer_name,
           assigned_admin_id: plot.assigned_admin_id,
@@ -340,6 +350,8 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
           priority: lateCount >= 4 ? 1 : 4,
           plot_id: plot.id,
           plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
           block: plot.block,
           buyer_name: plot.buyer_name,
           assigned_admin_id: plot.assigned_admin_id,
@@ -365,6 +377,8 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
           priority: 5,
           plot_id: plot.id,
           plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
           block: plot.block,
           buyer_name: plot.buyer_name,
           assigned_admin_id: plot.assigned_admin_id,
@@ -384,6 +398,8 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
         priority: 6,
         plot_id: plot.id,
         plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
         block: plot.block,
         buyer_name: plot.buyer_name,
         assigned_admin_id: plot.assigned_admin_id,
@@ -754,7 +770,7 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
 
   // ── Fetch all plots for this site ──
   let plotQuery = `
-    SELECT p.id, p.plot_no, p.block, p.buyer_name, p.sale_price, p.status AS plot_status,
+    SELECT p.id, p.unit_type, p.unit_details, p.plot_no, p.block, p.buyer_name, p.sale_price, p.status AS plot_status,
            p.installments_enabled, p.interest_enabled, p.interest_rate, p.interest_type,
            p.booking_date, p.booking_by, p.assigned_admin_id
     FROM plots p
@@ -1065,7 +1081,7 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
 
   // ── 1. Fetch all BOOKED / active plots ──
   const plotRes = await pool.query(
-    `SELECT p.id, p.plot_no, p.block, p.buyer_name, p.sale_price,
+    `SELECT p.id, p.unit_type, p.unit_details, p.plot_no, p.block, p.buyer_name, p.sale_price,
             p.installments_enabled, p.interest_enabled, p.interest_rate, p.interest_type,
             p.booking_date, p.booking_by, p.status AS plot_status
      FROM plots p
@@ -1200,6 +1216,8 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     const base = {
       plot_id: plot.id,
       plot_no: plot.plot_no,
+          unit_type: plot.unit_type || 'plot',
+          unit_details: plot.unit_details || {},
       block: plot.block,
       buyer_name: plot.buyer_name,
       sale_price: salePrice,

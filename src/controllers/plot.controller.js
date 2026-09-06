@@ -1,3 +1,4 @@
+import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotModel, plotPaymentModel, PP_COUNTABLE } from '../models/Plot.model.js';
@@ -258,6 +259,7 @@ export const createPlot = asyncHandler(async (req, res) => {
     });
   }
 
+  const unitMetadata = await unitMetadataForWrite(req.body, Number(site_id), pool);
   const trimmedPlotNo = plot_no.trim().toUpperCase();
 
   // Duplicate check — returns all existing plots with same plot_no
@@ -293,6 +295,7 @@ export const createPlot = asyncHandler(async (req, res) => {
   }
 
   const data = {
+    ...unitMetadata,
     site_id: parseInt(site_id),
     plot_no: trimmedPlotNo,
     block: block ? block.trim().toUpperCase() : null,
@@ -442,7 +445,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
   const existing = await plotModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
 
-  const updateData = {};
+  const updateData = await unitMetadataForWrite(req.body, existing.site_id, pool, existing);
   if (req.body.buyer_member_id != null) {
     updateData.buyer_member_id = await validatePlotBuyerMember(existing.site_id, req.body.buyer_member_id, pool);
   } else if (buyer_name !== undefined && String(buyer_name || '').trim().toUpperCase() !== String(existing.buyer_name || '').trim().toUpperCase()) {
@@ -581,11 +584,15 @@ export const updatePlot = asyncHandler(async (req, res) => {
 
   let autoCommission = null;
   try {
-    autoCommission = await maybeAutoCreatePlotCommission({
-      plot: updated,
-      createdBy: req.user?.id,
-      fallbackAssignedAdminId: updateData.assigned_admin_id,
-    });
+    // Property metadata and identity-only edits must not create financial records.
+    const commissionFields = ['booking_by', 'sale_price', 'commission_enabled', 'commission_type', 'commission_value', 'commission_rate', 'plot_commission'];
+    if (commissionFields.some(key => Object.hasOwn(updateData, key))) {
+      autoCommission = await maybeAutoCreatePlotCommission({
+        plot: updated,
+        createdBy: req.user?.id,
+        fallbackAssignedAdminId: updateData.assigned_admin_id,
+      });
+    }
   } catch (err) {
     // Ignore if commission tables are not present yet.
     if (err?.code !== '42P01') throw err;
@@ -1010,7 +1017,7 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
 
     // Lock the plot so two simultaneous NOC opens cannot create two drafts.
     const plotResult = await client.query(
-      `SELECT id, site_id, plot_no, buyer_name, plot_size, plot_size_mtr,
+      `SELECT id, site_id, unit_type, plot_no, buyer_name, plot_size, plot_size_mtr,
               circle_rate, to_receive_bank, assigned_admin_id, status, plot_tag
          FROM plots
         WHERE id = $1
@@ -1071,7 +1078,7 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
         String(plot.plot_no || '').trim().toUpperCase(),
         plot.buyer_name ? String(plot.buyer_name).trim().toUpperCase() : null,
         parseFloat(plot.plot_size_mtr) || null,
-        parseFloat(plot.plot_size) || null,
+        (plot.unit_type === 'flat' ? Number(plot.plot_size) / 9 : parseFloat(plot.plot_size)) || null,
         parseFloat(plot.circle_rate) || null,
         parseFloat(plot.to_receive_bank) || 0,
         nocAmount,

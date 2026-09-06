@@ -51,7 +51,7 @@ export const listPlotsWithDocs = asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT * FROM (
        SELECT DISTINCT ON (p.site_id, p.plot_no, p.block)
-              p.id, p.plot_no, p.block, p.status, p.buyer_name, p.plot_size,
+              p.id, p.unit_type, p.unit_details, p.plot_no, p.block, p.status, p.buyer_name, p.plot_size,
               p.booking_by, p.booking_date, p.team, p.plot_tag, p.sale_price,
               (
                 SELECT COUNT(*) FROM documents d
@@ -80,7 +80,7 @@ export const getPlotDocuments = asyncHandler(async (req, res) => {
   const { plotId } = req.params;
 
   const { rows: plotRows } = await pool.query(
-    `SELECT id, plot_no, block, status, buyer_name, plot_size, plot_size_mtr,
+    `SELECT id, unit_type, unit_details, plot_no, block, status, buyer_name, plot_size, plot_size_mtr,
             booking_by, booking_date, sale_price, plot_rate, team, plot_tag, site_id
        FROM plots WHERE id = $1`,
     [plotId]

@@ -3,7 +3,7 @@ const errorMiddleware = (err, req, res, next) => {
   const isInsufficientImprest = err.constraint === 'imprest_sufficient_balance';
   const isMissingImprestOwner = err.constraint === 'imprest_debit_owner_required';
   const isImprestConflict = isInsufficientImprest || isMissingImprestOwner;
-  const statusCode = Number(err.statusCode)
+  const statusCode = (err.constraint === 'project_unit_profile' ? 409 : 0) || Number(err.statusCode)
     || (err.code === 'LIMIT_FILE_SIZE' ? 413 : isImprestConflict ? 409 : 500);
   const message = err.code === 'LIMIT_FILE_SIZE'
     ? 'The uploaded file exceeds the 10 MB limit.'

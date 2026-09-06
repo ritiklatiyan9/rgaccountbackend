@@ -55,10 +55,18 @@ const FOCUS_SQL = {
       liability: r0(r.liability), paid: r0(r.paid), outstanding: r0(r.outstanding), payments: r.payments,
       last_payment: r.last_payment ? new Date(r.last_payment).toISOString().slice(0, 10) : null,
     }));
-    const tot = list.reduce((a, r) => ({ liability: a.liability + r.liability, paid: a.paid + r.paid }), { liability: 0, paid: 0 });
+    // Unpaid and overpaid are summed separately — netting them cancels an overpaid farmer against an unpaid one and reports neither.
+    const tot = list.reduce((a, r) => ({
+      liability: a.liability + r.liability, paid: a.paid + r.paid,
+      unpaid: a.unpaid + Math.max(r.outstanding, 0), overpaid: a.overpaid + Math.max(-r.outstanding, 0),
+    }), { liability: 0, paid: 0, unpaid: 0, overpaid: 0 });
+    const stale = (r) => r.outstanding > 0 && (!r.last_payment || Date.now() - Date.parse(r.last_payment) > 180 * 864e5);
     return {
-      note: 'Farmers = land sellers the company owes money to. liability = agreed land amount; paid = approved payments on the ledger; outstanding = still to pay. Sorted by outstanding.',
-      count: list.length, liability_total: tot.liability, paid_total: tot.paid, outstanding_total: tot.liability - tot.paid,
+      note: 'Farmers = land sellers the company owes money to. liability = agreed land amount; paid = approved payments on the ledger; outstanding = still to pay (negative means paid beyond the recorded contract). unpaid_total and overpaid_total are summed per farmer and never netted against each other. Sorted by outstanding.',
+      count: list.length, liability_total: tot.liability, paid_total: tot.paid,
+      unpaid_total: tot.unpaid, overpaid_total: tot.overpaid, outstanding_total: tot.liability - tot.paid,
+      unrecorded_contracts: list.filter((r) => r.liability <= 0 && r.paid > 0).length,
+      stalled_farmers: list.filter(stale).length,
       fully_paid: list.filter((r) => r.outstanding <= 0).length, farmers: list,
     };
   },

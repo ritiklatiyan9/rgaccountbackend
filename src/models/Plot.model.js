@@ -71,7 +71,7 @@ class PlotModel extends MasterModel {
    *  price and received total, so keep this high-frequency response compact. */
   async findOptionsBySiteId(siteId, pool) {
     const query = `
-      SELECT p.id, p.plot_no, p.block, p.buyer_name, p.sale_price,
+      SELECT p.id, p.unit_type, p.unit_details, p.plot_no, p.block, p.buyer_name, p.sale_price,
              COALESCE(agg.total_received, 0) AS total_received
       FROM plots p
       LEFT JOIN LATERAL (

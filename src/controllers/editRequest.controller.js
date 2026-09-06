@@ -1,3 +1,4 @@
+import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeContext, normalizeTransactionTime, withTransactionTime } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { editRequestModel } from '../models/EditRequest.model.js';
@@ -149,8 +150,9 @@ const MODULE_MAP = {
     fetchOriginal: async (id, db = pool) => plotModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
       // plots columns: plot_no, block, buyer_name, plot_size, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes
-      const allowed = {};
-      for (const key of ['plot_no', 'block', 'buyer_name', 'plot_size', 'plot_rate', 'sale_price', 'registry_area', 'circle_rate', 'to_receive_bank', 'first_installment', 'booking_by', 'booking_date', 'notes']) {
+      const existing = await plotModel.findById(parseInt(id), db);
+      const allowed = await unitMetadataForWrite(data, existing.site_id, db, existing);
+      for (const key of ['plot_no', 'block', 'buyer_name', 'plot_size', 'plot_size_mtr', 'plot_rate', 'sale_price', 'registry_area', 'circle_rate', 'to_receive_bank', 'first_installment', 'booking_by', 'booking_date', 'notes']) {
         if (data[key] !== undefined) allowed[key] = data[key];
       }
       // Never write REGISTRY from this generic path. The validation below gives

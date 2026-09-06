@@ -68,10 +68,10 @@ export const invalidateCacheOnSuccess = (prefixes = []) => {
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
         // A successful write can alter a source used by the consolidated
-        // Balance Sheet or Dashboard position cards (plots and land deals also
-        // change expected value without creating a ledger row). Invalidate both
+        // Balance Sheet, Dashboard or Management Analytics (plots and land deals also
+        // change expected value without creating a ledger row). Invalidate them
         // centrally so a new module cannot accidentally leave stale KPIs.
-        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|', 'dashboard:'])];
+        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|', 'dashboard:', 'management-analytics|'])];
         clearCacheByPrefixes(effectivePrefixes).catch(() => {});
       }
     });

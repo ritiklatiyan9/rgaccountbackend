@@ -3,6 +3,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { memberModel } from '../models/Member.model.js';
 import { uploadSingle } from '../utils/upload.js';
 import pool from '../config/db.js';
+import { invalidateChangedAddress } from '../services/clientLocation.js';
 import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 import { findPeopleByPlot } from '../services/plotPeople.service.js';
 import { findMemberPlots } from '../services/plotMemberLinks.service.js';
@@ -590,7 +591,7 @@ export const updateMember = asyncHandler(async (req, res) => {
   }
 
   const existingPromise = pool.query(
-    `SELECT id, site_id, latitude, longitude, phone, member_type,
+    `SELECT id, site_id, latitude, longitude, geocode_source, address, city, state, pincode, village, district, phone, member_type,
             COALESCE(member_types, ARRAY[member_type]) AS member_types
        FROM members WHERE id = $1`,
     [memberId]
@@ -632,10 +633,11 @@ export const updateMember = asyncHandler(async (req, res) => {
   }
 
   // Unchanged pin echoed back by the edit form: leave geo columns (and their nominatim/pincode source) alone.
-  if (data.latitude != null && Number(existing.latitude) === data.latitude && Number(existing.longitude) === data.longitude) {
+  if (data.latitude != null && existing.latitude != null && existing.longitude != null && Number(existing.latitude) === data.latitude && Number(existing.longitude) === data.longitude) {
     for (const k of ['latitude', 'longitude', 'geocode_source', 'geocode_precision', 'geocoded_at']) delete data[k];
   }
 
+  invalidateChangedAddress(data, existing);
   Object.assign(data, docUrls);
 
   // Handle removing documents

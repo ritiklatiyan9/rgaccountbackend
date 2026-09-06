@@ -473,6 +473,27 @@ const PlotAutocompleteType = new GraphQLObjectType({
   },
 });
 
+const ProjectUnitDetailsType = new GraphQLObjectType({
+  name: 'ProjectUnitDetails',
+  fields: {
+    tower: { type: GraphQLString },
+    floor: { type: GraphQLString },
+    bedrooms: { type: GraphQLString },
+    parking: { type: GraphQLString },
+    facing: { type: GraphQLString },
+    khasra_no: { type: GraphQLString },
+    approval_reference: { type: GraphQLString },
+    allotment_no: { type: GraphQLString },
+    agreement_date: { type: GraphQLString },
+    possession_date: { type: GraphQLString },
+    area_basis: { type: GraphQLString },
+    carpet_area: { type: GraphQLFloat },
+    built_up_area: { type: GraphQLFloat },
+    super_built_up_area: { type: GraphQLFloat },
+    balcony_area: { type: GraphQLFloat },
+  },
+});
+
 const PlotType = new GraphQLObjectType({
   name: 'Plot',
   fields: {
@@ -481,6 +502,8 @@ const PlotType = new GraphQLObjectType({
     plot_no:             { type: GraphQLString },
     block:               { type: GraphQLString },
     buyer_name:          { type: GraphQLString },
+    unit_type:           { type: GraphQLString },
+    unit_details:        { type: ProjectUnitDetailsType },
     plot_size:           { type: GraphQLFloat },
     plot_size_mtr:       { type: GraphQLFloat },
     plot_rate:           { type: GraphQLFloat },

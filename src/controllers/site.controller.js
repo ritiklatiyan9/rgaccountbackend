@@ -1,3 +1,4 @@
+import { validateProjectProfile, allowedUnitTypes } from '../services/projectProfile.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import siteModel from '../models/Site.model.js';
 import pool from '../config/db.js';
@@ -28,6 +29,7 @@ export const createSite = asyncHandler(async (req, res) => {
     description: description || null,
     status: status || 'active',
     created_by: req.user.id,
+    ...(req.body.project_profile !== undefined ? { project_profile: validateProjectProfile(req.body.project_profile) } : {}),
   };
 
   const site = await siteModel.create(siteData, pool);
@@ -47,7 +49,7 @@ export const listSites = asyncHandler(async (req, res) => {
     sites = await siteModel.findByUserId(req.user.id, pool);
   }
 
-  res.json({ sites });
+  res.json({ sites, project_profile_supported: sites.every(site => Boolean(site.project_profile)) });
 });
 
 /**
@@ -69,7 +71,7 @@ export const getSite = asyncHandler(async (req, res) => {
     if (!hasAccess) return res.status(403).json({ message: 'Access denied to this site' });
   }
 
-  res.json({ site });
+  res.json({ site, project_profile_supported: Boolean(site.project_profile) });
 });
 
 /**
@@ -98,6 +100,14 @@ export const updateSite = asyncHandler(async (req, res) => {
   if (description !== undefined) updateData.description = description;
   if (status) updateData.status = status;
 
+  if (req.body.project_profile !== undefined) {
+    updateData.project_profile = validateProjectProfile(req.body.project_profile);
+    const { rows } = await pool.query(
+      'SELECT unit_type, COUNT(*)::int AS count FROM plots WHERE site_id = $1 AND NOT (unit_type = ANY($2::text[])) GROUP BY unit_type',
+      [Number(id), allowedUnitTypes(updateData.project_profile)],
+    );
+    if (rows.length) return res.status(409).json({ message: 'This site has existing units of another type. Choose Flats + Plots to retain all inventory.' });
+  }
   const updated = await siteModel.update(parseInt(id), updateData, pool);
   res.json({ site: updated });
 });
