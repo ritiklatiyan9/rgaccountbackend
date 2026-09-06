@@ -1,3 +1,4 @@
+import { protectProposedTransactionDate } from '../services/transactionDate.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeContext, normalizeTransactionTime, withTransactionTime } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -703,6 +704,8 @@ export const createEditRequest = asyncHandler(async (req, res) => {
       }
     }
 
+    await protectProposedTransactionDate(module, parsedProposed, recordSiteId);
+
     const destinationError = await validateProposedDestinationSite({
       module,
       proposedData: parsedProposed,
@@ -925,6 +928,8 @@ export const approveEditRequest = asyncHandler(async (req, res) => {
       db: client,
     });
     if (destinationError) throw workflowError(409, destinationError);
+
+    await protectProposedTransactionDate(editReq.module, proposedData, currentSiteId, client);
 
     // Upload after all validation while the request row is locked. If any
     // database step fails, the transaction rolls back and the asset is removed.

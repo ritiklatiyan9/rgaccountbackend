@@ -108,6 +108,7 @@
     "migrate:expense-sub-categories": "node src/migrations/150_expense_sub_categories.js",
     "migrate:daybook-order-date-reset": "node src/migrations/151_daybook_order_date_reset.js",
     "migrate:project-profiles": "node src/migrations/152_site_project_profiles.js",
+    "test:transaction-dates": "node --test test/transaction-date.test.mjs test/transaction-time.test.mjs",
     "test:project-profiles": "node --test test/project-profile.test.mjs"
   },
   "dependencies": {

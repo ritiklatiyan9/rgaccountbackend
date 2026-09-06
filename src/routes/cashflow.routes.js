@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -30,8 +31,8 @@ router.delete('/months/:id', requireRole('admin', 'sub_admin'), requirePermissio
 // ── Entry endpoints ──
 router.get('/entries', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), cashflowReadCache, listEntries);                              // ?month_id=X
 router.get('/entries/:id', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), cashflowReadCache, getEntry);
-router.post('/entries', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'write'), bustCashflowCache, createEntry);
-router.put('/entries/:id', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'update'), bustCashflowCache, updateEntry);
+router.post('/entries', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'write'), bustCashflowCache, transactionDateMiddleware, createEntry);
+router.put('/entries/:id', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'update'), bustCashflowCache, transactionDateMiddleware, updateEntry);
 router.delete('/entries/:id', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'delete'), bustCashflowCache, deleteEntry);
 router.post('/entries/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'delete'), bustCashflowCache, bulkDeleteEntries);
 

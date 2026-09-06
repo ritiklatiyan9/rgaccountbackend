@@ -1,3 +1,4 @@
+import { transactionDateEditable, currentTransactionDate } from '../services/transactionDate.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
@@ -185,7 +186,8 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
   }
 
   // ── Money-mapped gate ──
-  const paymentRows = Array.isArray(payments) ? payments : [];
+  const paymentDateEditable = await transactionDateEditable(siteIdInt, db);
+  const paymentRows = (Array.isArray(payments) ? payments : []).map(row => !paymentDateEditable && row && !row.source_plot_payment_id ? { ...row, payment_date: currentTransactionDate() } : row);
   const linkedIds = paymentRows
     .filter((p) => p && p.source_plot_payment_id)
     .map((p) => parseInt(p.source_plot_payment_id))

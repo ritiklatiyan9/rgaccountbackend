@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -65,8 +66,8 @@ router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot
 // ── Payment endpoints ──
 router.get('/payments/list', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQueryPlot, plotReadCache, listPayments);                        // ?plot_id=X
 router.get('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPayment, plotReadCache, getPayment);
-router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), requireBookingPermission, accessByBodyPlot, bustPlotCache, createPayment);
-router.put('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPayment, bustPlotCache, updatePayment);
+router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), requireBookingPermission, accessByBodyPlot, bustPlotCache, transactionDateMiddleware, createPayment);
+router.put('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPayment, bustPlotCache, transactionDateMiddleware, updatePayment);
 router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), accessByParamPayment, bustPlotCache, deletePayment);
 
 // ── Installment management endpoints ──
@@ -75,7 +76,7 @@ router.post('/:id/installments', requireRole('admin', 'sub_admin'), requirePermi
 router.put('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamInstallment, bustPlotCache, updateInstallment);
 router.delete('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), accessByParamInstallment, bustPlotCache, deleteInstallment);
 router.put('/:id/installment-settings', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, updateInstallmentSettings);
-router.post('/:id/installment-payment', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, recordInstallmentPayment);
+router.post('/:id/installment-payment', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, transactionDateMiddleware, recordInstallmentPayment);
 router.get('/:id/installment-payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, plotReadCache, listInstallmentPayments);
 
 export default router;

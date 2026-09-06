@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -37,8 +38,8 @@ router.post('/create', requireRole('admin', 'sub_admin'), requirePermission('com
 router.get('/list', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listPlotCommissions);
 
 // Payment routes (more specific, must come before /:id routes)
-router.post('/payment', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustPlotCommissionCache, createPlotCommissionPayment);
-router.put('/payment/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'update'), bustPlotCommissionCache, updatePlotCommissionPayment);
+router.post('/payment', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustPlotCommissionCache, transactionDateMiddleware, createPlotCommissionPayment);
+router.put('/payment/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'update'), bustPlotCommissionCache, transactionDateMiddleware, updatePlotCommissionPayment);
 router.delete('/payment/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'delete'), bustPlotCommissionCache, deletePlotCommissionPayment);
 router.post('/payment/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'delete'), bustPlotCommissionCache, bulkDeletePlotCommissionPayments);
 

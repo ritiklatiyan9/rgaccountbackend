@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -79,7 +80,7 @@ router.get('/peers', requirePermission('imprest', 'read'), accessByQuerySite, im
 
 // ── Immediate balance-to-balance transfers ──
 router.get('/transfers', requirePermission('imprest', 'read'), accessByRequiredQuerySite, imprestReadCache, listTransfers);
-router.post('/transfers', requirePermission('imprest', 'write'), accessByRequiredBodySite, requireTransferSource, requireTransferRecipient, bustImprestCache, createTransfer);
+router.post('/transfers', requirePermission('imprest', 'write'), accessByRequiredBodySite, requireTransferSource, requireTransferRecipient, bustImprestCache, transactionDateMiddleware, createTransfer);
 
 // ── Pending receipts (sub-admin confirms received funds) ──
 router.get('/pending-receipts', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, getPendingReceipts);
@@ -92,23 +93,23 @@ router.put('/allocations/:id/confirm', requirePermission('imprest', 'read'), acc
 router.put('/allocations/:id/decline', requirePermission('imprest', 'read'), accessByAllocation, bustImprestCache, declineReceipt);
 
 // ── Sub-admin creates expense from imprest ──
-router.post('/expense', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, createExpenseFromImprest);
+router.post('/expense', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, transactionDateMiddleware, createExpenseFromImprest);
 
 // ── Expense requests (overdraft flow) ──
 router.get('/expense-requests', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, listExpenseRequests);
 // A user who can open their Imprest account may ask for a refill even when
 // their role is not allowed to post expenses or transfers.
-router.post('/expense-requests', requirePermission('imprest', 'read'), accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, createExpenseRequest);
+router.post('/expense-requests', requirePermission('imprest', 'read'), accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, transactionDateMiddleware, createExpenseRequest);
 
 // ── Allocations: admin → sub-admin OR sub-admin → sub-admin (peer transfer) ──
 // Controller enforces role-specific rules (ledger debit for sub-admin giver, ownership check on cancel).
-router.post('/allocations', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAllocationRecipient, requireAssignedReviewer, bustImprestCache, createAllocation);
+router.post('/allocations', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAllocationRecipient, requireAssignedReviewer, bustImprestCache, transactionDateMiddleware, createAllocation);
 router.get('/allocations', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, listAllocations);
 router.delete('/allocations/:id', requirePermission('imprest', 'delete'), accessByAllocation, bustImprestCache, cancelAllocation);
 
 // ── Admin-only routes ──
 router.get('/all-balances', requireRole('admin'), accessByQuerySite, imprestReadCache, getAllBalances);
-router.post('/adjust', requireRole('admin'), uploadProofPhoto, accessByRequiredBodySite, requireTargetUser, bustImprestCache, adjustBalance);
+router.post('/adjust', requireRole('admin'), uploadProofPhoto, accessByRequiredBodySite, requireTargetUser, bustImprestCache, transactionDateMiddleware, adjustBalance);
 
 // ── Assigned reviewer approve/reject expense requests ──
 // Controllers limit sub-admins to requests explicitly assigned to them.
@@ -116,7 +117,7 @@ router.put('/expense-requests/:id/approve', requireRole('admin', 'sub_admin'), r
 router.put('/expense-requests/:id/reject', requireRole('admin', 'sub_admin'), requirePermission('imprest', 'read'), accessByExpenseRequest, bustImprestCache, rejectExpenseRequest);
 
 // ── Imprest returns (sub-admin → admin money return) ──
-router.post('/returns', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, createReturn);
+router.post('/returns', requirePermission('imprest', 'write'), uploadProofPhoto, accessByRequiredBodySite, requireAssignedReviewer, bustImprestCache, transactionDateMiddleware, createReturn);
 router.get('/returns', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, listReturns);
 router.get('/pending-returns', requireRole('admin'), accessByQuerySite, imprestReadCache, getPendingReturns);
 router.put('/returns/:id/accept', requireRole('admin'), accessByReturn, bustImprestCache, acceptReturn);

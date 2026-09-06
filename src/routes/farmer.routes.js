@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -84,8 +85,8 @@ router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission
 
 // Farmer Payments (installments)
 router.get('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), farmerReadCache, listPayments);
-router.post('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), bustFarmerCache, createPayment);
-router.put('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), bustFarmerCache, updatePayment);
+router.post('/:farmerId/payments', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), bustFarmerCache, transactionDateMiddleware, createPayment);
+router.put('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'update'), bustFarmerCache, transactionDateMiddleware, updatePayment);
 router.delete('/:farmerId/payments/:paymentId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, deletePayment);
 router.post('/:farmerId/payments/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, bulkDeletePayments);
 

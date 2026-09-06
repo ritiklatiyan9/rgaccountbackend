@@ -5,11 +5,13 @@ export const FEATURE_KEYS = Object.freeze({
   // ON by default: every person named on a NOC must have KYC verified. An admin can
   // switch it off from the Settings control panel to issue NOCs without KYC.
   NOC_KYC_REQUIRED: 'noc_kyc_required',
+  TRANSACTION_DATE_EDITABLE: 'transaction_date_editable',
 });
 
 const FEATURE_DEFAULTS = Object.freeze({
   [FEATURE_KEYS.PLOT_REGISTRY_WORKFLOW_UNLOCKED]: false,
   [FEATURE_KEYS.NOC_KYC_REQUIRED]: true,
+  [FEATURE_KEYS.TRANSACTION_DATE_EDITABLE]: true,
 });
 
 const parseStoredBoolean = (value, fallback = false) => {

@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -27,8 +28,8 @@ router.put('/categories/:id', canUpdate, bustCache, updateCategory);
 router.delete('/categories/:id', canDelete, bustCache, deleteCategory);
 
 router.get('/', canRead, readCache, listEntries);
-router.post('/', canWrite, bustCache, createEntry);
-router.put('/:id', canUpdate, bustCache, updateEntry);
+router.post('/', canWrite, bustCache, transactionDateMiddleware, createEntry);
+router.put('/:id', canUpdate, bustCache, transactionDateMiddleware, updateEntry);
 router.delete('/:id', canDelete, bustCache, deleteEntry);
 
 export default router;

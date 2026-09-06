@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -28,10 +29,10 @@ router.get('/autocomplete', requireRole('admin', 'sub_admin'), expenseMetaCache,
 router.get('/pending', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'), expenseReadCache, listPendingExpenses);     // Expense approval: get pending expenses
 router.get('/status-counts', requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'), expenseReadCache, getStatusCounts);   // Expense approval: get status counts
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, getExpense);
-router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'write'), bustExpenseCache, createExpense);
+router.post('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'write'), bustExpenseCache, transactionDateMiddleware, createExpense);
 // Drag order — must stay above '/:id' so 'order' is never read as an id.
 router.put('/order', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), bustExpenseCache, reorderExpenses);
-router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), bustExpenseCache, updateExpense);
+router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'update'), bustExpenseCache, transactionDateMiddleware, updateExpense);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), bustExpenseCache, deleteExpense);
 router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'delete'), bustExpenseCache, bulkDeleteExpenses);
 

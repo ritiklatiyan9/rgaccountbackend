@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -23,8 +24,8 @@ router.use(authMiddleware);
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), commissionReadCache, listCommissions);                           // ?site_id=X
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), commissionReadCache, getAutocomplete);               // ?site_id=X
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), commissionReadCache, getCommission);
-router.post('/', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustCommissionCache, createCommission);
-router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'update'), bustCommissionCache, updateCommission);
+router.post('/', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustCommissionCache, transactionDateMiddleware, createCommission);
+router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'update'), bustCommissionCache, transactionDateMiddleware, updateCommission);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'delete'), bustCommissionCache, deleteCommission);
 
 export default router;

@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -36,11 +37,11 @@ router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('firm
 
 // ── Transaction endpoints ──
 router.get('/transactions/list', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), firmReadCache, listTransactions);             // ?firm_id=X
-router.post('/transactions/firm-to-firm', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, createFirmToFirmTransfer);
+router.post('/transactions/firm-to-firm', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, transactionDateMiddleware, createFirmToFirmTransfer);
 router.get('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), firmReadCache, getTransaction);
-router.post('/transactions', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, createTransaction);
+router.post('/transactions', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, transactionDateMiddleware, createTransaction);
 router.post('/transactions/bulk', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, bulkCreateTransactions);     // Bulk import
-router.put('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'update'), bustFirmCache, updateTransaction);
+router.put('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'update'), bustFirmCache, transactionDateMiddleware, updateTransaction);
 router.delete('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'delete'), bustFirmCache, deleteTransaction);
 router.post('/transactions/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'delete'), bustFirmCache, bulkDeleteTransactions);
 

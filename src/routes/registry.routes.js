@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -86,8 +87,8 @@ router.delete('/documents/:docId', requireRole('admin', 'sub_admin'), requirePer
 // ── Registry Payment endpoints (BEFORE /:id to avoid route conflict) ──
 router.get('/payments/list', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), accessByQueryRegistry, registryReadCache, listRegistryPayments);                        // ?registry_id=X
 router.get('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), accessByParamPayment, registryReadCache, getRegistryPayment);
-router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'write'), accessByBodyRegistry, accessByBodySourcePlotPayment, bustRegistryCache, createRegistryPayment);
-router.put('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'update'), accessByParamPayment, bustRegistryCache, updateRegistryPayment);
+router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'write'), accessByBodyRegistry, accessByBodySourcePlotPayment, bustRegistryCache, transactionDateMiddleware, createRegistryPayment);
+router.put('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'update'), accessByParamPayment, bustRegistryCache, transactionDateMiddleware, updateRegistryPayment);
 router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'delete'), accessByParamPayment, bustRegistryCache, deleteRegistryPayment);
 
 // ── Payments-clear check (create-registry form) — BEFORE /:id ──

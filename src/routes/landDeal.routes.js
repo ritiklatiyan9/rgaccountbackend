@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -25,17 +26,17 @@ const canUpdate = requirePermission('farmers', 'update');
 const canDelete = requirePermission('farmers', 'delete');
 
 router.get('/', canRead, readCache, listDeals);
-router.post('/', canWrite, bustCache, createDeal);
+router.post('/', canWrite, bustCache, transactionDateMiddleware, createDeal);
 
 // Payment routes are declared before '/:id' so 'payments' is never read as an id.
 router.get('/:id/payments', canRead, readCache, listPayments);
-router.post('/:id/payments', canWrite, bustCache, createPayment);
-router.put('/:id/payments/:paymentId', canUpdate, bustCache, updatePayment);
+router.post('/:id/payments', canWrite, bustCache, transactionDateMiddleware, createPayment);
+router.put('/:id/payments/:paymentId', canUpdate, bustCache, transactionDateMiddleware, updatePayment);
 router.delete('/:id/payments/:paymentId', canDelete, bustCache, deletePayment);
 
-router.post('/:id/sell', canUpdate, bustCache, sellDeal);
+router.post('/:id/sell', canUpdate, bustCache, transactionDateMiddleware, sellDeal);
 router.get('/:id', canRead, readCache, getDeal);
-router.put('/:id', canUpdate, bustCache, updateDeal);
+router.put('/:id', canUpdate, bustCache, transactionDateMiddleware, updateDeal);
 router.delete('/:id', canDelete, bustCache, deleteDeal);
 
 export default router;

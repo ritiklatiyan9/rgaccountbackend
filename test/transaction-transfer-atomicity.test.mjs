@@ -28,6 +28,7 @@ function fixture({
   linked = false,
   stale = false,
   site = 5,
+  dateEditable = true,
 } = {}) {
   let records = new Map([
       [1, original(1)],
@@ -66,6 +67,7 @@ function fixture({
         batches.get(args[0]).response = args[1];
         return { rows: [] };
       }
+      if (sql.includes('FROM application_settings')) return { rows: [{ setting_value: dateEditable }] };
       if (sql.includes('FROM expenses owner_row')) {
         let row = records.get(args[0]);
         return { rows: row ? [stale ? { ...row, credit: '101' } : row] : [] };
@@ -261,4 +263,16 @@ test('a retry waiting on the same request keeps its outcome unknown', async () =
   );
   assert.equal(response.transfer_state, 'unknown');
   assert.equal(f.state().records.size, 2);
+});
+
+test('date-locked transfers retain original dates and atomically apply other edits', async () => {
+  const f = fixture({ dateEditable: false });
+  const req = request();
+  req.body.entries.forEach(entry => { entry.edits.date = '2030-01-01'; });
+  const res = await invoke(f, req);
+  assert.equal(res.code, 201);
+  assert.ok(f.state().destinations.every(row => row.date === '2026-09-05'));
+  assert.ok(f.state().destinations.every(row => row.amount === 150));
+  assert.equal(f.log.filter(sql => sql.includes('FROM application_settings')).length, 1);
+  assert.equal(f.state().audit.length, 2);
 });

@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 
 import {
@@ -71,9 +72,9 @@ router.put('/commitments/:id', requirePermission('vendors', 'update'), bustVendo
 router.delete('/commitments/:id', requirePermission('vendors', 'delete'), bustVendorCache, deleteVendorCommitment);
 router.post('/commitments/bulk-delete', requirePermission('vendors', 'delete'), bustVendorCache, bulkDeleteVendorCommitments);
 router.put('/commitments/:id/status', requirePermission('vendors', 'update'), bustVendorCache, updateVendorCommitmentStatus);
-router.post('/commitments/:id/payments', requirePermission('vendors', 'write'), bustVendorCache, addVendorPayment);
+router.post('/commitments/:id/payments', requirePermission('vendors', 'write'), bustVendorCache, transactionDateMiddleware, addVendorPayment);
 router.post('/commitments/:id/distribute-payment', requirePermission('vendors', 'write'), bustVendorCache, distributePaymentToItems);
-router.put('/payments/:paymentId', requirePermission('vendors', 'update'), bustVendorCache, updateVendorPayment);
+router.put('/payments/:paymentId', requirePermission('vendors', 'update'), bustVendorCache, transactionDateMiddleware, updateVendorPayment);
 router.delete('/payments/:paymentId', requirePermission('vendors', 'delete'), bustVendorCache, deleteVendorPayment);
 router.post('/payments/bulk-delete', requirePermission('vendors', 'delete'), bustVendorCache, bulkDeleteVendorPayments);
 
@@ -86,8 +87,8 @@ router.get('/inventory/:id', requirePermission('vendors', 'read'), vendorReadCac
 router.put('/inventory/:id', requirePermission('vendors', 'update'), bustVendorCache, updateInventoryOrder);
 router.delete('/inventory/:id', requirePermission('vendors', 'delete'), bustVendorCache, deleteInventoryOrder);
 
-router.post('/inventory/:id/payments', requirePermission('vendors', 'write'), bustVendorCache, addInventoryPayment);
-router.put('/inventory/inv-payments/:paymentId', requirePermission('vendors', 'update'), bustVendorCache, updateInventoryPayment);
+router.post('/inventory/:id/payments', requirePermission('vendors', 'write'), bustVendorCache, transactionDateMiddleware, addInventoryPayment);
+router.put('/inventory/inv-payments/:paymentId', requirePermission('vendors', 'update'), bustVendorCache, transactionDateMiddleware, updateInventoryPayment);
 router.delete('/inventory/inv-payments/:paymentId', requirePermission('vendors', 'delete'), bustVendorCache, deleteInventoryPayment);
 
 export default router;

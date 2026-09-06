@@ -1,3 +1,4 @@
+import { transactionDateEditable } from '../services/transactionDate.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import permissionModel from '../models/Permission.model.js';
@@ -857,6 +858,7 @@ export const executeTransfer = async (db, req) => {
       'Enter a transfer reason between 5 and 500 characters',
     );
   const sources = [];
+  const datePermissions = new Map();
   // Lock in a consistent order; competing batches cannot consume a source twice.
   const ordered = [...entries].sort(
     (a, b) =>
@@ -880,7 +882,9 @@ export const executeTransfer = async (db, req) => {
       Number(source.parent_id || 0) === Number(targetId || 0)
     )
       throw new TransferError(422, 'Choose a different module or destination');
-    const edited = editSource(source, entry.edits);
+    if (!datePermissions.has(source.site_id)) datePermissions.set(source.site_id, await transactionDateEditable(source.site_id, db));
+    const edits = datePermissions.get(source.site_id) ? entry.edits : { ...entry.edits, date: source.date };
+    const edited = editSource(source, edits);
     if (
       MODULES[targetType].direction &&
       edited.direction !== MODULES[targetType].direction

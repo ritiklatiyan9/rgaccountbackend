@@ -82,6 +82,10 @@ export const updatePlotRegistryWorkflow = asyncHandler(async (req, res) => {
  * Body: { site_id, key, enabled } — one endpoint for every control-panel switch.
  */
 const FEATURE_MESSAGES = {
+  [FEATURE_KEYS.TRANSACTION_DATE_EDITABLE]: {
+    on: 'Transaction date editing enabled for this site',
+    off: 'New transactions use today’s date (IST); existing transaction dates are locked',
+  },
   [FEATURE_KEYS.PLOT_REGISTRY_WORKFLOW_UNLOCKED]: {
     on: 'Plot Registry flexible navigation enabled',
     off: 'Plot Registry sequential workflow restored',
