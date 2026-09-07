@@ -111,7 +111,8 @@
     "migrate:site-partner-shares": "node src/migrations/153_site_partner_shares.js",
     "test:transaction-dates": "node --test test/transaction-date.test.mjs test/transaction-time.test.mjs",
     "test:project-profiles": "node --test test/project-profile.test.mjs",
-    "dev:preview": "node --watch src/devServer.js"
+    "dev:preview": "node --watch src/devServer.js",
+    "test:pending-payments": "node --test test/pending-plot-payments.test.mjs test/installment-allocation.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

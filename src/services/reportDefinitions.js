@@ -30,6 +30,7 @@ export const REPORTS = Object.freeze({
       { key: 'buyer_name', expr: `COALESCE(pp.buyer_name, p.buyer_name)`, label: 'Buyer' },
       { key: 'amount', expr: 'pp.amount', label: 'Amount', type: 'money' },
       { key: 'payment_from', expr: 'pp.payment_from', label: 'Mode' },
+      { key: 'payment_type', expr: 'pp.payment_type', label: 'Settlement account' },
       { key: 'cheque_status', expr: 'pp.cheque_status', label: 'Cheque status' },
       { key: 'received_by', expr: 'pp.received_by', label: 'Received by' },
       { key: 'created_by_name', expr: 'u.name', label: 'Entered by' },
