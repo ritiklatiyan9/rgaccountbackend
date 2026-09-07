@@ -15,6 +15,7 @@ import {
   sendPaymentReminderSms, paymentReminderSmsLog,
 } from '../controllers/installment.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
+import { pendingPlotPayments, createPercentagePaymentPlan } from '../controllers/pendingPlotPayments.controller.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import requirePlotSiteAccess from '../middlewares/plotSiteAccess.middleware.js';
@@ -48,6 +49,7 @@ router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payme
 router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, searchPlots);                                 // ?site_id=X&q=A67
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotMetaCache, getAutocomplete);                      // ?site_id=X
 router.get('/payment-management', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentManagementList);           // ?site_id=X
+router.get('/pending-payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, pendingPlotPayments);
 router.get('/payment-reminders', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentReminders);                  // ?site_id=X&page=1&limit=10
 router.get('/payment-analytics', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentAnalytics);                   // ?site_id=X&mode=...
 // SMS reminders — must stay above '/:id' so they aren't swallowed by the param route.
@@ -73,6 +75,7 @@ router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermiss
 // ── Installment management endpoints ──
 router.get('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, plotReadCache, listInstallments);
 router.post('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, createInstallments);
+router.post('/:id/payment-plan', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, createPercentagePaymentPlan);
 router.put('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamInstallment, bustPlotCache, updateInstallment);
 router.delete('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), accessByParamInstallment, bustPlotCache, deleteInstallment);
 router.put('/:id/installment-settings', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, updateInstallmentSettings);
