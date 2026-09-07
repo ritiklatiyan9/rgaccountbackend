@@ -1,9 +1,10 @@
 /**
  * One presentation sequence, two storage layers.
  *
- * `daybook_global_order` holds the cross-date sequence users arrange in the
- * period statements; `daybook_entry_order` holds each day's order for the
- * daily view (which also lists pending entries the ledger view excludes).
+ * `daybook_global_order` holds saved positions in the period statements;
+ * transaction dates take priority over those positions. `daybook_entry_order`
+ * holds each day's order for the daily view (which also lists pending entries
+ * the ledger view excludes).
  * Every save writes its own layer and projects into the other, so both views
  * agree. Readers and the base every save edits share SEQUENCE_ORDER_BY.
  */
@@ -11,21 +12,20 @@
 export const LEDGER_ENTRY_KEY_SQL = "CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))";
 
 /**
- * Saved cross-date positions first. An entry that has never been positioned
- * slots in by date: just above its date's first positioned entry, else just
- * above the first positioned entry of an older date, else at the end.
+ * Dates always lead, newest first. Saved positions arrange entries within
+ * each date; new entries slot above their date's first positioned entry.
  * Expects columns global_display_position, display_position, entry_date,
  * transaction_time, created_at, id.
  */
 export const SEQUENCE_ORDER_BY = `
-  ORDER BY COALESCE(
+  ORDER BY entry_date DESC,
+           COALESCE(
              global_display_position::numeric,
              COALESCE(
                MIN(global_display_position) OVER (PARTITION BY entry_date),
                MIN(global_display_position) OVER (ORDER BY entry_date DESC RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
              ) - 0.5
            ) ASC NULLS LAST,
-           entry_date DESC,
            display_position ASC NULLS LAST,
            transaction_time DESC NULLS LAST,
            created_at DESC,

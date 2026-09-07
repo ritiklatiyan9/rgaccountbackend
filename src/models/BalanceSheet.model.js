@@ -224,8 +224,8 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
   -- Parameter 10 is the timeline grain used by the metadata query. Keep its type
   -- explicit here because this query shares the same 12-parameter contract.
   WHERE $10::text IS NOT NULL
-  -- The sequence users arrange across dates in the period statements; entries
-  -- never positioned slot in by date (see SEQUENCE_ORDER_BY).
+  -- Keep dates chronological before limiting rows. Saved positions only
+  -- arrange entries within the same date (see SEQUENCE_ORDER_BY).
   ${SEQUENCE_ORDER_BY}
   LIMIT $9::int
 `;

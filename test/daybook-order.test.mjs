@@ -4,22 +4,24 @@ import pool from '../src/config/db.js';
 import balanceSheet from '../src/models/BalanceSheet.model.js';
 import { updateDayBookOrder } from '../src/controllers/daybook.controller.js';
 
-// Users arrange entries across dates in the period statements. That saved
-// sequence leads; an entry never positioned slots in by its date instead of
-// sinking to the end, and dates only break ties after that.
-const ANCHORED_SEQUENCE = /ORDER BY COALESCE\(\s+global_display_position::numeric,[\s\S]*PARTITION BY entry_date[\s\S]*ASC NULLS LAST,\s+entry_date DESC,\s+display_position ASC NULLS LAST/;
+// Dates lead before pagination; saved positions only arrange the same day.
+const ANCHORED_SEQUENCE = /ORDER BY entry_date DESC,\s+COALESCE\(\s+global_display_position::numeric,[\s\S]*PARTITION BY entry_date[\s\S]*ASC NULLS LAST,\s+display_position ASC NULLS LAST/;
 
-test('period reads follow the saved cross-date sequence, slot new entries in by date, and paginate', async (t) => {
+test('period reads sort by date before saved positions and pagination in every book', async (t) => {
   const calls = [];
   t.mock.method(pool, 'query', async (sql, params) => {
     calls.push({ sql, params });
     return calls.length === 1 ? { rows: [{ report: { order_revision: 2 } }] } : { rows: [] };
   });
-  await balanceSheet.getReport({ siteId: 9, scope: 'bank', limit: 50 });
-  assert.equal(calls.length, 2);
-  assert.match(calls[1].sql, ANCHORED_SEQUENCE);
-  assert.match(calls[1].sql, /LIMIT \$9::int/);
-  assert.equal(calls[1].params[8], 50);
+  for (const scope of ['bank', 'cash', 'all']) {
+    calls.length = 0;
+    await balanceSheet.getReport({ siteId: 9, scope, limit: 50 });
+    assert.equal(calls.length, 2);
+    assert.match(calls[1].sql, ANCHORED_SEQUENCE);
+    assert.match(calls[1].sql, /ORDER BY entry_date DESC,[\s\S]*LIMIT \$9::int/);
+    assert.equal(calls[1].params[3], scope);
+    assert.equal(calls[1].params[8], 50);
+  }
 });
 
 test('a partial cross-date save shifts selected entries and preserves other books', async (t) => {
