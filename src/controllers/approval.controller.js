@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
+import { hasRelation } from '../utils/schemaProbe.js';
 import {
   postApprovedImprestDebit,
   reverseApprovedImprestDebit,
@@ -253,7 +254,8 @@ export const listAllPending = asyncHandler(async (req, res) => {
   };
 
   const visPlot = moduleVisibility(req.user, allowedModules, 'plot_status');
-  if ((!module || module === 'plot_status') && visPlot.include) {
+  // Plot-status review needs migration 158; skip the source until it is run.
+  if ((!module || module === 'plot_status') && visPlot.include && await hasRelation('plot_status_approvals')) {
     const { where, params } = buildWhere('pa', 'pa', [], visPlot.scoped ? req.user.id : null);
     const { rows } = await pool.query(`
       SELECT pa.*, s.name AS site_name, u.name AS created_by_name, aa.name AS assigned_admin_name,
@@ -858,7 +860,9 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     .filter(([et]) => !['FARMER PAYMENT', 'PLOT COMMISSION', 'EXPENSE'].includes(et))
     .reduce((sum, [, count]) => sum + count, 0) : 0) : 0;
   const ftCount = a('firm_transaction') ? ft.rows[0].count : 0;
-  const plotStatusCount = await pool.query(`SELECT COUNT(*)::int AS count FROM plot_status_approvals pa WHERE pa.status = 'pending' ${site_id ? 'AND pa.site_id = $1' : ''}${scopeClauseFor('pa', 'plot_status')}`, params);
+  const plotStatusCount = await hasRelation('plot_status_approvals')
+    ? await pool.query(`SELECT COUNT(*)::int AS count FROM plot_status_approvals pa WHERE pa.status = 'pending' ${site_id ? 'AND pa.site_id = $1' : ''}${scopeClauseFor('pa', 'plot_status')}`, params)
+    : { rows: [{ count: 0 }] };
   const psCount = a('plot_status') ? plotStatusCount.rows[0].count : 0;
   const ppCount = a('plot_payment') ? pp.rows[0].count : 0;
   const pipCount = a('plot_installment_payment') ? pip.rows[0].count : 0;

@@ -123,7 +123,8 @@
     "migrate:partner-profit-payments": "node src/migrations/159_partner_profit_payments.js",
     "migrate:plot-money-transfers": "node src/migrations/160_plot_money_transfers.js",
     "test:plot-money-transfers": "node --test test/plot-money-transfer.test.mjs",
-    "test:partner-payments": "node --test test/partner-profit-payments.test.mjs test/partner-profit-payments-db.test.mjs"
+    "test:partner-payments": "node --test test/partner-profit-payments.test.mjs test/partner-profit-payments-db.test.mjs",
+    "test:unrun-migrations": "node --test test/unrun-migration-degradation.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",
