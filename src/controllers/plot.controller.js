@@ -797,6 +797,7 @@ export const listPayments = asyncHandler(async (req, res) => {
   const [paymentsRes, plotRes, fromBreakdown, receivedByBreakdown] = await Promise.all([
     pool.query(
       `SELECT pp.*, 'payment' AS source, u.name AS created_by_name,
+              (SELECT COALESCE(SUM(mt.amount), 0) FROM plot_money_transfers mt WHERE mt.source_payment_id = pp.id) AS money_transferred_amount,
               aa.name AS assigned_admin_name
          FROM plot_payments pp
          LEFT JOIN users u ON u.id = pp.created_by

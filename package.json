@@ -121,6 +121,8 @@
     "test:pending-payments": "node --test test/pending-plot-payments.test.mjs test/installment-allocation.test.mjs",
     "migrate:plot-status-approval": "node src/migrations/158_plot_status_approval.js",
     "migrate:partner-profit-payments": "node src/migrations/159_partner_profit_payments.js",
+    "migrate:plot-money-transfers": "node src/migrations/160_plot_money_transfers.js",
+    "test:plot-money-transfers": "node --test test/plot-money-transfer.test.mjs",
     "test:partner-payments": "node --test test/partner-profit-payments.test.mjs test/partner-profit-payments-db.test.mjs"
   },
   "dependencies": {

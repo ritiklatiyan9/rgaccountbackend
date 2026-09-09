@@ -19,6 +19,7 @@ import { pendingPlotPayments, createPercentagePaymentPlan } from '../controllers
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import requirePlotSiteAccess from '../middlewares/plotSiteAccess.middleware.js';
+import { transferPlotMoney } from '../controllers/plotMoneyTransfer.controller.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 // All plot routes require auth
@@ -66,6 +67,7 @@ router.put('/:id/kyc-member', requireRole('admin', 'sub_admin'), requirePermissi
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), accessByParamPlot, bustPlotCache, deletePlot);
 
 // ── Payment endpoints ──
+router.post('/payments/:id/transfer-money', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPayment, bustPlotCache, transferPlotMoney);
 router.get('/payments/list', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQueryPlot, plotReadCache, listPayments);                        // ?plot_id=X
 router.get('/payments/:id', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPayment, plotReadCache, getPayment);
 router.post('/payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), requireBookingPermission, accessByBodyPlot, bustPlotCache, transactionDateMiddleware, createPayment);
