@@ -28,3 +28,22 @@ test('frontend template catalog ids are all accepted by the backend whitelist', 
     assert.ok(RECEIPT_TEMPLATE_IDS.includes(id), `${id} missing from RECEIPT_TEMPLATE_IDS`);
   }
 });
+
+test('cheque reconciliation has independent defaults and survives saved-design normalization', () => {
+  const legacy = normalizeReceiptDesign({ cheque: { content: { title: 'Original cheque design' } } });
+  assert.equal(legacy.cheque_reconciliation.content.title, 'Cheque Reconciliation Receipt');
+  assert.equal(legacy.cheque.content.title, 'Original cheque design');
+  const custom = normalizeReceiptDesign({
+    cheque_reconciliation: {
+      template_id: 'simple-green', page_size: 'A5', colors: { accent: '#123456' },
+      content: { title: 'Instrument acknowledgement' },
+      detail_items: [{ key: 'cheque_no', label: 'Instrument no.', enabled: false }],
+    },
+  });
+  assert.equal(custom.cheque_reconciliation.page_size, 'A5');
+  assert.equal(custom.cheque_reconciliation.colors.accent, '#123456');
+  assert.equal(custom.cheque_reconciliation.content.title, 'Instrument acknowledgement');
+  assert.equal(custom.cheque_reconciliation.detail_items.find((item) => item.key === 'cheque_no').enabled, false);
+  assert.equal(custom.cheque.content.title, 'Cheque Receipt');
+  assert.deepEqual(normalizeReceiptDesign(custom), custom);
+});

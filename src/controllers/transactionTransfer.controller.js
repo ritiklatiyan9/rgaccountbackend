@@ -37,7 +37,7 @@ export const MODULES = {
     direction: 'credit',
   },
   plot_commission: {
-    label: 'Plot Commission',
+    label: 'Project Commission',
     permission: 'commissions',
     table: 'plot_commission_payments',
     parent: 'plot_commission_id',

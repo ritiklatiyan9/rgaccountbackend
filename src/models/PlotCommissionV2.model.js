@@ -50,7 +50,7 @@ class PlotCommissionV2Model extends MasterModel {
         COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
         (pc.total_commission - COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
       FROM plot_commissions_v2 pc
-      JOIN plots p ON pc.plot_id = p.id
+      LEFT JOIN plots p ON pc.plot_id = p.id -- a land commission has no plot (migration 155)
       JOIN members m ON pc.agent_id = m.id
       LEFT JOIN plot_commission_payments pcp ON pc.id = pcp.plot_commission_id
       WHERE pc.id = $1

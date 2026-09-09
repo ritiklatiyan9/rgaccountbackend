@@ -187,12 +187,17 @@ export const updateFarmer = asyncHandler(async (req, res) => {
  * DELETE /farmers/:id
  * Delete a farmer and all payments
  */
-// A land with sales mapped to it (Land Sale) cannot go — the FK is RESTRICT since migration 154.
+// A land with sales (Land Sale) or broker commissions (Land Commission) mapped to it cannot
+// go — both FKs are RESTRICT (migrations 154 / 155).
 const salesMappedTo = async (ids) => {
-  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM land_deals WHERE farmer_id = ANY($1::int[])', [ids]);
-  return rows[0].n;
+  const { rows } = await pool.query(
+    `SELECT (SELECT COUNT(*) FROM land_deals WHERE farmer_id = ANY($1::int[]))::int AS sales,
+            (SELECT COUNT(*) FROM plot_commissions_v2 WHERE farmer_id = ANY($1::int[]))::int AS commissions`,
+    [ids],
+  );
+  return rows[0].sales + rows[0].commissions;
 };
-const MAPPED_MESSAGE = (n) => `${n} land sale${n === 1 ? ' is' : 's are'} mapped to this land — delete or re-map them in Land Sale first`;
+const MAPPED_MESSAGE = (n) => `${n} land sale${n === 1 ? '' : 's'} / commission${n === 1 ? ' is' : 's are'} mapped to this land — delete or re-map them in Land Sale / Land Commission first`;
 
 export const deleteFarmer = asyncHandler(async (req, res) => {
   const mapped = await salesMappedTo([parseInt(req.params.id)]);

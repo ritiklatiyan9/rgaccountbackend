@@ -147,7 +147,7 @@ export const DASHBOARD_MODULE_CATALOG = [
   },
   {
     key: 'plot_commission',
-    label: 'Plot Commission',
+    label: 'Project Commission',
     path: '/plot-commission',
     description: 'Calculates agent commission, records payments and shows commission balances by plot.',
     permission: 'commissions',

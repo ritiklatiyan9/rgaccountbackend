@@ -14,7 +14,9 @@ import {
   bulkDeletePlotCommissionPayments,
   getPlotCommissionAnalytics,
   updatePlotCommission,
-  deletePlotCommission
+  deletePlotCommission,
+  listLandCommissions,
+  getCommissionBySubject,
 } from '../controllers/plotCommissionV2.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -36,6 +38,9 @@ router.use(authMiddleware);
 router.get('/plots', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotsForCommissionCache, getPlotsForCommission);
 router.post('/create', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustPlotCommissionCache, createPlotCommission);
 router.get('/list', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listPlotCommissions);
+// Land Commission (subject = land purchase / land sale) — same engine, same permission key.
+router.get('/land', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listLandCommissions);
+router.get('/subject/:kind/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getCommissionBySubject);
 
 // Payment routes (more specific, must come before /:id routes)
 router.post('/payment', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustPlotCommissionCache, transactionDateMiddleware, createPlotCommissionPayment);

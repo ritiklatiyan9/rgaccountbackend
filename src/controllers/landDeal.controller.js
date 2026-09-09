@@ -331,8 +331,10 @@ export const deleteDeal = asyncHandler(async (req, res) => {
   const { rows } = await pool.query('SELECT site_id FROM land_deals WHERE id = $1', [dealId]);
   if (!rows[0]) return res.status(404).json({ message: 'Land sale not found' });
   if (!(await siteAllowed(req, rows[0].site_id))) return res.status(403).json({ message: 'Access denied to this site' });
-  // Keep the parent, receipts, and ledger-trigger effects in one recovery batch.
+  // Keep the parent, receipts, broker commissions (their payouts cascade) and the
+  // ledger-trigger effects in one recovery batch — the same way a plot delete does.
   await tx(async (client) => {
+    await client.query('DELETE FROM plot_commissions_v2 WHERE land_deal_id = $1', [dealId]);
     await client.query('DELETE FROM land_deal_payments WHERE land_deal_id = $1', [dealId]);
     await client.query('DELETE FROM land_deals WHERE id = $1', [dealId]);
   });

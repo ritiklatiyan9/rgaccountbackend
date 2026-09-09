@@ -63,6 +63,24 @@ const COMMON_FIELDS = Object.freeze({
 
 const modeDefaults = (mode) => {
   const base = baseModeDefaults(mode);
+  if (mode === 'cheque_reconciliation') return {
+    ...base,
+    template_id: 'teal-modern', font_family: 'Trebuchet MS',
+    colors: { ...base.colors, accent: '#0d9488', background: '#f6fffe' },
+    fields: { ...base.fields, qr: false },
+    detail_items: [
+      ...base.detail_items.map((item) => item.key === 'payment_mode' ? { ...item, sample: 'CHEQUE' } : item),
+      { key: 'cheque_no', label: 'Cheque number', sample: '001247', enabled: true },
+      { key: 'cheque_status', label: 'Cheque status', sample: 'PENDING', enabled: true },
+      { key: 'bank_account', label: 'Bank account', sample: 'Site current account', enabled: true },
+      { key: 'plot_reference', label: 'Plot', sample: 'A-18', enabled: true },
+      { key: 'booking_reference', label: 'Booking', sample: 'BK-018', enabled: true },
+    ],
+    content: {
+      ...base.content, title: 'Cheque Reconciliation Receipt', amount_label: 'Cheque amount',
+      declaration: 'This acknowledgement records the cheque instrument only. Payment is subject to realization and reconciliation in the books of account. E. & O.E.',
+    },
+  };
   if (mode !== 'cheque') return base;
   // Mirrors rgaccount/src/lib/receiptDesigner.js: cheque = non-cash layout
   // with its own identity + realization declaration.
@@ -133,6 +151,7 @@ export const DEFAULT_RECEIPT_DESIGN = Object.freeze({
   version: 1,
   cash: modeDefaults('cash'),
   cheque: modeDefaults('cheque'),
+  cheque_reconciliation: modeDefaults('cheque_reconciliation'),
   non_cash: modeDefaults('non_cash'),
 });
 
@@ -216,6 +235,7 @@ export const normalizeReceiptDesign = (value) => ({
   version: 1,
   cash: normalizeMode(isObject(value) ? value.cash : null, 'cash'),
   cheque: normalizeMode(isObject(value) ? value.cheque : null, 'cheque'),
+  cheque_reconciliation: normalizeMode(isObject(value) ? value.cheque_reconciliation : null, 'cheque_reconciliation'),
   non_cash: normalizeMode(isObject(value) ? value.non_cash : null, 'non_cash'),
 });
 

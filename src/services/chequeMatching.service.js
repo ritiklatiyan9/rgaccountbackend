@@ -76,6 +76,8 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
        END AS parent_id,
        cfe.site_id,
        cfe.date,
+       cfe.transaction_time,
+       cfe.remarks,
        UPPER(${sourceChequeStatusSql}) AS cheque_status,
        COALESCE(NULLIF(fp.cheque_no, ''), NULLIF(pcp.cheque_no, ''), NULLIF(ft.cheque_no, ''),
                 NULLIF(pp.cheque_no, ''), NULLIF(pip.cheque_no, ''), NULLIF(ex.cheque_no, ''),

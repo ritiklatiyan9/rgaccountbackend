@@ -22,6 +22,21 @@ const commissionPaymentMovesMoney = (payment) => transactionMovesMoney({
   chequeStatus: payment?.cheque_status,
 });
 
+// A commission master belongs to exactly ONE subject (migration 155): a plot — Project
+// Commission — or a land purchase (farmer) / land sale (land deal) — Land Commission.
+// Payouts, approvals, cheques and the ledger mirror key off the payout row, so every
+// subject shares them unchanged.
+const SUBJECT_COLUMNS = { plot: 'plot_id', 'land-purchase': 'farmer_id', 'land-sale': 'land_deal_id' };
+const subjectOf = (body) => {
+  const given = Object.values(SUBJECT_COLUMNS)
+    .map((column) => [column, parseInt(body[column])])
+    .filter(([, value]) => Number.isInteger(value) && value > 0);
+  return given.length === 1 ? { column: given[0][0], id: given[0][1] } : null;
+};
+const num = (v) => parseFloat(v) || 0;
+const areaText = (row) => (num(row.area_bigha) > 0 ? `${num(row.area_bigha).toLocaleString('en-IN', { maximumFractionDigits: 2 })} bigha`
+  : num(row.area_gaz) > 0 ? `${num(row.area_gaz).toLocaleString('en-IN', { maximumFractionDigits: 2 })} gaz` : null);
+
 // Commission list totals intentionally accept only dates the accounting ledger
 // can represent. Validate the same range at the write boundary so a malformed
 // year cannot appear paid in the detail view but disappear from the register.
@@ -90,27 +105,35 @@ export const getPlotsForCommission = asyncHandler(async (req, res) => {
  * Create new commission linked to a plot.
  */
 export const createPlotCommission = asyncHandler(async (req, res) => {
-  const { site_id, plot_id, agent_id, total_commission, remarks } = req.body;
+  const { site_id, agent_id, total_commission, remarks } = req.body;
+  const subject = subjectOf(req.body);
 
-  if (!site_id || !plot_id || !agent_id || !total_commission) {
-    return res.status(400).json({ message: 'site_id, plot_id, agent_id, total_commission are required' });
+  if (!site_id || !subject || !agent_id || !total_commission) {
+    return res.status(400).json({ message: 'site_id, agent_id, total_commission and exactly one of plot_id / farmer_id / land_deal_id are required' });
+  }
+  const agentIdInt = parseInt(agent_id);
+  const siteIdInt = parseInt(site_id);
+
+  // A land subject must live on this site (plots are checked by the plot flow itself).
+  if (subject.column !== 'plot_id') {
+    const table = subject.column === 'farmer_id' ? 'farmers' : 'land_deals';
+    const { rows } = await pool.query(`SELECT site_id FROM ${table} WHERE id = $1`, [subject.id]);
+    if (!rows[0]) return res.status(404).json({ message: 'That land record no longer exists' });
+    if (Number(rows[0].site_id) !== siteIdInt) return res.status(400).json({ message: 'That land belongs to another site' });
   }
 
-  const plotIdInt = parseInt(plot_id);
-  const agentIdInt = parseInt(agent_id);
-
   // Single-round-trip duplicate check: try the INSERT optimistically inside
-  // a CTE and let it return 0 rows if the (plot_id, agent_id) pair already
+  // a CTE and let it return 0 rows if the (subject, agent) pair already
   // exists. Saves one round-trip vs the previous SELECT-then-INSERT.
   const result = await pool.query(
     `WITH existing AS (
        SELECT 1 FROM plot_commissions_v2
-        WHERE plot_id = $1 AND agent_id = $2
+        WHERE ${subject.column} = $1 AND agent_id = $2
         LIMIT 1
      ),
      ins AS (
        INSERT INTO plot_commissions_v2 (
-         site_id, plot_id, agent_id, total_commission, remarks, status, created_by
+         site_id, ${subject.column}, agent_id, total_commission, remarks, status, created_by
        )
        SELECT $3, $1, $2, $4, $5, 'Pending', $6
        WHERE NOT EXISTS (SELECT 1 FROM existing)
@@ -120,9 +143,9 @@ export const createPlotCommission = asyncHandler(async (req, res) => {
        (SELECT row_to_json(ins) FROM ins) AS master,
        EXISTS (SELECT 1 FROM existing) AS dup`,
     [
-      plotIdInt,
+      subject.id,
       agentIdInt,
-      parseInt(site_id),
+      siteIdInt,
       parseFloat(total_commission),
       remarks ? remarks.trim() : null,
       req.user.id,
@@ -131,9 +154,48 @@ export const createPlotCommission = asyncHandler(async (req, res) => {
 
   const row = result.rows[0];
   if (row.dup) {
-    return res.status(409).json({ message: 'This agent already has a commission assigned for this plot' });
+    return res.status(409).json({ message: 'This agent already has a commission on this record' });
   }
-  res.status(201).json({ master: row.master, message: 'Plot commission created successfully' });
+  res.status(201).json({ master: row.master, message: 'Commission created successfully' });
+});
+
+/**
+ * GET /plot-commission/land?site_id=X
+ * Every commission whose subject is a land purchase or a land sale — one row per
+ * agent; the Land Commission page groups them by subject.
+ */
+export const listLandCommissions = asyncHandler(async (req, res) => {
+  const { site_id } = req.query;
+  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const { rows } = await pool.query(
+    `SELECT pc.id, pc.site_id, pc.farmer_id, pc.land_deal_id, pc.agent_id, pc.total_commission, pc.remarks, pc.status, pc.created_at,
+            CASE WHEN pc.farmer_id IS NOT NULL THEN 'land-purchase' ELSE 'land-sale' END AS kind,
+            COALESCE(pc.farmer_id, pc.land_deal_id) AS subject_id,
+            COALESCE(f.name, d.buyer_name) AS subject_name,
+            COALESCE(f.phone, d.buyer_phone) AS subject_phone,
+            CASE WHEN pc.farmer_id IS NOT NULL THEN f.total_amount ELSE d.sale_amount END AS subject_amount,
+            df.name AS land_name, d.deal_date, d.status AS deal_status,
+            COALESCE(f.land_size_bigha, d.area_bigha) AS area_bigha, COALESCE(f.land_size_gaz, d.area_gaz) AS area_gaz,
+            m.full_name AS agent_name, m.phone AS agent_phone,
+            COALESCE(SUM(pcp.amount), 0) AS total_paid,
+            COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) = 'cash' THEN pcp.amount ELSE 0 END), 0) AS cash_paid,
+            COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) <> 'cash' THEN pcp.amount ELSE 0 END), 0) AS bank_paid,
+            COUNT(pcp.id)::int AS payment_count
+       FROM plot_commissions_v2 pc
+       JOIN members m ON m.id = pc.agent_id
+       LEFT JOIN farmers f ON f.id = pc.farmer_id
+       LEFT JOIN land_deals d ON d.id = pc.land_deal_id
+       LEFT JOIN farmers df ON df.id = d.farmer_id
+       LEFT JOIN plot_commission_payments pcp ON pcp.plot_commission_id = pc.id
+            AND ${commissionPaymentPostsSql('pcp')}
+            AND pcp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
+      WHERE pc.site_id = $1 AND pc.plot_id IS NULL
+      GROUP BY pc.id, f.id, d.id, df.id, m.id
+      ORDER BY pc.created_at DESC`,
+    [parseInt(site_id)],
+  );
+  res.json({ commissions: rows.map((r) => ({ ...r, area: areaText(r), total_commission: num(r.total_commission), subject_amount: num(r.subject_amount),
+    total_paid: num(r.total_paid), cash_paid: num(r.cash_paid), bank_paid: num(r.bank_paid), balance: num(r.total_commission) - num(r.total_paid) })) });
 });
 
 /**
@@ -173,15 +235,7 @@ export const getPlotCommissionDetail = asyncHandler(async (req, res) => {
  * Get all commissions for a plot (agent history) with all their payments.
  * Used by the new detail page that groups by plot.
  */
-export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
-  const { plotId } = req.params;
-  const { site_id } = req.query;
-  const numPlotId = parseInt(plotId);
-  const numSiteId = parseInt(site_id);
-  if (isNaN(numPlotId)) return res.status(400).json({ message: 'Invalid plot ID' });
-  if (!site_id) return res.status(400).json({ message: 'site_id is required' });
-  const entryVisibility = await resolveEntryVisibility(req.user, 'commissions', req.query.created_by);
-
+const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
   // Step 1: load commissions for the VIEWED booking (we need the IDs to fetch payments).
   const commissions = await plotCommissionV2Model.findAllCommissionsByPlotId(numPlotId, numSiteId, pool);
 
@@ -200,7 +254,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
       [numPlotId, numSiteId]
     );
     plotMeta = metaRes.rows[0] || null;
-    if (!plotMeta) return res.status(404).json({ message: 'Plot not found' });
+    if (!plotMeta) return null;
   }
 
   // Step 2: fire payments + site + timeline IN PARALLEL (was serial — 3 RTTs).
@@ -419,7 +473,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   );
   grand.balance = grand.total_commission - grand.total_paid_all;
 
-  res.json({
+  return {
     plot: plotInfo,
     agents,
     totals: { total_commission: totalCommission, total_paid: totalPaid, total_paid_all: totalPaidAll, balance: totalCommission - totalPaidAll },
@@ -427,7 +481,123 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
     is_resale: commissions.length > 1 || timeline.length > 1,
     timeline,
     entryVisibility,
+  };
+};
+
+export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
+  const numPlotId = parseInt(req.params.plotId);
+  if (isNaN(numPlotId)) return res.status(400).json({ message: 'Invalid plot ID' });
+  if (!req.query.site_id) return res.status(400).json({ message: 'site_id is required' });
+  const entryVisibility = await resolveEntryVisibility(req.user, 'commissions', req.query.created_by);
+  const payload = await plotDetail(numPlotId, parseInt(req.query.site_id), entryVisibility);
+  if (!payload) return res.status(404).json({ message: 'Plot not found' });
+  res.json(payload);
+});
+
+/**
+ * A land purchase (farmer) or land sale (land deal) shaped exactly like the plot detail
+ * payload, so the same detail page renders it: one "sale" in the timeline, agents with
+ * their payment ledgers, and `plot.subject` describing the land instead of a plot number.
+ * Unlike a plot (one decided commission shared by its agents), each land agent has their
+ * own decided amount, so the land total is the sum across agents.
+ */
+const landSubjectDetail = async (kind, subjectId, numSiteId, entryVisibility) => {
+  const column = SUBJECT_COLUMNS[kind];
+  const purchase = kind === 'land-purchase';
+  const { rows: metaRows } = await pool.query(
+    purchase
+      ? `SELECT f.id, f.name, f.phone, f.total_amount AS amount, f.land_size_bigha AS area_bigha, f.land_size_gaz AS area_gaz,
+                f.commission_amount AS suggested_commission, NULL::text AS land_name, NULL::date AS deal_date, s.name AS site_name
+           FROM farmers f JOIN sites s ON s.id = f.site_id WHERE f.id = $1 AND f.site_id = $2`
+      : `SELECT d.id, d.buyer_name AS name, d.buyer_phone AS phone, d.sale_amount AS amount, d.area_bigha, d.area_gaz,
+                NULL::numeric AS suggested_commission, lf.name AS land_name, d.deal_date, s.name AS site_name
+           FROM land_deals d LEFT JOIN farmers lf ON lf.id = d.farmer_id JOIN sites s ON s.id = d.site_id WHERE d.id = $1 AND d.site_id = $2`,
+    [subjectId, numSiteId],
+  );
+  const meta = metaRows[0];
+  if (!meta) return null;
+  const subject = {
+    kind, id: subjectId, column,
+    label: `${purchase ? 'Land purchase' : 'Land sale'} · ${meta.name}`,
+    counterparty: meta.name, counterparty_label: purchase ? 'Farmer' : 'Buyer', phone: meta.phone,
+    amount: num(meta.amount), amount_label: purchase ? 'Purchase price' : 'Sale price',
+    area: areaText(meta), land_name: meta.land_name, deal_date: meta.deal_date,
+    suggested_commission: num(meta.suggested_commission),
+    back: { path: '/farmers/commission', label: 'Land Commission' },
+  };
+
+  const [{ rows: commissions }, { rows: payments }, { rows: siteRows }] = await Promise.all([
+    pool.query(
+      `SELECT pc.*, m.full_name AS agent_name, m.phone AS agent_phone
+         FROM plot_commissions_v2 pc JOIN members m ON m.id = pc.agent_id
+        WHERE pc.${column} = $1 AND pc.site_id = $2
+        ORDER BY pc.created_at ASC`,
+      [subjectId, numSiteId],
+    ),
+    pool.query(
+      `SELECT pcp.*, u.name AS created_by_name, a.name AS approved_by_name, aa.name AS assigned_admin_name
+         FROM plot_commission_payments pcp
+         JOIN plot_commissions_v2 pc ON pc.id = pcp.plot_commission_id
+         LEFT JOIN users u ON pcp.created_by = u.id
+         LEFT JOIN users a ON pcp.approved_by = a.id
+         LEFT JOIN users aa ON aa.id = pcp.assigned_admin_id
+        WHERE pc.${column} = $1 AND pc.site_id = $2
+          AND ($3::text IS NULL OR pcp.created_by = ANY(string_to_array($3::text, ',')::int[]))
+        ORDER BY pcp.date DESC, pcp.created_at DESC`,
+      [subjectId, numSiteId, entryVisibility.creatorId],
+    ),
+    pool.query('SELECT name, city, state FROM sites WHERE id = $1', [numSiteId]),
+  ]);
+  const site = siteRows[0] || null;
+  const agentName = Object.fromEntries(commissions.map((c) => [c.id, c.agent_name]));
+  const byCommission = {};
+  for (const p of payments) {
+    (byCommission[p.plot_commission_id] ||= []).push({
+      ...p,
+      verifyUrl: buildVerifyUrl({
+        t: ReceiptType.COMMISSION, i: p.id, pn: agentName[p.plot_commission_id] || null, a: p.amount, d: p.date,
+        pm: p.payment_mode || null, pl: subject.label, sn: site?.name || null, sy: site?.city || null, ss: site?.state || null,
+      }),
+    });
+  }
+  const agents = commissions.map((c) => {
+    const rows = byCommission[c.id] || [];
+    const paid = rows.filter(commissionPaymentMovesMoney).reduce((sum, p) => sum + num(p.amount), 0);
+    const decided = num(c.total_commission);
+    return {
+      commission_id: c.id, plot_id: null, agent_id: c.agent_id, agent_name: c.agent_name, agent_phone: c.agent_phone,
+      total_commission: decided, total_paid: paid, total_paid_all: paid, balance: decided - paid,
+      status: c.status, remarks: c.remarks, created_at: c.created_at, payments: rows, payment_count: rows.length,
+    };
   });
+  const totalCommission = agents.reduce((s, a) => s + a.total_commission, 0);
+  const totalPaid = agents.reduce((s, a) => s + a.total_paid, 0);
+  const totals = { total_commission: totalCommission, total_paid: totalPaid, total_paid_all: totalPaid, balance: totalCommission - totalPaid };
+  return {
+    plot: { plot_id: null, plot_no: null, buyer_name: subject.counterparty, plot_size: subject.area, site_name: meta.site_name, site_id: numSiteId, subject },
+    subject,
+    agents,
+    totals,
+    grand: { ...totals, booking_count: 1 },
+    is_resale: false,
+    timeline: [{ plot_id: null, buyer_name: subject.counterparty, agents_detail: agents, ...totals, payment_count: payments.length, is_current: true }],
+    entryVisibility,
+  };
+};
+
+/** GET /plot-commission/subject/:kind/:id?site_id=  — kind: plot | land-purchase | land-sale */
+export const getCommissionBySubject = asyncHandler(async (req, res) => {
+  const { kind } = req.params;
+  const numId = parseInt(req.params.id);
+  if (!SUBJECT_COLUMNS[kind] || isNaN(numId)) return res.status(400).json({ message: 'Invalid commission subject' });
+  if (!req.query.site_id) return res.status(400).json({ message: 'site_id is required' });
+  const numSiteId = parseInt(req.query.site_id);
+  const entryVisibility = await resolveEntryVisibility(req.user, 'commissions', req.query.created_by);
+  const payload = kind === 'plot'
+    ? await plotDetail(numId, numSiteId, entryVisibility)
+    : await landSubjectDetail(kind, numId, numSiteId, entryVisibility);
+  if (!payload) return res.status(404).json({ message: 'Record not found' });
+  res.json(payload);
 });
 
 /**

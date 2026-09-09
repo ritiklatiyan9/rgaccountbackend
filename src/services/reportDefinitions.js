@@ -306,7 +306,7 @@ export const REPORTS = Object.freeze({
   },
 
   commissions: {
-    label: 'Plot Commissions',
+    label: 'Project Commissions',
     description: 'Agent commissions raised and paid out.',
     permission: 'commissions',
     icon: 'HandCoins',

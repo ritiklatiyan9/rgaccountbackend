@@ -370,14 +370,18 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const q = `
                   SELECT pcp.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
-             p.plot_no, p.buyer_name, ag.full_name AS agent_name,
+             p.plot_no, COALESCE(p.buyer_name, ld.buyer_name, lf.name) AS buyer_name, ag.full_name AS agent_name,
              ag.full_name AS entity_name, 'Commission agent'::text AS entity_type,
-             p.plot_no AS entity_plot_no, p.buyer_name AS entity_secondary,
+             COALESCE(p.plot_no, lf.name, ld.buyer_name) AS entity_plot_no, COALESCE(p.buyer_name, ld.buyer_name, lf.name) AS entity_secondary,
+             COALESCE('Plot ' || p.plot_no, 'Land purchase · ' || lf.name, 'Land sale · ' || ld.buyer_name) AS subject_label,
              'plot_commission_payment' AS source
       FROM plot_commission_payments pcp
       JOIN sites s ON pcp.site_id = s.id
       JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
-      JOIN plots p ON pcm.plot_id = p.id
+      -- A commission's subject is a plot OR a land purchase OR a land sale (migration 155).
+      LEFT JOIN plots p ON pcm.plot_id = p.id
+      LEFT JOIN farmers lf ON lf.id = pcm.farmer_id
+      LEFT JOIN land_deals ld ON ld.id = pcm.land_deal_id
       JOIN members ag ON pcm.agent_id = ag.id
       LEFT JOIN users u ON pcp.created_by = u.id
             LEFT JOIN users aa ON pcp.assigned_admin_id = aa.id
@@ -387,8 +391,8 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const r = await pool.query(q, params);
     results.push(...r.rows.map(row => ({
       ...row,
-      entry_label: `${row.agent_name} (Plot ${row.plot_no}) - ₹${row.amount}`,
-      module_label: 'Plot Commission payment',
+      entry_label: `${row.agent_name} (${row.subject_label || 'Commission'}) - ₹${row.amount}`,
+      module_label: row.plot_no ? 'Project Commission payment' : 'Land Commission payout',
     })));
   }
 

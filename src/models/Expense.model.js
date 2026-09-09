@@ -476,7 +476,7 @@ class ExpenseModel extends MasterModel {
           'commission' as source
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
-        JOIN plots p ON pcm.plot_id = p.id
+        LEFT JOIN plots p ON pcm.plot_id = p.id -- land commissions carry no plot (migration 155); the remark COALESCEs it away
         JOIN members ag ON pcm.agent_id = ag.id
         WHERE pcp.site_id = $1
 

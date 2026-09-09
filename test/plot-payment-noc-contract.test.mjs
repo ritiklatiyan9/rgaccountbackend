@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const read = (relativePath) => readFileSync(new URL(relativePath, import.meta.url), 'utf8');
+// The editor is split into presentation components and a shared workspace hook.
+const readNocEditor = () => [
+  read('../../rgaccount/src/pages/PlotRegistryNoc.jsx'),
+  ...readdirSync(new URL('../../rgaccount/src/components/noc/', import.meta.url))
+    .filter((name) => /\.jsx?$/.test(name))
+    .map((name) => read(`../../rgaccount/src/components/noc/${name}`)),
+].join('\n');
 
 test('Plot Payments is the primary NOC workspace', () => {
   const app = read('../../rgaccount/src/App.jsx');
@@ -19,7 +26,7 @@ test('Plot Payments is the primary NOC workspace', () => {
   assert.match(workspace, /canIncludeInNoc/);
   assert.match(workspace, /api\.post\(`\/plots\/\$\{plotId\}\/noc-workspace`\)/);
   assert.match(workspace, /workspace="plot-payments"/);
-  const nocEditor = read('../../rgaccount/src/pages/PlotRegistryNoc.jsx');
+  const nocEditor = readNocEditor();
   assert.match(nocEditor, /\/noc\/approve/);
   assert.match(nocEditor, /plotAlreadyRegistry/);
 });
@@ -67,7 +74,7 @@ test('NOC issuance keeps a permanent REF and appends immutable ACK revisions', (
 });
 
 test('NOC workspace controls payment visibility and the print follows the issued revision', () => {
-  const editor = read('../../rgaccount/src/pages/PlotRegistryNoc.jsx');
+  const editor = readNocEditor();
   const print = read('../../rgaccount/src/pages/PlotRegistryNocPrint.jsx');
 
   assert.match(editor, /Show payment breakdown on the NOC/);
@@ -85,7 +92,7 @@ test('NOC workspace controls payment visibility and the print follows the issued
 
 test('NOC names a farmer and a company signatory picked from Clients', () => {
   const controller = read('../src/controllers/registry.controller.js');
-  const editor = read('../../rgaccount/src/pages/PlotRegistryNoc.jsx');
+  const editor = readNocEditor();
   const print = read('../../rgaccount/src/pages/PlotRegistryNocPrint.jsx');
 
   assert.match(read('../src/migrations/129_noc_farmer_member.js'), /noc_farmer_member_id INTEGER REFERENCES members\(id\)/);
@@ -102,8 +109,10 @@ test('NOC names a farmer and a company signatory picked from Clients', () => {
   assert.match(editor, /rolesOf\(m\)\.includes\('FARMER'\)/);
   assert.match(editor, /rolesOf\(m\)\.some\(\(t\) => COMPANY_MEMBER_TYPES\.includes\(t\)\)/);
   // Print prefers the picked farmer over the legacy free-text names, and names the signatory.
-  assert.match(print, /farmerLine \|\| \[registry\.seller_name, registry\.farmer_name\]/);
-  assert.match(print, /signatory \? signatory\.full_name : 'Authorised Signatory'/);
+  assert.match(print, /farmerLines \|\| \[registry\.seller_name, registry\.farmer_name\]/);
+  assert.match(print, /signatories\.length \? signatories\.map/);
+  assert.match(print, /signatory\.full_name/);
+  assert.match(print, /Authorised Signatory/);
   // The certificate names the parties only — no signature ruling or witness blanks.
   assert.doesNotMatch(print, /sig-rule|sig-space|Signature of |wit-row/);
 });

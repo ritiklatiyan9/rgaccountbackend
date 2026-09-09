@@ -1766,7 +1766,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     plot_registry_payments:    'Registry Payments',
     farmer_payments:           'Farmer Payments',
     expenses:                  'Expenses',
-    plot_commission_payments:  'Plot Commissions',
+    plot_commission_payments:  'Project Commissions',
     vendor_payments:           'Vendor Payments',
     firm_transactions:         'Firm Transactions',
     day_book:                  'Direct Day Book Entry',
@@ -2977,7 +2977,7 @@ export const verifyData = asyncHandler(async (req, res) => {
   // Plot Commissions
   const pc = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(amount),0)::numeric AS total FROM plot_commissions WHERE site_id = $1 AND financial_transaction_posts('debit', status, by_note, cheque_status)`, [siteId]);
   const pcC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'plot_commissions' AND financial_transaction_posts('debit', status, cash_type, cheque_status)`, [siteId]);
-  modules.push({ module: 'Plot Commissions', sourceTotal: parseFloat(pc.rows[0].total), sourceCount: parseInt(pc.rows[0].cnt), cfeTotal: parseFloat(pcC.rows[0].total), cfeCount: parseInt(pcC.rows[0].cnt), type: 'expense' });
+  modules.push({ module: 'Project Commissions', sourceTotal: parseFloat(pc.rows[0].total), sourceCount: parseInt(pc.rows[0].cnt), cfeTotal: parseFloat(pcC.rows[0].total), cfeCount: parseInt(pcC.rows[0].cnt), type: 'expense' });
 
   // Commission Payments
   const pcp = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(amount),0)::numeric AS total FROM plot_commission_payments WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`, [siteId]);

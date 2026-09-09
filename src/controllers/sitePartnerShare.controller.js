@@ -9,7 +9,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 const shareRows = (siteId) => pool.query(
   `SELECT sps.id, sps.member_id, sps.share_pct::float AS share_pct, sps.notes,
-          m.full_name, m.member_type, m.phone
+          m.full_name, m.member_type, m.phone, m.photo
      FROM site_partner_shares sps
      JOIN members m ON m.id = sps.member_id
     WHERE sps.site_id = $1
@@ -22,6 +22,10 @@ export const getSiteProfitShares = asyncHandler(async (req, res) => {
   const siteId = Number.parseInt(req.params.id, 10);
   if (!Number.isInteger(siteId) || siteId <= 0) {
     return res.status(400).json({ message: 'A valid site is required.' });
+  }
+  // Dashboard shortcuts need identities only, without recomputing all KPIs.
+  if (req.query.shares_only === 'true') {
+    return res.json({ siteId, shares: await shareRows(siteId) });
   }
   const excludeOldPlots = String(req.query.exclude_old_plots || '') === 'true';
   const [kpis, shares] = await Promise.all([
