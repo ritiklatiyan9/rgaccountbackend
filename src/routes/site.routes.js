@@ -29,8 +29,11 @@ router.post('/director/assistant', requireRole('admin'), streamDirectorAssistant
 router.get('/', siteReadCache, listSites);                              // admin + sub_admin
 // Profit distribution (partner shares). Above /:id is not required — the path
 // segment differs — but keeps the director block together.
-router.get('/:id/profit-shares', requireRole('admin'), getSiteProfitShares);
-router.put('/:id/profit-shares', requireRole('admin'), saveSiteProfitShares);
+// Profit is recomputed from the whole ledger on every call, so cache it briefly per
+// user. The page's Refresh button adds a revision param, which is a new cache key.
+const profitCache = cacheResponse({ ttlSeconds: 120, namespace: 'site-profit' });
+router.get('/:id/profit-shares', requireRole('admin'), profitCache, getSiteProfitShares);
+router.put('/:id/profit-shares', requireRole('admin'), invalidateCacheOnSuccess(['site-profit|']), saveSiteProfitShares);
 
 router.get('/:id', siteReadCache, getSite);                             // admin + sub_admin (access-checked)
 router.post('/', requireRole('admin'), bustSiteCache, createSite);      // admin only

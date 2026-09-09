@@ -15,6 +15,7 @@ import pool from '../config/db.js';
 import { farmerModel } from '../models/Farmer.model.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { allocateCost, landArea, landStage, landUnit, overSold, remainingArea, soldArea } from '../utils/landMapping.js';
+import { landShareRows } from '../services/partnerShares.service.js';
 
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);
 const GAZ_TO_SQ_METRE = 0.8364;
@@ -203,7 +204,8 @@ export const getLandProfit = asyncHandler(async (req, res) => {
     if (!byFarmer.has(sale.farmer_id)) byFarmer.set(sale.farmer_id, []);
     byFarmer.get(sale.farmer_id).push(sale);
   }
-  const lands = farmers.map((f) => landOf(f, byFarmer.get(f.id) || []));
+  const splits = await landShareRows(farmers.map((f) => f.id));
+  const lands = farmers.map((f) => ({ ...landOf(f, byFarmer.get(f.id) || []), shares: splits.filter((s) => s.farmer_id === f.id) }));
   const summary = lands.reduce((acc, l) => {
     acc.lands += 1;
     acc[l.stage] = (acc[l.stage] || 0) + 1;

@@ -148,7 +148,7 @@ export async function getLandProfitDetail(siteId, end) {
        SELECT d.id,
               d.farmer_id,
               COALESCE(d.sale_amount, 0)::numeric AS sale_value,
-              COALESCE(NULLIF(d.purchase_cost, 0), f.total_amount, 0)::numeric AS purchase_cost,
+              COALESCE(d.purchase_cost, 0)::numeric AS purchase_cost,
               COALESCE(d.other_cost, 0)::numeric AS other_cost,
               COALESCE(r.received, 0)::numeric AS received,
               COALESCE(r.cash_received, 0)::numeric AS cash_received,
@@ -620,6 +620,107 @@ export async function getImprestDistribution(siteId, start, end) {
 }
 
 // ── Combined KPI fetch (single round-trip where possible) ──
+/**
+ * Cumulative-to-date profit from the three inputs it depends on. Expected Profit uses the
+ * full sold-land book profit; posted farmer payments attributable to those sold parcels
+ * already sit inside runningExpense, so that overlap is added back once. Current Profit
+ * is cash-basis. Shared by getAllKpis and the Sites Profit page so the two never drift.
+ */
+export function profitFrom(plotIncoming, landProfitDetail, runningExpense) {
+  const expectedProfit = plotIncoming.finalSaleValue
+    + landProfitDetail.bookProfit
+    - runningExpense
+    + landProfitDetail.purchaseCostAlreadyExpensed;
+  const currentProfit = plotIncoming.received + landProfitDetail.received - runningExpense;
+  return { expectedProfit, currentProfit };
+}
+
+/**
+ * Profit per land (a `farmers` row), built so the lands plus the plot side add up to the
+ * site's expectedProfit / currentProfit exactly — the same attribution getLandProfitDetail
+ * uses, just grouped by land:
+ *   expected = book profit of the sold pieces + farmer payments matched to them − all posted farmer payments
+ *   current  = posted buyer receipts − all posted farmer payments
+ * An unsold land is therefore money out with nothing sold yet (negative) until it sells.
+ */
+export async function getLandProfitByFarmer(siteId, end) {
+  const { rows } = await pool.query(
+    `WITH posted_receipts AS (
+       SELECT ldp.land_deal_id, COALESCE(SUM(le.credit), 0)::numeric AS received
+         FROM ledger_entries le
+         JOIN land_deal_payments ldp ON le.source_key = 'land_deal_payments' AND ldp.id = le.source_id
+        WHERE le.site_id = $1 AND le.entry_date < $2::date
+        GROUP BY ldp.land_deal_id
+     ), sold AS (
+       SELECT d.farmer_id,
+              COALESCE(SUM(COALESCE(d.sale_amount, 0)), 0)::numeric AS sale_value,
+              COALESCE(SUM(COALESCE(d.purchase_cost, 0)), 0)::numeric AS sold_cost,
+              COALESCE(SUM(COALESCE(d.other_cost, 0)), 0)::numeric AS other_cost,
+              COALESCE(SUM(COALESCE(r.received, 0)), 0)::numeric AS received
+         FROM land_deals d
+         LEFT JOIN farmers f ON f.id = d.farmer_id
+         LEFT JOIN posted_receipts r ON r.land_deal_id = d.id
+        WHERE d.site_id = $1 AND d.deal_date < $2::date
+          AND LOWER(TRIM(COALESCE(d.status, ''))) IN ('open', 'completed')
+        GROUP BY d.farmer_id
+     ), paid AS (
+       SELECT fp.farmer_id, COALESCE(SUM(le.debit), 0)::numeric AS paid
+         FROM ledger_entries le
+         JOIN farmer_payments fp ON le.source_key = 'farmer_payments' AND fp.id = le.source_id
+        WHERE le.site_id = $1 AND le.entry_date < $2::date
+        GROUP BY fp.farmer_id
+     )
+     SELECT f.id AS farmer_id, f.name,
+            COALESCE(s.sale_value, 0) AS sale_value, COALESCE(s.sold_cost, 0) AS sold_cost,
+            COALESCE(s.other_cost, 0) AS other_cost, COALESCE(s.received, 0) AS received, COALESCE(p.paid, 0) AS paid
+       FROM farmers f
+       LEFT JOIN sold s ON s.farmer_id = f.id
+       LEFT JOIN paid p ON p.farmer_id = f.id
+      WHERE f.site_id = $1 AND (s.farmer_id IS NOT NULL OR p.farmer_id IS NOT NULL)
+      ORDER BY f.name`,
+    [siteId, end],
+  );
+  return rows.map((row) => {
+    const book = numberOf(row.sale_value) - numberOf(row.sold_cost) - numberOf(row.other_cost);
+    const paid = numberOf(row.paid);
+    const matched = Math.min(numberOf(row.sold_cost), Math.max(paid, 0));
+    return {
+      farmer_id: row.farmer_id, name: row.name,
+      saleValue: roundMoney(row.sale_value), soldCost: roundMoney(row.sold_cost), otherCost: roundMoney(row.other_cost),
+      bookProfit: roundMoney(book), received: roundMoney(row.received), paid: roundMoney(paid),
+      expectedProfit: roundMoney(book + matched - paid),
+      currentProfit: roundMoney(numberOf(row.received) - paid),
+    };
+  });
+}
+
+/**
+ * Only what the profit page needs — 4 of getAllKpis' 15 queries, so it loads in a fraction
+ * of the time. `plot` and `land` split the same totals so each side can carry its own
+ * partner percentages; they add up to expectedProfit / currentProfit.
+ */
+export async function getProfitKpis(siteId, end, excludeOldPlots = false) {
+  const [plotIncoming, landProfitDetail, runningExpense, lands] = await Promise.all([
+    getPlotIncoming(siteId, end, excludeOldPlots),
+    getLandProfitDetail(siteId, end),
+    getRunningExpense(siteId, end),
+    getLandProfitByFarmer(siteId, end),
+  ]);
+  const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);
+  const farmerPaid = lands.reduce((sum, land) => sum + land.paid, 0);
+  const landExpected = lands.reduce((sum, land) => sum + land.expectedProfit, 0);
+  const landCurrent = lands.reduce((sum, land) => sum + land.currentProfit, 0);
+  return {
+    plotIncoming, landProfitDetail, lands,
+    runningExpense: roundMoney(runningExpense),
+    expectedProfit: roundMoney(expectedProfit),
+    currentProfit: roundMoney(currentProfit),
+    // The plot side is what is left once every land is carved out.
+    plot: { expectedProfit: roundMoney(expectedProfit - landExpected), currentProfit: roundMoney(currentProfit - landCurrent) },
+    land: { expectedProfit: roundMoney(landExpected), currentProfit: roundMoney(landCurrent) },
+  };
+}
+
 export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
   const [
     revenue,
@@ -655,15 +756,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     getLandRevenue(siteId, start, end),
   ]);
 
-  // Expected Profit uses the full sold-land book profit. Posted farmer payments
-  // attributable to those sold parcels already sit inside runningExpense, so add
-  // that overlap back once; otherwise the same purchase cost is deducted both in
-  // runningExpense and again inside bookProfit. Current Profit remains cash-basis.
-  const expectedProfit = plotIncoming.finalSaleValue
-    + landProfitDetail.bookProfit
-    - runningExpense
-    + landProfitDetail.purchaseCostAlreadyExpensed;
-  const currentProfit = plotIncoming.received + landProfitDetail.received - runningExpense;
+  const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);
   const currentReceipts = plotIncoming.received + landProfitDetail.received;
   const currentProfitMargin = currentReceipts > 0 ? (currentProfit / currentReceipts) * 100 : 0;
   const periodRevenue = revenue + landRevenue.credit;

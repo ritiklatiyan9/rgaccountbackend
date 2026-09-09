@@ -21,7 +21,7 @@ const expenseReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'expenses' }
 // meta cache that survives expense writes.
 const expenseMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'expenses-meta' });
 // Anchored prefix so 'expenses-meta|...' isn't busted by writes.
-const bustExpenseCache = invalidateCacheOnSuccess(['expenses|', '/daybook', 'expenses:page:']);
+const bustExpenseCache = invalidateCacheOnSuccess(['expenses|', 'imprest|', '/daybook', 'expenses:page:']);
 
 // Standard expense CRUD
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('expenses', 'read'), expenseReadCache, listExpenses);                            // ?site_id=X

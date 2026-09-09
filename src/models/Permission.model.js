@@ -4,6 +4,7 @@ import pool from '../config/db.js';
 // Keep this list additive: ensureDefaults() safely seeds newly introduced modules
 // for every existing sub-admin without overwriting their current choices.
 export const ALL_MODULES = Object.freeze([
+    'home',
     'dashboard',
     'finance_forecast',
     'clients',
@@ -45,7 +46,7 @@ export const ALL_MODULES = Object.freeze([
     'misc_income',
 ]);
 
-const READ_ONLY_MODULES = new Set(['dashboard', 'finance_forecast', 'balance_sheet', 'reports', 'settings', 'audit_logs', 'management_analytics']);
+const READ_ONLY_MODULES = new Set(['home', 'dashboard', 'finance_forecast', 'balance_sheet', 'reports', 'settings', 'audit_logs', 'management_analytics']);
 // Modules introduced after the original permission rollout stay fail-closed for
 // existing sub-admins. An administrator must opt users into these sensitive
 // document/payment surfaces from the permission matrix.

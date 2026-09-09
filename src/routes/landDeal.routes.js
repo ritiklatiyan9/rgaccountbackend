@@ -8,6 +8,7 @@ import {
   listDeals, getDeal, createDeal, updateDeal, deleteDeal, getLandProfit,
   listPayments, createPayment, updatePayment, deletePayment,
 } from '../controllers/landDeal.controller.js';
+import { getLandPartnerShares, saveLandPartnerShares } from '../controllers/landPartnerShare.controller.js';
 
 const router = express.Router();
 
@@ -28,6 +29,10 @@ const canDelete = requirePermission('farmers', 'delete');
 router.get('/', canRead, readCache, listDeals);
 // Declared before '/:id' so 'profit' and 'payments' are never read as an id.
 router.get('/profit', canRead, readCache, getLandProfit);
+// A land's own partner split (Land Profit → Partners). Saving changes partner figures on
+// Sites Profit too, so its cache is cleared as well. Admin-only like the site split.
+router.get('/land/:farmerId/partners', canRead, readCache, getLandPartnerShares);
+router.put('/land/:farmerId/partners', requireRole('admin'), invalidateCacheOnSuccess(['land-deals|', 'site-profit|']), saveLandPartnerShares);
 router.post('/', canWrite, bustCache, transactionDateMiddleware, createDeal);
 
 router.get('/:id/payments', canRead, readCache, listPayments);

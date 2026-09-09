@@ -131,7 +131,7 @@ export const getMonth = asyncHandler(async (req, res) => {
  */
 export const updateMonth = asyncHandler(async (req, res) => {
   const monthId = parseInt(req.params.id);
-  const { opening_balance, notes, is_locked, ledger_name } = req.body;
+  const { opening_balance, notes, is_locked, ledger_name, linked_member_id } = req.body;
 
   const updateData = {};
   if (opening_balance !== undefined) updateData.opening_balance = parseFloat(opening_balance) || 0;
@@ -139,6 +139,22 @@ export const updateMonth = asyncHandler(async (req, res) => {
   if (is_locked !== undefined) updateData.is_locked = Boolean(is_locked);
   // Rename a person ledger. Never blank the name — ignore empty values.
   if (ledger_name !== undefined && ledger_name.trim()) updateData.ledger_name = ledger_name.trim().toUpperCase();
+  // Link the ledger to a member so it shows on that partner's profit page (Sites Profit).
+  // Partners are matched per site, so the member must be registered on the ledger's site.
+  // null / '' unlinks.
+  if (linked_member_id !== undefined) {
+    if (linked_member_id === null || linked_member_id === '') updateData.linked_member_id = null;
+    else {
+      const memberId = parseInt(linked_member_id);
+      if (!Number.isInteger(memberId) || memberId <= 0) return res.status(400).json({ message: 'Invalid member' });
+      const { rows } = await pool.query(
+        `SELECT m.id FROM members m JOIN cash_flow_months cfm ON cfm.site_id = m.site_id WHERE m.id = $1 AND cfm.id = $2`,
+        [memberId, monthId],
+      );
+      if (!rows[0]) return res.status(400).json({ message: "That member is not registered on this ledger's site" });
+      updateData.linked_member_id = memberId;
+    }
+  }
 
   if (Object.keys(updateData).length === 0) {
     return res.status(400).json({ message: 'Nothing to update' });

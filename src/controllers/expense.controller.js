@@ -131,7 +131,7 @@ export const createExpense = asyncHandler(async (req, res) => {
     date: date || new Date().toISOString().split('T')[0],
     from_entity: from_entity ? from_entity.trim().toUpperCase() : null,
     to_entity: to_entity ? to_entity.trim().toUpperCase() : null,
-    payment_mode: payment_mode ? payment_mode.trim().toUpperCase() : null,
+    payment_mode: String(payment_mode ?? '').trim().toUpperCase() || 'CASH',
     debit: parseFloat(debit) || 0,
     credit: parseFloat(credit) || 0,
     remark: remark ? remark.trim().toUpperCase() : null,
@@ -264,7 +264,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
   if (date !== undefined) data.date = date;
   if (from_entity !== undefined) data.from_entity = from_entity ? from_entity.trim().toUpperCase() : null;
   if (to_entity !== undefined) data.to_entity = to_entity ? to_entity.trim().toUpperCase() : null;
-  if (payment_mode !== undefined) data.payment_mode = payment_mode ? payment_mode.trim().toUpperCase() : null;
+  if (payment_mode !== undefined) data.payment_mode = String(payment_mode ?? '').trim().toUpperCase() || 'CASH';
   if (debit !== undefined) data.debit = parseFloat(debit) || 0;
   if (credit !== undefined) data.credit = parseFloat(credit) || 0;
   if (remark !== undefined) data.remark = remark ? remark.trim().toUpperCase() : null;
