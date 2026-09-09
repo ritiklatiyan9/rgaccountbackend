@@ -795,7 +795,7 @@ const insertOther = async (db, source, type, targetId, userId) => {
     if (!rows[0]) throw new TransferError(409, 'Choose an active land sale');
     data = { ...common, ...bank, land_deal_id: targetId };
     parent = { id: targetId, name: rows[0].buyer_name };
-    path = `/farmers/land-profit/${targetId}`;
+    path = `/farmers/land-sale/${targetId}`;
   } else if (type === 'daybook') {
     data = {
       ...common,
