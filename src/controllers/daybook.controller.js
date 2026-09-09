@@ -673,7 +673,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries')
           AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
           AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'
-          AND ($3::int IS NULL OR cfe.created_by = $3::int)`,
+          AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))`,
       [siteId, queryDate, visibility.creatorId]
     ).then(r => r.rows).catch(err => { console.error('[daybook] module ledger query error:', err.message); return []; }),
     // Saved order, site label, daily balance and bank mappings share one round trip.
@@ -1123,7 +1123,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     return x.id;
   };
   const fallbackEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments, ...transformedModuleLedger]
-    .filter((entry) => !visibility.creatorId || Number(entry.created_by) === Number(visibility.creatorId))
+    .filter((entry) => !visibility.creatorId || String(visibility.creatorId).split(',').includes(String(entry.created_by)))
     .sort((a, b) => sortId(a) - sortId(b));
 
   // Saved positions take priority within the day. Remaining entries use their
@@ -3328,7 +3328,7 @@ export const getLatestDate = asyncHandler(async (req, res) => {
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
   const siteId = parseInt(site_id);
   const visibility = await resolveEntryVisibility(req.user, 'daybook', created_by);
-  const creatorClause = visibility.creatorId ? ' AND created_by = $2' : '';
+  const creatorClause = visibility.creatorId ? ' AND created_by = ANY(string_to_array($2::text, \',\' )::int[])' : '';
 
   const result = await pool.query(
     `SELECT MAX(d)::text AS latest_date FROM (
@@ -3336,7 +3336,7 @@ export const getLatestDate = asyncHandler(async (req, res) => {
        UNION ALL
        SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM expenses WHERE site_id = $1${creatorClause}
        UNION ALL
-       SELECT MAX((fp.date AT TIME ZONE 'Asia/Kolkata')::date) FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE f.site_id = $1${visibility.creatorId ? ' AND fp.created_by = $2' : ''}
+       SELECT MAX((fp.date AT TIME ZONE 'Asia/Kolkata')::date) FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE f.site_id = $1${visibility.creatorId ? ' AND fp.created_by = ANY(string_to_array($2::text, \',\' )::int[])' : ''}
        UNION ALL
        SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_commissions WHERE site_id = $1${creatorClause}
        UNION ALL
@@ -3348,7 +3348,7 @@ export const getLatestDate = asyncHandler(async (req, res) => {
        UNION ALL
        SELECT MAX((ldp.date AT TIME ZONE 'Asia/Kolkata')::date)
        FROM land_deal_payments ldp JOIN land_deals ld ON ld.id = ldp.land_deal_id
-       WHERE ld.site_id = $1${visibility.creatorId ? ' AND ldp.created_by = $2' : ''}
+       WHERE ld.site_id = $1${visibility.creatorId ? ' AND ldp.created_by = ANY(string_to_array($2::text, \',\' )::int[])' : ''}
      ) sub`,
     visibility.creatorId ? [siteId, visibility.creatorId] : [siteId]
   );

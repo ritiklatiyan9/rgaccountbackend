@@ -91,7 +91,7 @@ class PlotCommissionModel extends MasterModel {
       ) m ON true
       LEFT JOIN users u ON pc.assigned_admin_id = u.id
       WHERE pc.site_id = $1 AND pc.date = $2
-        AND ($3::int IS NULL OR pc.created_by = $3::int)
+        AND ($3::text IS NULL OR pc.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY pc.id ASC
     `;
     const result = await pool.query(query, [siteId, date, creatorId]);

@@ -187,7 +187,16 @@ export const updateFarmer = asyncHandler(async (req, res) => {
  * DELETE /farmers/:id
  * Delete a farmer and all payments
  */
+// A land with sales mapped to it (Land Sale) cannot go — the FK is RESTRICT since migration 154.
+const salesMappedTo = async (ids) => {
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM land_deals WHERE farmer_id = ANY($1::int[])', [ids]);
+  return rows[0].n;
+};
+const MAPPED_MESSAGE = (n) => `${n} land sale${n === 1 ? ' is' : 's are'} mapped to this land — delete or re-map them in Land Sale first`;
+
 export const deleteFarmer = asyncHandler(async (req, res) => {
+  const mapped = await salesMappedTo([parseInt(req.params.id)]);
+  if (mapped) return res.status(409).json({ message: MAPPED_MESSAGE(mapped) });
   // Atomic DELETE — if no row was deleted, return 404. Saves a SELECT round-trip.
   const result = await pool.query(
     `DELETE FROM farmers WHERE id = $1 RETURNING id`,
@@ -208,6 +217,8 @@ export const deleteFarmer = asyncHandler(async (req, res) => {
 export const bulkDeleteFarmers = asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
+  const mapped = await salesMappedTo(ids);
+  if (mapped) return res.status(409).json({ message: MAPPED_MESSAGE(mapped) });
 
   const result = await pool.query(`DELETE FROM farmers WHERE id = ANY($1::int[]) RETURNING id`, [ids]);
   res.json({ message: `${result.rows.length} farmer(s) deleted`, deleted: result.rows.map((r) => r.id) });
@@ -412,7 +423,7 @@ export const listPayments = asyncHandler(async (req, res) => {
      FROM farmers f
      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
        AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
-       AND ($2::int IS NULL OR fp.created_by = $2::int)
+       AND ($2::text IS NULL OR fp.created_by = ANY(string_to_array($2::text, ',')::int[]))
      LEFT JOIN sites s ON s.id = f.site_id
      WHERE f.id = $1
      GROUP BY f.id, s.id`,
@@ -506,7 +517,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
          JOIN farmers f ON f.id = fp.farmer_id
         WHERE fp.id = $1
           AND fp.farmer_id = $2
-          AND ($3::int IS NULL OR fp.created_by = $3::int)
+          AND ($3::text IS NULL OR fp.created_by = ANY(string_to_array($3::text, ',')::int[]))
         FOR UPDATE OF fp`,
       [paymentId, farmerId, entryVisibility.creatorId]
     );
@@ -610,7 +621,7 @@ export const deletePayment = asyncHandler(async (req, res) => {
     `WITH visible_payment AS (
        SELECT id FROM farmer_payments
         WHERE id = $1 AND farmer_id = $2
-          AND ($3::int IS NULL OR created_by = $3::int)
+          AND ($3::text IS NULL OR created_by = ANY(string_to_array($3::text, ',')::int[]))
      ), del_daybook AS (
        DELETE FROM day_book WHERE farmer_payment_id IN (SELECT id FROM visible_payment)
      )
@@ -639,7 +650,7 @@ export const bulkDeletePayments = asyncHandler(async (req, res) => {
     `WITH visible_payments AS (
        SELECT id FROM farmer_payments
         WHERE id = ANY($1::int[]) AND farmer_id = $2
-          AND ($3::int IS NULL OR created_by = $3::int)
+          AND ($3::text IS NULL OR created_by = ANY(string_to_array($3::text, ',')::int[]))
      ), del_daybook AS (
        DELETE FROM day_book WHERE farmer_payment_id IN (SELECT id FROM visible_payments)
      )

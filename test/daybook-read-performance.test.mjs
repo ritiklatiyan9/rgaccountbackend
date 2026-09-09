@@ -36,7 +36,7 @@ test('Day Book auxiliary metadata uses one database round trip', async () => {
   assert.match(db.calls[0].sql, /daybook_order_state/);
   assert.match(db.calls[0].sql, /day_book_daily_balance/);
   assert.match(db.calls[0].sql, /bank_accounts/);
-  assert.match(db.calls[0].sql, /cfe\.created_by = \$3/);
+  assert.match(db.calls[0].sql, /cfe\.created_by = ANY\(string_to_array\(\$3::text/);
   assert.equal(result.orderRevision, 7);
   assert.equal(result.savedOrderRows.length, 1);
   assert.deepEqual(result.dailyBalanceRow, { opening_balance: 900, closing_balance: 1100 });
@@ -98,7 +98,7 @@ test('creator-scoped mode balance stays one query and skips site-wide scans', as
 
   assert.equal(db.calls.length, 1);
   assert.deepEqual(db.calls[0].params, [8, '2026-08-30', 21]);
-  assert.match(db.calls[0].sql, /creator_cfe\.created_by = \$3/);
+  assert.match(db.calls[0].sql, /creator_cfe\.created_by = ANY\(string_to_array\(\$3::text/);
   assert.doesNotMatch(db.calls[0].sql, /imprest_ledger/);
   assert.equal(result.siteOpening, null);
   assert.equal(result.siteCurrent, null);

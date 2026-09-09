@@ -1,6 +1,7 @@
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
+import { readPlotPaymentHistory } from '../services/plotPaymentHistory.service.js';
 import { plotModel, plotPaymentModel, PP_COUNTABLE } from '../models/Plot.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
@@ -778,7 +779,7 @@ export const listPayments = asyncHandler(async (req, res) => {
            COUNT(*) FILTER (WHERE ${PP_COUNTABLE})::int AS payment_count
          FROM plot_payments pp
          WHERE pp.plot_id = p.id
-           AND ($2::int IS NULL OR pp.created_by = $2::int)
+           AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
        ) agg ON TRUE
       WHERE p.id = $1`,
     [plotIdInt, entryVisibility.creatorId]
@@ -792,7 +793,7 @@ export const listPayments = asyncHandler(async (req, res) => {
          LEFT JOIN users u ON u.id = pp.created_by
          LEFT JOIN users aa ON aa.id = pp.assigned_admin_id
         WHERE pp.plot_id = $1
-          AND ($2::int IS NULL OR pp.created_by = $2::int)
+          AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
         ORDER BY pp.date ASC, pp.created_at ASC`,
       [plotIdInt, entryVisibility.creatorId]
     ),
@@ -832,7 +833,10 @@ export const listPayments = asyncHandler(async (req, res) => {
     }),
   }));
 
-  res.json({ payments: paymentsWithVerify, plot, fromBreakdown, receivedByBreakdown, entryVisibility });
+  const historyPayments = req.query.include_history === 'true'
+    ? await readPlotPaymentHistory(pool, plotIdInt, entryVisibility.creatorId)
+    : undefined;
+  res.json({ payments: paymentsWithVerify, plot, fromBreakdown, receivedByBreakdown, entryVisibility, historyPayments });
 });
 
 /** GET /plots/payments/:id — Get a single payment */

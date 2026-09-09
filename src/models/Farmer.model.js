@@ -97,7 +97,7 @@ class FarmerPaymentModel extends MasterModel {
       LEFT JOIN users u ON u.id = fp.created_by
       LEFT JOIN users aa ON aa.id = fp.assigned_admin_id
       WHERE fp.farmer_id = $1
-        AND ($2::int IS NULL OR fp.created_by = $2::int)
+        AND ($2::text IS NULL OR fp.created_by = ANY(string_to_array($2::text, ',')::int[]))
       ORDER BY fp.date ASC, fp.created_at ASC
     `;
     const result = await pool.query(query, [farmerId, creatorId]);
@@ -126,7 +126,7 @@ class FarmerPaymentModel extends MasterModel {
       JOIN farmers f ON fp.farmer_id = f.id
       LEFT JOIN users u ON fp.assigned_admin_id = u.id
       WHERE f.site_id = $1 AND fp.date = $2
-        AND ($3::int IS NULL OR fp.created_by = $3::int)
+        AND ($3::text IS NULL OR fp.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY fp.id ASC
     `;
     const result = await pool.query(query, [siteId, date, creatorId]);

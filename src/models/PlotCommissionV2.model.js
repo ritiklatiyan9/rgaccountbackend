@@ -198,7 +198,7 @@ class PlotCommissionPaymentModel extends MasterModel {
       LEFT JOIN users a ON pcp.approved_by = a.id
       LEFT JOIN users aa ON aa.id = pcp.assigned_admin_id
       WHERE pcp.plot_commission_id = $1
-        AND ($2::int IS NULL OR pcp.created_by = $2::int)
+        AND ($2::text IS NULL OR pcp.created_by = ANY(string_to_array($2::text, ',')::int[]))
       ORDER BY pcp.date DESC, pcp.created_at DESC
     `;
     const result = await pool.query(query, [commissionId, creatorId]);

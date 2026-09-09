@@ -67,7 +67,7 @@ class PlotRegistryModel extends MasterModel {
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = pr.id
-          AND ($2::int IS NULL OR prp.created_by = $2::int)
+          AND ($2::text IS NULL OR prp.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND (
             prp.source_plot_payment_id IS NULL
             OR (pr.plot_id IS NOT NULL AND pp.plot_id = pr.plot_id)
@@ -132,7 +132,7 @@ class PlotRegistryModel extends MasterModel {
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = pr.id
-          AND ($2::int IS NULL OR prp.created_by = $2::int)
+          AND ($2::text IS NULL OR prp.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND (
             prp.source_plot_payment_id IS NULL
             OR (pr.plot_id IS NOT NULL AND pp.plot_id = pr.plot_id)
@@ -227,7 +227,7 @@ class PlotRegistryPaymentModel extends MasterModel {
       LEFT JOIN users u ON u.id = prp.created_by
       LEFT JOIN users aa ON aa.id = prp.assigned_admin_id
       WHERE prp.registry_id = $1
-        AND ($2::int IS NULL OR prp.created_by = $2::int)
+        AND ($2::text IS NULL OR prp.created_by = ANY(string_to_array($2::text, ',')::int[]))
       ORDER BY prp.payment_date ASC, prp.created_at ASC
     `;
     const result = await pool.query(query, [registryId, creatorId]);

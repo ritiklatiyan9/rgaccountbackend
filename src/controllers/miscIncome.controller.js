@@ -163,7 +163,7 @@ export const listEntries = asyncHandler(async (req, res) => {
         AND ($3::date IS NULL OR e.date <= $3::date)
         AND ($4::int IS NULL OR e.category_id = $4::int)
         AND ($5::text IS NULL OR e.direction = $5::text)
-        AND ($6::int IS NULL OR e.created_by = $6::int)
+        AND ($6::text IS NULL OR e.created_by = ANY(string_to_array($6::text, ',')::int[]))
       ORDER BY e.date DESC, e.id DESC`,
     [siteId, from, to, categoryId, direction, visibility.creatorId],
   );

@@ -62,7 +62,7 @@ class CashFlowMonthModel extends MasterModel {
           COUNT(*)::int AS entry_count
         FROM cash_flow_entries cfe
         WHERE cfe.cash_flow_month_id = cfm.id
-          AND ($2::int IS NULL OR cfe.created_by = $2::int)
+          AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ) agg ON TRUE
       WHERE cfm.site_id = $1
@@ -108,7 +108,7 @@ class CashFlowMonthModel extends MasterModel {
           COUNT(*)::int AS entry_count
         FROM cash_flow_entries cfe
         WHERE cfe.cash_flow_month_id = cfm.id
-          AND ($2::int IS NULL OR cfe.created_by = $2::int)
+          AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ) agg ON TRUE
       WHERE cfm.id = $1
@@ -172,7 +172,7 @@ class CashFlowEntryModel extends MasterModel {
       LEFT JOIN firms tf ON tf.id = cfe.to_firm_id
       LEFT JOIN users u ON u.id = cfe.created_by
       WHERE cfe.cash_flow_month_id = $1
-        AND ($2::int IS NULL OR cfe.created_by = $2::int)
+        AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
         AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ORDER BY date ASC, created_at ASC
     `;
@@ -189,7 +189,7 @@ class CashFlowEntryModel extends MasterModel {
         COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, cash_type, cheque_status)), 0) AS total_credit
       FROM cash_flow_entries
       WHERE cash_flow_month_id = $1
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
         AND (source_module IS NULL OR source_module !~ '_person$')
     `;
     const result = await pool.query(query, [monthId, creatorId]);
@@ -217,7 +217,7 @@ class CashFlowEntryModel extends MasterModel {
         COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, cash_type, cheque_status)), 0) AS total_credit
       FROM cash_flow_entries
       WHERE cash_flow_month_id = $1
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
         AND (source_module IS NULL OR source_module !~ '_person$')
       GROUP BY particular
       ORDER BY total_debit DESC
@@ -240,7 +240,7 @@ class CashFlowEntryModel extends MasterModel {
       LEFT JOIN users u ON cfe.assigned_admin_id = u.id
       WHERE cfe.site_id = $1 AND cfe.date = $2
         AND cfe.source_module IS NULL
-        AND ($3::int IS NULL OR cfe.created_by = $3::int)
+        AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY cfe.created_at ASC
     `;
     const result = await pool.query(query, [siteId, date, creatorId]);

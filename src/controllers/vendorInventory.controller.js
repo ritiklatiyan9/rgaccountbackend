@@ -127,7 +127,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
          SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
          WHERE vip.order_id = o.id
            AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
-           AND ($${creatorIdx}::int IS NULL OR vip.created_by = $${creatorIdx}::int)
+           AND ($${creatorIdx}::text IS NULL OR vip.created_by = ANY(string_to_array($${creatorIdx}::text, ',')::int[]))
        ), 0) AS total_paid,
        o.commitment_id, o.project_id, o.location_id, o.material_request_id,
        ${ORDER_VALUE_SQL} AS order_value,
@@ -135,7 +135,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
          SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
          WHERE vip.order_id = o.id
            AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
-           AND ($${creatorIdx}::int IS NULL OR vip.created_by = $${creatorIdx}::int)
+           AND ($${creatorIdx}::text IS NULL OR vip.created_by = ANY(string_to_array($${creatorIdx}::text, ',')::int[]))
        ), 0)) AS outstanding,
        ${RECEIVED_QTY_SQL} AS received_qty,
        (o.qty_ordered - ${RECEIVED_QTY_SQL}) AS pending_qty,
@@ -175,7 +175,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
-         AND ($2::int IS NULL OR vip.created_by = $2::int)
+         AND ($2::text IS NULL OR vip.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ) vp ON true
      WHERE o.site_id = $1`,
     [siteId, visibility.creatorId]
@@ -225,7 +225,7 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
      FROM vendor_inventory_payments p
      LEFT JOIN users u ON u.id = p.created_by
      WHERE p.order_id = $1
-       AND ($2::int IS NULL OR p.created_by = $2::int)
+       AND ($2::text IS NULL OR p.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ORDER BY p.payment_date DESC, p.id DESC`,
     [orderId, visibility.creatorId]
   );
@@ -471,7 +471,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
     `SELECT id, site_id, status, amount, created_by, transaction_time
        FROM vendor_inventory_payments
       WHERE id = $1 AND site_id = $2
-        AND ($3::int IS NULL OR created_by = $3::int)`,
+        AND ($3::text IS NULL OR created_by = ANY(string_to_array($3::text, ',')::int[]))`,
     [paymentId, siteId, visibility.creatorId]
   );
   const existing = existingRes.rows[0];
@@ -504,7 +504,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
      WHERE p.id = $1
        AND p.order_id = o.id
        AND o.site_id = $2
-       AND ($11::int IS NULL OR p.created_by = $11::int)
+       AND ($11::text IS NULL OR p.created_by = ANY(string_to_array($11::text, ',')::int[]))
      RETURNING p.*`,
     [
       paymentId,
@@ -548,7 +548,7 @@ export const deleteInventoryPayment = asyncHandler(async (req, res) => {
     `DELETE FROM vendor_inventory_payments p
      USING vendor_inventory_orders o
      WHERE p.id = $1 AND p.order_id = o.id AND o.site_id = $2
-       AND ($3::int IS NULL OR p.created_by = $3::int)
+       AND ($3::text IS NULL OR p.created_by = ANY(string_to_array($3::text, ',')::int[]))
      RETURNING p.id`,
     [paymentId, siteId, visibility.creatorId]
   );
@@ -603,7 +603,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
-         AND ($2::int IS NULL OR vip.created_by = $2::int)
+         AND ($2::text IS NULL OR vip.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ) vp ON true
      WHERE o.site_id = $1 AND o.status != 'cancelled'
      GROUP BY COALESCE(NULLIF(o.item_category, ''), 'UNCATEGORIZED')
@@ -617,7 +617,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
      FROM vendor_inventory_payments p
      INNER JOIN vendor_inventory_orders o ON o.id = p.order_id
      WHERE p.site_id = $1
-       AND ($2::int IS NULL OR p.created_by = $2::int)
+       AND ($2::text IS NULL OR p.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ORDER BY p.payment_date DESC, p.id DESC
      LIMIT 10`,
     [siteId, visibility.creatorId]
@@ -643,7 +643,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
-         AND ($2::int IS NULL OR vip.created_by = $2::int)
+         AND ($2::text IS NULL OR vip.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ) vp ON true
      WHERE o.site_id = $1 AND o.status != 'cancelled'`,
     [siteId, visibility.creatorId]

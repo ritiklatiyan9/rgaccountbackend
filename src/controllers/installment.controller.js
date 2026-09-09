@@ -104,14 +104,14 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
   const [payRes, instPayRes] = await Promise.all([pool.query(
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
      FROM plot_payments WHERE plot_id = ANY($1)
-       AND ($2::int IS NULL OR created_by = $2::int)
+       AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
        AND ${plotPaymentPosts()} GROUP BY plot_id`,
     [plotIds, creatorId]
   ), pool.query(
     `SELECT plot_id, installment_id, COALESCE(SUM(amount), 0) AS paid_direct
        FROM plot_installment_payments
       WHERE plot_id = ANY($1)
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
         AND ${installmentPaymentPosts()}
       GROUP BY plot_id, installment_id`,
     [plotIds, creatorId]
@@ -134,13 +134,13 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
          SELECT plot_id, date AS payment_date
            FROM plot_payments
           WHERE plot_id = ANY($1)
-            AND ($2::int IS NULL OR created_by = $2::int)
+            AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
             AND ${plotPaymentPosts()}
          UNION ALL
          SELECT plot_id, payment_date
            FROM plot_installment_payments
           WHERE plot_id = ANY($1)
-            AND ($2::int IS NULL OR created_by = $2::int)
+            AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
             AND ${installmentPaymentPosts()}
        ) posted
       GROUP BY plot_id`,
@@ -156,13 +156,13 @@ export const buildPaymentReminders = async (site_id, creatorId = null) => {
          SELECT plot_id, date, amount
            FROM plot_payments
           WHERE plot_id = ANY($1)
-            AND ($2::int IS NULL OR created_by = $2::int)
+            AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
             AND ${plotPaymentPosts()}
          UNION ALL
          SELECT plot_id, payment_date AS date, amount
            FROM plot_installment_payments
           WHERE plot_id = ANY($1)
-            AND ($2::int IS NULL OR created_by = $2::int)
+            AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
             AND ${installmentPaymentPosts()}
        ) posted
       ORDER BY plot_id, date ASC`,
@@ -516,14 +516,14 @@ export const listInstallments = asyncHandler(async (req, res) => {
   const [totalRes, directRes] = await Promise.all([pool.query(
     `SELECT COALESCE(SUM(amount), 0) AS total_received FROM plot_payments
       WHERE plot_id = $1
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
         AND ${plotPaymentPosts()}`,
     [parseInt(id), visibility.creatorId]
   ), pool.query(
     `SELECT installment_id, COALESCE(SUM(amount), 0) AS paid_direct
        FROM plot_installment_payments
       WHERE plot_id = $1
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
         AND ${installmentPaymentPosts()}
       GROUP BY installment_id`,
     [parseInt(id), visibility.creatorId]
@@ -816,11 +816,11 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
     `SELECT plot_id, COALESCE(SUM(amount), 0) AS total_received
      FROM (
        SELECT pp.plot_id, pp.amount FROM plot_payments pp
-        WHERE pp.plot_id = ANY($1) AND ($2::int IS NULL OR pp.created_by = $2::int)
+        WHERE pp.plot_id = ANY($1) AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND ${plotPaymentPosts('pp')}
        UNION ALL
        SELECT pip.plot_id, pip.amount FROM plot_installment_payments pip
-        WHERE pip.plot_id = ANY($1) AND ($2::int IS NULL OR pip.created_by = $2::int)
+        WHERE pip.plot_id = ANY($1) AND ($2::text IS NULL OR pip.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND ${installmentPaymentPosts('pip')}
      ) u
      GROUP BY plot_id`,
@@ -833,7 +833,7 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
     `SELECT plot_id, installment_id, COALESCE(SUM(amount), 0) AS paid_direct
        FROM plot_installment_payments
       WHERE plot_id = ANY($1)
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
         AND ${installmentPaymentPosts()}
       GROUP BY plot_id, installment_id`,
     [plotIds, creatorId]
@@ -850,13 +850,13 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
      FROM (
        SELECT pp.date AS d, pp.amount FROM plot_payments pp
         WHERE pp.site_id = $1 AND pp.date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
-          AND ($2::int IS NULL OR pp.created_by = $2::int)
+          AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND ${plotPaymentPosts('pp')}
        UNION ALL
        SELECT pip.payment_date AS d, pip.amount FROM plot_installment_payments pip
         JOIN plots p ON p.id = pip.plot_id
         WHERE p.site_id = $1 AND pip.payment_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '5 months'
-          AND ($2::int IS NULL OR pip.created_by = $2::int)
+          AND ($2::text IS NULL OR pip.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND ${installmentPaymentPosts('pip')}
      ) u
      GROUP BY 1 ORDER BY 1`,
@@ -1115,12 +1115,12 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     `SELECT plot_id, SUM(amount) AS total_received FROM (
         SELECT plot_id, amount FROM plot_payments
          WHERE plot_id = ANY($1)
-           AND ($2::int IS NULL OR created_by = $2::int)
+           AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
            AND ${plotPaymentPosts()}
         UNION ALL
         SELECT plot_id, amount FROM plot_installment_payments
          WHERE plot_id = ANY($1)
-           AND ($2::int IS NULL OR created_by = $2::int)
+           AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
            AND ${installmentPaymentPosts()}
      ) combined
      GROUP BY plot_id`,
@@ -1134,7 +1134,7 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     `SELECT installment_id, COALESCE(SUM(amount), 0) AS paid_direct
      FROM plot_installment_payments
      WHERE plot_id = ANY($1)
-       AND ($2::int IS NULL OR created_by = $2::int)
+       AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
        AND ${installmentPaymentPosts()}
      GROUP BY installment_id`,
     [plotIds, creatorId]
@@ -1146,11 +1146,11 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   const lastPayRes = await pool.query(
     `SELECT plot_id, MAX(d) AS last_payment_date FROM (
         SELECT plot_id, date AS d FROM plot_payments WHERE plot_id = ANY($1)
-          AND ($2::int IS NULL OR created_by = $2::int)
+          AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND ${plotPaymentPosts()}
         UNION ALL
         SELECT plot_id, payment_date AS d FROM plot_installment_payments WHERE plot_id = ANY($1)
-          AND ($2::int IS NULL OR created_by = $2::int)
+          AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND ${installmentPaymentPosts()}
      ) combined
      GROUP BY plot_id`,
@@ -1162,11 +1162,11 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   // ── 5. Payments per plot with dates (used by `no_payment_since` mode) ──
   const allPayRes = await pool.query(
     `SELECT plot_id, date, amount FROM plot_payments WHERE plot_id = ANY($1)
-       AND ($2::int IS NULL OR created_by = $2::int)
+       AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
        AND ${plotPaymentPosts()}
      UNION ALL
      SELECT plot_id, payment_date AS date, amount FROM plot_installment_payments WHERE plot_id = ANY($1)
-       AND ($2::int IS NULL OR created_by = $2::int)
+       AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
        AND ${installmentPaymentPosts()}
      ORDER BY plot_id, date ASC`,
     [plotIds, creatorId]

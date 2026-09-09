@@ -497,7 +497,7 @@ export const deleteEntry = asyncHandler(async (req, res) => {
       WHERE cfe.id = $1
         AND cfe.cash_flow_month_id = cfm.id
         AND cfm.is_locked = FALSE
-        AND ($2::int IS NULL OR cfe.created_by = $2::int)
+        AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
       RETURNING cfe.id`,
     [entryId, entryVisibility.creatorId]
   );
@@ -508,7 +508,7 @@ export const deleteEntry = asyncHandler(async (req, res) => {
          FROM cash_flow_entries cfe
          JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.id = $1
-          AND ($2::int IS NULL OR cfe.created_by = $2::int)`,
+          AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))`,
       [entryId, entryVisibility.creatorId]
     );
     if (check.rows.length === 0) return res.status(404).json({ message: 'Entry not found' });
@@ -534,7 +534,7 @@ export const bulkDeleteEntries = asyncHandler(async (req, res) => {
       WHERE cfe.id = ANY($1::int[])
         AND cfe.cash_flow_month_id = cfm.id
         AND cfm.is_locked = FALSE
-        AND ($2::int IS NULL OR cfe.created_by = $2::int)
+        AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
       RETURNING cfe.id`,
     [ids, entryVisibility.creatorId]
   );

@@ -397,7 +397,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
      FROM vendor_commitments vc
      LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
        AND financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)
-       AND ($3::int IS NULL OR vp.created_by = $3::int)
+       AND ($3::text IS NULL OR vp.created_by = ANY(string_to_array($3::text, ',')::int[]))
      LEFT JOIN members m ON m.id = vc.vendor_member_id
      LEFT JOIN users aa ON aa.id = vc.assigned_admin_id
      LEFT JOIN construction_projects cp ON cp.id = vc.project_id
@@ -414,7 +414,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
      LEFT JOIN users u ON u.id = vp.created_by
      LEFT JOIN users aa ON aa.id = vp.assigned_admin_id
      WHERE vp.commitment_id = $1 AND vp.site_id = $2
-       AND ($3::int IS NULL OR vp.created_by = $3::int)
+       AND ($3::text IS NULL OR vp.created_by = ANY(string_to_array($3::text, ',')::int[]))
      ORDER BY vp.payment_date DESC, vp.id DESC`,
     [commitmentId, siteId, entryVisibility.creatorId]
   );
@@ -468,7 +468,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
        FROM vendor_inventory_payments p
        LEFT JOIN users u ON u.id = p.created_by
        WHERE p.order_id = ANY($1::int[])
-         AND ($2::int IS NULL OR p.created_by = $2::int)
+         AND ($2::text IS NULL OR p.created_by = ANY(string_to_array($2::text, ',')::int[]))
        ORDER BY p.payment_date DESC, p.id DESC`,
       [orderIds, entryVisibility.creatorId]
     );
@@ -938,7 +938,7 @@ export const deleteVendorPayment = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `DELETE FROM vendor_payments
       WHERE id = $1 AND site_id = $2
-        AND ($3::int IS NULL OR created_by = $3::int)
+        AND ($3::text IS NULL OR created_by = ANY(string_to_array($3::text, ',')::int[]))
       RETURNING commitment_id`,
     [paymentId, siteId, entryVisibility.creatorId]
   );
@@ -969,7 +969,7 @@ export const bulkDeleteVendorPayments = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `DELETE FROM vendor_payments
       WHERE id = ANY($1::int[]) AND site_id = $2
-        AND ($3::int IS NULL OR created_by = $3::int)
+        AND ($3::text IS NULL OR created_by = ANY(string_to_array($3::text, ',')::int[]))
       RETURNING id, commitment_id`,
     [ids, siteId, entryVisibility.creatorId]
   );

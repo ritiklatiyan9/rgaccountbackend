@@ -727,7 +727,7 @@ export const listTransactions = asyncHandler(async (req, res) => {
      LEFT JOIN users creator ON creator.id = cfe.created_by
      WHERE cfe.is_firm_transaction = TRUE
        AND (cfe.from_firm_id = $1 OR cfe.to_firm_id = $1)
-       AND ($2::int IS NULL OR cfe.created_by = $2::int)
+       AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ORDER BY cfe.date ASC, cfe.created_at ASC`,
     [fId, entryVisibility.creatorId]
   );
@@ -928,7 +928,7 @@ export const bulkDeleteTransactions = asyncHandler(async (req, res) => {
        LEFT JOIN cash_flow_entries cfe ON cfe.id = ft.cash_flow_entry_id
        LEFT JOIN cash_flow_months cfm  ON cfm.id = cfe.cash_flow_month_id
       WHERE ft.id = ANY($1::int[])
-        AND ($2::int IS NULL OR ft.created_by = $2::int)`,
+        AND ($2::text IS NULL OR ft.created_by = ANY(string_to_array($2::text, ',')::int[]))`,
     [ids, entryVisibility.creatorId]
   );
   const deletable = ctxRes.rows.filter((r) => !(r.cash_flow_entry_id && r.cf_is_locked));

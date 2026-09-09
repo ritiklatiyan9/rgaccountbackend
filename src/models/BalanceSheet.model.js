@@ -76,7 +76,7 @@ const SCOPED = `
         OR COALESCE(le.remarks, '') ILIKE CONCAT('%', $8::text, '%')
       )
       AND ($11::int IS NULL OR plot.id = $11::int)
-      AND ($12::int IS NULL OR creator_cfe.created_by = $12::int)
+      AND ($12::text IS NULL OR creator_cfe.created_by = ANY(string_to_array($12::text, ',')::int[]))
   ),
   period_entries AS (
     SELECT *

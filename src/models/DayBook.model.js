@@ -45,7 +45,7 @@ class DayBookModel extends MasterModel {
       FROM day_book d
       LEFT JOIN users u ON d.assigned_admin_id = u.id
       LEFT JOIN users approver ON d.approved_by = approver.id
-      WHERE d.site_id = $1 AND d.date = $2 ${creatorId ? 'AND d.created_by = $3' : ''}
+      WHERE d.site_id = $1 AND d.date = $2 ${creatorId ? 'AND d.created_by = ANY(string_to_array($3::text, \',\' )::int[])' : ''}
       ORDER BY d.id ASC
     `;
     const result = await pool.query(query, creatorId ? [siteId, date, creatorId] : [siteId, date]);
@@ -144,7 +144,7 @@ class DayBookModel extends MasterModel {
    * Autocomplete values
    */
   async getAutocomplete(siteId, pool, creatorId = null) {
-    const creatorClause = creatorId ? ' AND created_by = $2' : '';
+    const creatorClause = creatorId ? ' AND created_by = ANY(string_to_array($2::text, \',\' )::int[])' : '';
     const queries = {
       particulars: `SELECT DISTINCT particular   AS val FROM day_book WHERE site_id = $1${creatorClause} AND particular   IS NOT NULL AND particular   != '' ORDER BY val LIMIT 50`,
       fromEntities: `SELECT DISTINCT from_entity  AS val FROM day_book WHERE site_id = $1${creatorClause} AND from_entity  IS NOT NULL AND from_entity  != '' ORDER BY val LIMIT 50`,

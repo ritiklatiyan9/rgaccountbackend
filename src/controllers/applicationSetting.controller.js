@@ -119,6 +119,22 @@ export const updateFeature = asyncHandler(async (req, res) => {
 
 const SIDEBAR_ORDER_KEY = 'sidebar_order';
 
+const PROJECT_PAYMENT_VIEW_KEY = 'project_payments_default_view';
+const paymentViews = ['combined', 'old', 'new'];
+export const getProjectPaymentSettings = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.query.site_id);
+  if (!siteId) return;
+  const stored = await applicationSettingModel.getJson(siteId, PROJECT_PAYMENT_VIEW_KEY, 'combined');
+  res.json({ site_id: siteId, default_view: paymentViews.includes(stored) ? stored : 'combined' });
+});
+export const updateProjectPaymentSettings = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.body.site_id);
+  if (!siteId) return;
+  if (!paymentViews.includes(req.body.default_view)) return res.status(400).json({ message: 'default_view must be combined, old or new' });
+  const value = await applicationSettingModel.setJson(siteId, PROJECT_PAYMENT_VIEW_KEY, req.body.default_view, req.user.id);
+  res.json({ site_id: siteId, default_view: value });
+});
+
 /**
  * GET /settings/sidebar-order
  * The shared navigation order every user sees. Readable by anyone signed in;

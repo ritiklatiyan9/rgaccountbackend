@@ -341,7 +341,7 @@ export const deleteExpense = asyncHandler(async (req, res) => {
   const visibility = await resolveEntryVisibility(req.user, 'expenses', null);
   // Atomic DELETE — saves a SELECT round-trip.
   const result = await pool.query(
-    `DELETE FROM expenses WHERE id = $1 ${visibility.creatorId ? 'AND created_by = $2' : ''} RETURNING id`,
+    `DELETE FROM expenses WHERE id = $1 ${visibility.creatorId ? 'AND created_by = ANY(string_to_array($2::text, \',\' )::int[])' : ''} RETURNING id`,
     visibility.creatorId ? [parseInt(req.params.id), visibility.creatorId] : [parseInt(req.params.id)]
   );
   if (!result.rows[0]) return res.status(404).json({ message: 'Expense not found' });
@@ -361,7 +361,7 @@ export const bulkDeleteExpenses = asyncHandler(async (req, res) => {
 
   const visibility = await resolveEntryVisibility(req.user, 'expenses', null);
   const result = await pool.query(
-    `DELETE FROM expenses WHERE id = ANY($1::int[]) ${visibility.creatorId ? 'AND created_by = $2' : ''} RETURNING id`,
+    `DELETE FROM expenses WHERE id = ANY($1::int[]) ${visibility.creatorId ? 'AND created_by = ANY(string_to_array($2::text, \',\' )::int[])' : ''} RETURNING id`,
     visibility.creatorId ? [ids, visibility.creatorId] : [ids]
   );
   res.json({ message: `${result.rows.length} expense(s) deleted`, deleted: result.rows.map((r) => r.id) });

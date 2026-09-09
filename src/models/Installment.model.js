@@ -54,7 +54,7 @@ class InstallmentPaymentModel extends MasterModel {
       FROM plot_installment_payments pip
       LEFT JOIN users u ON u.id = pip.created_by
       WHERE pip.installment_id = $1
-        AND ($2::int IS NULL OR pip.created_by = $2::int)
+        AND ($2::text IS NULL OR pip.created_by = ANY(string_to_array($2::text, ',')::int[]))
       ORDER BY pip.payment_date ASC, pip.created_at ASC
     `;
     const result = await pool.query(query, [installmentId, creatorId]);
@@ -69,7 +69,7 @@ class InstallmentPaymentModel extends MasterModel {
       JOIN plot_installments pi ON pi.id = pip.installment_id
       LEFT JOIN users u ON u.id = pip.created_by
       WHERE pip.plot_id = $1
-        AND ($2::int IS NULL OR pip.created_by = $2::int)
+        AND ($2::text IS NULL OR pip.created_by = ANY(string_to_array($2::text, ',')::int[]))
       ORDER BY pip.payment_date ASC, pip.created_at ASC
     `;
     const result = await pool.query(query, [plotId, creatorId]);

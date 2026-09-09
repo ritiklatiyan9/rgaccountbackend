@@ -270,7 +270,7 @@ class ExpenseModel extends MasterModel {
       LEFT JOIN users u ON e.approved_by = u.id
       LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
       WHERE e.site_id = $1 AND e.date = $2
-        AND ($3::int IS NULL OR e.created_by = $3::int)
+        AND ($3::text IS NULL OR e.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY e.id ASC
     `;
     const result = await pool.query(query, [siteId, date, creatorId]);
@@ -293,7 +293,7 @@ class ExpenseModel extends MasterModel {
           SET display_order = v.pos
          FROM (VALUES ${values}) AS v(id, pos)
         WHERE e.id = v.id AND e.site_id = $1 AND e.date = $2::date
-          ${creatorId ? `AND e.created_by = $${ids.length + 3}` : ''}`,
+          ${creatorId ? `AND e.created_by = ANY(string_to_array($${ids.length + 3}::text, ',' )::int[])` : ''}`,
       creatorId ? [siteId, date, ...ids, creatorId] : [siteId, date, ...ids]
     );
     return result.rowCount;
@@ -357,7 +357,7 @@ class ExpenseModel extends MasterModel {
    * Autocomplete values
    */
   async getAutocomplete(siteId, pool, creatorId = null) {
-    const creatorClause = creatorId ? ' AND created_by = $2' : '';
+    const creatorClause = creatorId ? ' AND created_by = ANY(string_to_array($2::text, \',\' )::int[])' : '';
     const queries = {
       fromEntities: `SELECT DISTINCT from_entity  AS val FROM expenses WHERE site_id = $1${creatorClause} AND from_entity  IS NOT NULL AND from_entity  != '' ORDER BY val`,
       toEntities: `SELECT DISTINCT to_entity    AS val FROM expenses WHERE site_id = $1${creatorClause} AND to_entity    IS NOT NULL AND to_entity    != '' ORDER BY val`,
@@ -396,7 +396,7 @@ class ExpenseModel extends MasterModel {
     let whereClause = '';
 
     if (only_site === 'true') { whereClause += ` AND u.source = 'expenses'`; }
-    if (created_by) { whereClause += ` AND u.created_by = $${pIdx++}`; params.push(created_by); }
+    if (created_by) { whereClause += ` AND u.created_by = ANY(string_to_array($${pIdx++}::text, ',' )::int[])`; params.push(created_by); }
     if (status) { whereClause += ` AND u.status = $${pIdx++}`; params.push(status); }
     const md = buildModeWhere(mode, params, pIdx);
     whereClause += md.clause;
@@ -615,7 +615,7 @@ class ExpenseModel extends MasterModel {
     let pIdx = 2;
     let whereClause = '';
 
-    if (created_by) { whereClause += ` AND u.created_by = $${pIdx++}`; params.push(created_by); }
+    if (created_by) { whereClause += ` AND u.created_by = ANY(string_to_array($${pIdx++}::text, ',' )::int[])`; params.push(created_by); }
     if (status) { whereClause += ` AND u.status = $${pIdx++}`; params.push(status); }
 
     const md = buildModeWhere(mode, params, pIdx);

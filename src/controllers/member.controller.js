@@ -574,7 +574,8 @@ export const getMemberAutocomplete = asyncHandler(async (req, res) => {
 export const getMember = asyncHandler(async (req, res) => {
   const member = await memberModel.findByIdWithKyc(parseInt(req.params.id), pool);
   if (!member) return res.status(404).json({ message: 'Member not found' });
-  res.json({ member });
+  const plots = await findMemberPlots(member.site_id, pool);
+  res.json({ member: { ...member, plots: plots.get(String(member.id)) || [] } });
 });
 
 /** PUT /members/:id */
@@ -794,7 +795,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
       `SELECT pp.id, pp.date, pp.amount, pp.payment_type, pp.bank_details,
               pp.bank_name, pp.narration, pp.payment_from, pp.received_by,
               pp.status, pp.cheque_no, pp.cheque_status,
-              p.plot_no, p.block, COALESCE(pp.buyer_name, p.buyer_name) AS buyer_name
+              p.id AS plot_id, p.plot_no, p.plot_tag, p.block, COALESCE(pp.buyer_name, p.buyer_name) AS buyer_name
        FROM plot_payments pp
        JOIN plots p ON p.id = pp.plot_id AND p.site_id = pp.site_id
        ${LEDGER_PLOT_BUYER_JOIN}

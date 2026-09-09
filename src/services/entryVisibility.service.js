@@ -4,8 +4,10 @@ const PRIVILEGED_ROLES = new Set(['admin', 'super_admin']);
 
 export const parseCreatorId = (value) => {
   if (value === undefined || value === null || value === '' || value === 'all') return null;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  const parts = (Array.isArray(value) ? value : String(value).split(',')).map(v => String(v).trim());
+  if (!parts.length || parts.some(v => !/^\d+$/.test(v) || !Number.isSafeInteger(Number(v)) || Number(v) < 1 || Number(v) > 2147483647)) return -1;
+  const ids = [...new Set(parts.map(Number))];
+  return ids.length === 1 ? ids[0] : ids.join(',');
 };
 
 /**

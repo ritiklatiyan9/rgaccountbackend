@@ -758,7 +758,7 @@ export const deleteRegistryPayment = asyncHandler(async (req, res) => {
   // Atomic DELETE — saves a SELECT round-trip.
   const result = await pool.query(
     `DELETE FROM plot_registry_payments
-      WHERE id = $1 AND ($2::int IS NULL OR created_by = $2::int)
+      WHERE id = $1 AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
       RETURNING id`,
     [parseInt(req.params.id), entryVisibility.creatorId]
   );

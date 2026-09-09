@@ -218,7 +218,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
        LEFT JOIN users a ON pcp.approved_by = a.id
        LEFT JOIN users aa ON aa.id = pcp.assigned_admin_id
       WHERE p.plot_no = $1 AND pc.site_id = $2
-        AND ($3::int IS NULL OR pcp.created_by = $3::int)
+        AND ($3::text IS NULL OR pcp.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY pcp.date DESC, pcp.created_at DESC`,
     [plotNoForPayments, numSiteId, entryVisibility.creatorId]
   );
@@ -269,7 +269,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
               SUM(amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid_all,
               COUNT(*) AS payment_count
        FROM plot_commission_payments
-       WHERE ($3::int IS NULL OR created_by = $3::int)
+       WHERE ($3::text IS NULL OR created_by = ANY(string_to_array($3::text, ',')::int[]))
        GROUP BY plot_commission_id
      ) paid_agg ON paid_agg.plot_commission_id = pc.id
      WHERE p.plot_no = $1 AND p.site_id = $2
@@ -778,7 +778,7 @@ export const bulkDeletePlotCommissionPayments = asyncHandler(async (req, res) =>
   const deleted = await pool.query(
     `DELETE FROM plot_commission_payments
       WHERE id = ANY($1::int[])
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
       RETURNING plot_commission_id`,
     [ids, entryVisibility.creatorId]
   );

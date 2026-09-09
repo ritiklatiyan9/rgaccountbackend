@@ -116,7 +116,7 @@ class FirmTransactionModel extends MasterModel {
     const query = `
       SELECT * FROM firm_transactions
       WHERE firm_id = $1
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
       ORDER BY date ASC, created_at ASC
     `;
     const result = await pool.query(query, [firmId, creatorId]);
@@ -135,7 +135,7 @@ class FirmTransactionModel extends MasterModel {
           COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0) AS ft_credit
         FROM firm_transactions
         WHERE firm_id = $1
-          AND ($2::int IS NULL OR created_by = $2::int)
+          AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
       ),
       cf_agg AS (
         SELECT
@@ -144,7 +144,7 @@ class FirmTransactionModel extends MasterModel {
           COALESCE(SUM(CASE WHEN to_firm_id   = $1 AND financial_transaction_posts('credit', status, cash_type, cheque_status) THEN COALESCE(debit, 0) + COALESCE(credit, 0) ELSE 0 END), 0) AS cf_credit
         FROM cash_flow_entries
         WHERE (from_firm_id = $1 OR to_firm_id = $1)
-          AND ($2::int IS NULL OR created_by = $2::int)
+          AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND is_firm_transaction = TRUE
       )
       SELECT
@@ -174,7 +174,7 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0) AS total_credit
       FROM firm_transactions
       WHERE firm_id = $1
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
       GROUP BY COALESCE(NULLIF(remark, ''), 'UNCATEGORIZED')
       ORDER BY total_debit DESC
     `;
@@ -192,7 +192,7 @@ class FirmTransactionModel extends MasterModel {
         COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0) AS total_credit
       FROM firm_transactions
       WHERE firm_id = $1
-        AND ($2::int IS NULL OR created_by = $2::int)
+        AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
       GROUP BY COALESCE(NULLIF(name, ''), 'UNKNOWN')
       ORDER BY total_debit DESC
     `;
@@ -240,7 +240,7 @@ class FirmTransactionModel extends MasterModel {
       JOIN firms f ON f.id = ft.firm_id
       LEFT JOIN users u ON ft.assigned_admin_id = u.id
       WHERE ft.site_id = $1 AND ft.date = $2
-        AND ($3::int IS NULL OR ft.created_by = $3::int)
+        AND ($3::text IS NULL OR ft.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY ft.id ASC
     `;
     const result = await pool.query(query, [siteId, date, creatorId]);

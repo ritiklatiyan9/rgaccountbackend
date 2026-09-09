@@ -21,12 +21,12 @@ export const pendingPlotPayments = asyncHandler(async (req, res) => {
                   FROM plot_installments WHERE plot_id = ANY($1::int[]) ORDER BY plot_id, sort_order, due_date, id`, [ids]),
     pool.query(`SELECT plot_id, installment_id, SUM(amount) AS amount FROM (
                   SELECT plot_id, NULL::int AS installment_id, amount FROM plot_payments
-                   WHERE plot_id = ANY($1::int[]) AND ($2::int IS NULL OR created_by = $2)
+                   WHERE plot_id = ANY($1::int[]) AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
                      AND date BETWEEN DATE '1900-01-01' AND $3::date
                      AND financial_transaction_posts('credit', status, payment_type, cheque_status)
                   UNION ALL
                   SELECT plot_id, installment_id, amount FROM plot_installment_payments
-                   WHERE plot_id = ANY($1::int[]) AND ($2::int IS NULL OR created_by = $2)
+                   WHERE plot_id = ANY($1::int[]) AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
                      AND payment_date BETWEEN DATE '1900-01-01' AND $3::date
                      AND financial_transaction_posts('credit', status, payment_mode, cheque_status)
                 ) posted GROUP BY plot_id, installment_id`, [ids, visibility.creatorId, today]),

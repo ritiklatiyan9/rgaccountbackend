@@ -45,7 +45,7 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
          CONCAT(COALESCE(cfe.source_module, 'personal_ledger'), ':', COALESCE(cfe.source_id, cfe.id)),
          cfe.transaction_time)
          FROM cash_flow_entries cfe WHERE cfe.site_id = $1 AND cfe.date = $2::date
-           AND ($3::int IS NULL OR cfe.created_by = $3::int)), '{}'::jsonb) AS entry_times,
+           AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))), '{}'::jsonb) AS entry_times,
        COALESCE((
          SELECT dos.revision
            FROM daybook_order_state dos
@@ -81,7 +81,7 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
            FROM cash_flow_entries cfe
            JOIN bank_accounts ba ON ba.id = cfe.bank_account_id
           WHERE cfe.site_id = $1 AND cfe.date = $2::date
-            AND ($3::int IS NULL OR cfe.created_by = $3::int)
+            AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))
        ), '[]'::jsonb) AS bank_map_rows`,
     [siteId, date, creatorId]
   );
@@ -153,7 +153,7 @@ export async function loadDayBookModeBalanceData({ siteId, date, creatorId = nul
          ON creator_cfe.id = split_part(le.id, ':', 1)::int
       WHERE le.site_id = $1
         AND le.entry_date <= $2::date
-        AND creator_cfe.created_by = $3
+        AND creator_cfe.created_by = ANY(string_to_array($3::text, ',' )::int[])
       GROUP BY le.bucket, is_before, src`,
       [siteId, date, creatorId]
     );
