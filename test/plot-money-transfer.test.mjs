@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import pool from '../src/config/db.js';
 import { up } from '../src/migrations/160_plot_money_transfers.js';
 import { transferPlotMoney } from '../src/controllers/plotMoneyTransfer.controller.js';
-import { transferInput } from '../src/services/plotMoneyTransfer.service.js';
+import { executePlotMoneyTransfer, transferInput } from '../src/services/plotMoneyTransfer.service.js';
 import { currentTransactionDate } from '../src/services/transactionDate.service.js';
 
 const body = overrides => ({ request_id: randomUUID(), target_plot_id: 2, amount: '100000', date: '2026-09-09', ...overrides });
@@ -15,6 +15,39 @@ test('validates amount, destination, dates and retry key before opening a transa
   assert.throws(() => transferInput(body({ target_plot_id: '2x' }), 1));
   assert.throws(() => transferInput(body({ request_id: '' }), 1));
   assert.equal(transferInput(body({ amount: '0.01' }), 1).amount, 0.01);
+});
+
+test('missing transfer schema returns an actionable 503 and rechecks after migration', async () => {
+  let present = false;
+  const db = { async query(sql) {
+    if (sql.includes('to_regclass')) return { rows: [{ present }] };
+    if (sql.includes('pg_advisory_xact_lock')) return { rows: [] };
+    if (sql.includes('SELECT * FROM plot_payments')) return { rows: [] };
+    throw new Error(`Unexpected query: ${sql}`);
+  } };
+  const input = transferInput(body(), 1);
+  await assert.rejects(executePlotMoneyTransfer(db, { id: 1, role: 'admin' }, input),
+    { statusCode: 503, code: 'PLOT_MONEY_TRANSFERS_NOT_READY' });
+  present = true;
+  await assert.rejects(executePlotMoneyTransfer(db, { id: 1, role: 'admin' }, input),
+    { statusCode: 404, message: 'Source payment not found' });
+});
+
+test('missing-schema message is safe to expose while unexpected errors remain generic', async () => {
+  const { default: errorMiddleware } = await import('../src/middlewares/error.middleware.js');
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    for (const code of ['PLOT_MONEY_TRANSFERS_NOT_READY', undefined]) {
+      let status, payload;
+      const res = { status(value) { status = value; return this; }, json(value) { payload = value; } };
+      errorMiddleware({ statusCode: 503, code, message: 'private database details' }, {}, res, () => {});
+      assert.equal(status, 503);
+      assert.equal(payload.message, code
+        ? 'Plot transfers are temporarily unavailable. Please contact an administrator to enable them.'
+        : 'Something went wrong with it');
+    }
+  } finally { console.error = originalError; }
 });
 
 const invoke = (input, paymentId = 1, user = { id: 1, role: 'admin' }) => new Promise((resolve, reject) => {

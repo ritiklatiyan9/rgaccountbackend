@@ -1,6 +1,6 @@
 # Plot money transfers
 
-In Plot Payments → plot → payment Actions, **Transfer Entry** opens the transaction modal. Select the destination location and enter its full plot number, select the booking, then enter the amount and date. The preview shows both remarks before saving.
+In Plot Payments → plot → payment Actions, **Transfer Entry** opens the transaction modal. The site is fixed to the source plot. Select an eligible destination plot from the same-site dropdown, then enter the amount and date. The preview shows both remarks before saving.
 
 For ₹1,00,000 from A1 to A2, the original receipt stays unchanged. Two approved BANK/TRANSFER adjustments are created atomically:
 
@@ -13,7 +13,7 @@ The source must be approved and any cheque cleared. The caller needs plot-paymen
 
 ## Activation
 
-From `Accounts/rgaccountbackend`, run `npm run migrate:plot-money-transfers` against the intended database before deploying the updated backend. Then deploy the frontend if using a hosted frontend. The local frontend currently points to the hosted API configured by `VITE_API_URL`; local frontend changes alone do not activate the endpoint.
+`npm start` and `npm run migrate` now include the plot transfer migration. For an existing deployment, from `Accounts/rgaccountbackend`, run `npm run migrate:plot-money-transfers` against the intended database before deploying the updated backend. Restart or redeploy older backend processes after migrating because older versions cache a missing table until restart. Then deploy the frontend if using a hosted frontend. The local frontend currently points to the hosted API configured by `VITE_API_URL`; local frontend changes alone do not activate the endpoint.
 
 ## Verification
 

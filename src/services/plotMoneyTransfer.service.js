@@ -2,7 +2,6 @@ import { currentTransactionDate, transactionDateEditable } from './transactionDa
 import { transactionTimeForWrite } from './transactionTime.service.js';
 import { canUserViewEntry } from './entryVisibility.service.js';
 import { transactionMovesMoney } from '../utils/transactionPosting.js';
-import { hasRelation } from '../utils/schemaProbe.js';
 
 const fail = (statusCode, message) => { throw Object.assign(new Error(message), { statusCode }); };
 const positiveId = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 2147483647;
@@ -18,7 +17,12 @@ export function transferInput(body, paymentId) {
 export async function executePlotMoneyTransfer(db, user, input) {
   // Lock the request key as well as the plots: retries and concurrent transfers
   // from different receipts on the same plot must not spend the same balance.
-  if (!await hasRelation('plot_money_transfers')) fail(503, 'Money transfer between plots is not enabled on this database yet');
+  // Probe on the transaction connection so migrations are picked up immediately,
+  // without holding one connection while waiting for a second pool connection.
+  const schema = await db.query("SELECT to_regclass('public.plot_money_transfers') IS NOT NULL AS present");
+  if (!schema.rows[0]?.present) throw Object.assign(new Error('Plot transfers are temporarily unavailable. Please contact an administrator to enable them.'), {
+    statusCode: 503, code: 'PLOT_MONEY_TRANSFERS_NOT_READY',
+  });
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [input.id]);
   const source = (await db.query('SELECT * FROM plot_payments WHERE id = $1', [input.paymentId])).rows[0];
   if (!source || !await canUserViewEntry(user, 'plot_payments', source.created_by)) fail(404, 'Source payment not found');

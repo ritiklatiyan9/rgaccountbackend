@@ -7,7 +7,9 @@ const errorMiddleware = (err, req, res, next) => {
     || (err.code === 'LIMIT_FILE_SIZE' ? 413 : isImprestConflict ? 409 : 500);
   const message = err.code === 'LIMIT_FILE_SIZE'
     ? 'The uploaded file exceeds the 10 MB limit.'
-    : (statusCode < 500 ? err.message : 'Something went wrong with it');
+    : err.code === 'PLOT_MONEY_TRANSFERS_NOT_READY'
+      ? 'Plot transfers are temporarily unavailable. Please contact an administrator to enable them.'
+      : (statusCode < 500 ? err.message : 'Something went wrong with it');
   let imprestDetails = {};
   if (isInsufficientImprest && err.detail) {
     try {
