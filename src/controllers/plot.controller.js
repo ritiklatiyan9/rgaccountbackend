@@ -1,3 +1,4 @@
+import { validatePlotApprover } from '../services/plotApproval.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -252,6 +253,7 @@ export const createPlot = asyncHandler(async (req, res) => {
   if (!plot_no || !plot_no.trim()) return res.status(400).json({ message: 'Plot number is required' });
   if (!plot_size && plot_size !== 0) return res.status(400).json({ message: 'Plot size is required' });
 
+  await validatePlotApprover(pool, site_id, assigned_admin_id);
   const normalizedStatus = String(status || 'BOOKED').trim().toUpperCase();
   if (normalizedStatus === 'REGISTRY') {
     return res.status(409).json({
@@ -268,7 +270,7 @@ export const createPlot = asyncHandler(async (req, res) => {
 
   var newPlotTag = undefined;
   if (existingPlots.length > 0) {
-    const nonResale = existingPlots.filter(p => p.status !== 'RESALE');
+    const nonResale = existingPlots.filter(p => p.status !== 'RESALE' || (p.approval_status && p.approval_status !== 'approved'));
     const allResale = nonResale.length === 0;
     const dupInfo = existingPlots.map(p => ({ id: p.id, status: p.status, plot_tag: p.plot_tag, buyer_name: p.buyer_name }));
 
@@ -320,6 +322,8 @@ export const createPlot = asyncHandler(async (req, res) => {
     booking_by: booking_by ? booking_by.trim().toUpperCase() : null,
     booking_date: booking_date || null,
     status: normalizedStatus,
+    scheme: String(req.body.scheme || "").trim() || null,
+    approval_requested_by: req.user.id,
     notes: notes ? notes.trim() : null,
     plc_charges: parseFloat(plc_charges) || 0,
     commission_rate: parseFloat(commission_rate) || 0,
@@ -446,6 +450,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
   const existing = await plotModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
 
+  await validatePlotApprover(pool, existing.site_id, assigned_admin_id === undefined ? existing.assigned_admin_id : assigned_admin_id);
   const updateData = await unitMetadataForWrite(req.body, existing.site_id, pool, existing);
   if (req.body.buyer_member_id != null) {
     updateData.buyer_member_id = await validatePlotBuyerMember(existing.site_id, req.body.buyer_member_id, pool);
@@ -514,6 +519,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
     }
     updateData.status = nextStatus;
   }
+  if (req.body.scheme !== undefined) updateData.scheme = String(req.body.scheme || '').trim() || null;
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
   if (plc_charges !== undefined) updateData.plc_charges = parseFloat(plc_charges) || 0;
   if (commission_rate !== undefined) updateData.commission_rate = parseFloat(commission_rate) || 0;
@@ -534,6 +540,8 @@ export const updatePlot = asyncHandler(async (req, res) => {
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
+  updateData.approval_requested_by = req.user.id;
+  updateData.approval_requested_at = new Date().toISOString();
   const updated = await plotModel.update(parseInt(id), updateData, pool);
 
   // ── Retire the previous agent's orphaned commission when booking_by changes ──
@@ -727,6 +735,7 @@ export const createPayment = asyncHandler(async (req, res) => {
     try {
       ({ result, bookedPlot } = await withCompanyPlotBooking({
         pool, plotId: plotIdInt, memberId: req.body.booking_client_id,
+        requestedBy: req.user.id, assignedAdminId: assigned_admin_id,
         date: date || new Date().toISOString().slice(0, 10), savePayment,
       }));
     } catch (error) {

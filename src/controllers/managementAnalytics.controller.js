@@ -245,7 +245,7 @@ const overviewData = async (siteId, { from, to }) => {
   // gross_in/gross_out (+ cash/bank splits, by_source) are EVERY ledger row — shown as the module breakdown only.
   const PLOT_SRC = new Set(['plot_payments', 'plot_installment_payments']);
   const LAND_SRC = 'land_deal_payments';
-  const NON_EXPENSE_SRC = new Set(['personal_ledger', 'plot_payments', 'plot_installment_payments', LAND_SRC, 'day_book', 'misc_income_entries', 'firm_transactions']);
+  const NON_EXPENSE_SRC = new Set(['personal_ledger', 'plot_payments', 'plot_installment_payments', LAND_SRC, 'day_book', 'misc_income_entries', 'firm_transactions', 'partner_profit_payments']);
   const m = { gross_in: 0, gross_out: 0, cash_in: 0, bank_in: 0, cash_out: 0, bank_out: 0, plot_payments: 0, land_receipts: 0, misc_income: 0, personal_ledger_credit: 0, total_expense: 0 };
   const byMonth = new Map(); const bySrc = new Map(); const exp = { total: 0, count: 0 };
   const monthRow = (k) => byMonth.get(k) || { gross_in: 0, gross_out: 0, plot_payments: 0, land_receipts: 0, misc_income: 0, personal_ledger_credit: 0, total_expense: 0 };

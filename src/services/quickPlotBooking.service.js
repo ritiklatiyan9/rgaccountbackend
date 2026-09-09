@@ -1,8 +1,9 @@
+import { validatePlotApprover } from './plotApproval.service.js';
 const bookingError = (status, code, message) => Object.assign(new Error(message), { status, code });
 
 /** Keep the COMPANY → BOOKED transition and its first payment indivisible.
  * The row lock also prevents two operators from booking the same plot. */
-export async function withCompanyPlotBooking({ pool, plotId, memberId, date, savePayment }) {
+export async function withCompanyPlotBooking({ pool, plotId, memberId, date, savePayment, requestedBy, assignedAdminId }) {
   if (!Number.isSafeInteger(Number(memberId)) || Number(memberId) <= 0) {
     throw bookingError(400, 'BOOKING_CLIENT_REQUIRED', 'Select a user to book this plot.');
   }
@@ -22,10 +23,14 @@ export async function withCompanyPlotBooking({ pool, plotId, memberId, date, sav
     if (!member?.full_name?.trim()) {
       throw bookingError(400, 'BOOKING_CLIENT_UNAVAILABLE', 'Select an active user registered in this site.');
     }
+    const reviewerId = requestedBy
+      ? await validatePlotApprover(client, plot.site_id, assignedAdminId || plot.assigned_admin_id)
+      : plot.assigned_admin_id;
     const { rows: [bookedPlot] } = await client.query(
-      `UPDATE plots SET buyer_name = $2, buyer_member_id = $4, status = 'BOOKED', booking_date = $3::date, updated_at = NOW()
+      `UPDATE plots SET buyer_name = $2, buyer_member_id = $4, status = 'BOOKED', booking_date = $3::date, updated_at = NOW(),
+        assigned_admin_id = $5, approval_requested_by = COALESCE($6, created_by)
         WHERE id = $1 RETURNING *`,
-      [plotId, member.full_name.trim().toUpperCase(), date, member.id],
+      [plotId, member.full_name.trim().toUpperCase(), date, member.id, reviewerId || null, requestedBy || null],
     );
     const result = await savePayment(client);
     if (!result.rows[0]) throw bookingError(409, 'PLOT_BOOKING_CHANGED', 'The plot changed. Select it again before saving.');

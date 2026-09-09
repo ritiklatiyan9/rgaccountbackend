@@ -20,6 +20,7 @@ const ALLOWED_TABLES = {
   plot_commission_payment: 'plot_commission_payments', // New v2
   cash_flow_entry: 'cash_flow_entries',
   firm_transaction: 'firm_transactions',
+  plot_status: 'plot_status_approvals',
   plot_payment: 'plot_payments',
   plot_installment_payment: 'plot_installment_payments',
   expense: 'expenses',
@@ -186,6 +187,7 @@ function isModuleAllowed(allowed, moduleKey) {
     return allowed.has('daybook');
   }
   if (moduleKey === 'vendor_inventory_payment') return allowed.has('vendor_payment') || allowed.has('vendors');
+  if (moduleKey === 'plot_status') return allowed.has('plot_payment');
   if (moduleKey === 'land_deal_payment') return allowed.has('farmer_payment');
   return allowed.has(moduleKey);
 }
@@ -249,6 +251,22 @@ export const listAllPending = asyncHandler(async (req, res) => {
     }
     return { where: conditions.join(' AND '), params };
   };
+
+  const visPlot = moduleVisibility(req.user, allowedModules, 'plot_status');
+  if ((!module || module === 'plot_status') && visPlot.include) {
+    const { where, params } = buildWhere('pa', 'pa', [], visPlot.scoped ? req.user.id : null);
+    const { rows } = await pool.query(`
+      SELECT pa.*, s.name AS site_name, u.name AS created_by_name, aa.name AS assigned_admin_name,
+        pa.buyer_name AS entity_name, pa.plot_no AS entity_plot_no,
+        'Plot status' AS entity_type, 'plot_status' AS source
+      FROM plot_status_approvals pa JOIN sites s ON s.id = pa.site_id
+      LEFT JOIN users u ON u.id = pa.created_by
+      LEFT JOIN users aa ON aa.id = pa.assigned_admin_id
+      WHERE ${where} ORDER BY pa.created_at DESC, pa.id DESC`, params);
+    results.push(...rows.map(row => ({ ...row, module_label: 'Plot status approval',
+      entry_label: `Plot ${row.plot_no} — ${row.plot_status === 'BOOKED' ? 'BOOKING' : row.plot_status} PENDING${row.scheme ? ` · Scheme: ${row.scheme}` : ''}`,
+    })));
+  }
 
   // 1. Farmer Payments (from farmer_payments table)
   const visFp = moduleVisibility(req.user, allowedModules, 'farmer_payment');
@@ -840,6 +858,8 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     .filter(([et]) => !['FARMER PAYMENT', 'PLOT COMMISSION', 'EXPENSE'].includes(et))
     .reduce((sum, [, count]) => sum + count, 0) : 0) : 0;
   const ftCount = a('firm_transaction') ? ft.rows[0].count : 0;
+  const plotStatusCount = await pool.query(`SELECT COUNT(*)::int AS count FROM plot_status_approvals pa WHERE pa.status = 'pending' ${site_id ? 'AND pa.site_id = $1' : ''}${scopeClauseFor('pa', 'plot_status')}`, params);
+  const psCount = a('plot_status') ? plotStatusCount.rows[0].count : 0;
   const ppCount = a('plot_payment') ? pp.rows[0].count : 0;
   const pipCount = a('plot_installment_payment') ? pip.rows[0].count : 0;
   const vpCount = a('vendor_payment') ? vp.rows[0].count : 0;
@@ -852,6 +872,7 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     plot_commission: pcCount,
     cash_flow_entry: cfCount,
     firm_transaction: ftCount,
+    plot_status: psCount,
     plot_payment: ppCount,
     plot_installment_payment: pipCount,
     expense: exCount,
@@ -859,7 +880,7 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     vendor_inventory_payment: vipCount,
     plot_registry_payment: prpCount,
     misc_income_entry: mieCount,
-    total: fpCount + pcCount + cfCount + ftCount + ppCount + pipCount + exCount + vpCount + vipCount + prpCount + mieCount,
+    total: psCount + fpCount + pcCount + cfCount + ftCount + ppCount + pipCount + exCount + vpCount + vipCount + prpCount + mieCount,
   };
 
   res.json({ ...counts, allowed_modules: allowedModules ? Array.from(allowedModules) : null });
@@ -901,10 +922,11 @@ export const approveEntry = asyncHandler(async (req, res) => {
   }
 
   const result = await pool.query(
-    `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`,
+    `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1${source === 'plot_status' ? " AND status = 'pending'" : ''} RETURNING *`,
     [entryId, req.user.id]
   );
   
+  if (!result.rows[0]) return res.status(409).json({ message: 'This request has already been decided. Refresh the approval queue.' });
   const entry = result.rows[0];
 
   if (source === 'firm_transaction') {
@@ -1009,10 +1031,11 @@ export const rejectEntry = asyncHandler(async (req, res) => {
   const wasApproved = check.rows[0].status === 'approved';
 
   const result = await pool.query(
-    `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`,
+    `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1${source === 'plot_status' ? " AND status = 'pending'" : ''} RETURNING *`,
     [entryId, req.user.id]
   );
 
+  if (!result.rows[0]) return res.status(409).json({ message: 'This request has already been decided. Refresh the approval queue.' });
   if (source === 'plot_installment_payment') {
     await reconcileInstallmentPayment(entryId);
   }
@@ -1083,6 +1106,7 @@ export const rejectEntry = asyncHandler(async (req, res) => {
  * Body: { voucher_url }
  */
 export const attachVoucher = asyncHandler(async (req, res) => {
+  if (req.query.source === 'plot_status') return res.status(400).json({ message: 'Plot status approvals do not have payment vouchers' });
   const { id } = req.params;
   const { source } = req.query;
   const { voucher_url } = req.body;

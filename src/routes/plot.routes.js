@@ -29,7 +29,7 @@ const plotReadCache = cacheResponse({ ttlSeconds: 45, namespace: 'plots' });
 // rarely changes; long-TTL meta cache that survives plot/payment writes.
 const plotMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'plots-meta' });
 // Anchored prefix so 'plots-meta|...' isn't busted by writes.
-const bustPlotCache = invalidateCacheOnSuccess(['plots|', 'plots:pageData:', 'members|', '/daybook', 'registries|', 'registries-meta|']);
+const bustPlotCache = invalidateCacheOnSuccess(['approvals|', '/approvals', 'plots|', 'plots:pageData:', 'members|', '/daybook', 'registries|', 'registries-meta|']);
 
 const accessByQuerySite = requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' });
 const accessByBodySite = requirePlotSiteAccess({ entity: 'site', source: 'body', key: 'site_id' });

@@ -294,6 +294,7 @@ const KpiCardsType = new GraphQLObjectType({
     landProfitDetail:      { type: new GraphQLNonNull(LandProfitDetailType) },
     registryPaymentDetail: { type: new GraphQLNonNull(RegistryPaymentDetailType) },
     runningExpense:        { type: new GraphQLNonNull(GraphQLFloat) },
+    partnerProfitPaid:     { type: new GraphQLNonNull(GraphQLFloat) },
     expectedProfit:        { type: new GraphQLNonNull(GraphQLFloat) },
     currentProfit:         { type: new GraphQLNonNull(GraphQLFloat) },
     totalRevenue:          { type: new GraphQLNonNull(GraphQLFloat) },
@@ -516,6 +517,8 @@ const PlotType = new GraphQLObjectType({
     booking_date:        { type: GraphQLString },
     status:              { type: GraphQLString },
     notes:               { type: GraphQLString },
+    scheme:              { type: GraphQLString },
+    approval_status:     { type: GraphQLString },
     plot_tag:            { type: GraphQLString },
     // Co-applicant — one home on the plot row, shared by booking → plot → NOC → registry.
     co_applicant_name:     { type: GraphQLString },
@@ -954,7 +957,7 @@ const QueryType = new GraphQLObjectType({
         // guard alongside the exact Admin
         // custody snapshot. Versioning prevents an older payload from failing
         // the new non-null GraphQL contract.
-        const key = cacheKey(`kpi-cards-v7-plot-pricing-sale${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
+        const key = cacheKey(`kpi-cards-v8-partner-payments${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
 
         if (cacheEnabled()) {
           const cached = await cacheGet(key);

@@ -71,7 +71,7 @@ export const invalidateCacheOnSuccess = (prefixes = []) => {
         // Balance Sheet, Dashboard or Management Analytics (plots and land deals also
         // change expected value without creating a ledger row). Invalidate them
         // centrally so a new module cannot accidentally leave stale KPIs.
-        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|', 'dashboard:', 'management-analytics|'])];
+        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|', 'site-profit|', 'dashboard:', 'management-analytics|'])];
         clearCacheByPrefixes(effectivePrefixes).catch(() => {});
       }
     });

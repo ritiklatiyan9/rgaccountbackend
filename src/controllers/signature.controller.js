@@ -6,6 +6,7 @@ import pool from '../config/db.js';
 // module-specific validation rules (e.g. vendor's required amount/date)
 // stay untouched.
 export const SIGN_TARGETS = {
+  partner_profit_payment: { table: 'partner_profit_payments', perm: 'sites', adminOnly: true, siteQuery: 'SELECT site_id FROM partner_profit_payments WHERE id = $1 LIMIT 1' },
   expense: {
     table: 'expenses',
     perm: 'expenses',

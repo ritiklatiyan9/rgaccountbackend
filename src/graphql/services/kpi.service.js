@@ -15,6 +15,7 @@
  * and returns move custody, but they are not operating income or expense.
  * They remain visible in Personal Ledger and in the all-ledger Site Balance.
  */
+import { getPartnerProfitPaid } from '../../services/partnerPayments.service.js';
 import pool from '../../config/db.js';
 
 // ── Date range WHERE fragments ──
@@ -260,7 +261,7 @@ export async function getExpenseBreakdown(siteId, start, end) {
         AND debit <> 0
         AND source_key NOT IN (
           'firm_transactions', 'personal_ledger', 'plot_payments',
-          'plot_installment_payments', 'day_book', 'misc_income_entries'
+          'plot_installment_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments'
         )
         AND ledger_type <> 'person'
       GROUP BY source_key`,
@@ -287,7 +288,7 @@ export async function getRunningExpense(siteId, end) {
         AND debit <> 0
         AND source_key NOT IN (
           'firm_transactions', 'personal_ledger', 'plot_payments',
-          'plot_installment_payments', 'day_book', 'misc_income_entries'
+          'plot_installment_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments'
         )
         AND ledger_type <> 'person'`,
     [siteId, end]
@@ -738,6 +739,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     landProfitDetail,
     runningExpense,
     landRevenue,
+    partnerProfitPaid,
   ] = await Promise.all([
     getRevenue(siteId, start, end, excludeOldPlots),
     getExpenseBreakdown(siteId, start, end),
@@ -754,6 +756,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     getLandProfitDetail(siteId, end),
     getRunningExpense(siteId, end),
     getLandRevenue(siteId, start, end),
+    getPartnerProfitPaid(siteId, end),
   ]);
 
   const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);
@@ -769,6 +772,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     plotIncoming,
     landProfitDetail,
     registryPaymentDetail: registryPayments,
+    partnerProfitPaid,
     runningExpense: roundMoney(runningExpense),
     expectedProfit: roundMoney(expectedProfit),
     currentProfit: roundMoney(currentProfit),

@@ -28,7 +28,7 @@ const registryReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'registries
 // that survives registry/payment writes.
 const registryMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'registries-meta' });
 // Anchored prefix so 'registries-meta|...' isn't busted by writes.
-const bustRegistryCache = invalidateCacheOnSuccess(['registries|', 'registries-meta|']);
+const bustRegistryCache = invalidateCacheOnSuccess(['registries|', 'registries-meta|', 'plots|', 'plots:pageData:', 'approvals|']);
 
 const accessByQuerySite = requireRegistrySiteAccess({ entity: 'site', source: 'query', key: 'site_id' });
 const accessByBodySite = requireRegistrySiteAccess({ entity: 'site', source: 'body', key: 'site_id' });

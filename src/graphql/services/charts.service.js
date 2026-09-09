@@ -95,7 +95,7 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
        FROM ledger_entries
        WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
          AND debit <> 0
-         AND source_key NOT IN ('plot_payments', 'plot_installment_payments', 'day_book', 'misc_income_entries', 'firm_transactions')
+         AND source_key NOT IN ('plot_payments', 'plot_installment_payments', 'day_book', 'misc_income_entries', 'firm_transactions', 'partner_profit_payments')
          AND ledger_type <> 'person'
        GROUP BY 1
      )

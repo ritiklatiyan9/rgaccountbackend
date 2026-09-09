@@ -14,6 +14,7 @@ router.use(requireRole('admin', 'sub_admin'));
 const requireTargetPermission = (req, res, next) => {
   const target = SIGN_TARGETS[req.params.target];
   if (!target) return res.status(400).json({ message: 'Unknown signature target' });
+  if (target.adminOnly) return requireRole('admin')(req, res, next);
   return requirePermission(target.perm, 'update')(req, res, next);
 };
 

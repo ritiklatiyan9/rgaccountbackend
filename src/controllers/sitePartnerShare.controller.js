@@ -1,3 +1,4 @@
+import { partnerPaidByMember, paymentPartners } from '../services/partnerPayments.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { getProfitKpis } from '../graphql/services/kpi.service.js';
@@ -7,10 +8,10 @@ import { landShareRows, normalizeShares as normalizeSharesRule, siteShareRows } 
 // and running expense all key off `end`). `end` is EXCLUSIVE — the Dashboard passes
 // tomorrow (local date) so today's entries count; passing today silently dropped them.
 const cutoff = () => {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const date = new Date(`${today}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
 };
 
 const shareRows = siteShareRows;
@@ -23,17 +24,20 @@ export const getSiteProfitShares = asyncHandler(async (req, res) => {
   }
   // Dashboard shortcuts need identities only, without recomputing all KPIs.
   if (req.query.shares_only === 'true') {
-    return res.json({ siteId, shares: await shareRows(siteId) });
+    return res.json({ siteId, shares: await paymentPartners(siteId) });
   }
   const excludeOldPlots = String(req.query.exclude_old_plots || '') === 'true';
-  const [kpis, shares] = await Promise.all([
-    getProfitKpis(siteId, cutoff(), excludeOldPlots),
+  const end = cutoff();
+  const [kpis, shares, payments] = await Promise.all([
+    getProfitKpis(siteId, end, excludeOldPlots),
     shareRows(siteId),
+    partnerPaidByMember(siteId, end),
   ]);
   // Each land carries its own split when one is saved; an empty list means it follows the site split.
   const landSplits = await landShareRows(kpis.lands.map((land) => land.farmer_id));
   res.json({
     siteId,
+    payments,
     profit: {
       expectedProfit: kpis.expectedProfit,
       currentProfit: kpis.currentProfit,

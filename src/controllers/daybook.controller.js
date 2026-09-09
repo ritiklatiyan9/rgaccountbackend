@@ -670,7 +670,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
          LEFT JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
          LEFT JOIN plots p ON pcm.plot_id = p.id
         WHERE cfe.site_id = $1 AND cfe.date = $2
-          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries')
+          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries', 'partner_profit_payments')
           AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
           AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'
           AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))`,
@@ -1065,6 +1065,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // read_only: these are managed in their own module pages — Day Book only
   // displays them so its totals tie to the Remaining cards + Balance Sheet.
   const MODULE_LEDGER_META = {
+    partner_profit_payments: { prefix: 'ppp', entry_type: 'PARTNER PROFIT PAYMENT', source: 'partner_profit_payment', category: 'PARTNER PROFIT' },
     plot_installment_payments: { prefix: 'pip', entry_type: 'PLOT INSTALLMENT', source: 'plot_installment', category: 'PLOT PAYMENT' },
     vendor_payments:           { prefix: 'vp',  entry_type: 'VENDOR PAYMENT',   source: 'vendor_payment',   category: 'VENDOR' },
     plot_commission_payments:  { prefix: 'pcp', entry_type: 'PLOT COMMISSION PAYMENT', source: 'commission_payment', category: 'COMMISSION' },
