@@ -989,7 +989,8 @@ export const getPlotNocRegistry = asyncHandler(async (req, res) => {
 
   // Resold (OLD) plots never enter the registry flow — the NOC belongs to the current record.
   const { rows: tagRows } = await pool.query('SELECT plot_tag FROM plots WHERE id = $1', [plotId]);
-  if (tagRows[0] && String(tagRows[0].plot_tag || '').trim().toUpperCase() === 'OLD') {
+  if (!tagRows[0]) return res.status(404).json({ code: 'PLOT_NOT_FOUND', message: 'Plot not found' });
+  if (String(tagRows[0].plot_tag || '').trim().toUpperCase() === 'OLD') {
     return res.status(400).json({ code: 'OLD_PLOT', message: 'Resold (OLD) plots stay out of the registry flow — open the NOC from the current plot record' });
   }
 
@@ -1011,10 +1012,9 @@ export const getPlotNocRegistry = asyncHandler(async (req, res) => {
 
   const registry = result.rows[0];
   if (!registry) {
-    return res.status(404).json({
-      code: 'REGISTRY_REQUIRED',
-      message: 'Create the linked registry record before generating an NOC.',
-    });
+    // A first NOC visit has no draft yet. The client creates it with the
+    // authorized POST; a read must not create legal records as a side effect.
+    return res.json({ registry: null, requires_creation: true });
   }
   res.json({ registry });
 });
@@ -1037,9 +1037,10 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
 
     // Lock the plot so two simultaneous NOC opens cannot create two drafts.
     const plotResult = await client.query(
-      `SELECT id, site_id, unit_type, plot_no, buyer_name, plot_size, plot_size_mtr,
+      `SELECT id, site_id, COALESCE(to_jsonb(p)->>'unit_type', 'plot') AS unit_type,
+              plot_no, buyer_name, plot_size, plot_size_mtr,
               circle_rate, to_receive_bank, assigned_admin_id, status, plot_tag
-         FROM plots
+         FROM plots p
         WHERE id = $1
         FOR UPDATE`,
       [plotId]
@@ -1047,7 +1048,7 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
     const plot = plotResult.rows[0];
     if (!plot) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Plot not found' });
+      return res.status(404).json({ code: 'PLOT_NOT_FOUND', message: 'Plot not found' });
     }
     if (String(plot.plot_tag || '').trim().toUpperCase() === 'OLD') {
       await client.query('ROLLBACK');
