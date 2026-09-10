@@ -629,6 +629,70 @@ export const createInstallments = asyncHandler(async (req, res) => {
   res.status(201).json({ installments: created });
 });
 
+/** PUT /plots/:id/installments — Replace the whole schedule in one step.
+ *
+ * Receipts are allocated to installments at read time (see
+ * allocateInstallmentPayments), so swapping the rows cannot lose money.
+ * The one thing that would is a row with directly linked
+ * plot_installment_payments: the FK cascades, so such a row is kept and the
+ * request is refused unless it is sent back unchanged (matched by id). */
+export const replaceInstallments = asyncHandler(async (req, res) => {
+  const plotId = parseInt(req.params.id);
+  const { installments } = req.body;
+  if (!Array.isArray(installments) || installments.length === 0 || installments.length > 120)
+    return res.status(400).json({ message: 'Send between 1 and 120 installments' });
+  for (const inst of installments) {
+    if (!(parseFloat(inst?.amount) > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(String(inst?.due_date || '')))
+      return res.status(400).json({ message: 'Each installment needs a positive amount and a due date' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const plot = (await client.query('SELECT id, installments_enabled FROM plots WHERE id = $1 FOR UPDATE', [plotId])).rows[0];
+    if (!plot) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Plot not found' }); }
+
+    const { rows: linked } = await client.query(
+      `SELECT DISTINCT installment_id FROM plot_installment_payments WHERE plot_id = $1 AND installment_id IS NOT NULL`, [plotId]);
+    const keptIds = new Set(installments.map((inst) => parseInt(inst.id)).filter(Number.isInteger));
+    const missing = linked.map((row) => row.installment_id).filter((id) => !keptIds.has(id));
+    if (missing.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Some installments already have payments recorded against them and cannot be removed. Edit those rows instead.' });
+    }
+
+    await client.query(`DELETE FROM plot_installments WHERE plot_id = $1 AND id <> ALL($2::int[])`, [plotId, [...keptIds]]);
+    const saved = [];
+    let order = 1;
+    for (const inst of installments) {
+      const data = {
+        installment_name: inst.installment_name || `Installment ${order}`,
+        amount: parseFloat(inst.amount),
+        due_date: inst.due_date,
+        sort_order: order++,
+      };
+      const id = parseInt(inst.id);
+      const row = Number.isInteger(id) && keptIds.has(id)
+        ? (await client.query(
+            `UPDATE plot_installments SET installment_name=$2, amount=$3, due_date=$4, sort_order=$5, updated_at=NOW()
+              WHERE id=$1 AND plot_id=$6 RETURNING *`, [id, data.installment_name, data.amount, data.due_date, data.sort_order, plotId])).rows[0]
+        : (await client.query(
+            `INSERT INTO plot_installments (plot_id, installment_name, amount, due_date, sort_order, status, paid_amount)
+             VALUES ($1,$2,$3,$4,$5,'pending',0) RETURNING *`, [plotId, data.installment_name, data.amount, data.due_date, data.sort_order])).rows[0];
+      if (row) saved.push(row);
+    }
+    if (!plot.installments_enabled) await client.query('UPDATE plots SET installments_enabled = TRUE WHERE id = $1', [plotId]);
+    await installmentModel.refreshStatuses(plotId, client);
+    await client.query('COMMIT');
+    res.json({ installments: saved });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
 /** PUT /plots/installments/:instId — Update a single installment */
 export const updateInstallment = asyncHandler(async (req, res) => {
   const { instId } = req.params;

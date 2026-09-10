@@ -125,7 +125,8 @@
     "test:plot-money-transfers": "node --test test/plot-money-transfer.test.mjs",
     "test:partner-payments": "node --test test/partner-profit-payments.test.mjs test/partner-profit-payments-db.test.mjs",
     "test:unrun-migrations": "node --test test/unrun-migration-degradation.test.mjs",
-    "migrate:registry-cash-allocation": "node src/migrations/161_registry_cash_allocation.js"
+    "migrate:registry-cash-allocation": "node src/migrations/161_registry_cash_allocation.js",
+    "test:installment-replace": "node --test test/installment-schedule-replace.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

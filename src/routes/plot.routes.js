@@ -8,7 +8,7 @@ import {
   getAutocomplete, getPlotNocRegistry, createPlotNocRegistry, listBookingClients, listPlotKycMembers,
 } from '../controllers/plot.controller.js';
 import {
-  updateInstallmentSettings, listInstallments, createInstallments,
+  updateInstallmentSettings, listInstallments, createInstallments, replaceInstallments,
   updateInstallment, deleteInstallment,
   recordInstallmentPayment, listInstallmentPayments,
   paymentManagementList, paymentReminders, paymentAnalytics,
@@ -77,6 +77,7 @@ router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermiss
 // ── Installment management endpoints ──
 router.get('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, plotReadCache, listInstallments);
 router.post('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, createInstallments);
+router.put('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, replaceInstallments);
 router.post('/:id/payment-plan', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, createPercentagePaymentPlan);
 router.put('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamInstallment, bustPlotCache, updateInstallment);
 router.delete('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), accessByParamInstallment, bustPlotCache, deleteInstallment);

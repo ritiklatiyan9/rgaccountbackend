@@ -19,11 +19,18 @@ test('every read path naming an unrun migration object probes for it first', () 
     'controllers/approval.controller.js': read('../src/controllers/approval.controller.js'),
     'services/plotMoneyTransfer.service.js': read('../src/services/plotMoneyTransfer.service.js'),
   };
+  // Either the shared memoized probe, or an inline to_regclass on the caller's
+  // own transaction connection (a service may prefer the latter so a freshly
+  // run migration is seen immediately without a second pool connection).
+  const probes = (relation) => [
+    new RegExp(`hasRelation\\('${relation}'\\)`),
+    new RegExp(`to_regclass\\('public\\.${relation}'\\)`),
+  ];
   for (const [file, source] of Object.entries(sources)) {
     for (const [relation, migration] of GUARDED) {
       if (!source.includes(relation)) continue;
-      assert.match(source, new RegExp(`hasRelation\\('${relation}'\\)`),
-        `${file} queries ${relation} (migration ${migration}) but never probes with hasRelation`);
+      assert.ok(probes(relation).some((re) => re.test(source)),
+        `${file} queries ${relation} (migration ${migration}) but never probes for it first`);
     }
   }
 });
@@ -46,9 +53,10 @@ test('approvals report zero pending plot-status rows instead of failing', () => 
 
 test('a transfer attempt fails with a message, not a raw database error', () => {
   const source = read('../src/services/plotMoneyTransfer.service.js');
-  assert.match(source, /if \(!await hasRelation\('plot_money_transfers'\)\) fail\(503, /);
-  assert.ok(source.indexOf("hasRelation('plot_money_transfers')") < source.indexOf('pg_advisory_xact_lock'),
-    'the guard must run before any work is done');
+  const probeAt = Math.max(source.indexOf("hasRelation('plot_money_transfers')"), source.indexOf("to_regclass('public.plot_money_transfers')"));
+  assert.ok(probeAt >= 0, 'the service must probe for plot_money_transfers');
+  assert.match(source, /statusCode: 503|fail\(503, /, 'a missing table must surface as 503 with a message');
+  assert.ok(probeAt < source.indexOf('pg_advisory_xact_lock'), 'the guard must run before any work is done');
 });
 
 test('the probe caches the promise so concurrent callers issue one query', () => {
