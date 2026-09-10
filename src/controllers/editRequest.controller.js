@@ -15,6 +15,7 @@ import { deleteCloudinaryAsset, uploadCloudinaryAsset } from '../utils/cloudinar
 import { createRegistryRecord } from './registry.controller.js';
 import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
+import { applyFarmerPaymentBank } from '../services/farmerPaymentBank.service.js';
 import {
   FarmerPaymentValidationError,
   canonicalFarmerPaymentModeFromDayBook,
@@ -143,6 +144,7 @@ const MODULE_MAP = {
       if (Object.keys(allowed).length === 0) return existing;
       const updated = await farmerPaymentModel.update(paymentId, allowed, db);
       const daybookEntries = await rebuildFarmerPaymentDayBook(db, paymentId);
+      await applyFarmerPaymentBank(db, updated, data);
       return { ...updated, daybook_entries: daybookEntries };
     },
   },
