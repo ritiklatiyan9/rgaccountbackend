@@ -80,4 +80,20 @@ export const requireAnyPermission = (modules, action) => {
     };
 };
 
+// A direct assignment lets a sub-admin review that request without granting
+// access to the site's entire approval workspace. Controllers must enforce the
+// assigned-only scope for both reads and decisions.
+export const requireApprovalAccess = async (req, res, next) => {
+    try {
+        if (req.user.role === 'admin' || req.user.role === 'super_admin') return next();
+        if (req.user.role !== 'sub_admin') return res.status(403).json({ message: 'Insufficient permissions' });
+        const permission = await getRequestPermission(req, 'expense_approval');
+        req.assignedApprovalsOnly = permission?.can_read !== true;
+        return next();
+    } catch (err) {
+        console.error('Approval permission check failed:', err);
+        return res.status(500).json({ message: 'Permission check failed' });
+    }
+};
+
 export default requirePermission;

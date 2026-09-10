@@ -14,25 +14,29 @@ import {
 } from '../controllers/approval.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
-import requirePermission from '../middlewares/permission.middleware.js';
+import requirePermission, { requireApprovalAccess } from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
-const approvalReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'approvals' });
+const cachedApprovalRead = cacheResponse({ ttlSeconds: 30, namespace: 'approvals' });
+// Never serve an earlier, broader cached response after workspace access is revoked.
+const approvalReadCache = (req, res, next) => req.assignedApprovalsOnly ? next() : cachedApprovalRead(req, res, next);
 // Approval mutations affect all modules (expenses, farmers, plots, cashflow, daybook, etc.)
 const bustApprovalCache = invalidateCacheOnSuccess(['plots|', 'plots:pageData:', 'approvals|', '/approvals', '/expenses', 'expenses|', 'expenses:page:', 'imprest|', '/farmers', '/plots', '/cashflow', '/daybook', '/firms', '/registries', 'land-deals|', '/land-deals', 'misc-income|']);
 
-// All approval routes require auth + admin role or sub-admin with expense_approval permission
+// Direct assignments are accessible without the broad expense-approval grant.
 router.use(authMiddleware);
-router.use(requireRole('admin', 'sub_admin'), requirePermission('expense_approval', 'read'));
+router.use(requireRole('admin', 'sub_admin'));
 
-router.get('/pending', approvalReadCache, listAllPending);           // ?site_id=X&date_from=&date_to=&module=
-router.get('/counts', approvalReadCache, getPendingCounts);           // ?site_id=X
-router.get('/cheques', approvalReadCache, listChequeEntries);         // ?site_id=X&status=PENDING|CLEARED|BOUNCED|RETURNED|all
-router.put('/:id/approve', bustApprovalCache, approveEntry);          // ?source=farmer_payment|plot_commission|...
-router.put('/:id/reject', bustApprovalCache, rejectEntry);            // ?source=...
-router.put('/:id/voucher', bustApprovalCache, attachVoucher);         // ?source=... { voucher_url }
-router.post('/bulk-approve', bustApprovalCache, bulkApprove);         // { items: [{ id, source }] }
-router.post('/bulk-reject', bustApprovalCache, bulkReject);           // { items: [{ id, source }] }
-router.patch('/cheque-status', bustApprovalCache, updateChequeStatus); // { id, source, cheque_status }
+router.get('/pending', requireApprovalAccess, approvalReadCache, listAllPending);
+router.get('/counts', requireApprovalAccess, approvalReadCache, getPendingCounts);
+router.put('/:id/approve', requireApprovalAccess, bustApprovalCache, approveEntry);
+router.put('/:id/reject', requireApprovalAccess, bustApprovalCache, rejectEntry);
+router.post('/bulk-approve', requireApprovalAccess, bustApprovalCache, bulkApprove);
+router.post('/bulk-reject', requireApprovalAccess, bustApprovalCache, bulkReject);
+
+router.use(requirePermission('expense_approval', 'read'));
+router.get('/cheques', approvalReadCache, listChequeEntries);
+router.put('/:id/voucher', bustApprovalCache, attachVoucher);
+router.patch('/cheque-status', bustApprovalCache, updateChequeStatus);
 
 export default router;

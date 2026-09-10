@@ -7,7 +7,8 @@ import pool from '../config/db.js';
 // shared here because three endpoints now need it.
 //
 // The promise itself is cached, so concurrent first calls issue one query.
-// A process restart re-probes, which is how a freshly run migration is picked up.
+// Missing objects are checked again on the next read, so running a migration
+// restores notifications without a process restart. Successful probes stay cached.
 const probes = new Map();
 
 export function hasRelation(name) {
@@ -15,7 +16,11 @@ export function hasRelation(name) {
     probes.set(name, pool
       .query('SELECT to_regclass($1) IS NOT NULL AS present', [`public.${name}`])
       .then(({ rows }) => !!rows[0]?.present)
-      .catch(() => false));
+      .catch(() => false)
+      .then(present => {
+        if (!present) probes.delete(name);
+        return present;
+      }));
   }
   return probes.get(name);
 }

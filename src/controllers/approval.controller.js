@@ -161,7 +161,8 @@ async function resolveEntrySiteId(source, entry) {
  * For sub-admins, fetch allowed approval modules from user_approval_modules.
  * Admins get null (meaning all modules allowed).
  */
-async function getAllowedModules(user) {
+async function getAllowedModules(user, assignedOnly = false) {
+  if (assignedOnly) return new Set();
   if (user.role === 'admin' || user.role === 'super_admin') return null; // all allowed
   try {
     const result = await pool.query(
@@ -215,7 +216,7 @@ function moduleVisibility(user, allowed, moduleKey) {
  */
 export const listAllPending = asyncHandler(async (req, res) => {
   const { site_id, date_from, date_to, module, assigned_admin_id } = req.query;
-  const allowedModules = await getAllowedModules(req.user);
+  const allowedModules = await getAllowedModules(req.user, req.assignedApprovalsOnly);
 
   const results = [];
 
@@ -266,7 +267,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
       LEFT JOIN users aa ON aa.id = pa.assigned_admin_id
       WHERE ${where} ORDER BY pa.created_at DESC, pa.id DESC`, params);
     results.push(...rows.map(row => ({ ...row, module_label: 'Plot status approval',
-      entry_label: `Plot ${row.plot_no} — ${row.plot_status === 'BOOKED' ? 'BOOKING' : row.plot_status} PENDING${row.scheme ? ` · Scheme: ${row.scheme}` : ''}`,
+      entry_label: `Plot ${row.plot_no} updated — ${row.plot_status === 'BOOKED' ? 'BOOKING' : row.plot_status} · Approval pending${row.scheme ? ` · Scheme: ${row.scheme}` : ''}`,
     })));
   }
 
@@ -792,7 +793,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
 
   // Sort combined results by date DESC
   results.sort((a, b) => {
-    const dA = new Date(a.date), dB = new Date(b.date);
+    const dA = new Date(a.source === 'plot_status' ? a.created_at : a.date), dB = new Date(b.source === 'plot_status' ? b.created_at : b.date);
     return dB - dA || b.id - a.id;
   });
 
@@ -806,7 +807,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
  */
 export const getPendingCounts = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
-  const allowedModules = await getAllowedModules(req.user);
+  const allowedModules = await getAllowedModules(req.user, req.assignedApprovalsOnly);
 
   // Build an "assigned to me" clause for sub-admins lacking module grants —
   // they still need counts for entries delegated directly to them.
@@ -919,14 +920,14 @@ export const approveEntry = asyncHandler(async (req, res) => {
     if (assignedTo) {
       return res.status(403).json({ message: 'This entry is assigned to another user for approval' });
     }
-    const allowedModules = await getAllowedModules(req.user);
+    const allowedModules = await getAllowedModules(req.user, req.assignedApprovalsOnly);
     if (!isModuleAllowed(allowedModules, source)) {
       return res.status(403).json({ message: 'You do not have permission to approve this module' });
     }
   }
 
   const result = await pool.query(
-    `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1${source === 'plot_status' ? " AND status = 'pending'" : ''} RETURNING *`,
+    `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1${source === 'plot_status' ? " AND status = 'pending'" : ''}${req.assignedApprovalsOnly ? ' AND assigned_admin_id = $2' : ''} RETURNING *`,
     [entryId, req.user.id]
   );
   
@@ -1026,7 +1027,7 @@ export const rejectEntry = asyncHandler(async (req, res) => {
     if (assignedTo) {
       return res.status(403).json({ message: 'This entry is assigned to another user for approval' });
     }
-    const allowedModules = await getAllowedModules(req.user);
+    const allowedModules = await getAllowedModules(req.user, req.assignedApprovalsOnly);
     if (!isModuleAllowed(allowedModules, source)) {
       return res.status(403).json({ message: 'You do not have permission to reject this module' });
     }
@@ -1035,7 +1036,7 @@ export const rejectEntry = asyncHandler(async (req, res) => {
   const wasApproved = check.rows[0].status === 'approved';
 
   const result = await pool.query(
-    `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1${source === 'plot_status' ? " AND status = 'pending'" : ''} RETURNING *`,
+    `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1${source === 'plot_status' ? " AND status = 'pending'" : ''}${req.assignedApprovalsOnly ? ' AND assigned_admin_id = $2' : ''} RETURNING *`,
     [entryId, req.user.id]
   );
 
@@ -1177,6 +1178,7 @@ export const bulkApprove = asyncHandler(async (req, res) => {
     if (ids.length === 0) continue;
     const assignmentClause = canOverrideAssignment
       ? ''
+      : req.assignedApprovalsOnly ? ' AND assigned_admin_id = $3'
       : ' AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)';
     const result = await pool.query(
       `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW()
@@ -1306,6 +1308,7 @@ export const bulkReject = asyncHandler(async (req, res) => {
     if (ids.length === 0) continue;
     const assignmentClause = canOverrideAssignment
       ? ''
+      : req.assignedApprovalsOnly ? ' AND assigned_admin_id = $3'
       : ' AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)';
     const result = await pool.query(
       `UPDATE ${table} SET status = 'rejected', approved_by = $2, approved_at = NOW(), updated_at = NOW()
