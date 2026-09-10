@@ -1,5 +1,6 @@
 import { transactionDateEditable, currentTransactionDate } from '../services/transactionDate.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
+import { nocRegistryDate } from '../utils/nocRegistryDate.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { withRegistryPaymentVerifyUrl } from '../utils/registryPaymentReceipt.js';
@@ -886,6 +887,7 @@ const resolveNocPeople = async (db, registry, plot) => {
 const buildNocPayload = async (registryId) => {
   const registry = await plotRegistryModel.findByIdWithTotals(registryId, pool);
   if (!registry) return null;
+  registry.registry_date = nocRegistryDate(undefined, registry.registry_date);
 
   const plotPromise = registry.plot_id
     ? pool.query(`SELECT * FROM plots WHERE id = $1`, [registry.plot_id])
@@ -1169,7 +1171,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
   const {
     noc_no, noc_date, noc_place, noc_notes, noc_show_payments, noc_include_co_applicant,
     noc_farmer_member_id, noc_authorized_member_id, included_plot_payment_ids, inline_payments, change_note,
-    noc_farmer_member_ids, noc_authorized_member_ids, noc_client_member_ids,
+    noc_farmer_member_ids, noc_authorized_member_ids, noc_client_member_ids, registry_date,
   } = req.body;
 
   const includedIds = Array.isArray(included_plot_payment_ids)
@@ -1195,6 +1197,8 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
       return res.status(404).json({ message: 'Registry not found' });
     }
     workflowUnlocked = await readRegistryWorkflowUnlocked(client, registry.site_id);
+
+    const registryDate = nocRegistryDate(registry_date, registry.registry_date);
 
     // KYC gate: every person named on the NOC must have KYC done (override in Settings bypasses).
     const includeCo = noc_include_co_applicant === undefined || noc_include_co_applicant === null
@@ -1324,6 +1328,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
               noc_farmer_member_ids = $14::integer[],
               noc_authorized_member_ids = $15::integer[],
               noc_client_member_ids = $16::integer[],
+              registry_date = $17::date,
               noc_generated_at = NOW(),
               noc_approved_at = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_at END,
               noc_approved_by = CASE WHEN $10::boolean THEN NULL ELSE noc_approved_by END,
@@ -1346,6 +1351,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
         farmerMemberIds,
         authorizedMemberIds,
         clientMemberIds,
+        registryDate,
       ]
     );
 
@@ -1568,6 +1574,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
         ack_no: ackNo,
         revision_no: revisionNo,
         noc_date: noc_date !== undefined ? (noc_date || null) : registry.noc_date,
+        registry_date: registryDate,
         noc_place: noc_place !== undefined ? (noc_place ? String(noc_place).trim().toUpperCase() : null) : registry.noc_place,
         noc_notes: noc_notes !== undefined ? (noc_notes ? String(noc_notes).trim() : null) : registry.noc_notes,
         show_payments: showPayments,

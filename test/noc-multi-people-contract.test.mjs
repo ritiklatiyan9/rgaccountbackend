@@ -22,8 +22,8 @@ test('saveRegistryNoc persists the arrays, keeps legacy single columns, and its 
   // Legacy single columns stay synced to the first pick for older readers.
   assert.match(controller, /noc_farmer_member_id = \$12::integer/);
   assert.match(controller, /const farmerMemberId = farmerMemberIds\?\.\[0\] \|\| null/);
-  // The params array ends with the three arrays, in placeholder order.
-  assert.match(controller, /farmerMemberId,\s*authorizedMemberId,\s*farmerMemberIds,\s*authorizedMemberIds,\s*clientMemberIds,\s*\]\s*\)/);
+  // People retain their placeholder order; registry date follows as $17.
+  assert.match(controller, /farmerMemberId,\s*authorizedMemberId,\s*farmerMemberIds,\s*authorizedMemberIds,\s*clientMemberIds,\s*registryDate,\s*\]\s*\)/);
   // Extra purchasers face the KYC gate.
   assert.match(controller, /clientMemberIds\?\.length/);
   assert.match(controller, /k\.client_member_id = m\.id AND k\.status = 'VERIFIED'/);
