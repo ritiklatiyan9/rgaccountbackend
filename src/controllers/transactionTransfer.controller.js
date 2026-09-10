@@ -77,6 +77,10 @@ export const MODULES = {
     direction: 'debit',
   },
 };
+// Ledger mirror source_module (table name) → transfer type of the owning entry.
+const TYPE_BY_TABLE = Object.fromEntries(
+  Object.entries(MODULES).map(([k, v]) => [v.table, k]),
+);
 const LABEL_BY_TYPE = Object.fromEntries(
   Object.entries(MODULES).map(([k, v]) => [k, v.label]),
 );
@@ -135,15 +139,26 @@ const loadSource = async (db, req, type, id, lock = false) => {
       [parentId],
     );
     const month = months[0];
-    if (
-      !month ||
-      month.ledger_type?.toLowerCase() !== 'person' ||
-      row.source_module ||
-      row.is_firm_transaction
-    )
+    // A ledger row synced from another module is only a mirror: shift the
+    // owning entry instead, so the mirror follows it.
+    if (row.source_module) {
+      const owner = TYPE_BY_TABLE[row.source_module];
+      if (!owner || !row.source_id)
+        throw new TransferError(
+          409,
+          `Ledger entry #${id} is synced from ${row.source_module.replace(/_/g, ' ')}, which cannot be shifted. Deselect it and try again`,
+        );
+      return loadSource(db, req, owner, Number(row.source_id), lock);
+    }
+    if (row.is_firm_transaction)
       throw new TransferError(
         409,
-        'Transfer the original entry from its owning module; this is a synced or firm entry',
+        `Ledger entry #${id} is a firm / bank statement transaction and cannot be shifted. Deselect it and try again`,
+      );
+    if (!month || month.ledger_type?.toLowerCase() !== 'person')
+      throw new TransferError(
+        409,
+        `Ledger entry #${id} belongs to a site ledger, not a Personal Ledger, and cannot be shifted`,
       );
     if (month.is_locked)
       throw new TransferError(423, 'The source Personal Ledger is locked');
@@ -172,7 +187,7 @@ const loadSource = async (db, req, type, id, lock = false) => {
   )
     throw new TransferError(
       409,
-      'This is a linked or internal Day Book row. Transfer the original entry from its owning module',
+      `Day Book row #${id} is a linked or internal row. Shift the original entry from its owning module`,
     );
   await ensureSiteAccess(db, req, siteId);
   if (
@@ -182,17 +197,17 @@ const loadSource = async (db, req, type, id, lock = false) => {
   )
     throw new TransferError(
       409,
-      'Rejected, cancelled or void entries cannot be transferred',
+      `${LABEL_BY_TYPE[type]} #${id} is rejected, cancelled or void and cannot be shifted`,
     );
   if (['BOUNCED', 'RETURNED'].includes(upper(row.cheque_status)))
     throw new TransferError(
       409,
-      'Bounced or returned entries cannot be transferred',
+      `${LABEL_BY_TYPE[type]} #${id} is a bounced or returned cheque and cannot be shifted`,
     );
   if (row.source_plot_payment_id || row.include_in_noc)
     throw new TransferError(
       409,
-      'This entry is linked to a Plot Payment or NOC and cannot be transferred',
+      `${LABEL_BY_TYPE[type]} #${id} is linked to a Plot Payment or NOC and cannot be shifted`,
     );
   if (type === 'expense') {
     const linked = await db.query(
@@ -202,7 +217,7 @@ const loadSource = async (db, req, type, id, lock = false) => {
     if (linked.rows.length)
       throw new TransferError(
         409,
-        'This expense is linked to Compliance and cannot be transferred',
+        `Expense #${id} is linked to Compliance and cannot be shifted`,
       );
   }
   if (type === 'plot_payment') {
@@ -213,7 +228,7 @@ const loadSource = async (db, req, type, id, lock = false) => {
     if (linked.rows.length)
       throw new TransferError(
         409,
-        'This Plot Payment is linked to Registry / NOC and cannot be transferred',
+        `Plot Payment #${id} is linked to Registry / NOC and cannot be shifted`,
       );
   }
   const { rows: mirrors } =
@@ -240,7 +255,7 @@ const loadSource = async (db, req, type, id, lock = false) => {
   if (reconciled.rows.length)
     throw new TransferError(
       409,
-      'This entry is bank-reconciled. Remove its reconciliation link before transferring',
+      `${LABEL_BY_TYPE[type]} #${id} is bank-reconciled. Remove its reconciliation link before shifting`,
     );
   let debit = row.debit,
     credit = row.credit;
@@ -255,11 +270,11 @@ const loadSource = async (db, req, type, id, lock = false) => {
   if (number(debit) > 0 && number(credit) > 0)
     throw new TransferError(
       422,
-      'Separate entries containing both debit and credit before transferring',
+      `${LABEL_BY_TYPE[type]} #${id} has both debit and credit. Separate them before shifting`,
     );
   const net = number(credit) - number(debit);
   if (!net)
-    throw new TransferError(422, 'Zero-value entries cannot be transferred');
+    throw new TransferError(422, `${LABEL_BY_TYPE[type]} #${id} has zero value and cannot be shifted`);
   const paymentMode =
     row.payment_mode ||
     (type === 'commission' ? row.by_note : null) ||
