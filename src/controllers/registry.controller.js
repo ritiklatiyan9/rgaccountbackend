@@ -1,5 +1,6 @@
 import { transactionDateEditable, currentTransactionDate } from '../services/transactionDate.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
+import { registryCoverageSql } from '../utils/registryCashAllocation.js';
 import { nocRegistryDate } from '../utils/nocRegistryDate.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
@@ -1057,7 +1058,7 @@ export const approveRegistryNoc = asyncHandler(async (req, res) => {
     const { rows } = await client.query(
       `SELECT pr.*,
               COALESCE((
-                SELECT SUM(prp.amount)
+                SELECT ${registryCoverageSql}
                   FROM plot_registry_payments prp
                   LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
                  WHERE prp.registry_id = pr.id
@@ -1470,7 +1471,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
     // fully paid. Evaluated INSIDE the transaction, after the payment syncs
     // above, so payments added in this very save count toward the total. ──
     const totalRes = await client.query(
-      `SELECT COALESCE(SUM(prp.amount), 0)::numeric AS total_paid
+      `SELECT ${registryCoverageSql}::numeric AS total_paid
          FROM plot_registry_payments prp
          LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = $1
@@ -1532,6 +1533,13 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
          JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
          WHERE prp.registry_id = $1
            AND COALESCE(prp.include_in_noc, FALSE)
+           AND NOT (COALESCE(NULLIF(UPPER(TRIM(pp.payment_type)), ''), 'CASH') = 'CASH'
+             AND EXISTS (SELECT 1 FROM plot_registry_payments allocation
+               WHERE allocation.registry_id = prp.registry_id
+                 AND allocation.source_plot_payment_id IS NULL AND allocation.amount > 0
+                 AND COALESCE(allocation.include_in_noc, FALSE)
+                 AND COALESCE(NULLIF(UPPER(TRIM(allocation.payment_mode)), ''), 'CASH') = 'CASH'
+                 AND financial_transaction_posts('credit', allocation.status, allocation.payment_mode, allocation.cheque_status)))
            AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
          UNION ALL
          SELECT
@@ -1540,7 +1548,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
            prp.amount,
            jsonb_build_object(
              'id', prp.id,
-             'source', 'manual',
+             'source', CASE WHEN COALESCE(NULLIF(UPPER(TRIM(prp.payment_mode)), ''), 'CASH') = 'CASH' THEN 'cash_allocation' ELSE 'manual' END,
              'date', prp.payment_date,
              'amount', prp.amount,
              'mode', prp.payment_mode,

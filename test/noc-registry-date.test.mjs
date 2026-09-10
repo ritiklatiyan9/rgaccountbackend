@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { nocRegistryDate } from '../src/utils/nocRegistryDate.js';
+import { registryCoverageSql } from '../src/utils/registryCashAllocation.js';
 
 test('registry dates preserve omissions, allow clearing, and reject invalid calendar dates', () => {
   assert.equal(nocRegistryDate(undefined, '2026-09-23'), '2026-09-23');
@@ -44,7 +45,7 @@ test('generating and regenerating persist registry date in the record and revisi
     const start = source.indexOf('export const saveRegistryNoc =');
     const handler = source.slice(start, source.indexOf('\n// ═', start)).replace('export const', 'const');
     const ctx = vm.createContext({
-      pool: { connect: async () => ({ query, release() {} }) }, asyncHandler: fn => fn, nocRegistryDate,
+      pool: { connect: async () => ({ query, release() {} }) }, asyncHandler: fn => fn, nocRegistryDate, registryCoverageSql,
       readRegistryWorkflowUnlocked: async () => false, readNocKycRequired: async () => false,
       COMPANY_MEMBER_TYPES: ['PARTNER', 'EMPLOYEE', 'MEMBER'],
       buildNocPayload: async () => ({ registry: await record() }),

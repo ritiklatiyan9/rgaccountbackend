@@ -1,4 +1,5 @@
 import MasterModel from './MasterModel.js';
+import { registryCoverageSql, registryCashAllocationSql } from '../utils/registryCashAllocation.js';
 import { decorateRegistryStage } from '../utils/registryStage.js';
 
 // Memoized existence check for the handover table (migration 068) so the list
@@ -62,8 +63,8 @@ class PlotRegistryModel extends MasterModel {
       LEFT JOIN users aa ON aa.id = pr.assigned_admin_id
       LEFT JOIN LATERAL (
         SELECT
-          SUM(prp.amount)::numeric AS total_paid,
-          COUNT(*)::int            AS payment_count
+          ${registryCoverageSql}::numeric AS total_paid,
+          COUNT(*) FILTER (WHERE NOT ${registryCashAllocationSql})::int AS payment_count
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = pr.id
@@ -127,8 +128,8 @@ class PlotRegistryModel extends MasterModel {
       LEFT JOIN plots p ON pr.plot_id = p.id
       LEFT JOIN LATERAL (
         SELECT
-          SUM(prp.amount)::numeric AS total_paid,
-          COUNT(*)::int            AS payment_count
+          ${registryCoverageSql}::numeric AS total_paid,
+          COUNT(*) FILTER (WHERE NOT ${registryCashAllocationSql})::int AS payment_count
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
         WHERE prp.registry_id = pr.id
