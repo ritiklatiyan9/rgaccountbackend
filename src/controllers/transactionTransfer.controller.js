@@ -23,7 +23,7 @@ export const MODULES = {
   },
   expense: { label: 'Expenses', permission: 'expenses', table: 'expenses' },
   farmer_payment: {
-    label: 'Lands / Farmer Payments',
+    label: 'Land Purchase (Farmer Payment)',
     permission: 'farmers',
     table: 'farmer_payments',
     parent: 'farmer_id',
@@ -63,7 +63,7 @@ export const MODULES = {
     direction: 'credit',
   },
   land_sale: {
-    label: 'Land Sale Receipts',
+    label: 'Land Sale',
     permission: 'farmers',
     table: 'land_deal_payments',
     parent: 'land_deal_id',
