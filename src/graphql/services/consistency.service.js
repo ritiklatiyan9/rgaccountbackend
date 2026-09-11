@@ -11,6 +11,18 @@
 import pool from '../../config/db.js';
 
 const TOLERANCE = 0.01;
+const postedMirrorDebit = `CASE WHEN financial_transaction_posts(
+  CASE WHEN cfe.debit < 0 THEN 'credit' ELSE 'debit' END,
+  cfe.status, cfe.cash_type, cfe.cheque_status) THEN COALESCE(cfe.debit, 0) ELSE 0 END`;
+const postedMirrorCredit = `CASE WHEN financial_transaction_posts(
+  CASE WHEN cfe.credit < 0 THEN 'debit' ELSE 'credit' END,
+  cfe.status, cfe.cash_type, cfe.cheque_status) THEN COALESCE(cfe.credit, 0) ELSE 0 END`;
+const postedExpenseNet = `(CASE WHEN financial_transaction_posts(
+  CASE WHEN debit < 0 THEN 'credit' ELSE 'debit' END,
+  status, payment_mode, cheque_status) THEN COALESCE(debit, 0) ELSE 0 END
+  - CASE WHEN financial_transaction_posts(
+    CASE WHEN credit < 0 THEN 'debit' ELSE 'credit' END,
+    status, payment_mode, cheque_status) THEN COALESCE(credit, 0) ELSE 0 END)`;
 
 /**
  * Run A — Source tables (single source of truth).
@@ -24,18 +36,18 @@ async function runFromSourceTables(siteId, start, end) {
        SELECT pp.amount FROM plot_payments pp
        JOIN plots plt ON plt.id = pp.plot_id
        WHERE pp.site_id = $1 AND pp.date >= $2 AND pp.date < $3
-         AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
+         AND financial_transaction_posts(CASE WHEN pp.amount < 0 THEN 'debit' ELSE 'credit' END, pp.status, pp.payment_type, pp.cheque_status)
        UNION ALL
        SELECT pip.amount FROM plot_installment_payments pip
        JOIN plots p ON p.id = pip.plot_id
        WHERE p.site_id = $1 AND pip.payment_date >= $2 AND pip.payment_date < $3
-         AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
+         AND financial_transaction_posts(CASE WHEN pip.amount < 0 THEN 'debit' ELSE 'credit' END, pip.status, pip.payment_mode, pip.cheque_status)
        UNION ALL
        SELECT ldp.amount FROM land_deal_payments ldp
        JOIN land_deals ld ON ld.id = ldp.land_deal_id
        WHERE ld.site_id = $1 AND ld.status IN ('open', 'completed')
          AND ldp.date >= $2 AND ldp.date < $3
-         AND financial_transaction_posts('credit', ldp.status, ldp.payment_mode, ldp.cheque_status)
+         AND financial_transaction_posts(CASE WHEN ldp.amount < 0 THEN 'debit' ELSE 'credit' END, ldp.status, ldp.payment_mode, ldp.cheque_status)
      ) u`,
     [siteId, start, end]
   );
@@ -50,15 +62,14 @@ async function runFromSourceTables(siteId, start, end) {
        SELECT fp.amount AS debit FROM farmer_payments fp
        JOIN farmers f ON f.id = fp.farmer_id
        WHERE f.site_id = $1 AND fp.date >= $2 AND fp.date < $3
-         AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
+         AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
        UNION ALL
-       SELECT debit FROM expenses
+       SELECT ${postedExpenseNet} AS debit FROM expenses
        WHERE site_id = $1 AND date >= $2 AND date < $3
-         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
        UNION ALL
        SELECT amount AS debit FROM plot_commissions
        WHERE site_id = $1 AND date >= $2 AND date < $3
-         AND financial_transaction_posts('debit', status, by_note, cheque_status)
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, by_note, cheque_status)
        UNION ALL
        SELECT amount AS debit FROM plot_commission_payments
        WHERE site_id = $1 AND date >= $2 AND date < $3
@@ -69,18 +80,22 @@ async function runFromSourceTables(siteId, start, end) {
        UNION ALL
        SELECT amount AS debit FROM vendor_payments
        WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
-         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
+       UNION ALL
+       SELECT amount AS debit FROM vendor_inventory_payments
+       WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
+         AND source_vendor_payment_id IS NULL
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
        UNION ALL
        SELECT amount AS debit FROM plot_registry_payments
        WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
          AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
          AND source_plot_payment_id IS NULL
        UNION ALL
-       SELECT debit FROM day_book
+       SELECT ${postedExpenseNet} AS debit FROM day_book
        WHERE site_id = $1 AND date >= $2 AND date < $3
          AND entry_type = 'EXPENSE'
          AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
-         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      ) u`,
     [siteId, start, end]
   );
@@ -125,16 +140,15 @@ async function runFromCashFlowEntries(siteId, start, end) {
   const expenseModules = [
     'farmer_payments', 'expenses',
     'plot_commissions', 'plot_commission_payments',
-    'vendor_payments',
+    'vendor_payments', 'vendor_inventory_payments',
   ];
 
   const revPlaceholders = revenueModules.map((_, i) => `$${i + 4}`).join(', ');
   const revResult = await pool.query(
-    `SELECT COALESCE(SUM(credit), 0)::numeric AS total_credit
+    `SELECT COALESCE(SUM(${postedMirrorCredit} - ${postedMirrorDebit}), 0)::numeric AS total_credit
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND cfe.source_module IN (${revPlaceholders})
-       AND financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
        AND (
          cfe.source_module <> 'land_deal_payments'
          OR EXISTS (
@@ -149,11 +163,10 @@ async function runFromCashFlowEntries(siteId, start, end) {
 
   const expPlaceholders = expenseModules.map((_, i) => `$${i + 4}`).join(', ');
   const expResult = await pool.query(
-    `SELECT COALESCE(SUM(debit), 0)::numeric AS total_debit
+    `SELECT COALESCE(SUM(${postedMirrorDebit} - ${postedMirrorCredit}), 0)::numeric AS total_debit
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
-       AND cfe.source_module IN (${expPlaceholders})
-       AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)`,
+       AND cfe.source_module IN (${expPlaceholders})`,
     [siteId, start, end, ...expenseModules]
   );
   const totalExpense = parseFloat(expResult.rows[0].total_debit) || 0;
@@ -161,11 +174,10 @@ async function runFromCashFlowEntries(siteId, start, end) {
   // Plot registry payments — only those NOT auto-paid via a plot_payment
   // (matches canonical: source_plot_payment_id IS NULL).
   const registryResult = await pool.query(
-    `SELECT COALESCE(SUM(cfe.debit), 0)::numeric AS total
+    `SELECT COALESCE(SUM(${postedMirrorDebit} - ${postedMirrorCredit}), 0)::numeric AS total
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND cfe.source_module = 'plot_registry_payments'
-       AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
        AND EXISTS (
          SELECT 1 FROM plot_registry_payments prp
          WHERE prp.id = cfe.source_id AND prp.source_plot_payment_id IS NULL
@@ -176,11 +188,10 @@ async function runFromCashFlowEntries(siteId, start, end) {
 
   // Orphan day_book EXPENSE entries synced to cash_flow
   const orphanResult = await pool.query(
-    `SELECT COALESCE(SUM(cfe.debit), 0)::numeric AS total
+    `SELECT COALESCE(SUM(${postedMirrorDebit} - ${postedMirrorCredit}), 0)::numeric AS total
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND cfe.source_module = 'day_book'
-       AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
        AND EXISTS (
          SELECT 1 FROM day_book db
          WHERE db.id = cfe.source_id AND db.entry_type = 'EXPENSE'
@@ -252,11 +263,11 @@ export function getQueryDescriptions() {
   return {
     totalRevenue: {
       runA: 'SUM(amount) FROM posted plot/installment receipts + sold-land buyer receipts: credits count while pending; cheques wait for clearance',
-      runB: 'SUM(credit) FROM cash_flow_entries using the same credit-first and cheque-clearance policy',
+      runB: 'Posted credit minus debit from receipt mirrors, including transfer offsets and refunds',
     },
     totalExpense: {
-      runA: 'SUM(amount/debit) from debit modules only after approval; cheque debits also require clearance',
-      runB: 'SUM(debit) from matching cash-flow mirrors with the same approval and cheque-clearance policy. Person-ledger debit is excluded here because it is counted in outstanding.',
+      runA: 'Net posted payments minus recoveries from operating modules; each direction uses its approval and cheque-clearance rules',
+      runB: 'Posted debit minus credit from matching cash-flow mirrors. Personal-ledger movements are counted in outstanding.',
     },
     netProfit: {
       formula: 'totalRevenue − totalExpense',

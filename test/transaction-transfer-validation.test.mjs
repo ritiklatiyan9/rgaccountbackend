@@ -6,6 +6,8 @@ import {
   versionOf,
   normalizeEntries,
   editSource,
+  normalizeTransferFields,
+  buildTransferLegs,
 } from '../src/services/transactionTransfer.validation.js';
 const source = {
   date: '2026-09-05',
@@ -125,4 +127,35 @@ test('version covers edits even if updated_at has not changed', () => {
   };
   assert.notEqual(versionOf(row), versionOf({ ...row, amount: '101' }));
   assert.notEqual(versionOf(row), versionOf({ ...row, row_version: '11' }));
+});
+
+
+test('normalized transfer fields preserve unmatched values and enforce native lengths before preview', () => {
+  const fields = { ...source, direction: 'credit', payment_mode: 'TRANSFER', mode: 'bank', particular: 'Chosen party', remarks: 'Original note', bank_name: 'Example bank', bank_account_no: '123', bank_reference: 'UTR', bank_ifsc: 'IFSC', category: 'category', from_entity: 'Sender', to_entity: 'Recipient' };
+  const vendor = normalizeTransferFields('vendor_payment', fields);
+  assert.equal(vendor.payment_mode, 'BANK');
+  assert.equal(vendor.particular, null);
+  assert.match(vendor.remarks, /PARTY: Chosen party/);
+  assert.match(vendor.remarks, /BANK: Example bank/);
+  assert.equal(vendor.bank_reference, 'UTR');
+  assert.equal(vendor.bank_account_no, null);
+  assert.match(vendor.field_storage_note, /Note/);
+  const personal = normalizeTransferFields('personal_ledger', fields);
+  assert.equal(personal.particular, 'BANK TRANSFER');
+  assert.match(personal.remarks, /REFERENCE: UTR/);
+  assert.equal(fields.particular, 'Chosen party');
+  assert.throws(() => normalizeTransferFields('expense', { ...fields, from_entity: null, parent_name: 'A'.repeat(256) }), /255-character/);
+  assert.throws(() => normalizeTransferFields('expense', { ...fields, category: 'ß'.repeat(100) }), /100-character/);
+  assert.doesNotThrow(() => normalizeTransferFields('expense', { ...fields, remarks: 'Long note '.repeat(400) }));
+});
+test('paired posting arithmetic is exact and preserves the original bank bucket', () => {
+  const original = { ...source, amount: 100, remaining_amount: 70.25, mode: 'bank', bank_account_id: 12 };
+  const edited = editSource(original, { amount: '70.25', payment_mode: 'BANK', direction: 'credit' });
+  const legs = buildTransferLegs(original, edited, { date: '2026-10-30', userId: 2, reason: 'Change allocation' });
+  assert.equal(legs.offset.direction, 'debit');
+  assert.equal(legs.destination.amount, legs.offset.amount);
+  assert.equal(legs.destination.status, 'approved');
+  assert.equal(legs.offset.bank_account_id, 12);
+  assert.throws(() => buildTransferLegs(original, { ...edited, amount: 70.26 }, { date: '2026-10-30', userId: 2, reason: 'Change allocation' }), /remaining/);
+  assert.throws(() => buildTransferLegs(original, { ...edited, mode: 'cash' }, { date: '2026-10-30', userId: 2, reason: 'Change allocation' }), /cash or bank/);
 });

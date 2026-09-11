@@ -1,79 +1,57 @@
-# Transaction transfers
+# Transfer Entry
 
-Entries can be moved individually or in atomic batches of 1–100 within one site.
-The frontend offers an Actions (three dots) menu, existing checkbox selection,
-"Select for bulk transfer" across module pages, and a shared edit/review/confirm dialog.
-Plot summary rows first open a picker of actual payment entries; plot ownership is never moved.
+Transfer Entry preserves the original transaction and appends two approved postings on the selected transfer date. For a ₹5,000 Personal Ledger credit dated 21 October, choosing a Farmer Payment **credit** on 30 October creates a ₹5,000 Personal Ledger debit and a ₹5,000 Farmer Payment credit on 30 October. The original remains dated 21 October. Choosing a destination debit reverses both new directions; the preview shows that explicitly.
 
-Supported transaction owners: Personal Ledger, Expenses, Farmer Payments, Plot
-Payments, Plot Commission Payments, Vendor Payments, Miscellaneous Income,
-Registry Payments, Land Sale Receipts, Day Book and General Commissions.
-
-Firm transfers and internal imprest movements are paired accounting operations;
-they must use their dedicated workflows. Synced Day Book/ledger copies resolve to
-the original owner where possible. Compliance-linked, registry/NOC-linked,
-reconciled, cancelled, rejected, returned, bounced and locked entries are protected.
-Split farmer payments must first be separated into cash and bank entries.
-Destinations must exist in the same site; personal ledgers must match every entry's
-month. Receipt-only and payment-only destinations enforce their direction, and
-plot commissions enforce the agreed commission cap.
-
-## Deployment
-
-The local frontend currently points to the hosted backend through `.env.local`.
-Deploy the backend routes/service and run:
-
-```sh
-npm run migrate:universal-transfers
-```
-
-Migration 146 was applied to the configured database during implementation on 2026-09-05.
-For other environments, run the command above before enabling the frontend.
-
-Migration 146 extends the existing migration-097 audit constraints and adds the
-idempotency batch table. It does not move or rewrite accounting entries. The
-updated frontend requires the updated backend; an old backend will not accept
-the new batch-options route. No fallback silently discards edits.
+The transfer conserves the site's cash/bank balance, including its bank-account allocation, and does not create additional imprest spending. It changes the allocation between module accounts. Module totals can change while the overall money balance stays the same.
 
 ## API
 
-`POST /transaction-transfers/options` accepts `{ entries: [{source_type, source_id}] }`.
-It is a read operation. The legacy single-source GET options route remains.
-The response contains fresh source versions, editable source fields and permitted
-destinations. `POST /transaction-transfers` accepts:
+- `POST /transaction-transfers/options` accepts `entries: [{ source_type, source_id }]` and returns sources with versions and remaining amounts, permitted destinations, and today's transfer date. Existing GET options requests remain supported.
+- `POST /transaction-transfers/preview` validates the source, dates, permissions, destination, available amount, and fields. It returns the original plus the two planned postings, equal debit/credit totals, any later Personal Ledger opening adjustments, and `preview_hash`. It performs no accounting writes.
+- `POST /transaction-transfers` repeats validation under locks and requires the same payload plus the reviewed `preview_hash`. A UUID `request_id` makes the entire batch idempotent. Retry exactly the same payload after a network error; a different payload needs a new request ID.
+
+Example request:
 
 ```json
 {
-  "request_id": "a unique UUID v4",
-  "target_type": "plot_commission",
-  "target_id": 8,
-  "reason": "Correct module classification",
+  "request_id": "3b5a63b9-385a-4cbb-bb45-09b6a72c2225",
+  "target_type": "farmer_payment",
+  "target_id": 18,
+  "transfer_date": "2026-10-30",
+  "reason": "Allocate receipt to farmer account",
   "entries": [{
     "source_type": "personal_ledger",
     "source_id": 123,
-    "source_version": "version from options",
-    "edits": {"date": "2026-09-05", "amount": "100.50", "direction": "debit"}
+    "source_version": "version returned by options",
+    "edits": {"amount": "5000.00", "direction": "credit", "payment_mode": "BANK", "particular": "BANK"}
   }]
 }
 ```
 
-Source delete permission, target write permission, creator visibility and site
-access are checked server-side. Row locks and source fingerprints detect concurrent
-changes. Every deletion, destination insert, ledger/imprest trigger and audit
-write shares one database transaction. A repeated request UUID with the same
-payload returns the committed response; a changed payload is rejected.
+Amounts use two decimal places and cannot exceed the original's untransferred balance. Batches contain 1–100 distinct underlying entries from one site. Partial transfers and onward transfers from a received destination posting are supported. Source-offset rows are protected balancing records, not new transferable receipts.
 
-Transfers create Pending entries and clear old approvals and signatures. The
-original record and evidence stay in the audit snapshot, together with destination
-fields. Existing posting rules still apply: pending credits can post; debits need
-approval; cheques need clearance. Changing an instrument or financial fields resets
-cheque clearance. Extra source fields and multiple source attachments that do not
-fit the target schema remain in the transfer audit snapshot.
+The server normalizes fields before previewing and saving. Where a module has no separate party or bank-detail column, those values are preserved in its Remarks, Note, Narration, or expense Remark. The preview shows the actual instrument/text and explains that mapping; no edited detail is silently dropped.
 
-## Verification
+The original must be approved and any cheque cleared. New internal postings use cash or bank, never a new pending cheque. Changing from cash to bank or vice versa is a separate funds movement and is rejected in this allocation flow. Both posting modules require write and approval authority, plus normal creator visibility and site access. The user cannot set approval status, signatures, site, or creator through edited fields.
 
-- `npm run test:transfers`: behavioral validation, permission, stale version,
-  rollback of a second-item failure, and duplicate-request tests.
-- Frontend: `node --test src/lib/transferSources.test.mjs`; `npm run build`.
-- Isolated browser checks use mock entries and transfers. Real accounting records
-  are not moved as part of verification.
+## Modules and linked records
+
+Supported monetary owners are Personal Ledger, Expenses, Farmer Payments, Plot Payments, Project / Land Commission payments, Vendor Payments, standalone Purchasing Payments, Miscellaneous Income, Land Sale receipts, and standalone Day Book entries. Negative amounts encode the opposite direction in amount-only module tables; ordinary vendor and land-sale payments retain their positive-only constraints.
+
+Registry payment records and legacy General Commissions are excluded from the site's canonical money ledger, so they cannot be an end of a balanced money transfer. Their underlying payment must be selected instead. Firm statements, internal/linked Day Book rows, compliance-linked expenses, NOC/registry-linked plot receipts, cancelled records, uncleared cheques, and split cash/bank payments keep explicit safeguards. A vendor payment already allocated to purchasing orders is blocked until those allocations are adjusted; a linked purchasing row resolves to that same protected owner. Standalone purchasing payments can transfer directly. Bank-reconciled original payments retain their reconciliation because the original is untouched.
+
+All new plot-to-plot transfers use this same API and preview. The former plot-specific POST returns `410 UNIFIED_TRANSFER_REQUIRED`. Historic `plot_money_transfers` records remain intact; prior allocations reduce the source receipt's remaining amount.
+
+## Dates and ledger carry-forward
+
+The transfer date cannot precede any original entry. A site with date editing disabled posts on today's date, shown in the preview. A Personal Ledger selection identifies the person; the service resolves or creates that person's month for the transfer date. A newly created month carries the previous closing balance.
+
+Existing later Personal Ledger months receive the same signed transfer delta in their opening balance. The preview lists each before/change/after amount. Adding the delta preserves any existing manual opening adjustment. A locked source, target, or affected later month blocks the transfer. Monthly metadata changes and the two monetary entries commit or roll back together.
+
+## Database installation and verification
+
+Run `npm run migrate:paired-transfers` after existing application migrations. Migration 163 creates `transaction_money_transfers`, immutable links, deferred pair checks, mirror normalization, and imprest exclusions. It leaves existing accounting entries untouched. The normal `npm start` and `npm run migrate` sequences include it. Earlier posting/imprest migrations also preserve generated transfer records when rerun.
+
+Database constraints require exactly the registered source offset and destination, with matching approval, date, parent, site, bank bucket/account and opposite ledger amounts. They reject extra unregistered legs. The original, both generated rows, their mirrors, and the audit record cannot be edited or deleted independently. Further reallocations append a new balanced transfer from the received destination.
+
+Run pure validation and contract tests with `npm run test:transfers`. To execute the isolated PostgreSQL behavior/reporting tests, set `PGLITE_MODULE` to a local installation of `@electric-sql/pglite/dist/index.js` before that command. These tests create an embedded database and never use the configured application database. They cover history/date retention, all supported module directions, partial/onward transfers, approval aliases, cash/imprest preservation, bank-account preservation, future openings, stale previews, plot batch availability, rollback, idempotency, and immutable pair constraints.

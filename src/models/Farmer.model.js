@@ -36,7 +36,7 @@ class FarmerModel extends MasterModel {
         COUNT(fp.id) AS payment_count
       FROM farmers f
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
-        AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
+        AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
         -- Same sanity window the ledger applies, so a typo'd year cannot make
         -- this page disagree with the Day Book.
         AND fp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
@@ -57,7 +57,7 @@ class FarmerModel extends MasterModel {
         COUNT(fp.id) AS payment_count
       FROM farmers f
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
-        AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
+        AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
       WHERE f.id = $1
       GROUP BY f.id
     `;
@@ -73,7 +73,7 @@ class FarmerModel extends MasterModel {
         COUNT(fp.id) AS payment_count
       FROM farmers f
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
-        AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
+        AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
       WHERE f.created_by = $1
       GROUP BY f.id
       ORDER BY f.created_at DESC
@@ -106,14 +106,14 @@ class FarmerPaymentModel extends MasterModel {
 
   /** Sum of all payments for a farmer */
   async getTotalPaid(farmerId, pool) {
-    const query = `SELECT COALESCE(SUM(amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`;
+    const query = `SELECT COALESCE(SUM(amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)`;
     const result = await pool.query(query, [farmerId]);
     return parseFloat(result.rows[0].total);
   }
 
   /** Sum of all interest for a farmer */
   async getTotalInterest(farmerId, pool) {
-    const query = `SELECT COALESCE(SUM(interest_amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`;
+    const query = `SELECT COALESCE(SUM(interest_amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)`;
     const result = await pool.query(query, [farmerId]);
     return parseFloat(result.rows[0].total);
   }

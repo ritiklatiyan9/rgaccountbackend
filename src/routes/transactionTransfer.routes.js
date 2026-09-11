@@ -2,7 +2,7 @@ import express from 'express';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import {
-  getTransferOptions, handleTransferError, transferEntry,
+  getTransferOptions, handleTransferError, transferEntry, previewTransfer,
 } from '../controllers/transactionTransfer.controller.js';
 
 const router = express.Router();
@@ -11,6 +11,7 @@ router.use(requireRole('admin', 'sub_admin'));
 
 router.get('/options', getTransferOptions);
 router.post('/options', getTransferOptions);
+router.post('/preview', previewTransfer);
 router.post('/', transferEntry);
 router.use(handleTransferError);
 

@@ -51,7 +51,10 @@ const migrate = async () => {
     // mirror with a stale status/mode/cheque flag (for example a BANK receipt
     // still marked as a pending cheque), which would incorrectly suppress the
     // amount even under the correct policy. Reconcile only changed mirrors so
-    // rerunning this migration is a no-op.
+    // rerunning this migration is a no-op. Paired-transfer projections already
+    // use positive debit/credit columns and are immutable; retain their posting
+    // shape on restart. JSON lookup is compatible before migration 163 adds
+    // entry_transfer_id to these source tables.
     await client.query(`
       UPDATE cash_flow_entries cfe
          SET debit = 0,
@@ -63,6 +66,7 @@ const migrate = async () => {
              updated_at = NOW()
         FROM plot_payments pp
        WHERE cfe.source_module = 'plot_payments' AND cfe.source_id = pp.id
+         AND NULLIF(to_jsonb(pp)->>'entry_transfer_id', '') IS NULL
          AND (cfe.debit, cfe.credit, cfe.cash_type, cfe.status, cfe.cheque_status, cfe.cheque_no)
              IS DISTINCT FROM
              (0::numeric, pp.amount, cashflow_mode_bucket(pp.payment_type), pp.status, pp.cheque_status, pp.cheque_no)
@@ -93,6 +97,7 @@ const migrate = async () => {
              updated_at = NOW()
         FROM farmer_payments fp
        WHERE cfe.source_module = 'farmer_payments' AND cfe.source_id = fp.id
+         AND NULLIF(to_jsonb(fp)->>'entry_transfer_id', '') IS NULL
          AND (cfe.debit, cfe.credit, cfe.cash_type, cfe.status, cfe.cheque_status, cfe.cheque_no)
              IS DISTINCT FROM
              (fp.amount, 0::numeric, cashflow_mode_bucket(fp.payment_mode), fp.status, fp.cheque_status, fp.cheque_no)
@@ -108,6 +113,7 @@ const migrate = async () => {
              updated_at = NOW()
         FROM expenses ex
        WHERE cfe.source_module = 'expenses' AND cfe.source_id = ex.id
+         AND NULLIF(to_jsonb(ex)->>'entry_transfer_id', '') IS NULL
          AND (cfe.debit, cfe.credit, cfe.cash_type, cfe.status, cfe.cheque_status, cfe.cheque_no)
              IS DISTINCT FROM
              (ex.debit, ex.credit, cashflow_mode_bucket(ex.payment_mode), ex.status, ex.cheque_status, ex.cheque_no)
@@ -123,6 +129,7 @@ const migrate = async () => {
              updated_at = NOW()
         FROM plot_commission_payments pcp
        WHERE cfe.source_module = 'plot_commission_payments' AND cfe.source_id = pcp.id
+         AND NULLIF(to_jsonb(pcp)->>'entry_transfer_id', '') IS NULL
          AND (cfe.debit, cfe.credit, cfe.cash_type, cfe.status, cfe.cheque_status, cfe.cheque_no)
              IS DISTINCT FROM
              (pcp.amount, 0::numeric, cashflow_mode_bucket(pcp.payment_mode), pcp.status, pcp.cheque_status, pcp.cheque_no)
@@ -138,6 +145,7 @@ const migrate = async () => {
              updated_at = NOW()
         FROM vendor_payments vp
        WHERE cfe.source_module = 'vendor_payments' AND cfe.source_id = vp.id
+         AND NULLIF(to_jsonb(vp)->>'entry_transfer_id', '') IS NULL
          AND (cfe.debit, cfe.credit, cfe.cash_type, cfe.status, cfe.cheque_status, cfe.cheque_no)
              IS DISTINCT FROM
              (vp.amount, 0::numeric, cashflow_mode_bucket(vp.payment_mode), vp.status, vp.cheque_status, vp.cheque_no)
@@ -207,6 +215,7 @@ const migrate = async () => {
              updated_at = NOW()
         FROM day_book db
        WHERE cfe.source_module = 'day_book' AND cfe.source_id = db.id
+         AND NULLIF(to_jsonb(db)->>'entry_transfer_id', '') IS NULL
          AND (cfe.debit, cfe.credit, cfe.cash_type, cfe.status, cfe.cheque_status, cfe.cheque_no)
              IS DISTINCT FROM
              (db.debit, db.credit, cashflow_mode_bucket(db.payment_mode), db.status, db.cheque_status, db.cheque_no)

@@ -242,7 +242,10 @@ async function migrate() {
       AFTER INSERT OR UPDATE OR DELETE ON vendor_inventory_payments
       FOR EACH ROW EXECUTE FUNCTION sync_vendor_inventory_payment_cashflow()
     `);
-    await client.query(`UPDATE vendor_inventory_payments SET updated_at = COALESCE(updated_at, created_at, NOW())`);
+    // Re-running the startup migration must not make the old source trigger
+    // rewrite a protected paired-transfer mirror into its signed storage form.
+    await client.query(`UPDATE vendor_inventory_payments SET updated_at = COALESCE(updated_at, created_at, NOW())
+      WHERE NULLIF(to_jsonb(vendor_inventory_payments)->>'entry_transfer_id', '') IS NULL`);
 
     await client.query('COMMIT');
     await client.query('BEGIN');

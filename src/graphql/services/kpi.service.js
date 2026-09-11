@@ -35,7 +35,7 @@ const roundPct = (value) => Math.round(numberOf(value) * 100) / 100;
 // private copy of all of it.
 export async function getRevenue(siteId, start, end, excludeOldPlots = false) {
   const { rows } = await pool.query(
-    `SELECT COALESCE(SUM(credit), 0)::numeric AS total
+    `SELECT COALESCE(SUM(credit - debit), 0)::numeric AS total
        FROM ledger_entries
       WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
         AND source_key IN ('plot_payments', 'plot_installment_payments')
@@ -52,7 +52,7 @@ export async function getPlotIncoming(siteId, end, excludeOldPlots = false) {
   const { rows } = await pool.query(
      `WITH plot_receipts AS (
        SELECT COALESCE(pp.plot_id, pip.plot_id) AS plot_id,
-              COALESCE(SUM(le.credit), 0)::numeric AS received
+              COALESCE(SUM(le.credit - le.debit), 0)::numeric AS received
          FROM ledger_entries le
          LEFT JOIN plot_payments pp
            ON le.source_key = 'plot_payments' AND pp.id = le.source_id
@@ -137,9 +137,9 @@ export async function getLandProfitDetail(siteId, end) {
   const { rows } = await pool.query(
     `WITH posted_receipts AS (
        SELECT ldp.land_deal_id,
-              COALESCE(SUM(le.credit), 0)::numeric AS received,
-              COALESCE(SUM(le.credit) FILTER (WHERE le.bucket = 'cash'), 0)::numeric AS cash_received,
-              COALESCE(SUM(le.credit) FILTER (WHERE le.bucket <> 'cash'), 0)::numeric AS bank_received
+              COALESCE(SUM(le.credit - le.debit), 0)::numeric AS received,
+              COALESCE(SUM(le.credit - le.debit) FILTER (WHERE le.bucket = 'cash'), 0)::numeric AS cash_received,
+              COALESCE(SUM(le.credit - le.debit) FILTER (WHERE le.bucket <> 'cash'), 0)::numeric AS bank_received
          FROM ledger_entries le
          JOIN land_deal_payments ldp
            ON le.source_key = 'land_deal_payments' AND ldp.id = le.source_id
@@ -166,7 +166,7 @@ export async function getLandProfitDetail(siteId, end) {
        WHERE farmer_id IS NOT NULL
        GROUP BY farmer_id
      ), posted_farmer_cost AS (
-       SELECT fp.farmer_id, COALESCE(SUM(le.debit), 0)::numeric AS posted_cost
+       SELECT fp.farmer_id, COALESCE(SUM(le.debit - le.credit), 0)::numeric AS posted_cost
        FROM ledger_entries le
        JOIN farmer_payments fp
          ON le.source_key = 'farmer_payments' AND fp.id = le.source_id
@@ -220,8 +220,8 @@ export async function getLandProfitDetail(siteId, end) {
 // are cumulative; this row intentionally follows the selected dashboard range.
 export async function getLandRevenue(siteId, start, end) {
   const { rows } = await pool.query(
-    `SELECT COALESCE(SUM(le.credit), 0)::numeric AS credit,
-            COUNT(*) FILTER (WHERE le.credit <> 0)::int AS txn_count
+    `SELECT COALESCE(SUM(le.credit - le.debit), 0)::numeric AS credit,
+            COUNT(*) FILTER (WHERE le.credit <> 0 OR le.debit <> 0)::int AS txn_count
        FROM ledger_entries le
        JOIN land_deal_payments ldp
          ON le.source_key = 'land_deal_payments' AND ldp.id = le.source_id
@@ -246,22 +246,20 @@ export async function getLandRevenue(siteId, start, end) {
 // counted under that module's own source_key — e.g. OM Associates had 3
 // "…COMMISSION" Day Book rows for plots already fully paid off in
 // plot_commission_payments, double-counting ₹4,53,570 as expense.
-// `debit <> 0`, NOT `debit > 0`: a reversed/refunded payment is entered as a
-// negative-amount row in its module, and dropping those made the card show
-// what was *committed* instead of what was actually paid out — ₹5.99 cr too
-// high on OM Associates farmer payments alone. Site Balance and the
-// Revenue-vs-Expense chart already net them, so the card was the odd one out.
+// Refunds and transfer offsets can use either a signed debit or a positive
+// credit. Net both columns so the operating cost agrees with the module's
+// remaining payment balance and with the shared site ledger.
 export async function getExpenseBreakdown(siteId, start, end) {
   const { rows } = await pool.query(
     `SELECT source_key AS source_type,
-            COALESCE(SUM(debit), 0)::numeric AS total_debit,
+            COALESCE(SUM(debit - credit), 0)::numeric AS total_debit,
             COUNT(*)::int AS txn_count
        FROM ledger_entries
       WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
-        AND debit <> 0
+        AND (debit <> 0 OR credit <> 0)
         AND source_key NOT IN (
           'firm_transactions', 'personal_ledger', 'plot_payments',
-          'plot_installment_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments'
+          'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments'
         )
         AND ledger_type <> 'person'
       GROUP BY source_key`,
@@ -282,13 +280,13 @@ export async function getExpenseBreakdown(siteId, start, end) {
 // source policy above, while totalExpense remains the selected-period movement.
 export async function getRunningExpense(siteId, end) {
   const { rows } = await pool.query(
-    `SELECT COALESCE(SUM(debit), 0)::numeric AS total
+    `SELECT COALESCE(SUM(debit - credit), 0)::numeric AS total
        FROM ledger_entries
       WHERE site_id = $1 AND entry_date < $2::date
-        AND debit <> 0
+        AND (debit <> 0 OR credit <> 0)
         AND source_key NOT IN (
           'firm_transactions', 'personal_ledger', 'plot_payments',
-          'plot_installment_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments'
+          'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments'
         )
         AND ledger_type <> 'person'`,
     [siteId, end]
@@ -458,7 +456,7 @@ export async function getRegistryPayments(siteId, start, end) {
   const { rows } = await pool.query(
     `WITH activity AS (
        SELECT
-         le.credit::numeric AS amount,
+         (le.credit - le.debit)::numeric AS amount,
          le.bucket,
          UPPER(TRIM(COALESCE(p.plot_tag, ''))) = 'OLD' AS is_old
        FROM ledger_entries le
@@ -471,7 +469,7 @@ export async function getRegistryPayments(siteId, start, end) {
          AND le.entry_date >= $2::date
          AND le.entry_date < $3::date
          AND le.source_key IN ('plot_payments', 'plot_installment_payments')
-         AND le.credit <> 0
+         AND (le.credit <> 0 OR le.debit <> 0)
          AND UPPER(TRIM(COALESCE(p.status, ''))) = 'REGISTRY'
      )
      SELECT
@@ -647,7 +645,7 @@ export function profitFrom(plotIncoming, landProfitDetail, runningExpense) {
 export async function getLandProfitByFarmer(siteId, end) {
   const { rows } = await pool.query(
     `WITH posted_receipts AS (
-       SELECT ldp.land_deal_id, COALESCE(SUM(le.credit), 0)::numeric AS received
+       SELECT ldp.land_deal_id, COALESCE(SUM(le.credit - le.debit), 0)::numeric AS received
          FROM ledger_entries le
          JOIN land_deal_payments ldp ON le.source_key = 'land_deal_payments' AND ldp.id = le.source_id
         WHERE le.site_id = $1 AND le.entry_date < $2::date
@@ -665,7 +663,7 @@ export async function getLandProfitByFarmer(siteId, end) {
           AND LOWER(TRIM(COALESCE(d.status, ''))) IN ('open', 'completed')
         GROUP BY d.farmer_id
      ), paid AS (
-       SELECT fp.farmer_id, COALESCE(SUM(le.debit), 0)::numeric AS paid
+       SELECT fp.farmer_id, COALESCE(SUM(le.debit - le.credit), 0)::numeric AS paid
          FROM ledger_entries le
          JOIN farmer_payments fp ON le.source_key = 'farmer_payments' AND fp.id = le.source_id
         WHERE le.site_id = $1 AND le.entry_date < $2::date

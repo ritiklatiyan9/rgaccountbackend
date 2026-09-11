@@ -23,7 +23,8 @@ const near = (a, b) => Math.abs(a - b) < 1;
 // the divergence this check exists to catch lived in the handler, not the view.
 const modeBalance = (siteId, date) => new Promise((resolve, reject) => {
   getModeBalance(
-    { query: { site_id: String(siteId), date } },
+    // The controller scopes rows by entry visibility; without a user it sees nothing.
+    { query: { site_id: String(siteId), date }, user: { id: 0, role: 'super_admin' } },
     { json: resolve, status: () => ({ json: (b) => reject(new Error(b?.message || 'mode-balance failed')) }) },
     reject,
   );

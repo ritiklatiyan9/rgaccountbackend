@@ -101,6 +101,7 @@ const dayBookOrderKey = (entry) => {
       pp: 'plot_payments',
       pip: 'plot_installment_payments',
       vp: 'vendor_payments',
+      vip: 'vendor_inventory_payments',
       pcp: 'plot_commission_payments',
       prp: 'plot_registry_payments',
     };
@@ -670,7 +671,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
          LEFT JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
          LEFT JOIN plots p ON pcm.plot_id = p.id
         WHERE cfe.site_id = $1 AND cfe.date = $2
-          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries', 'partner_profit_payments')
+          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'vendor_inventory_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries', 'partner_profit_payments')
           AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
           AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'
           AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))`,
@@ -1070,6 +1071,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     partner_profit_payments: { prefix: 'ppp', entry_type: 'PARTNER PROFIT PAYMENT', source: 'partner_profit_payment', category: 'PARTNER PROFIT' },
     plot_installment_payments: { prefix: 'pip', entry_type: 'PLOT INSTALLMENT', source: 'plot_installment', category: 'PLOT PAYMENT' },
     vendor_payments:           { prefix: 'vp',  entry_type: 'VENDOR PAYMENT',   source: 'vendor_payment',   category: 'VENDOR' },
+    vendor_inventory_payments: { prefix: 'vip', entry_type: 'PURCHASING PAYMENT', source: 'vendor_inventory_payment', category: 'PURCHASING' },
     plot_commission_payments:  { prefix: 'pcp', entry_type: 'PLOT COMMISSION PAYMENT', source: 'commission_payment', category: 'COMMISSION' },
     land_deal_payments:        { prefix: 'ldp', entry_type: 'LAND SALE RECEIPT', source: 'land_deal_payment', category: 'LAND SALE' },
     misc_income_entries:       { prefix: 'mie', entry_type: 'MISC INCOME', source: 'misc_income_entry', category: 'MISC INCOME' },
@@ -1117,7 +1119,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     });
 
   // Merge and sort ASC by id
-  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000 };
+  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000, vip: 1000000 };
   const sortId = (x) => {
     if (typeof x.id === 'string') {
       const [prefix, n] = x.id.split('_');
@@ -1771,6 +1773,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     expenses:                  'Expenses',
     plot_commission_payments:  'Project Commissions',
     vendor_payments:           'Vendor Payments',
+    vendor_inventory_payments: 'Purchasing Payments',
     firm_transactions:         'Firm Transactions',
     day_book:                  'Direct Day Book Entry',
     personal_ledger:           'Personal Ledger',
@@ -2952,50 +2955,62 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
  * GET /daybook/verify-data?site_id=X
  * Compares each module's source table against cash_flow_entries to surface mismatches.
  */
+// SQL identifiers below are fixed application constants, never request values.
+// A negative amount reverses its posting direction; paired transfer mirrors
+// record that reversal in the opposite positive column instead.
+const reportPostedLeg = (column, direction, mode = 'payment_mode', alias = '') => {
+  const opposite = direction === 'debit' ? 'credit' : 'debit';
+  return `(CASE WHEN financial_transaction_posts(
+    CASE WHEN ${alias}${column} < 0 THEN '${opposite}' ELSE '${direction}' END,
+    ${alias}status, ${alias}${mode}, ${alias}cheque_status)
+    THEN COALESCE(${alias}${column},0) ELSE 0 END)`;
+};
+const reportPostedNet = (direction = 'debit', mode = 'payment_mode', alias = '') =>
+  `(${reportPostedLeg(direction, direction, mode, alias)} - ${reportPostedLeg(direction === 'debit' ? 'credit' : 'debit', direction === 'debit' ? 'credit' : 'debit', mode, alias)})`;
+const reportPostedRow = (mode = 'payment_mode') =>
+  `(${reportPostedLeg('debit', 'debit', mode)} <> 0 OR ${reportPostedLeg('credit', 'credit', mode)} <> 0)`;
+
 export const verifyData = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
   const siteId = parseInt(site_id);
-
   const modules = [];
+  const sourceAmount = async (table, direction = 'debit', mode = 'payment_mode', where = 'site_id = $1') => {
+    const value = reportPostedLeg('amount', direction, mode);
+    return (await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(${value}),0)::numeric AS total
+      FROM ${table} WHERE ${where} AND ${value} <> 0`, [siteId])).rows[0];
+  };
+  const sourceColumns = async (table, where = 'site_id = $1') =>
+    (await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(${reportPostedNet()}),0)::numeric AS total
+      FROM ${table} WHERE ${where} AND ${reportPostedRow()}`, [siteId])).rows[0];
+  const mirror = async (source, direction = 'debit') =>
+    (await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(${reportPostedNet(direction, 'cash_type')}),0)::numeric AS total
+      FROM cash_flow_entries WHERE site_id = $1 AND source_module = $2 AND ${reportPostedRow('cash_type')}`, [siteId, source])).rows[0];
+  const append = (module, source, synced, type = 'expense', extra = {}) => modules.push({
+    module, sourceTotal: Number(source.total), sourceCount: Number(source.cnt),
+    cfeTotal: Number(synced.total), cfeCount: Number(synced.cnt), type, ...extra,
+  });
 
-  // Plot Payments (earn)
-  const pp = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(amount),0)::numeric AS total FROM plot_payments WHERE site_id = $1 AND amount <> 0 AND financial_transaction_posts('credit', status, payment_type, cheque_status)`, [siteId]);
-  const ppI = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(pip.amount),0)::numeric AS total FROM plot_installment_payments pip JOIN plots p ON p.id = pip.plot_id WHERE p.site_id = $1 AND pip.amount <> 0 AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)`, [siteId]);
-  const ppC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(credit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'plot_payments' AND credit <> 0 AND financial_transaction_posts('credit', status, cash_type, cheque_status)`, [siteId]);
-  const ppIC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(credit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'plot_installment_payments' AND credit <> 0 AND financial_transaction_posts('credit', status, cash_type, cheque_status)`, [siteId]);
-  modules.push({ module: 'Plot Payments', sourceTotal: parseFloat(pp.rows[0].total) + parseFloat(ppI.rows[0].total), sourceCount: parseInt(pp.rows[0].cnt) + parseInt(ppI.rows[0].cnt), cfeTotal: parseFloat(ppC.rows[0].total) + parseFloat(ppIC.rows[0].total), cfeCount: parseInt(ppC.rows[0].cnt) + parseInt(ppIC.rows[0].cnt), type: 'earn' });
+  const pp = await sourceAmount('plot_payments', 'credit', 'payment_type');
+  const pip = await sourceAmount('plot_installment_payments', 'credit', 'payment_mode', 'plot_id IN (SELECT id FROM plots WHERE site_id = $1)');
+  const ppC = await mirror('plot_payments', 'credit');
+  const pipC = await mirror('plot_installment_payments', 'credit');
+  append('Plot Payments', {total: Number(pp.total) + Number(pip.total), cnt: Number(pp.cnt) + Number(pip.cnt)},
+    {total: Number(ppC.total) + Number(pipC.total), cnt: Number(ppC.cnt) + Number(pipC.cnt)}, 'earn');
 
-  // Farmer Payments
-  const fp = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(fp.amount),0)::numeric AS total FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id WHERE f.site_id = $1 AND fp.amount <> 0 AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)`, [siteId]);
-  const fpC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'farmer_payments' AND debit <> 0 AND financial_transaction_posts('debit', status, cash_type, cheque_status)`, [siteId]);
-  const fpD = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM day_book WHERE site_id = $1 AND entry_type = 'FARMER PAYMENT' AND debit <> 0 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`, [siteId]);
-  modules.push({ module: 'Farmer Payments', sourceTotal: parseFloat(fp.rows[0].total), sourceCount: parseInt(fp.rows[0].cnt), cfeTotal: parseFloat(fpC.rows[0].total), cfeCount: parseInt(fpC.rows[0].cnt), daybookTotal: parseFloat(fpD.rows[0].total), daybookCount: parseInt(fpD.rows[0].cnt), type: 'expense' });
-
-  // Expenses
-  const ex = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM expenses WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`, [siteId]);
-  const exC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'expenses' AND financial_transaction_posts('debit', status, cash_type, cheque_status)`, [siteId]);
-  modules.push({ module: 'Expenses', sourceTotal: parseFloat(ex.rows[0].total), sourceCount: parseInt(ex.rows[0].cnt), cfeTotal: parseFloat(exC.rows[0].total), cfeCount: parseInt(exC.rows[0].cnt), type: 'expense' });
-
-  // Plot Commissions
-  const pc = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(amount),0)::numeric AS total FROM plot_commissions WHERE site_id = $1 AND financial_transaction_posts('debit', status, by_note, cheque_status)`, [siteId]);
-  const pcC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'plot_commissions' AND financial_transaction_posts('debit', status, cash_type, cheque_status)`, [siteId]);
-  modules.push({ module: 'Project Commissions', sourceTotal: parseFloat(pc.rows[0].total), sourceCount: parseInt(pc.rows[0].cnt), cfeTotal: parseFloat(pcC.rows[0].total), cfeCount: parseInt(pcC.rows[0].cnt), type: 'expense' });
-
-  // Commission Payments
-  const pcp = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(amount),0)::numeric AS total FROM plot_commission_payments WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`, [siteId]);
-  const pcpC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'plot_commission_payments' AND financial_transaction_posts('debit', status, cash_type, cheque_status)`, [siteId]);
-  modules.push({ module: 'Commission Payments', sourceTotal: parseFloat(pcp.rows[0].total), sourceCount: parseInt(pcp.rows[0].cnt), cfeTotal: parseFloat(pcpC.rows[0].total), cfeCount: parseInt(pcpC.rows[0].cnt), type: 'expense' });
-
-  // Vendor Payments
-  const vp = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(amount),0)::numeric AS total FROM vendor_payments WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`, [siteId]);
-  const vpC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'vendor_payments' AND financial_transaction_posts('debit', status, cash_type, cheque_status)`, [siteId]);
-  modules.push({ module: 'Vendor Payments', sourceTotal: parseFloat(vp.rows[0].total), sourceCount: parseInt(vp.rows[0].cnt), cfeTotal: parseFloat(vpC.rows[0].total), cfeCount: parseInt(vpC.rows[0].cnt), type: 'expense' });
-
-  // Plot Registry Payments
-  const prp = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(amount),0)::numeric AS total FROM plot_registry_payments WHERE site_id = $1 AND financial_transaction_posts('debit', status, payment_mode, cheque_status)`, [siteId]);
-  const prpC = await pool.query(`SELECT COUNT(*)::int AS cnt, COALESCE(SUM(debit),0)::numeric AS total FROM cash_flow_entries WHERE site_id = $1 AND source_module = 'plot_registry_payments' AND financial_transaction_posts('debit', status, cash_type, cheque_status)`, [siteId]);
-  modules.push({ module: 'Registry Payments', sourceTotal: parseFloat(prp.rows[0].total), sourceCount: parseInt(prp.rows[0].cnt), cfeTotal: parseFloat(prpC.rows[0].total), cfeCount: parseInt(prpC.rows[0].cnt), type: 'expense' });
+  const farmer = await sourceAmount('farmer_payments', 'debit', 'payment_mode', 'farmer_id IN (SELECT id FROM farmers WHERE site_id = $1)');
+  const farmerDaybook = await sourceColumns('day_book', "site_id = $1 AND entry_type = 'FARMER PAYMENT'");
+  append('Farmer Payments', farmer, await mirror('farmer_payments'), 'expense', {
+    daybookTotal: Number(farmerDaybook.total), daybookCount: Number(farmerDaybook.cnt),
+  });
+  append('Expenses', await sourceColumns('expenses'), await mirror('expenses'));
+  for (const [module, table, mode, where] of [
+    ['Project Commissions', 'plot_commissions', 'by_note'],
+    ['Commission Payments', 'plot_commission_payments', 'payment_mode'],
+    ['Vendor Payments', 'vendor_payments', 'payment_mode'],
+    ['Purchasing Payments', 'vendor_inventory_payments', 'payment_mode', 'site_id = $1 AND source_vendor_payment_id IS NULL'],
+    ['Registry Payments', 'plot_registry_payments', 'payment_mode'],
+  ]) append(module, await sourceAmount(table, 'debit', mode, where), await mirror(table));
 
   // Firm Transactions
   const ft = await pool.query(`SELECT COUNT(*) FILTER (WHERE financial_transaction_posts('debit', ft.status, ft.payment_mode, ft.cheque_status) OR financial_transaction_posts('credit', ft.status, ft.payment_mode, ft.cheque_status))::int AS cnt, COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', ft.status, ft.payment_mode, ft.cheque_status)),0)::numeric AS td, COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', ft.status, ft.payment_mode, ft.cheque_status)),0)::numeric AS tc FROM firm_transactions ft JOIN firms f ON f.id = ft.firm_id WHERE f.site_id = $1`, [siteId]);
@@ -3039,17 +3054,17 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
      FROM (
        SELECT amount, 'plot_payments' AS source_type FROM plot_payments
        WHERE site_id = $1
-         AND financial_transaction_posts('credit', status, payment_type, cheque_status)
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'debit' ELSE 'credit' END, status, payment_type, cheque_status)
        UNION ALL
        SELECT amount, 'plot_payments' AS source_type FROM plot_installment_payments
        WHERE plot_id IN (SELECT id FROM plots WHERE site_id = $1)
-         AND financial_transaction_posts('credit', status, payment_mode, cheque_status)
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'debit' ELSE 'credit' END, status, payment_mode, cheque_status)
        UNION ALL
        SELECT ldp.amount, 'land_deal_payments' AS source_type
        FROM land_deal_payments ldp
        JOIN land_deals ld ON ld.id = ldp.land_deal_id
        WHERE ld.site_id = $1 AND ld.status IN ('open', 'completed')
-         AND financial_transaction_posts('credit', ldp.status, ldp.payment_mode, ldp.cheque_status)
+         AND financial_transaction_posts(CASE WHEN ldp.amount < 0 THEN 'debit' ELSE 'credit' END, ldp.status, ldp.payment_mode, ldp.cheque_status)
      ) u
      GROUP BY source_type`,
     [siteId]
@@ -3068,40 +3083,43 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
        FROM farmer_payments fp
        JOIN farmers f ON f.id = fp.farmer_id
        WHERE f.site_id = $1
-         AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
+         AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
        UNION ALL
-       SELECT debit, 'expenses' AS source_type
+       SELECT ${reportPostedNet()} AS debit, 'expenses' AS source_type
        FROM expenses
        WHERE site_id = $1
-         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
        UNION ALL
        SELECT amount AS debit, 'plot_registry_payments' AS source_type
        FROM plot_registry_payments
        WHERE site_id = $1
-         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
          AND source_plot_payment_id IS NULL
        UNION ALL
        SELECT amount AS debit, 'commissions' AS source_type
        FROM plot_commissions
        WHERE site_id = $1
-         AND financial_transaction_posts('debit', status, by_note, cheque_status)
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, by_note, cheque_status)
        UNION ALL
        SELECT amount AS debit, 'commission_payments' AS source_type
        FROM plot_commission_payments
        WHERE site_id = $1
-         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
        UNION ALL
        SELECT amount AS debit, 'vendor_payments' AS source_type
        FROM vendor_payments
        WHERE site_id = $1
-         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
        UNION ALL
-       SELECT debit, 'expenses' AS source_type
+       SELECT amount AS debit, 'vendor_inventory_payments' AS source_type
+       FROM vendor_inventory_payments
+       WHERE site_id = $1 AND source_vendor_payment_id IS NULL
+         AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
+       UNION ALL
+       SELECT ${reportPostedNet()} AS debit, 'expenses' AS source_type
        FROM day_book
        WHERE site_id = $1
          AND entry_type = 'EXPENSE'
          AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
-         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
      ) u
      GROUP BY source_type`,
     [siteId]
@@ -3125,7 +3143,7 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
   // ── Ledger flow: non-profit entries, separated by site vs person ledger_type ──
   const profitModules = [
     'plot_payments', 'farmer_payments', 'expenses',
-    'plot_commissions', 'plot_commission_payments', 'vendor_payments',
+    'plot_commissions', 'plot_commission_payments', 'vendor_payments', 'vendor_inventory_payments',
     'plot_installment_payments', 'land_deal_payments', 'plot_registry_payments',
   ];
 
@@ -3239,6 +3257,7 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
     `WITH first_date AS (
        SELECT LEAST(
          COALESCE((SELECT MIN(date) FROM plot_payments WHERE site_id = $1 AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
+         COALESCE((SELECT MIN(payment_date) FROM vendor_inventory_payments WHERE site_id = $1 AND source_vendor_payment_id IS NULL AND payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
          COALESCE((SELECT MIN(e.date) FROM expenses e WHERE e.site_id = $1 AND e.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
          COALESCE((SELECT MIN(db.date) FROM day_book db WHERE db.site_id = $1 AND db.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
          COALESCE((SELECT MIN(ldp.date) FROM land_deal_payments ldp JOIN land_deals ld ON ld.id = ldp.land_deal_id WHERE ld.site_id = $1 AND ldp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now())
@@ -3259,19 +3278,19 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
          SELECT date, amount FROM plot_payments
          WHERE site_id = $1
            AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('credit', status, payment_type, cheque_status)
+           AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'debit' ELSE 'credit' END, status, payment_type, cheque_status)
          UNION ALL
          SELECT pip.payment_date AS date, pip.amount FROM plot_installment_payments pip
          JOIN plots p ON p.id = pip.plot_id
          WHERE p.site_id = $1
            AND pip.payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('credit', pip.status, pip.payment_mode, pip.cheque_status)
+           AND financial_transaction_posts(CASE WHEN pip.amount < 0 THEN 'debit' ELSE 'credit' END, pip.status, pip.payment_mode, pip.cheque_status)
          UNION ALL
          SELECT ldp.date, ldp.amount FROM land_deal_payments ldp
          JOIN land_deals ld ON ld.id = ldp.land_deal_id
          WHERE ld.site_id = $1 AND ld.status IN ('open', 'completed')
            AND ldp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('credit', ldp.status, ldp.payment_mode, ldp.cheque_status)
+           AND financial_transaction_posts(CASE WHEN ldp.amount < 0 THEN 'debit' ELSE 'credit' END, ldp.status, ldp.payment_mode, ldp.cheque_status)
        ) u
        GROUP BY 1
      ),
@@ -3282,33 +3301,42 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
          JOIN farmers f ON f.id = fp.farmer_id
          WHERE f.site_id = $1
            AND fp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
+           AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
          UNION ALL
-         SELECT date, debit FROM expenses
+         SELECT date, ${reportPostedNet()} AS debit FROM expenses
          WHERE site_id = $1
            AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
          UNION ALL
          SELECT payment_date AS date, amount AS debit FROM plot_registry_payments
          WHERE site_id = $1
            AND payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
+           AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
            AND source_plot_payment_id IS NULL
          UNION ALL
          SELECT date, amount AS debit FROM plot_commissions
          WHERE site_id = $1
            AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('debit', status, by_note, cheque_status)
+           AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, by_note, cheque_status)
          UNION ALL
          SELECT date, amount AS debit FROM plot_commission_payments
          WHERE site_id = $1
            AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
+           AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
          UNION ALL
          SELECT payment_date AS date, amount AS debit FROM vendor_payments
          WHERE site_id = $1
            AND payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-           AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
+           AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
+         UNION ALL
+         SELECT payment_date AS date, amount AS debit FROM vendor_inventory_payments
+         WHERE site_id = $1 AND source_vendor_payment_id IS NULL
+           AND payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
+           AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
+         UNION ALL
+         SELECT date, ${reportPostedNet()} AS debit FROM day_book
+         WHERE site_id = $1 AND entry_type = 'EXPENSE'
+           AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
+           AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
        ) u
        GROUP BY 1
      )

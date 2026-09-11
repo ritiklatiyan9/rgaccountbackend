@@ -35,6 +35,8 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          SELECT MIN(date)    AS d FROM plot_commission_payments WHERE site_id = $1 AND date >= $2 AND date < $3
          UNION ALL
          SELECT MIN(payment_date) FROM vendor_payments          WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
+         UNION ALL
+         SELECT MIN(payment_date) FROM vendor_inventory_payments WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3 AND source_vendor_payment_id IS NULL
        ) sub
      ),
      last_entry AS (
@@ -57,6 +59,8 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          SELECT MAX(date)    AS d FROM plot_commission_payments WHERE site_id = $1 AND date >= $2 AND date < $3
          UNION ALL
          SELECT MAX(payment_date) FROM vendor_payments          WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
+         UNION ALL
+         SELECT MAX(payment_date) FROM vendor_inventory_payments WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3 AND source_vendor_payment_id IS NULL
        ) sub
      ),
      range_series AS (
@@ -74,7 +78,7 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
        )::date AS bucket
      ),
      earn AS (
-       SELECT date_trunc($4::text, entry_date)::date AS bucket, COALESCE(SUM(credit), 0)::numeric AS total
+       SELECT date_trunc($4::text, entry_date)::date AS bucket, COALESCE(SUM(credit - debit), 0)::numeric AS total
        FROM ledger_entries le
        WHERE le.site_id = $1 AND le.entry_date >= $2 AND le.entry_date < $3
          AND le.source_key IN ('plot_payments', 'plot_installment_payments', 'land_deal_payments')
@@ -91,11 +95,11 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
        GROUP BY 1
      ),
      exp AS (
-       SELECT date_trunc($4::text, entry_date)::date AS bucket, COALESCE(SUM(debit), 0)::numeric AS total
+       SELECT date_trunc($4::text, entry_date)::date AS bucket, COALESCE(SUM(debit - credit), 0)::numeric AS total
        FROM ledger_entries
        WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
-         AND debit <> 0
-         AND source_key NOT IN ('plot_payments', 'plot_installment_payments', 'day_book', 'misc_income_entries', 'firm_transactions', 'partner_profit_payments')
+         AND (debit <> 0 OR credit <> 0)
+         AND source_key NOT IN ('plot_payments', 'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'firm_transactions', 'partner_profit_payments')
          AND ledger_type <> 'person'
        GROUP BY 1
      )
@@ -141,11 +145,15 @@ export async function getProfitTrend(siteId, start, end, resolution = 'MONTH', e
  */
 export async function getExpenseByCategory(siteId, start, end, top = 8) {
   const { rows } = await pool.query(
-    `SELECT category, COALESCE(SUM(debit), 0)::numeric AS total
+    `SELECT category, COALESCE(SUM(
+       CASE WHEN financial_transaction_posts(CASE WHEN debit < 0 THEN 'credit' ELSE 'debit' END,
+         status, payment_mode, cheque_status) THEN debit ELSE 0 END
+       - CASE WHEN financial_transaction_posts(CASE WHEN credit < 0 THEN 'debit' ELSE 'credit' END,
+         status, payment_mode, cheque_status) THEN credit ELSE 0 END
+     ), 0)::numeric AS total
      FROM expenses
      WHERE site_id = $1 AND date >= $2 AND date < $3
-       AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
-       AND debit > 0
+       AND (debit <> 0 OR credit <> 0)
      GROUP BY category
      ORDER BY total DESC
      LIMIT $4`,

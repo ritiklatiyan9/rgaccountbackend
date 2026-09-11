@@ -9,7 +9,7 @@ export class TransferError extends Error {
 export const asId = (value, label = 'id') => {
   if (
     !/^[1-9]\d*$/.test(String(value)) ||
-    !Number.isSafeInteger(Number(value))
+    (!Number.isSafeInteger(Number(value)) || Number(value)>2147483647)
   ) {
     throw new TransferError(400, `A valid ${label} is required`);
   }
@@ -159,5 +159,105 @@ export const editSource = (source, edits = {}) => {
   result.customer_signature_url = null;
   result.authority_signature_url = null;
   result.raw_mode = result.payment_mode;
+  return result;
+};
+
+// All arithmetic uses integer minor units, including partial-transfer limits.
+export const moneyCents = value => {
+  const n = Number(value);
+  const cents = Math.round(n * 100);
+  if (!Number.isFinite(n) || !Number.isSafeInteger(cents)) throw new TransferError(422, 'Invalid monetary amount');
+  return cents;
+};
+export const buildTransferLegs = (source, edited, { date, userId, reason }) => {
+  if (moneyCents(edited.amount) > moneyCents(source.remaining_amount ?? source.amount))
+    throw new TransferError(409, 'Transfer exceeds the amount remaining on the original entry');
+  if ((source.mode === 'cash') !== (edited.mode === 'cash'))
+    throw new TransferError(422, 'Keep both transfer entries in the original cash or bank balance');
+  if (edited.mode === 'cheque') throw new TransferError(422, 'Use BANK for an internal transfer of a cleared cheque; a transfer does not issue a new cheque');
+  const shared = {
+    date, amount: edited.amount, payment_mode: edited.payment_mode,
+    raw_mode: edited.payment_mode, mode: edited.mode,
+    bank_account_id: edited.mode==='cash' ? null : source.bank_account_id || null,
+    status: 'approved', approved_by: userId, approved_at: new Date().toISOString(),
+    cheque_status: null, cheque_no: null, created_by: userId,
+    customer_signature_url: null, authority_signature_url: null,
+    // These paired internal postings must not create an admin's cash expense
+    // or reuse the original customer's signed authorization.
+    assigned_admin_id: null,
+    raw: { ...source.raw, mapped_member_id: null, mapped_user_id: null, interest_rate: 0, interest_amount: 0 },
+  };
+  const destination = { ...edited, ...shared, remarks: [edited.remarks, `TRANSFER: ${reason}`].filter(Boolean).join(' · ') };
+  const offset = { ...source, ...shared, direction: edited.direction === 'credit' ? 'debit' : 'credit',
+    remarks: `TRANSFER OFFSET: ${reason}`, is_source_offset: true };
+  return { destination, offset };
+};
+
+// Canonicalize the plan before it is previewed. Several modules intentionally
+// have a single narrative column instead of separate party/bank-detail fields.
+// Preserve every entered value there and make that storage mapping explicit.
+export const normalizeTransferFields = (type, entry) => {
+  const result = { ...entry };
+  const textParts = [];
+  const moved = [];
+  const moveToNarrative = (key, label) => {
+    if (result[key]) { textParts.push(`${label}: ${result[key]}`); moved.push(label.toLowerCase()); }
+    result[key] = null;
+  };
+  const vendor = ['vendor_payment','vendor_inventory_payment'].includes(type);
+  if (vendor && !['CASH','BANK','UPI','NEFT','RTGS','IMPS'].includes(result.payment_mode)) {
+    result.payment_mode = result.raw_mode = 'BANK';
+  }
+  if (['plot_payment','plot_commission','vendor_payment','vendor_inventory_payment','land_sale'].includes(type)) moveToNarrative('particular','PARTY');
+  if (!['expense','daybook'].includes(type)) {
+    moveToNarrative('category','CATEGORY');
+    moveToNarrative('from_entity','FROM');
+    moveToNarrative('to_entity','TO');
+  }
+  const bankFields = {
+    personal_ledger: [], expense: ['bank_account_no','bank_ifsc'],
+    farmer_payment: ['bank_name','bank_account_no','bank_ifsc','bank_reference'],
+    plot_payment: ['bank_name','bank_account_no','bank_ifsc'],
+    plot_commission: ['bank_name','bank_reference'],
+    vendor_payment: ['bank_reference'], vendor_inventory_payment: ['bank_reference'],
+    misc_income: ['bank_name','bank_account_no','bank_ifsc','bank_reference'],
+    land_sale: ['bank_name','bank_account_no','bank_ifsc','bank_reference'],
+    daybook: ['bank_account_no','bank_ifsc'],
+  }[type] || [];
+  for (const [key,label] of Object.entries({bank_name:'BANK',bank_account_no:'ACCOUNT',bank_ifsc:'IFSC',bank_reference:'REFERENCE'}))
+    if (!bankFields.includes(key)) moveToNarrative(key,label);
+  if (type==='personal_ledger') {
+    const instrument = String(result.payment_mode || result.mode || 'CASH').toUpperCase().replace(/^TRANSFER$/,'BANK TRANSFER');
+    if (String(result.particular || '').toUpperCase() !== instrument) moveToNarrative('particular','PARTY');
+    result.particular=instrument;
+  }
+  if (type==='expense') {
+    const party=entry.parent_name || entry.particular || 'TRANSFERRED ENTRY';
+    result.from_entity=result.from_entity || (result.direction==='credit'?party:null);
+    result.to_entity=result.to_entity || (result.direction==='debit'?party:null);
+    result.category=String(result.category || 'TRANSFERRED ENTRY').toUpperCase();
+    result.particular=[result.particular,result.remarks,...textParts].filter(Boolean).join(' · ').toUpperCase();
+    result.remarks=null;
+    result.field_storage_note='The expense Remark contains the party, remarks and additional bank details.';
+  } else {
+    result.remarks=[result.remarks,...textParts].filter(Boolean).join(' · ');
+    if(type==='daybook') result.category=result.category || 'TRANSFERRED ENTRY';
+    if(moved.length) result.field_storage_note=`Additional ${[...new Set(moved)].join(', ')} details are saved in ${vendor?'Note':type==='plot_payment'?'Narration':'Remarks'}.`;
+  }
+  // Narrative columns are TEXT. Enforce each dedicated column's native limit
+  // after defaults/case conversion, before issuing a reviewable preview.
+  const nativeLimits = {
+    personal_ledger: { particular: 500 },
+    expense: { from_entity: 255, to_entity: 255, category: 100, bank_account_no: 100, bank_ifsc: 255 },
+    farmer_payment: { particular: 255, bank_name: 255, bank_account_no: 100, bank_reference: 255, bank_ifsc: 20 },
+    plot_payment: { bank_name: 150, bank_account_no: 255, bank_ifsc: 150 },
+    plot_commission: { bank_name: 100, bank_reference: 100 },
+    vendor_payment: { bank_reference: 120 }, vendor_inventory_payment: { bank_reference: 120 },
+    misc_income: { particular: 255, bank_name: 150, bank_account_no: 50, bank_reference: 120, bank_ifsc: 20 },
+    land_sale: { bank_name: 150, bank_account_no: 50, bank_reference: 120, bank_ifsc: 20 },
+    daybook: { particular: 500, from_entity: 255, to_entity: 255, category: 100, bank_account_no: 100, bank_ifsc: 255 },
+  }[type] || {};
+  for(const [key,limit] of Object.entries(nativeLimits)) if(result[key] && Array.from(String(result[key])).length>limit)
+    throw new TransferError(422,`${key.replaceAll('_',' ')} exceeds this destination's ${limit}-character limit. Shorten it before previewing`);
   return result;
 };

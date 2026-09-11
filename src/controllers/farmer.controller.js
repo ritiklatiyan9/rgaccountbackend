@@ -427,7 +427,7 @@ export const listPayments = asyncHandler(async (req, res) => {
        s.state AS site_state
      FROM farmers f
      LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
-       AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
+       AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
        AND ($2::text IS NULL OR fp.created_by = ANY(string_to_array($2::text, ',')::int[]))
      LEFT JOIN sites s ON s.id = f.site_id
      WHERE f.id = $1

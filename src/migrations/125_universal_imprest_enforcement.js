@@ -676,7 +676,8 @@ const migrate = async () => {
         -- plot_registry_payments, imprest/document_imprest and ordinary module
         -- mirrors included). Only a true direct Personal Ledger row is owned
         -- here, and a direct row linked from a firm transaction is its mirror.
-        IF v_entry.source_module IS NOT NULL OR v_is_firm_mirror THEN
+        IF v_entry.source_module IS NOT NULL OR v_is_firm_mirror
+          OR NULLIF(to_jsonb(v_entry)->>'entry_transfer_id', '') IS NOT NULL THEN
           PERFORM reconcile_imprest_debit(
             'cash_flow_entry', p_entry_id, v_entry.created_by, v_entry.site_id,
             0, FALSE, FALSE, 'DERIVED CASH-FLOW MIRROR', NULL
@@ -728,6 +729,13 @@ const migrate = async () => {
         v_old_cashflow_id INTEGER;
       BEGIN
         v_reference_id := NULLIF(v_row->>'id', '')::integer;
+
+        -- Generated transfer adjustments do not spend imprest.
+        -- The transfer FK/pair constraint authorizes these immutable legs.
+        IF NULLIF(v_row->>'entry_transfer_id', '') IS NOT NULL THEN
+          IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+          RETURN NEW;
+        END IF;
 
         IF TG_TABLE_NAME = 'cash_flow_entries' THEN
           IF TG_OP = 'DELETE' THEN
