@@ -825,6 +825,14 @@ export const updateTransaction = asyncHandler(async (req, res) => {
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
 
+  // An edit to posted money must be reviewed again, like every other module.
+  const postingFields = new Set(['date', 'debit', 'credit', 'payment_mode', 'cheque_no']);
+  if (Object.keys(updateData).some((key) => postingFields.has(key))) {
+    updateData.status = 'pending';
+    updateData.approved_by = null;
+    updateData.approved_at = null;
+  }
+
   // ── If a linked CF entry exists, fetch (cf_entry + cf_month + firm) in
   //    ONE query in parallel with the main UPDATE. Was up to 4 serial RTTs:
   //    UPDATE → cfEntry SELECT → cfMonth SELECT → firm SELECT → cfEntry UPDATE.

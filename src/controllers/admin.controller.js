@@ -282,6 +282,12 @@ const APPROVAL_MODULES = [
   'plot_payment',
   'expense',
   'daybook',
+  // Modules that reach the approval queue but had no grantable entry, so a
+  // sub-admin could only ever see rows assigned to them one by one.
+  'misc_income_entry',
+  'vendor_payment',
+  'plot_registry_payment',
+  'plot_installment_payment',
 ];
 
 // Ensure the table exists (safe to call multiple times)
