@@ -7,6 +7,7 @@ import {
 } from '../services/imprestPosting.service.js';
 import { notifyApprovedPlotPayment } from '../services/plotPaymentNotification.service.js';
 import { CHEQUE_STATUSES, updateChequeStatusRecord } from '../services/chequeStatus.service.js';
+import { decideTransferApproval } from './transactionTransfer.controller.js';
 
 /**
  * Unified approval controller for all financial modules.
@@ -253,6 +254,31 @@ export const listAllPending = asyncHandler(async (req, res) => {
     }
     return { where: conditions.join(' AND '), params };
   };
+
+  // A paired transfer is reviewed as one request. Its two financial legs do
+  // not exist yet, so the approval queue cannot accidentally approve one side.
+  if ((!module || module === 'transaction_transfer') && await hasRelation('transaction_transfer_approval_requests')) {
+    const scopedReviewer = req.user.role === 'sub_admin' ? req.user.id : null;
+    const { where, params } = buildWhere('tar', 'tar', [], scopedReviewer, 'pending', 'transfer_date');
+    const { rows } = await pool.query(`
+      SELECT tar.*,tar.transfer_date AS date,tar.amount AS debit,tar.amount AS credit,
+        'INTERNAL' AS payment_mode,s.name AS site_name,
+        requester.name AS created_by_name,reviewer.name AS assigned_admin_name,
+        tar.target_label AS entity_name,'Balanced transfer' AS entity_type,
+        tar.source_label AS entity_secondary,'transaction_transfer' AS source
+      FROM transaction_transfer_approval_requests tar
+      JOIN sites s ON s.id=tar.site_id
+      LEFT JOIN users requester ON requester.id=tar.requested_by
+      LEFT JOIN users reviewer ON reviewer.id=tar.assigned_admin_id
+      WHERE ${where}
+      ORDER BY tar.created_at DESC,tar.id DESC`, params);
+    results.push(...rows.map((row) => ({
+      ...row,
+      module_label: 'Transfer Entry',
+      particular: `Transfer ${row.source_label} to ${row.target_label}`,
+      entry_label: `${row.source_label} → ${row.target_label} · approval pending`,
+    })));
+  }
 
   const visPlot = moduleVisibility(req.user, allowedModules, 'plot_status');
   // Plot-status review needs migration 158; skip the source until it is run.
@@ -871,6 +897,13 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   const vipCount = a('vendor_inventory_payment') ? vip.rows[0].count : 0;
   const prpCount = a('plot_registry_payment') ? prp.rows[0].count : 0;
   const mieCount = a('misc_income_entry') ? mie.rows[0].count : 0;
+  const transferCount = await hasRelation('transaction_transfer_approval_requests')
+    ? (await pool.query(
+      `SELECT COUNT(*)::int AS count FROM transaction_transfer_approval_requests tar
+        WHERE tar.status='pending' ${site_id ? 'AND tar.site_id=$1' : ''}${isSubAdmin ? ` AND tar.assigned_admin_id=${parseInt(req.user.id)}` : ''}`,
+      params,
+    )).rows[0].count
+    : 0;
 
   const counts = {
     farmer_payment: fpCount,
@@ -885,7 +918,8 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
     vendor_inventory_payment: vipCount,
     plot_registry_payment: prpCount,
     misc_income_entry: mieCount,
-    total: psCount + fpCount + pcCount + cfCount + ftCount + ppCount + pipCount + exCount + vpCount + vipCount + prpCount + mieCount,
+    transaction_transfer: transferCount,
+    total: psCount + fpCount + pcCount + cfCount + ftCount + ppCount + pipCount + exCount + vpCount + vipCount + prpCount + mieCount + transferCount,
   };
 
   res.json({ ...counts, allowed_modules: allowedModules ? Array.from(allowedModules) : null });
@@ -898,6 +932,11 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
 export const approveEntry = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { source } = req.query;
+
+  if (source === 'transaction_transfer') {
+    const result = await decideTransferApproval({ id, reviewer: req.user, decision: 'approve' });
+    return res.json(result);
+  }
 
   if (!source || !ALLOWED_TABLES[source]) {
     return res.status(400).json({ message: 'A valid financial source query param is required' });
@@ -1008,6 +1047,11 @@ export const approveEntry = asyncHandler(async (req, res) => {
 export const rejectEntry = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { source } = req.query;
+
+  if (source === 'transaction_transfer') {
+    const result = await decideTransferApproval({ id, reviewer: req.user, decision: 'reject' });
+    return res.json(result);
+  }
 
   if (!source || !ALLOWED_TABLES[source]) {
     return res.status(400).json({ message: 'source query param is required' });
@@ -1174,6 +1218,11 @@ export const bulkApprove = asyncHandler(async (req, res) => {
   const affectedCommissions = new Set();
   const canOverrideAssignment = hasGlobalApprovalOverride(req.user);
 
+  for (const item of items.filter((entry) => entry.source === 'transaction_transfer')) {
+    await decideTransferApproval({ id: item.id, reviewer: req.user, decision: 'approve' });
+    totalApproved += 1;
+  }
+
   for (const [table, ids] of Object.entries(grouped)) {
     if (ids.length === 0) continue;
     const assignmentClause = canOverrideAssignment
@@ -1303,6 +1352,11 @@ export const bulkReject = asyncHandler(async (req, res) => {
   let skippedAssignedToOthers = 0;
   const affectedCommissions = new Set();
   const canOverrideAssignment = hasGlobalApprovalOverride(req.user);
+
+  for (const item of items.filter((entry) => entry.source === 'transaction_transfer')) {
+    await decideTransferApproval({ id: item.id, reviewer: req.user, decision: 'reject' });
+    totalRejected += 1;
+  }
 
   for (const [table, ids] of Object.entries(grouped)) {
     if (ids.length === 0) continue;

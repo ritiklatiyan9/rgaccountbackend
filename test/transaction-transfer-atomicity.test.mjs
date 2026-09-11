@@ -5,7 +5,8 @@ import pool from '../src/config/db.js';
 import permissionModel from '../src/models/Permission.model.js';
 import { currentTransactionDate } from '../src/services/transactionDate.service.js';
 import {up} from '../src/migrations/163_paired_transaction_transfers.js';
-import {getTransferOptions, previewTransfer, transferEntry, handleTransferError} from '../src/controllers/transactionTransfer.controller.js';
+import {up as upTransferApprovals} from '../src/migrations/164_transaction_transfer_approvals.js';
+import {getTransferOptions, previewTransfer, transferEntry, decideTransferApproval, handleTransferError} from '../src/controllers/transactionTransfer.controller.js';
 
 const enabled=Boolean(process.env.PGLITE_MODULE);
 const invoke=(handler,body,user={id:1,role:'admin'})=>new Promise((resolve,reject)=>handler({body,user,method:'POST'}, {status(code){this.code=code;return this;},json(body){resolve({code:this.code||200,body});}}, reject));
@@ -27,7 +28,7 @@ async function setup(){
   const {PGlite}=await import(process.env.PGLITE_MODULE);pg=new PGlite();
   const query=async(sql,args)=>{const r=args?.length?await pg.query(sql,args):(await pg.exec(sql)).at(-1);return {...r,rowCount:r?.affectedRows??r?.rows?.length??0};};
   pool.query=query;pool.connect=async()=>({query,release(){}});pool.end=async()=>pg.close();
-  await pg.exec(`CREATE TABLE sites(id int PRIMARY KEY);CREATE TABLE users(id int PRIMARY KEY,role text);CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
+  await pg.exec(`CREATE TABLE sites(id int PRIMARY KEY,name text);CREATE TABLE users(id int PRIMARY KEY,name text,email text,role text,is_active boolean DEFAULT true);CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
     CREATE TABLE members(id int PRIMARY KEY,full_name text);CREATE TABLE user_sites(user_id int,site_id int);CREATE TABLE user_approval_modules(user_id int,module text);
     CREATE TABLE application_settings(site_id int,setting_key text,setting_value jsonb);
     CREATE TABLE cash_flow_months(id serial PRIMARY KEY,site_id int,year int,month int,ledger_name text,ledger_type text,is_locked boolean DEFAULT false,opening_balance numeric DEFAULT 0,created_by int,linked_member_id int,linked_user_id int);
@@ -45,7 +46,7 @@ async function setup(){
     CREATE TABLE bank_accounts(id int PRIMARY KEY,site_id int);
     CREATE TABLE plot_money_transfers(id uuid PRIMARY KEY,source_payment_id int,amount numeric);
     CREATE FUNCTION financial_transaction_posts(text,text,text,text) RETURNS boolean LANGUAGE SQL AS $$ SELECT $2='approved' AND ($4 IS NULL OR $4='CLEARED') $$;
-    INSERT INTO sites VALUES(1),(2);INSERT INTO users VALUES(1,'admin'),(2,'sub_admin');INSERT INTO members VALUES(1,'Agent');
+    INSERT INTO sites VALUES(1,'Site one'),(2,'Site two');INSERT INTO users(id,name,email,role) VALUES(1,'Admin','admin@test.invalid','admin'),(2,'Reviewer','reviewer@test.invalid','sub_admin');INSERT INTO user_sites VALUES(2,1);INSERT INTO members VALUES(1,'Agent');
     INSERT INTO cash_flow_months(site_id,year,month,ledger_name,ledger_type,created_by) VALUES(1,2026,10,'ALICE','person',1),(1,2026,10,'BOB','person',1);
     INSERT INTO farmers VALUES(1,1,'Farmer'),(2,2,'Other site farmer');
     INSERT INTO plots VALUES(1,1,'A1','Buyer A',1,'BOOKED'),(2,1,'A2','Buyer B',1,'BOOKED');
@@ -79,7 +80,7 @@ async function setup(){
     CREATE FUNCTION test_direct_imprest() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM reconcile_direct_cashflow_imprest(NEW.id);RETURN NEW;END $$;
     CREATE TRIGGER direct_imprest AFTER INSERT ON cash_flow_entries FOR EACH ROW EXECUTE FUNCTION test_direct_imprest();`);
   for(const table of Object.values(tables).filter(t=>t!=='cash_flow_entries')) await pg.exec(`CREATE TRIGGER test_imprest AFTER INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION sync_universal_imprest_from_source()`);
-  await up(pool);await up(pool);
+  await up(pool);await up(pool);await upTransferApprovals(pool);await upTransferApprovals(pool);
 }
 async function original(type='personal_ledger',{amount=5000,direction='credit',date='2026-10-21',mode='BANK',parentId=parentIds[type]}={}){
   const data={site_id:1,date,payment_date:date,status:'approved',particular:mode,payment_mode:mode,payment_type:mode,cash_type:mode.toLowerCase(),created_by:1,bank_account_id:mode==='BANK'?1:null};
@@ -114,6 +115,33 @@ test('paired transfer SQL behavior',{skip:!enabled},async t=>{
       }
       const mirror=(await pool.query("SELECT * FROM cash_flow_entries WHERE source_module='farmer_payments' AND source_id=$1",[target.id])).rows[0];assert.equal(Number(mirror.credit),5000);assert.equal(mirror.bank_account_id,1);
       await assert.rejects(pool.query('UPDATE cash_flow_entries SET credit=1 WHERE id=$1',[mirror.id]),/protected/);
+    });
+    await t.test('approval request changes no balance, then approval posts both immutable legs once',async()=>{
+      const r=await request('personal_ledger','farmer_payment',{amount:88});
+      r.body.assigned_admin_id=2;
+      const before=await total();
+      const p=await preview(r.body);
+      assert.equal(p.approval.assigned_admin_id,2);
+      const queued=await invoke(transferEntry,r.body);
+      assert.equal(queued.code,202);
+      assert.equal(queued.body.status,'pending');
+      assert.equal(await total(),before);
+      assert.equal(Number((await pool.query('SELECT COUNT(*) n FROM transaction_money_transfers WHERE request_id=$1',[r.body.request_id])).rows[0].n),0);
+      const requestRow=(await pool.query('SELECT * FROM transaction_transfer_approval_requests WHERE request_id=$1',[r.body.request_id])).rows[0];
+      const approved=await decideTransferApproval({id:requestRow.id,reviewer:{id:2,role:'sub_admin'},decision:'approve'});
+      assert.match(approved.message,/transferred/);
+      assert.equal(await total(),before);
+      assert.equal((await pool.query('SELECT status FROM transaction_transfer_approval_requests WHERE id=$1',[requestRow.id])).rows[0].status,'approved');
+      assert.equal(Number((await pool.query('SELECT COUNT(*) n FROM transaction_money_transfers WHERE request_id=$1',[r.body.request_id])).rows[0].n),1);
+      await assert.rejects(decideTransferApproval({id:requestRow.id,reviewer:{id:2,role:'sub_admin'},decision:'approve'}),/already approved/);
+      await assert.rejects(pool.query('DELETE FROM transaction_transfer_approval_requests WHERE id=$1',[requestRow.id]),/cannot be deleted/);
+    });
+    await t.test('rejected transfer request posts no accounting rows',async()=>{
+      const r=await request('personal_ledger','expense',{amount:44});r.body.assigned_admin_id=2;await preview(r.body);
+      const before=await total(),queued=await invoke(transferEntry,r.body);
+      await decideTransferApproval({id:queued.body.approval_request.id,reviewer:{id:2,role:'sub_admin'},decision:'reject'});
+      assert.equal(await total(),before);
+      assert.equal(Number((await pool.query('SELECT COUNT(*) n FROM transaction_money_transfers WHERE request_id=$1',[r.body.request_id])).rows[0].n),0);
     });
     await t.test('partial transfer, changed direction and onward transfer retain zero net change',async()=>{
       const r=await request('personal_ledger','misc_income',{transferAmount:1250.25,targetDirection:'debit'});let before=await total();const p=await preview(r.body);assert.equal(p.transfers[0].source_offset.direction,'credit');

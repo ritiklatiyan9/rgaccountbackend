@@ -4,6 +4,7 @@ export class TransferError extends Error {
   constructor(status, message) {
     super(message);
     this.status = status;
+    this.statusCode = status;
   }
 }
 export const asId = (value, label = 'id') => {

@@ -866,9 +866,45 @@ const requireApproval = async (db, req, type) => {
   const { rows } = await db.query('SELECT 1 FROM user_approval_modules WHERE user_id=$1 AND module=ANY($2::text[])', [req.user.id, modules]);
   if (!rows.length) throw new TransferError(403, `Approval permission for ${LABEL_BY_TYPE[type]} is required to post both transfer entries together`);
 };
+const resolveTransferApprover = async (db, value, siteId) => {
+  if (value === undefined || value === null || value === '') return null;
+  const id = asId(value, 'approver');
+  const { rows } = await db.query(
+    `SELECT u.id, COALESCE(NULLIF(TRIM(u.name),''),u.email) AS name, u.email, u.role
+       FROM users u
+      WHERE u.id=$1 AND u.is_active=true
+        AND (u.role IN ('admin','super_admin') OR (u.role='sub_admin' AND EXISTS (
+          SELECT 1 FROM user_sites us WHERE us.user_id=u.id AND us.site_id=$2
+        )))`,
+    [id, siteId],
+  );
+  if (!rows[0]) throw new TransferError(422, 'Choose an active approver for this site');
+  return rows[0];
+};
 const assertTransferSchema = async (db) => {
   const { rows } = await db.query("SELECT to_regclass('transaction_money_transfers') IS NOT NULL AS ready");
   if (!rows[0]?.ready) throw new TransferError(503, 'Transfer database update is required. Run migrate:paired-transfers on the backend.');
+};
+const assertTransferApprovalSchema = async (db) => {
+  const { rows } = await db.query("SELECT to_regclass('public.transaction_transfer_approval_requests') IS NOT NULL AS ready");
+  if (!rows[0]?.ready) throw new TransferError(503, 'Transfer approval database update is required. Run migrate:transfer-approvals on the backend.');
+};
+const assertNoOtherPendingTransfer = async (db, plans, requestId) => {
+  const relation = await db.query("SELECT to_regclass('public.transaction_transfer_approval_requests') IS NOT NULL AS ready");
+  if (!relation.rows[0]?.ready) return;
+  const sourceKeys = plans.map(({ source }) => `${source.type}:${source.id}`);
+  const safeRequestId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId || '')
+    ? requestId : '00000000-0000-4000-8000-000000000000';
+  const { rows } = await db.query(
+    `SELECT r.id
+       FROM transaction_transfer_approval_requests r
+       JOIN LATERAL jsonb_array_elements(r.request_payload->'entries') selected ON TRUE
+         WHERE r.status='pending' AND r.request_id<>$1
+           AND CONCAT(selected->>'source_type',':',selected->>'source_id')=ANY($2::text[])
+       LIMIT 1`,
+    [safeRequestId, sourceKeys],
+  );
+  if (rows[0]) throw new TransferError(409, 'One of these entries already has a pending transfer approval');
 };
 const resolvePersonalLedger = async (db, source, lock = false) => {
   // A Personal Ledger is one account whose entries may use any transaction
@@ -917,6 +953,8 @@ export const prepareTransfer = async (db, req, lock = false) => {
   }
   if (new Set(plans.map(p => Number(p.source.site_id))).size !== 1) throw new TransferError(422, 'Select entries from one site per batch');
   const siteId = plans[0].source.site_id;
+  await assertNoOtherPendingTransfer(db, plans, req.body.request_id);
+  const approver = await resolveTransferApprover(db, req.body.assigned_admin_id, siteId);
   const options = await targetOptions(db, siteId);
   let parent = targetId ? options[targetType]?.find(p => Number(p.id) === targetId) : { id: null, label: LABEL_BY_TYPE[targetType] };
   if (!parent) throw new TransferError(422, 'Choose an eligible destination in the same site');
@@ -955,6 +993,7 @@ export const prepareTransfer = async (db, req, lock = false) => {
 
   const preview = {
     transfer_date: date,
+    ...(approver ? { approval: { assigned_admin_id: approver.id, assigned_admin_name: approver.name, role: approver.role } } : {}),
     opening_balance_adjustments: [],
     transfers: plans.map(({source,offset,destination,sourceMonth}) => ({
       source: publicSource(source),
@@ -964,7 +1003,10 @@ export const prepareTransfer = async (db, req, lock = false) => {
     })),
     totals: { debit: plans.reduce((sum,p)=>sum+moneyCents(p.destination.amount),0)/100, credit: plans.reduce((sum,p)=>sum+moneyCents(p.destination.amount),0)/100, net_change: 0 },
   };
-  preview.preview_hash = versionOf({ preview, reason, user_id: req.user.id });
+  const previewForHash = approver
+    ? { ...preview, approval: { assigned_admin_id: approver.id } }
+    : preview;
+  preview.preview_hash = versionOf({ preview: previewForHash, reason, user_id: req.user.id });
   return { plans, targetType, targetId, parent, targetMonth, reason, preview };
 };
 export const previewTransfer = asyncHandler(async (req,res) => {
@@ -1006,11 +1048,14 @@ const insertTransferLeg = async (db, source, type, parentId, userId, transferId,
   if (source.bank_account_id && type!=='personal_ledger') await db.query(`UPDATE cash_flow_entries cfe SET bank_account_id=ba.id FROM bank_accounts ba WHERE ba.id=$1 AND ba.site_id=cfe.site_id AND cfe.source_module=$2 AND cfe.source_id=$3`,[source.bank_account_id,MODULES[type].table,target.row.id]);
   return target;
 };
-export const executeTransfer = async (db,req) => {
+export const executeTransfer = async (db,req,approvedBy=req.user.id) => {
   const { plans,targetType,targetId,reason,preview }=await prepareTransfer(db,req,true);
   if (!req.body.preview_hash || req.body.preview_hash!==preview.preview_hash) throw new TransferError(409,'The transfer preview changed. Review the entries again before confirming');
   const transfers=[];
   for (const { source,offset,destination } of plans) {
+    const approvedAt = new Date().toISOString();
+    Object.assign(offset, { approved_by: approvedBy, approved_at: approvedAt, assigned_admin_id: req.body.assigned_admin_id || null });
+    Object.assign(destination, { approved_by: approvedBy, approved_at: approvedAt, assigned_admin_id: req.body.assigned_admin_id || null });
     const id=randomUUID();
     const sourceParent=source.type==='personal_ledger' ? (await resolvePersonalLedger(db,source,true)).id : source.parent_id;
     const targetParent=targetType==='personal_ledger' ? (await resolvePersonalLedger(db,{parent_id:targetId},true)).id : targetId;
@@ -1026,6 +1071,69 @@ export const executeTransfer = async (db,req) => {
   if(targetType==='plot_commission') commissions.add(targetId);
   for(const id of commissions) await refreshCommission(db,id);
   return {message:`${transfers.length} ${transfers.length===1?'entry':'entries'} transferred with matching debit and credit postings`,transfers,preview,...(transfers.length===1?transfers[0]:{})};
+};
+const clearTransferCaches = () => clearCacheByPrefixes([
+  'cashflow', 'expenses', 'farmers', 'plots', 'plot-commission', 'plotCommission',
+  'commissions', 'vendors', 'misc-income', 'misc_income', 'registries', 'land-deals',
+  'daybook', 'dashboard', 'imprest', 'balance', 'graphql', 'analytics', 'approvals',
+]).catch(() => {});
+
+const approvalResponse = (row) => ({
+  status: row.status,
+  message: row.status === 'pending'
+    ? `Transfer sent to ${row.assigned_admin_name || 'the selected approver'}`
+    : `Transfer request ${row.status}`,
+  approval_request: {
+    id: row.id,
+    request_id: row.request_id,
+    status: row.status,
+    assigned_admin_id: row.assigned_admin_id,
+    assigned_admin_name: row.assigned_admin_name || null,
+    transfer_date: row.transfer_date,
+    amount: Number(row.amount),
+    source_label: row.source_label,
+    target_label: row.target_label,
+    created_at: row.created_at,
+  },
+  preview: row.preview,
+  ...(row.result || {}),
+});
+
+const queueTransferApproval = async (db, req, requestId, hash) => {
+  await assertTransferApprovalSchema(db);
+  const existing = await db.query(
+    `SELECT r.*,COALESCE(NULLIF(TRIM(a.name),''),a.email) AS assigned_admin_name
+       FROM transaction_transfer_approval_requests r
+       JOIN users a ON a.id=r.assigned_admin_id
+      WHERE r.request_id=$1 FOR UPDATE OF r`,
+    [requestId],
+  );
+  if (existing.rows[0]) {
+    const row = existing.rows[0];
+    if (Number(row.requested_by) !== Number(req.user.id) || row.request_hash !== hash)
+      throw new TransferError(409, 'This request id has already been used for a different transfer');
+    return { row, existing: true };
+  }
+  const prepared = await prepareTransfer(db, req, true);
+  if (!req.body.preview_hash || req.body.preview_hash !== prepared.preview.preview_hash)
+    throw new TransferError(409, 'The transfer preview changed. Review the entries again before confirming');
+  if (!prepared.preview.approval?.assigned_admin_id)
+    throw new TransferError(422, 'Choose an approver before sending this transfer');
+  const sourceLabel = prepared.plans.length === 1
+    ? `${LABEL_BY_TYPE[prepared.plans[0].source.type]} #${prepared.plans[0].source.id}`
+    : `${prepared.plans.length} selected entries`;
+  const { rows } = await db.query(
+    `INSERT INTO transaction_transfer_approval_requests
+      (request_id,request_hash,site_id,assigned_admin_id,requested_by,transfer_date,amount,
+       source_label,target_label,reason,request_payload,preview)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     RETURNING *`,
+    [requestId, hash, prepared.plans[0].source.site_id, prepared.preview.approval.assigned_admin_id,
+      req.user.id, prepared.preview.transfer_date, prepared.preview.totals.debit, sourceLabel,
+      `${LABEL_BY_TYPE[prepared.targetType]} · ${prepared.parent.label}`, prepared.reason, req.body,
+      prepared.preview],
+  );
+  return { row: { ...rows[0], assigned_admin_name: prepared.preview.approval.assigned_admin_name }, existing: false };
 };
 export const transferEntry = asyncHandler(async (req, res) => {
   const requestId = req.body.request_id;
@@ -1047,6 +1155,13 @@ export const transferEntry = asyncHandler(async (req, res) => {
     await db.query("SET LOCAL statement_timeout = '45s'");
     await assertTransferSchema(db);
     const hash = versionOf(req.body);
+    if (req.body.assigned_admin_id !== undefined && req.body.assigned_admin_id !== null && req.body.assigned_admin_id !== '') {
+      const queued = await queueTransferApproval(db, req, requestId, hash);
+      await db.query('COMMIT');
+      committed = true;
+      await clearTransferCaches();
+      return res.status(queued.existing ? 200 : 202).json(approvalResponse(queued.row));
+    }
     await db.query(
       'INSERT INTO transaction_transfer_batches (request_id,request_hash,transferred_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
       [requestId, hash, req.user.id],
@@ -1073,26 +1188,7 @@ export const transferEntry = asyncHandler(async (req, res) => {
       );
     await db.query('COMMIT');
     committed = true;
-    await clearCacheByPrefixes([
-      'cashflow',
-      'expenses',
-      'farmers',
-      'plots',
-      'plot-commission',
-      'plotCommission',
-      'commissions',
-      'vendors',
-      'misc-income',
-      'misc_income',
-      'registries',
-      'land-deals',
-      'daybook',
-      'dashboard',
-      'imprest',
-      'balance',
-      'graphql',
-      'analytics',
-    ]).catch(() => {});
+    await clearTransferCaches();
     res.status(batch.response ? 200 : 201).json(result);
   } catch (error) {
     if (!committed) {
@@ -1106,6 +1202,72 @@ export const transferEntry = asyncHandler(async (req, res) => {
     db.release();
   }
 });
+
+/** Decide one pending transfer request from the shared approval centre. */
+export const decideTransferApproval = async ({ id, reviewer, decision }) => {
+  if (!['approve', 'reject'].includes(decision)) throw new TransferError(400, 'Invalid transfer decision');
+  const approvalId = asId(id, 'transfer approval');
+  const db = await pool.connect();
+  let committed = false;
+  try {
+    await db.query('BEGIN');
+    await db.query("SET LOCAL lock_timeout = '8s'");
+    await db.query("SET LOCAL statement_timeout = '45s'");
+    await assertTransferSchema(db);
+    await assertTransferApprovalSchema(db);
+    const { rows } = await db.query(
+      'SELECT * FROM transaction_transfer_approval_requests WHERE id=$1 FOR UPDATE',
+      [approvalId],
+    );
+    const request = rows[0];
+    if (!request) throw new TransferError(404, 'Transfer approval request not found');
+    const globalReviewer = ['admin', 'super_admin'].includes(reviewer.role);
+    if (!globalReviewer && Number(request.assigned_admin_id) !== Number(reviewer.id))
+      throw new TransferError(403, 'This transfer is assigned to another approver');
+    if (request.status !== 'pending')
+      throw new TransferError(409, `This transfer request is already ${request.status}`);
+
+    if (decision === 'reject') {
+      const rejected = (await db.query(
+        `UPDATE transaction_transfer_approval_requests
+            SET status='rejected',approved_by=$2,approved_at=NOW(),updated_at=NOW()
+          WHERE id=$1 AND status='pending' RETURNING *`,
+        [approvalId, reviewer.id],
+      )).rows[0];
+      await db.query('COMMIT');
+      committed = true;
+      await clearTransferCaches();
+      return { entry: rejected, message: 'Transfer request rejected; no accounting entries were posted' };
+    }
+
+    const requester = (await db.query(
+      'SELECT id,role,is_active FROM users WHERE id=$1', [request.requested_by],
+    )).rows[0];
+    if (!requester?.is_active) throw new TransferError(409, 'The requester is no longer active; reject this transfer and create a new request');
+    const syntheticReq = { user: requester, body: request.request_payload };
+    await db.query(
+      'INSERT INTO transaction_transfer_batches (request_id,request_hash,transferred_by) VALUES ($1,$2,$3)',
+      [request.request_id, request.request_hash, request.requested_by],
+    );
+    const result = await executeTransfer(db, syntheticReq, reviewer.id);
+    await db.query('UPDATE transaction_transfer_batches SET response=$2 WHERE request_id=$1', [request.request_id, result]);
+    const approved = (await db.query(
+      `UPDATE transaction_transfer_approval_requests
+          SET status='approved',result=$2,approved_by=$3,approved_at=NOW(),updated_at=NOW()
+        WHERE id=$1 AND status='pending' RETURNING *`,
+      [approvalId, result, reviewer.id],
+    )).rows[0];
+    await db.query('COMMIT');
+    committed = true;
+    await clearTransferCaches();
+    return { entry: approved, result, message: result.message };
+  } catch (error) {
+    if (!committed) await db.query('ROLLBACK');
+    throw error;
+  } finally {
+    db.release();
+  }
+};
 export const handleTransferError = (error, req, res, next) => {
   if (error.transferUnknown)
     return res

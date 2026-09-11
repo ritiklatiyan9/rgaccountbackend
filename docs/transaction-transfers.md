@@ -1,14 +1,15 @@
 # Transfer Entry
 
-Transfer Entry preserves the original transaction and appends two approved postings on the selected transfer date. For a ₹5,000 Personal Ledger credit dated 21 October, choosing a Farmer Payment **credit** on 30 October creates a ₹5,000 Personal Ledger debit and a ₹5,000 Farmer Payment credit on 30 October. The original remains dated 21 October. Choosing a destination debit reverses both new directions; the preview shows that explicitly.
+Transfer Entry preserves the original transaction and, after approval, appends two approved postings on the selected transfer date. For a ₹5,000 Personal Ledger credit dated 21 October, choosing a Farmer Payment **credit** on 30 October creates a ₹5,000 Personal Ledger debit and a ₹5,000 Farmer Payment credit on 30 October. The original remains dated 21 October. Choosing a destination debit reverses both new directions; the preview shows that explicitly.
 
 The transfer conserves the site's cash/bank balance, including its bank-account allocation, and does not create additional imprest spending. It changes the allocation between module accounts. Module totals can change while the overall money balance stays the same.
 
 ## API
 
 - `POST /transaction-transfers/options` accepts `entries: [{ source_type, source_id }]` and returns sources with versions and remaining amounts, permitted destinations, and today's transfer date. Existing GET options requests remain supported.
-- `POST /transaction-transfers/preview` validates the source, dates, permissions, destination, available amount, and fields. It returns the original plus the two planned postings, equal debit/credit totals, and `preview_hash`. It performs no accounting writes.
-- `POST /transaction-transfers` repeats validation under locks and requires the same payload plus the reviewed `preview_hash`. A UUID `request_id` makes the entire batch idempotent. Retry exactly the same payload after a network error; a different payload needs a new request ID.
+- `POST /transaction-transfers/preview` validates the source, dates, permissions, destination, selected approver, available amount, and fields. It returns the original plus the two planned postings, equal debit/credit totals, approval routing, and `preview_hash`. It performs no accounting writes.
+- `POST /transaction-transfers` repeats validation under locks and requires the same payload plus the reviewed `preview_hash`. With `assigned_admin_id`, it stores one pending approval request and performs no accounting writes. A UUID `request_id` makes submission and posting idempotent.
+- `GET /approvals/pending` and `GET /approvals/counts` include `transaction_transfer` requests, which feed the header bell and `/notifications/all`. `PUT /approvals/:id/approve?source=transaction_transfer` revalidates the saved plan under locks and posts both legs in one transaction. Rejection records the decision without posting either leg. The bulk approval endpoints support the same source.
 
 Example request:
 
@@ -17,6 +18,7 @@ Example request:
   "request_id": "3b5a63b9-385a-4cbb-bb45-09b6a72c2225",
   "target_type": "farmer_payment",
   "target_id": 18,
+  "assigned_admin_id": 7,
   "transfer_date": "2026-10-30",
   "reason": "Allocate receipt to farmer account",
   "entries": [{
@@ -32,7 +34,7 @@ Amounts use two decimal places and cannot exceed the original's untransferred ba
 
 The server normalizes fields before previewing and saving. Where a module has no separate party or bank-detail column, those values are preserved in its Remarks, Note, Narration, or expense Remark. The preview shows the actual instrument/text and explains that mapping; no edited detail is silently dropped.
 
-The original must be approved and any cheque cleared. New internal postings use cash or bank, never a new pending cheque. Changing from cash to bank or vice versa is a separate funds movement and is rejected in this allocation flow. Both posting modules require write and approval authority, plus normal creator visibility and site access. The user cannot set approval status, signatures, site, or creator through edited fields.
+The original must be approved and any cheque cleared. New internal postings use cash or bank, never a new pending cheque. Changing from cash to bank or vice versa is a separate funds movement and is rejected in this allocation flow. Both posting modules require write and approval authority, plus normal creator visibility and site access. The approver must be an active admin or an active site-assigned sub-admin. The user cannot set approval status, signatures, site, or creator through edited fields.
 
 ## Modules and linked records
 
@@ -48,7 +50,7 @@ The transfer date cannot precede any original entry. A site with date editing di
 
 ## Database installation and verification
 
-Run `npm run migrate:paired-transfers` after existing application migrations. Migration 163 creates `transaction_money_transfers`, immutable links, deferred pair checks, mirror normalization, and imprest exclusions. It leaves existing accounting entries untouched. The normal `npm start` and `npm run migrate` sequences include it. Earlier posting/imprest migrations also preserve generated transfer records when rerun.
+Run `npm run migrate:paired-transfers` and then `npm run migrate:transfer-approvals` after existing application migrations. Migration 163 creates `transaction_money_transfers`, immutable links, deferred pair checks, mirror normalization, and imprest exclusions. Migration 164 creates the pending transfer request and review audit table. Both leave existing accounting entries untouched. The normal `npm start` and `npm run migrate` sequences include them. Earlier posting/imprest migrations also preserve generated transfer records when rerun.
 
 Database constraints require exactly the registered source offset and destination, with matching approval, date, parent, site, bank bucket/account and opposite ledger amounts. They reject extra unregistered legs. The original, both generated rows, their mirrors, and the audit record cannot be edited or deleted independently. Further reallocations append a new balanced transfer from the received destination.
 

@@ -11,6 +11,7 @@ const read = (relativePath) => readFileSync(new URL(relativePath, import.meta.ur
 const GUARDED = [
   ['plot_money_transfers', '160'],
   ['plot_status_approvals', '158'],
+  ['transaction_transfer_approval_requests', '164'],
 ];
 
 test('every read path naming an unrun migration object probes for it first', () => {
