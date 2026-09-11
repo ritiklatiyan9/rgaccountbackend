@@ -7,7 +7,7 @@ The transfer conserves the site's cash/bank balance, including its bank-account 
 ## API
 
 - `POST /transaction-transfers/options` accepts `entries: [{ source_type, source_id }]` and returns sources with versions and remaining amounts, permitted destinations, and today's transfer date. Existing GET options requests remain supported.
-- `POST /transaction-transfers/preview` validates the source, dates, permissions, destination, available amount, and fields. It returns the original plus the two planned postings, equal debit/credit totals, any later Personal Ledger opening adjustments, and `preview_hash`. It performs no accounting writes.
+- `POST /transaction-transfers/preview` validates the source, dates, permissions, destination, available amount, and fields. It returns the original plus the two planned postings, equal debit/credit totals, and `preview_hash`. It performs no accounting writes.
 - `POST /transaction-transfers` repeats validation under locks and requires the same payload plus the reviewed `preview_hash`. A UUID `request_id` makes the entire batch idempotent. Retry exactly the same payload after a network error; a different payload needs a new request ID.
 
 Example request:
@@ -42,11 +42,9 @@ Registry payment records and legacy General Commissions are excluded from the si
 
 All new plot-to-plot transfers use this same API and preview. The former plot-specific POST returns `410 UNIFIED_TRANSFER_REQUIRED`. Historic `plot_money_transfers` records remain intact; prior allocations reduce the source receipt's remaining amount.
 
-## Dates and ledger carry-forward
+## Dates and Personal Ledgers
 
-The transfer date cannot precede any original entry. A site with date editing disabled posts on today's date, shown in the preview. A Personal Ledger selection identifies the person; the service resolves or creates that person's month for the transfer date. A newly created month carries the previous closing balance.
-
-Existing later Personal Ledger months receive the same signed transfer delta in their opening balance. The preview lists each before/change/after amount. Adding the delta preserves any existing manual opening adjustment. A locked source, target, or affected later month blocks the transfer. Monthly metadata changes and the two monetary entries commit or roll back together.
+The transfer date cannot precede any original entry. A site with date editing disabled posts on today's date, shown in the preview. Personal Ledger entries already support any transaction date, so a transfer stays in the exact ledger selected by the user. It does not create a second ledger when the transfer date falls in another month and does not rewrite another ledger's opening balance. A locked source or target ledger blocks the transfer.
 
 ## Database installation and verification
 
@@ -54,4 +52,4 @@ Run `npm run migrate:paired-transfers` after existing application migrations. Mi
 
 Database constraints require exactly the registered source offset and destination, with matching approval, date, parent, site, bank bucket/account and opposite ledger amounts. They reject extra unregistered legs. The original, both generated rows, their mirrors, and the audit record cannot be edited or deleted independently. Further reallocations append a new balanced transfer from the received destination.
 
-Run pure validation and contract tests with `npm run test:transfers`. To execute the isolated PostgreSQL behavior/reporting tests, set `PGLITE_MODULE` to a local installation of `@electric-sql/pglite/dist/index.js` before that command. These tests create an embedded database and never use the configured application database. They cover history/date retention, all supported module directions, partial/onward transfers, approval aliases, cash/imprest preservation, bank-account preservation, future openings, stale previews, plot batch availability, rollback, idempotency, and immutable pair constraints.
+Run pure validation and contract tests with `npm run test:transfers`. To execute the isolated PostgreSQL behavior/reporting tests, set `PGLITE_MODULE` to a local installation of `@electric-sql/pglite/dist/index.js` before that command. These tests create an embedded database and never use the configured application database. They cover history/date retention, all supported module directions, partial/onward transfers, approval aliases, cash/imprest preservation, bank-account preservation, single-ledger date handling, stale previews, plot batch availability, rollback, idempotency, and immutable pair constraints.

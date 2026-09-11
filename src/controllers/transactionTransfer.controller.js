@@ -372,7 +372,12 @@ const publicSource = ({ raw, ...source }) => ({
 });
 const targetOptions = async (db, siteId) => {
   const queries = {
-    personal_ledger: `SELECT id, ledger_name AS label, CONCAT(year,'-',LPAD(month::text,2,'0')) AS period, CONCAT(ledger_name, ' · ', TO_CHAR(MAKE_DATE(year,month,1),'Mon YYYY')) AS meta FROM cash_flow_months WHERE site_id = $1 AND LOWER(ledger_type) = 'person' AND NOT is_locked ORDER BY year DESC,month DESC,ledger_name`,
+    personal_ledger: `SELECT id,ledger_name AS label,CONCAT(year,'-',LPAD(month::text,2,'0')) AS period,CONCAT(ledger_name,' · ',TO_CHAR(MAKE_DATE(year,month,1),'Mon YYYY')) AS meta
+      FROM (SELECT DISTINCT ON (COALESCE('member:'||linked_member_id::text,'user:'||linked_user_id::text,'name:'||UPPER(TRIM(ledger_name)))) cfm.*
+        FROM cash_flow_months cfm WHERE site_id=$1 AND LOWER(ledger_type)='person' AND NOT is_locked
+        ORDER BY COALESCE('member:'||linked_member_id::text,'user:'||linked_user_id::text,'name:'||UPPER(TRIM(ledger_name))),
+          EXISTS(SELECT 1 FROM cash_flow_entries cfe WHERE cfe.cash_flow_month_id=cfm.id) DESC,year DESC,month DESC,id DESC) chosen
+      ORDER BY ledger_name`,
     farmer_payment: `SELECT id,name AS label FROM farmers WHERE site_id = $1 ORDER BY name`,
     plot_payment: `SELECT id, CONCAT('Plot ',plot_no,' · ',buyer_name) AS label FROM plots p WHERE site_id = $1 AND UPPER(COALESCE(status,'')) NOT IN ('CANCELLED','COMPANY','RESALE') AND UPPER(COALESCE(to_jsonb(p)->>'plot_tag',''))<>'OLD' ORDER BY plot_no`,
     plot_commission: `SELECT pc.id, CONCAT(COALESCE('Plot '||p.plot_no,'Land purchase · '||f.name,'Land sale · '||ld.buyer_name),' · ',m.full_name) AS label FROM plot_commissions_v2 pc LEFT JOIN plots p ON p.id=pc.plot_id LEFT JOIN farmers f ON f.id=pc.farmer_id LEFT JOIN land_deals ld ON ld.id=pc.land_deal_id JOIN members m ON m.id=pc.agent_id WHERE pc.site_id=$1 AND UPPER(COALESCE(p.status,ld.status,'')) <> 'CANCELLED' ORDER BY label`,
@@ -441,13 +446,6 @@ const insertPersonalLedger = async (client, source, targetId, userId) => {
     throw new TransferError(404, 'Destination Personal Ledger not found');
   if (month.is_locked)
     throw new TransferError(423, 'Destination Personal Ledger is locked');
-  const entryPeriod = dateParts(source.date);
-  if (month.month !== entryPeriod.month || month.year !== entryPeriod.year) {
-    throw new TransferError(
-      409,
-      'Destination Personal Ledger must match the entry month and year',
-    );
-  }
   // Ledger convention (Quick Entry, ledger page): particular = instrument
   // (CASH / BANK / NEFT…), the party goes into remarks.
   const instrument = upper(source.payment_mode) || upper(source.mode) || 'CASH';
@@ -872,21 +870,19 @@ const assertTransferSchema = async (db) => {
   const { rows } = await db.query("SELECT to_regclass('transaction_money_transfers') IS NOT NULL AS ready");
   if (!rows[0]?.ready) throw new TransferError(503, 'Transfer database update is required. Run migrate:paired-transfers on the backend.');
 };
-const resolveLedgerMonth = async (db, source, date, create = false) => {
-  const { rows } = await db.query('SELECT * FROM cash_flow_months WHERE id=$1', [source.parent_id]);
-  const original = rows[0];
-  if (!original) throw new TransferError(404, 'Personal Ledger not found');
-  const { month, year } = dateParts(date);
-  if (create) await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`transfer-ledger:${original.site_id}:${original.ledger_name}:${year}:${month}`]);
-  const match = await db.query(`SELECT * FROM cash_flow_months WHERE site_id=$1 AND LOWER(ledger_type)='person' AND ledger_name=$2 AND month=$3 AND year=$4 ORDER BY id LIMIT 1${create ? ' FOR UPDATE' : ''}`, [original.site_id, original.ledger_name, month, year]);
-  if (match.rows[0]?.is_locked) throw new TransferError(423, `Personal Ledger for ${year}-${String(month).padStart(2,'0')} is locked`);
-  if (match.rows[0]) return match.rows[0];
-  if (!create) return { ...original, id: null, month, year, will_create_month: true };
-  const prior = await db.query(`SELECT m.opening_balance+COALESCE(SUM(c.credit-c.debit) FILTER (WHERE financial_transaction_posts(CASE WHEN c.credit-c.debit>0 THEN 'credit' ELSE 'debit' END,c.status,c.cash_type,c.cheque_status)),0) AS closing FROM cash_flow_months m LEFT JOIN cash_flow_entries c ON c.cash_flow_month_id=m.id AND (c.source_module IS NULL OR c.source_module !~ '_person$') WHERE m.id=(SELECT id FROM cash_flow_months WHERE site_id=$1 AND ledger_name=$2 AND LOWER(ledger_type)='person' AND (year,month)<($3,$4) ORDER BY year DESC,month DESC,id DESC LIMIT 1) GROUP BY m.id`,[original.site_id,original.ledger_name,year,month]);
-  const opening=prior.rows[0]?.closing || 0;
-  const { rows: inserted } = await db.query(`INSERT INTO cash_flow_months (site_id,month,year,opening_balance,ledger_name,ledger_type,created_by,linked_member_id,linked_user_id)
-    VALUES ($1,$2,$3,$8,$4,'person',$5,$6,$7) RETURNING *`, [original.site_id,month,year,original.ledger_name,original.created_by,original.linked_member_id || null,original.linked_user_id || null,opening]);
-  return inserted[0];
+const resolvePersonalLedger = async (db, source, lock = false) => {
+  // A Personal Ledger is one account whose entries may use any transaction
+  // date. `cash_flow_months` is a legacy table name/period label; a transfer
+  // must stay in the ledger the user selected instead of silently creating a
+  // second account merely because the transfer date is in another month.
+  const { rows } = await db.query(
+    `SELECT * FROM cash_flow_months WHERE id=$1${lock ? ' FOR UPDATE' : ''}`,
+    [source.parent_id],
+  );
+  const ledger = rows[0];
+  if (!ledger) throw new TransferError(404, 'Personal Ledger not found');
+  if (ledger.is_locked) throw new TransferError(423, `Personal Ledger "${ledger.ledger_name}" is locked`);
+  return ledger;
 };
 
 // Build the exact posting plan without writing accounting data. Execute repeats
@@ -916,7 +912,7 @@ export const prepareTransfer = async (db, req, lock = false) => {
     if (date < source.date) throw new TransferError(422, 'Transfer date cannot be earlier than the original entry date');
     const edited = editSource(source, { ...entry.edits, date, payment_mode: entry.edits?.payment_mode || (source.mode === 'cheque' ? 'BANK' : source.payment_mode) });
     const legs = buildTransferLegs(source, edited, { date, userId: req.user.id, reason });
-    const sourceMonth = source.type === 'personal_ledger' ? await resolveLedgerMonth(db, source, date) : null;
+    const sourceMonth = source.type === 'personal_ledger' ? await resolvePersonalLedger(db, source) : null;
     plans.push({ source, ...legs, sourceMonth });
   }
   if (new Set(plans.map(p => Number(p.source.site_id))).size !== 1) throw new TransferError(422, 'Select entries from one site per batch');
@@ -935,7 +931,7 @@ export const prepareTransfer = async (db, req, lock = false) => {
     if(!rows.length) throw new TransferError(422,'The original bank account does not belong to this site');
   }
   let targetMonth;
-  if (targetType === 'personal_ledger') targetMonth = await resolveLedgerMonth(db, {parent_id: targetId}, date);
+  if (targetType === 'personal_ledger') targetMonth = await resolvePersonalLedger(db, {parent_id: targetId});
   for (const plan of plans) {
     plan.offset.remarks=`TRANSFER TO ${LABEL_BY_TYPE[targetType]} / ${parent.label} · ORIGINAL ${plan.source.type} #${plan.source.id} (${plan.source.date}) · ${reason}`;
     plan.destination.remarks=`TRANSFER FROM ${plan.source.parent_name} · ORIGINAL ${plan.source.type} #${plan.source.id} (${plan.source.date}) · ${plan.destination.remarks}`;
@@ -957,30 +953,13 @@ export const prepareTransfer = async (db, req, lock = false) => {
     if (delta<0 && moneyCents(balance.rows[0].amount)+delta<0) throw new TransferError(409,'Transfer exceeds the source plot balance');
   }
 
-  const ledgerDeltas = new Map();
-  const addLedgerDelta = (name, amount, direction) => ledgerDeltas.set(name,(ledgerDeltas.get(name)||0) + moneyCents(amount)*(direction==='credit'?1:-1));
-  for (const p of plans) {
-    if(p.source.type==='personal_ledger') addLedgerDelta(p.source.parent_name,p.offset.amount,p.offset.direction);
-    if(targetType==='personal_ledger') addLedgerDelta(parent.label,p.destination.amount,p.destination.direction);
-  }
-  const openingAdjustments=[];
-  const period=dateParts(date);
-  for (const [name,delta] of [...ledgerDeltas.entries()].sort((a,b)=>a[0].localeCompare(b[0]))) {
-    if(!delta) continue;
-    const {rows: months}=await db.query(`SELECT id,ledger_name,year,month,opening_balance,is_locked FROM cash_flow_months WHERE site_id=$1 AND LOWER(ledger_type)='person' AND ledger_name=$2 AND (year,month)>($3,$4) ORDER BY year,month,id${lock?' FOR UPDATE':''}`,[siteId,name,period.year,period.month]);
-    for(const month of months) {
-      if(month.is_locked) throw new TransferError(423,`A later Personal Ledger month (${month.year}-${String(month.month).padStart(2,'0')}) is locked. Unlock it before changing the carried balance`);
-      const before=moneyCents(month.opening_balance);
-      openingAdjustments.push({id:month.id,ledger_name:name,period:`${month.year}-${String(month.month).padStart(2,'0')}`,before:before/100,change:delta/100,after:(before+delta)/100});
-    }
-  }
   const preview = {
     transfer_date: date,
-    opening_balance_adjustments: openingAdjustments,
+    opening_balance_adjustments: [],
     transfers: plans.map(({source,offset,destination,sourceMonth}) => ({
       source: publicSource(source),
-      source_offset: { type: source.type, type_label: LABEL_BY_TYPE[source.type], parent_id: sourceMonth?.id ?? source.parent_id, parent_name: source.parent_name, date, direction: offset.direction, amount: offset.amount, payment_mode: offset.payment_mode, will_create_month: Boolean(sourceMonth?.will_create_month) },
-      target: { type: targetType, type_label: LABEL_BY_TYPE[targetType], parent_id: targetMonth?.id ?? targetId, parent_name: parent.label, date, direction: destination.direction, amount: destination.amount, payment_mode: destination.payment_mode, field_storage_note: destination.field_storage_note || null, will_create_month: Boolean(targetMonth?.will_create_month), fields: { particular: destination.particular, remarks: destination.remarks, category: destination.category, from_entity: destination.from_entity, to_entity: destination.to_entity, bank_name: destination.bank_name, bank_account_no: destination.bank_account_no, bank_reference: destination.bank_reference, bank_ifsc: destination.bank_ifsc } },
+      source_offset: { type: source.type, type_label: LABEL_BY_TYPE[source.type], parent_id: sourceMonth?.id ?? source.parent_id, parent_name: source.parent_name, date, direction: offset.direction, amount: offset.amount, payment_mode: offset.payment_mode },
+      target: { type: targetType, type_label: LABEL_BY_TYPE[targetType], parent_id: targetMonth?.id ?? targetId, parent_name: parent.label, date, direction: destination.direction, amount: destination.amount, payment_mode: destination.payment_mode, field_storage_note: destination.field_storage_note || null, fields: { particular: destination.particular, remarks: destination.remarks, category: destination.category, from_entity: destination.from_entity, to_entity: destination.to_entity, bank_name: destination.bank_name, bank_account_no: destination.bank_account_no, bank_reference: destination.bank_reference, bank_ifsc: destination.bank_ifsc } },
       remaining_amount: (moneyCents(source.remaining_amount) - moneyCents(destination.amount)) / 100,
     })),
     totals: { debit: plans.reduce((sum,p)=>sum+moneyCents(p.destination.amount),0)/100, credit: plans.reduce((sum,p)=>sum+moneyCents(p.destination.amount),0)/100, net_change: 0 },
@@ -1033,8 +1012,8 @@ export const executeTransfer = async (db,req) => {
   const transfers=[];
   for (const { source,offset,destination } of plans) {
     const id=randomUUID();
-    const sourceParent=source.type==='personal_ledger' ? (await resolveLedgerMonth(db,source,offset.date,true)).id : source.parent_id;
-    const targetParent=targetType==='personal_ledger' ? (await resolveLedgerMonth(db,{parent_id:targetId},destination.date,true)).id : targetId;
+    const sourceParent=source.type==='personal_ledger' ? (await resolvePersonalLedger(db,source,true)).id : source.parent_id;
+    const targetParent=targetType==='personal_ledger' ? (await resolvePersonalLedger(db,{parent_id:targetId},true)).id : targetId;
     const outgoing=await insertTransferLeg(db,offset,source.type,sourceParent,req.user.id,id,'source_offset');
     const incoming=await insertTransferLeg(db,destination,targetType,targetParent,req.user.id,id,'destination');
     const {rows}=await db.query(`INSERT INTO transaction_money_transfers
@@ -1042,9 +1021,6 @@ export const executeTransfer = async (db,req) => {
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id,created_at`,
       [id,req.body.request_id,source.site_id,source.type,source.id,outgoing.row.id,sourceParent,targetType,incoming.row.id,targetParent,destination.amount,destination.date,destination.direction,destination.mode,reason,req.user.id,source.raw,destination.bank_account_id]);
     transfers.push({ transfer:rows[0],source:{type:source.type,id:source.id},source_offset:{type:source.type,id:outgoing.row.id,parent_id:sourceParent,path:outgoing.path},target:{type:targetType,id:incoming.row.id,parent_id:targetParent,path:incoming.path} });
-  }
-  for (const adjustment of preview.opening_balance_adjustments) {
-    await db.query('UPDATE cash_flow_months SET opening_balance=$2 WHERE id=$1',[adjustment.id,adjustment.after]);
   }
   const commissions=new Set(plans.filter(p=>p.source.type==='plot_commission').map(p=>p.source.parent_id));
   if(targetType==='plot_commission') commissions.add(targetId);

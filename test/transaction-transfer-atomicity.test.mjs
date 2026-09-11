@@ -123,19 +123,20 @@ test('paired transfer SQL behavior',{skip:!enabled},async t=>{
       const dest=(await pool.query('SELECT * FROM misc_income_entries WHERE id=$1',[posted.body.target.id])).rows[0];
       const onward=await request('misc_income','expense',{row:dest,transferAmount:500});before=await total();await preview(onward.body);await invoke(transferEntry,onward.body);assert.equal(await total(),before);
     });
-    await t.test('new source month carries forward its balance; both new dates are in that month',async()=>{
+    await t.test('a later transfer date stays in the selected personal ledger',async()=>{
       const r=await request('personal_ledger','expense',{transferDate:'2026-11-02',transferAmount:100});const before=await total();await preview(r.body);const posted=await invoke(transferEntry,r.body);assert.equal(await total(),before);
-      const month=(await pool.query('SELECT * FROM cash_flow_months WHERE id=$1',[posted.body.source_offset.parent_id])).rows[0];assert.equal(month.month,11);assert.ok(Number(month.opening_balance)>0);
+      assert.equal(posted.body.source_offset.parent_id,r.row.cash_flow_month_id);
+      const leg=(await pool.query('SELECT date,cash_flow_month_id FROM cash_flow_entries WHERE id=$1',[posted.body.source_offset.id])).rows[0];const legDate=leg.date instanceof Date?leg.date.toISOString().slice(0,10):String(leg.date).slice(0,10);assert.equal(legDate,'2026-11-02');assert.equal(leg.cash_flow_month_id,r.row.cash_flow_month_id);
     });
-    await t.test('backdated transfers preview and update later openings, preserving manual differences',async()=>{
-      const month=(await pool.query("SELECT * FROM cash_flow_months WHERE ledger_name='ALICE' AND month=11")).rows[0];
+    await t.test('transfers do not create period ledgers or rewrite another ledger opening',async()=>{
+      const month=(await pool.query("SELECT * FROM cash_flow_months WHERE ledger_name='ALICE' ORDER BY id LIMIT 1")).rows[0];
       await pool.query('UPDATE cash_flow_months SET opening_balance=opening_balance+123 WHERE id=$1',[month.id]);
       const before=Number((await pool.query('SELECT opening_balance FROM cash_flow_months WHERE id=$1',[month.id])).rows[0].opening_balance);
-      const r=await request('personal_ledger','expense',{amount:100,transferAmount:40});let p=await preview(r.body);
-      const adjustment=p.opening_balance_adjustments.find(a=>a.id===month.id);assert.equal(adjustment.before,before);assert.equal(adjustment.change,-40);assert.equal(adjustment.after,before-40);
-      await invoke(transferEntry,r.body);assert.equal(Number((await pool.query('SELECT opening_balance FROM cash_flow_months WHERE id=$1',[month.id])).rows[0].opening_balance),before-40);
-      const locked=await request('personal_ledger','expense',{amount:10});await pool.query('UPDATE cash_flow_months SET is_locked=true WHERE id=$1',[month.id]);
-      await assert.rejects(preview(locked.body),/later Personal Ledger month/);await pool.query('UPDATE cash_flow_months SET is_locked=false WHERE id=$1',[month.id]);
+      const countBefore=Number((await pool.query("SELECT COUNT(*) AS count FROM cash_flow_months WHERE ledger_name='ALICE'")).rows[0].count);
+      const r=await request('personal_ledger','expense',{amount:100,transferAmount:40});const p=await preview(r.body);
+      assert.deepEqual(p.opening_balance_adjustments,[]);
+      await invoke(transferEntry,r.body);assert.equal(Number((await pool.query('SELECT opening_balance FROM cash_flow_months WHERE id=$1',[month.id])).rows[0].opening_balance),before);
+      assert.equal(Number((await pool.query("SELECT COUNT(*) AS count FROM cash_flow_months WHERE ledger_name='ALICE'")).rows[0].count),countBefore);
     });
     await t.test('all posting modules create signed balanced legs, including land commissions',async()=>{
       for(const type of Object.keys(tables).filter(t=>t!=='personal_ledger')){
