@@ -69,6 +69,7 @@ const LIMITS = {
   from_entity: 255,
   to_entity: 255,
   category: 100,
+  sub_category: 100,
 };
 export const editSource = (source, edits = {}) => {
   if (!edits || typeof edits !== 'object' || Array.isArray(edits))
@@ -215,6 +216,7 @@ export const normalizeTransferFields = (type, entry) => {
     moveToNarrative('from_entity','FROM');
     moveToNarrative('to_entity','TO');
   }
+  if (type !== 'expense') moveToNarrative('sub_category','SUB-CATEGORY');
   const bankFields = {
     personal_ledger: [], expense: ['bank_account_no','bank_ifsc'],
     farmer_payment: ['bank_name','bank_account_no','bank_ifsc','bank_reference'],
@@ -249,7 +251,7 @@ export const normalizeTransferFields = (type, entry) => {
   // after defaults/case conversion, before issuing a reviewable preview.
   const nativeLimits = {
     personal_ledger: { particular: 500 },
-    expense: { from_entity: 255, to_entity: 255, category: 100, bank_account_no: 100, bank_ifsc: 255 },
+    expense: { from_entity: 255, to_entity: 255, category: 100, sub_category: 100, bank_account_no: 100, bank_ifsc: 255 },
     farmer_payment: { particular: 255, bank_name: 255, bank_account_no: 100, bank_reference: 255, bank_ifsc: 20 },
     plot_payment: { bank_name: 150, bank_account_no: 255, bank_ifsc: 150 },
     plot_commission: { bank_name: 100, bank_reference: 100 },

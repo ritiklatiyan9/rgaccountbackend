@@ -345,6 +345,7 @@ const loadSource = async (db, req, type, id, lock = false) => {
     from_entity: row.from_entity || '',
     to_entity: row.to_entity || '',
     category: row.category || '',
+    sub_category: row.sub_category || '',
     bank_name: row.bank_name || '',
     bank_account_no:
       row.bank_account_no || row.account_no || row.bank_details || '',
@@ -494,6 +495,7 @@ const insertExpense = async (client, source, userId) => {
     from_entity: source.from_entity,
     to_entity: source.to_entity,
     category: source.category,
+    sub_category: source.sub_category,
     remark: source.particular,
     account_no: source.bank_account_no,
     branch: source.bank_ifsc,
@@ -512,10 +514,10 @@ const insertExpense = async (client, source, userId) => {
   const { rows } = await client.query(
     `INSERT INTO expenses
        (site_id,date,from_entity,to_entity,payment_mode,debit,credit,remark,account_no,branch,
-        category,status,approved_by,approved_at,created_by,voucher_url,assigned_admin_id,
+        category,sub_category,status,approved_by,approved_at,created_by,voucher_url,assigned_admin_id,
         cheque_status,cheque_no,customer_signature_url,authority_signature_url,
         mapped_member_id,mapped_user_id,voucher_urls,bill_url,bill_urls)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
      RETURNING *`,
     [
       source.site_id,
@@ -536,6 +538,7 @@ const insertExpense = async (client, source, userId) => {
         null,
       sourceExpense.branch || sourceBank.bank_ifsc || sourceBank.branch || null,
       upper(sourceExpense.category) || 'TRANSFERRED ENTRY',
+      upper(sourceExpense.sub_category) || null,
       source.status,
       source.approved_by,
       source.approved_at,
@@ -998,7 +1001,7 @@ export const prepareTransfer = async (db, req, lock = false) => {
     transfers: plans.map(({source,offset,destination,sourceMonth}) => ({
       source: publicSource(source),
       source_offset: { type: source.type, type_label: LABEL_BY_TYPE[source.type], parent_id: sourceMonth?.id ?? source.parent_id, parent_name: source.parent_name, date, direction: offset.direction, amount: offset.amount, payment_mode: offset.payment_mode },
-      target: { type: targetType, type_label: LABEL_BY_TYPE[targetType], parent_id: targetMonth?.id ?? targetId, parent_name: parent.label, date, direction: destination.direction, amount: destination.amount, payment_mode: destination.payment_mode, field_storage_note: destination.field_storage_note || null, fields: { particular: destination.particular, remarks: destination.remarks, category: destination.category, from_entity: destination.from_entity, to_entity: destination.to_entity, bank_name: destination.bank_name, bank_account_no: destination.bank_account_no, bank_reference: destination.bank_reference, bank_ifsc: destination.bank_ifsc } },
+      target: { type: targetType, type_label: LABEL_BY_TYPE[targetType], parent_id: targetMonth?.id ?? targetId, parent_name: parent.label, date, direction: destination.direction, amount: destination.amount, payment_mode: destination.payment_mode, field_storage_note: destination.field_storage_note || null, fields: { particular: destination.particular, remarks: destination.remarks, category: destination.category, sub_category: destination.sub_category, from_entity: destination.from_entity, to_entity: destination.to_entity, bank_name: destination.bank_name, bank_account_no: destination.bank_account_no, bank_reference: destination.bank_reference, bank_ifsc: destination.bank_ifsc } },
       remaining_amount: (moneyCents(source.remaining_amount) - moneyCents(destination.amount)) / 100,
     })),
     totals: { debit: plans.reduce((sum,p)=>sum+moneyCents(p.destination.amount),0)/100, credit: plans.reduce((sum,p)=>sum+moneyCents(p.destination.amount),0)/100, net_change: 0 },

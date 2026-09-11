@@ -41,6 +41,13 @@ const normalizeFarmerArea = (gazValue, metreValue) => {
   return { land_size_gaz: null, land_size_mtr: null };
 };
 
+const RATE_UNITS = new Set(['bigha', 'gaz', 'mtr']);
+/** A rate is meaningless without the unit it is quoted per, and a bigha is regional. */
+const normalizeRateQuote = (unit, gazPerBigha) => ({
+  rate_unit: RATE_UNITS.has(String(unit || '').toLowerCase()) ? String(unit).toLowerCase() : 'bigha',
+  gaz_per_bigha: parseOptionalArea(gazPerBigha),
+});
+
 // ──────────────────────────────────────────────────────────────
 // FARMER CRUD
 // ──────────────────────────────────────────────────────────────
@@ -54,6 +61,7 @@ export const createFarmer = asyncHandler(async (req, res) => {
     name, phone, address, total_amount, interest_rate, site_id, notes, status, member_id,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
     land_size_bigha, land_size_gaz, land_size_mtr, land_rate, commission_percentage, commission_amount,
+    rate_unit, gaz_per_bigha,
   } = req.body;
 
   if (!name) {
@@ -90,6 +98,7 @@ export const createFarmer = asyncHandler(async (req, res) => {
     land_size_bigha: land_size_bigha != null && land_size_bigha !== '' ? parseFloat(land_size_bigha) : null,
     ...normalizedArea,
     land_rate: land_rate != null && land_rate !== '' ? parseFloat(land_rate) : null,
+    ...normalizeRateQuote(rate_unit, gaz_per_bigha),
     commission_percentage: commission_percentage != null && commission_percentage !== '' ? parseFloat(commission_percentage) : null,
     commission_amount: commission_amount != null && commission_amount !== '' ? parseFloat(commission_amount) : null,
   };
@@ -138,6 +147,7 @@ export const updateFarmer = asyncHandler(async (req, res) => {
     name, phone, address, total_amount, interest_rate, notes, status, member_id,
     payment_mode, cash_amount, bank_amount, bank_name, bank_account_no, bank_reference, bank_ifsc,
     land_size_bigha, land_size_gaz, land_size_mtr, land_rate, commission_percentage, commission_amount,
+    rate_unit, gaz_per_bigha,
   } = req.body;
 
   // Build the update set without an extra existence-check round-trip — the
@@ -163,6 +173,7 @@ export const updateFarmer = asyncHandler(async (req, res) => {
     Object.assign(updateData, normalizeFarmerArea(land_size_gaz, land_size_mtr));
   }
   if (land_rate !== undefined) updateData.land_rate = land_rate != null && land_rate !== '' ? parseFloat(land_rate) : null;
+  if (rate_unit !== undefined || gaz_per_bigha !== undefined) Object.assign(updateData, normalizeRateQuote(rate_unit, gaz_per_bigha));
   if (commission_percentage !== undefined) updateData.commission_percentage = commission_percentage != null && commission_percentage !== '' ? parseFloat(commission_percentage) : null;
   if (commission_amount !== undefined) updateData.commission_amount = commission_amount != null && commission_amount !== '' ? parseFloat(commission_amount) : null;
 
