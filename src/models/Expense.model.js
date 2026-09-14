@@ -386,7 +386,7 @@ class ExpenseModel extends MasterModel {
    * Calculates running balance dynamically across both tables.
    */
   async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
-    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by, related_member_ids } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
     const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -418,6 +418,9 @@ class ExpenseModel extends MasterModel {
     if (missing_bill === 'true') {
       whereClause += ` AND u.payment_mode IS NOT NULL AND u.payment_mode != '' AND u.payment_mode != 'CASH' AND (u.bill_url IS NULL OR u.bill_url = '')`;
     }
+    const party = buildRelatedPartyWhere(related_member_ids, params, pIdx, 'u.original_id');
+    if (party.clause) whereClause += ` AND u.source = 'expenses'${party.clause}`;
+    pIdx = party.pIdx;
 
     const filterParams = [...params]; // snapshot before LIMIT/OFFSET
 
@@ -610,7 +613,7 @@ class ExpenseModel extends MasterModel {
    * Unified Breakdown stats based on the active filters
    */
   async getUnifiedBreakdowns(siteId, filters, pool) {
-    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, only_site, created_by } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, only_site, created_by, related_member_ids } = filters;
     const params = [siteId];
     let pIdx = 2;
     let whereClause = '';
@@ -636,8 +639,13 @@ class ExpenseModel extends MasterModel {
       pIdx++;
     }
 
-    // When only_site=true, use simplified queries against expenses table only
-    if (only_site === 'true') {
+    const party = buildRelatedPartyWhere(related_member_ids, params, pIdx, 'u.id');
+    whereClause += party.clause;
+    pIdx = party.pIdx;
+
+    // When only_site=true, use simplified queries against expenses table only.
+    // A client filter means expense rows only, exactly as the list applies it.
+    if (only_site === 'true' || party.clause) {
       const modeQ = `
         SELECT COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode,
           COALESCE(SUM(debit), 0)::numeric as total_debit,
@@ -647,7 +655,7 @@ class ExpenseModel extends MasterModel {
           SELECT payment_mode,
                  CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
                  CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-                 date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status
+                 id, date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status
           FROM expenses WHERE site_id = $1
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(payment_mode, 'UNSPECIFIED') ORDER BY total_debit DESC`;
@@ -660,7 +668,7 @@ class ExpenseModel extends MasterModel {
           SELECT payment_mode,
                  CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
                  CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-                 date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status
+                 id, date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status
           FROM expenses WHERE site_id = $1
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY category ASC`;
@@ -769,6 +777,23 @@ class ExpenseModel extends MasterModel {
 
     return { modeBreakdown, categoryBreakdown };
   }
+}
+
+/**
+ * "Money Related To" filter: keep expense rows linked to ANY of `memberIds`.
+ * The link table is a hint keyed (source_key, source_id) and carries no money,
+ * so this only narrows which rows are shown and summed — it never alters them.
+ * ponytail: expense rows only; map unified sources to their own targets if a
+ * page ever filters farmer/commission rows through this query.
+ */
+function buildRelatedPartyWhere(memberIds, params, pIdx, idColumn) {
+  if (!Array.isArray(memberIds) || memberIds.length === 0) return { clause: '', pIdx };
+  params.push(memberIds);
+  return {
+    clause: ` AND ${idColumn} IN (SELECT l.source_id FROM transaction_party_links l
+      WHERE l.source_key = 'expense' AND l.site_id = $1 AND l.member_id = ANY($${pIdx}::int[]))`,
+    pIdx: pIdx + 1,
+  };
 }
 
 export const expenseModel = new ExpenseModel();

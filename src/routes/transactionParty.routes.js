@@ -32,7 +32,7 @@ router.get(
 router.put(
   '/:target/:id',
   requireTargetPermission('update'),
-  invalidateCacheOnSuccess(['transaction-parties|']),
+  invalidateCacheOnSuccess(['transaction-parties|', 'expenses:page:', 'expenses:breakdown:']),
   savePartyLink
 );
 

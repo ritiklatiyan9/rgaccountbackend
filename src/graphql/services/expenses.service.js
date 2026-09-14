@@ -53,6 +53,9 @@ function normalizeFilters(filters = {}) {
   if (filters.only_site === true || filters.only_site === 'true') {
     normalized.only_site = 'true';
   }
+  if (Array.isArray(filters.related_member_ids) && filters.related_member_ids.length > 0) {
+    normalized.related_member_ids = filters.related_member_ids;
+  }
 
   return normalized;
 }

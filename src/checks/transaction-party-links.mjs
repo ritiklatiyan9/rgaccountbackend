@@ -11,6 +11,7 @@ import 'dotenv/config';
 import assert from 'node:assert/strict';
 import pool from '../config/db.js';
 import { PARTY_TARGETS } from '../controllers/transactionParty.controller.js';
+import { expenseModel } from '../models/Expense.model.js';
 
 const money = (n) => '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 const ledgerTotals = async (db, siteId) => {
@@ -111,6 +112,57 @@ try {
     } else {
       console.log('✓ unlinking left the ledger unchanged');
     }
+  }
+
+  // ── The Expenses "Money Related To" filter (server-side) ──
+  // Two expenses on one site linked to two different clients: filtering by one
+  // returns exactly its expense, filtering by both returns both, and the summary
+  // and breakdown describe the same rows the list shows.
+  const { rows: pair } = await db.query(`
+    SELECT e.site_id, ARRAY_AGG(e.id ORDER BY e.id DESC) AS expense_ids,
+           (SELECT ARRAY_AGG(m.id ORDER BY m.id) FROM (SELECT id FROM members WHERE site_id = e.site_id ORDER BY id LIMIT 2) m) AS member_ids
+      FROM (SELECT id, site_id, ROW_NUMBER() OVER (PARTITION BY site_id ORDER BY id DESC) AS rn FROM expenses) e
+     WHERE e.rn <= 2
+     GROUP BY e.site_id
+    HAVING COUNT(*) = 2 AND (SELECT COUNT(*) FROM members WHERE site_id = e.site_id) >= 2
+     LIMIT 1`);
+  if (!pair[0]) {
+    console.log('· no site with two expenses and two clients — expense filter not exercised');
+  } else {
+    const { site_id: siteId, expense_ids: [expenseA, expenseB], member_ids: [memberA, memberB] } = pair[0];
+    for (const [expenseId, memberId] of [[expenseA, memberA], [expenseB, memberB]]) {
+      await db.query(
+        `INSERT INTO transaction_party_links (source_key, source_id, site_id, member_id, direction)
+              VALUES ('expense', $1, $2, $3, 'debit')
+         ON CONFLICT (source_key, source_id) DO UPDATE SET member_id = EXCLUDED.member_id`,
+        [expenseId, siteId, memberId]
+      );
+    }
+    // The model runs its queries in parallel; on this single transaction client pg
+    // queues them and prints a deprecation warning. Harmless here — the app uses a pool.
+    const pageFor = (ids, extra = { only_site: 'true' }) => expenseModel.findPaginatedUnified(
+      siteId, { ...extra, related_member_ids: ids }, 1, 0, db
+    );
+    const idsOf = (page) => page.items.map((row) => Number(row.id)).sort((a, b) => a - b);
+
+    const onlyA = await pageFor([memberA]);
+    const both = await pageFor([memberA, memberB]);
+    const unified = await pageFor([memberA], {}); // no only_site: still expense rows only
+    const breakdown = await expenseModel.getUnifiedBreakdowns(siteId, { only_site: 'true', related_member_ids: [memberA] }, db);
+    const breakdownEntries = breakdown.categoryBreakdown.reduce((sum, row) => sum + Number(row.entries), 0);
+    const { rows: [posted] } = await db.query(
+      `SELECT CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN COALESCE(debit, 0) ELSE 0 END::numeric AS debit
+         FROM expenses WHERE id = $1`, [expenseA]);
+
+    const expectOne = JSON.stringify(idsOf(onlyA)) === JSON.stringify([expenseA]);
+    const expectBoth = JSON.stringify(idsOf(both)) === JSON.stringify([expenseA, expenseB].sort((a, b) => a - b));
+    if (!expectOne) fail(`client filter returned ${JSON.stringify(idsOf(onlyA))}, expected [${expenseA}]`);
+    else if (!expectBoth) fail(`two-client filter returned ${JSON.stringify(idsOf(both))}`);
+    else if (JSON.stringify(idsOf(unified)) !== JSON.stringify([expenseA])) fail('unified mode leaked non-expense rows into the client filter');
+    else if (onlyA.totalItems !== 1 || Number(onlyA.summary.total_count) !== 1) fail(`count/summary disagree with the list: ${onlyA.totalItems}/${onlyA.summary.total_count}`);
+    else if (Number(onlyA.summary.total_debit) !== Number(posted.debit)) fail(`summary debit ${onlyA.summary.total_debit} ≠ the one linked expense's posted debit ${posted.debit}`);
+    else if (breakdownEntries !== 1) fail(`breakdown counted ${breakdownEntries} entries for one linked expense`);
+    else console.log(`✓ expense filter: one client → 1 row (${money(posted.debit)} posted), two clients → 2 rows; count, summary and breakdown agree`);
   }
 
   // ── A bad direction must be rejected by the database, not just the API ──

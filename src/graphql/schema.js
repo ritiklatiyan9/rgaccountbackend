@@ -98,6 +98,8 @@ const ExpensesPageFiltersInput = new GraphQLInputObjectType({
     dateFrom:    { type: GraphQLString },
     dateTo:      { type: GraphQLString },
     missingBill: { type: GraphQLBoolean },
+    // "Money Related To" multi-select: rows linked to ANY of these clients.
+    relatedMemberIds: { type: new GraphQLList(new GraphQLNonNull(GraphQLInt)) },
     order:       { type: ExpenseSortOrderEnum },
     onlySite:    { type: GraphQLBoolean },
     createdBy:   { type: GraphQLInt },
@@ -661,6 +663,13 @@ function cacheKey(prefix, siteId, start, end) {
   return `dashboard:${prefix}:${siteId}:${start}:${end}`;
 }
 
+// Keeps only real positive ids, sorted and de-duplicated so the cache key for
+// [3, 1] and [1, 3, 3] is the same entry.
+const positiveIntList = (values) => {
+  const ids = [...new Set((values || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b);
+  return ids.length ? ids : undefined;
+};
+
 function serializeFilters(filters = {}) {
   return Object.entries(filters)
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
@@ -1088,6 +1097,7 @@ const QueryType = new GraphQLObjectType({
           dateFrom: filters.dateFrom || undefined,
           dateTo: filters.dateTo || undefined,
           missing_bill: filters.missingBill ? 'true' : undefined,
+          related_member_ids: positiveIntList(filters.relatedMemberIds),
           order: filters.order || 'desc',
           // Expenses module should show only entries from expense page.
           only_site: filters.onlySite === false ? undefined : 'true',
@@ -1148,6 +1158,7 @@ const QueryType = new GraphQLObjectType({
           dateFrom: filters.dateFrom || undefined,
           dateTo: filters.dateTo || undefined,
           missing_bill: filters.missingBill ? 'true' : undefined,
+          related_member_ids: positiveIntList(filters.relatedMemberIds),
           order: filters.order || 'desc',
           only_site: filters.onlySite === false ? undefined : 'true',
           created_by: canViewAllEntries
