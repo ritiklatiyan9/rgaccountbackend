@@ -3,6 +3,7 @@ import pool from '../config/db.js';
 
 const MODULES = {
   personal_ledger: ['cash_flow_entries','cash_flow_month_id'], expense: ['expenses',null],
+  partner_profit: ['partner_profit_payments','member_id',true],
   farmer_payment: ['farmer_payments','farmer_id'], plot_payment: ['plot_payments','plot_id'],
   plot_commission: ['plot_commission_payments','plot_commission_id'], vendor_payment: ['vendor_payments','commitment_id'],
   vendor_inventory_payment: ['vendor_inventory_payments','order_id'],
@@ -54,12 +55,13 @@ export async function up(database=pool) {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('163_paired_transaction_transfers'))");
     await db.query(`CREATE TABLE IF NOT EXISTS transaction_transfer_batches (
       request_id UUID PRIMARY KEY,request_hash TEXT NOT NULL,transferred_by INTEGER NOT NULL REFERENCES users(id),response JSONB,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
-    const types=Object.keys(MODULES).map(s=>`'${s}'`).join(',');
+    const sourceTypes=Object.entries(MODULES).filter(([,config])=>!config[2]).map(([type])=>`'${type}'`).join(',');
+    const targetTypes=Object.keys(MODULES).map(type=>`'${type}'`).join(',');
     await db.query(`CREATE TABLE IF NOT EXISTS transaction_money_transfers (
       id UUID PRIMARY KEY, request_id UUID NOT NULL REFERENCES transaction_transfer_batches(request_id) ON DELETE RESTRICT,
       site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
-      source_type TEXT NOT NULL CHECK(source_type IN (${types})),source_record_id INTEGER NOT NULL,source_offset_id INTEGER NOT NULL,source_parent_id INTEGER,
-      target_type TEXT NOT NULL CHECK(target_type IN (${types})),target_record_id INTEGER NOT NULL,target_parent_id INTEGER,
+      source_type TEXT NOT NULL CHECK(source_type IN (${sourceTypes})),source_record_id INTEGER NOT NULL,source_offset_id INTEGER NOT NULL,source_parent_id INTEGER,
+      target_type TEXT NOT NULL CHECK(target_type IN (${targetTypes})),target_record_id INTEGER NOT NULL,target_parent_id INTEGER,
       amount NUMERIC(15,2) NOT NULL CHECK(amount>0),date DATE NOT NULL,direction TEXT NOT NULL CHECK(direction IN ('debit','credit')),
       bucket TEXT NOT NULL CHECK(bucket IN ('cash','bank')),bank_account_id INTEGER REFERENCES bank_accounts(id),reason TEXT NOT NULL CHECK(length(btrim(reason)) BETWEEN 5 AND 500),
       created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,source_snapshot JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

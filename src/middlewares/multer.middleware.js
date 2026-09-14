@@ -12,13 +12,24 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-  const allowedTypes = /jpg|jpeg|png|webp|pdf/;
-  const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  const mimetype = allowedTypes.test(file.mimetype);
-  if (mimetype && extname) {
+  const allowedExtensions = new Set([
+    '.jpg', '.jpeg', '.png', '.webp', '.pdf', '.doc', '.docx', '.xls', '.xlsx',
+    '.csv', '.txt', '.aac', '.m4a', '.mp3', '.ogg', '.wav', '.webm',
+  ]);
+  const allowedMimeTypes = new Set([
+    'image/jpeg', 'image/png', 'image/webp', 'application/pdf', 'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'text/csv', 'text/plain', 'audio/aac', 'audio/mp4', 'audio/mpeg', 'audio/ogg',
+    'audio/wav', 'audio/webm', 'video/webm',
+  ]);
+  const extensionAllowed = allowedExtensions.has(path.extname(file.originalname).toLowerCase());
+  const mimeAllowed = allowedMimeTypes.has(String(file.mimetype || '').toLowerCase());
+  if (mimeAllowed && extensionAllowed) {
     return cb(null, true);
   } else {
-    cb(new Error('Invalid file type'));
+    cb(new Error('Unsupported file type'));
   }
 };
 

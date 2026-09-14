@@ -1,12 +1,24 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
-import { transactionTimeForWrite } from '../services/transactionTime.service.js';
+import { normalizeTransactionTime, transactionTimeForWrite } from '../services/transactionTime.service.js';
 import { getPartnerProfitPaid, paymentPartners, validatePartnerPayment } from '../services/partnerPayments.service.js';
 
 const siteIdOf = (req) => {
   const id = Number(req.params.id);
   if (!Number.isSafeInteger(id) || id <= 0) { const error = new Error('A valid site is required.'); error.statusCode = 400; throw error; }
   return id;
+};
+
+const paymentIdOf = (req) => {
+  const id = Number(req.params.paymentId);
+  if (!Number.isSafeInteger(id) || id <= 0) { const error = new Error('A valid payment is required.'); error.statusCode = 400; throw error; }
+  return id;
+};
+
+const assertActiveSiteBank = async (bankId, siteId, db) => {
+  if (!bankId) return;
+  const bank = await db.query('SELECT id FROM bank_accounts WHERE id=$1 AND site_id=$2 AND is_active=true FOR SHARE', [bankId, siteId]);
+  if (!bank.rows[0]) { const error = new Error('Select an active bank account belonging to this site.'); error.statusCode = 400; throw error; }
 };
 
 export const listPaymentPartners = asyncHandler(async (req, res) => {
@@ -60,13 +72,7 @@ export const createPartnerPayment = asyncHandler(async (req, res) => {
       await db.query('ROLLBACK');
       return res.status(400).json({ message: 'The selected partner does not belong to this site’s profit distribution.' });
     }
-    if (data.bankId) {
-      const bank = await db.query('SELECT id FROM bank_accounts WHERE id=$1 AND site_id=$2 AND is_active=true FOR SHARE', [data.bankId, siteId]);
-      if (!bank.rows[0]) {
-        await db.query('ROLLBACK');
-        return res.status(400).json({ message: 'Select an active bank account belonging to this site.' });
-      }
-    }
+    await assertActiveSiteBank(data.bankId, siteId, db);
     const { rows } = await db.query(`INSERT INTO partner_profit_payments
       (site_id, member_id, date, transaction_time, amount, payment_mode, bank_account_id, bank_reference, remarks, voucher_url, request_id, created_by)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
@@ -80,13 +86,69 @@ export const createPartnerPayment = asyncHandler(async (req, res) => {
   finally { db.release(); }
 });
 
+export const updatePartnerPayment = asyncHandler(async (req, res) => {
+  const siteId = siteIdOf(req);
+  const paymentId = paymentIdOf(req);
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const current = (await db.query('SELECT *, date::text AS date FROM partner_profit_payments WHERE site_id=$1 AND id=$2 FOR UPDATE', [siteId, paymentId])).rows[0];
+    if (!current) { await db.query('ROLLBACK'); return res.status(404).json({ message: 'Payment not found.' }); }
+    if (current.entry_transfer_id) { await db.query('ROLLBACK'); return res.status(409).json({ message: 'This payment belongs to a balanced transfer and cannot be edited. Open the transfer history from its original entry.' }); }
+    if (current.status !== 'approved') { await db.query('ROLLBACK'); return res.status(409).json({ message: 'A voided payment cannot be edited. Delete it or record a new payment.' }); }
+
+    const data = validatePartnerPayment({
+      member_id: current.member_id,
+      amount: req.body.amount ?? current.amount,
+      date: req.body.date ?? current.date,
+      payment_mode: req.body.payment_mode ?? current.payment_mode,
+      bank_account_id: Object.hasOwn(req.body, 'bank_account_id') ? req.body.bank_account_id : current.bank_account_id,
+      request_id: current.request_id,
+    });
+    await assertActiveSiteBank(data.bankId, siteId, db);
+    const transactionTime = Object.hasOwn(req.body, 'transaction_time')
+      ? normalizeTransactionTime(req.body.transaction_time)
+      : current.transaction_time;
+    const { rows } = await db.query(`UPDATE partner_profit_payments SET
+        date=$3, transaction_time=$4, amount=$5, payment_mode=$6, bank_account_id=$7,
+        bank_reference=$8, remarks=$9
+      WHERE site_id=$1 AND id=$2 RETURNING *, date::text AS date`, [
+      siteId, paymentId, data.date, transactionTime, data.amount, data.mode, data.bankId,
+      Object.hasOwn(req.body, 'bank_reference') ? String(req.body.bank_reference || '').trim().slice(0, 200) || null : current.bank_reference,
+      Object.hasOwn(req.body, 'remarks') ? String(req.body.remarks || '').trim().slice(0, 2000) || null : current.remarks,
+    ]);
+    await db.query('COMMIT');
+    res.json({ payment: rows[0], message: 'Partner profit payment updated.' });
+  } catch (error) { await db.query('ROLLBACK'); throw error; }
+  finally { db.release(); }
+});
+
+export const deletePartnerPayment = asyncHandler(async (req, res) => {
+  const siteId = siteIdOf(req);
+  const paymentId = paymentIdOf(req);
+  const { rows } = await pool.query(
+    'DELETE FROM partner_profit_payments WHERE site_id=$1 AND id=$2 AND entry_transfer_id IS NULL RETURNING id',
+    [siteId, paymentId]
+  );
+  if (!rows[0]) {
+    const existing = await pool.query('SELECT entry_transfer_id FROM partner_profit_payments WHERE site_id=$1 AND id=$2', [siteId, paymentId]);
+    if (existing.rows[0]?.entry_transfer_id) return res.status(409).json({ message: 'This payment belongs to a balanced transfer and cannot be deleted.' });
+    return res.status(404).json({ message: 'Payment not found. Refresh the history.' });
+  }
+  res.json({ message: 'Partner profit payment deleted from profit history and the daybook.' });
+});
+
 export const voidPartnerPayment = asyncHandler(async (req, res) => {
   const reason = String(req.body?.reason || '').trim().slice(0, 2000);
   if (!reason) return res.status(400).json({ message: 'Enter a reason for voiding this payment.' });
-  const paymentId = Number(req.params.paymentId);
-  if (!Number.isSafeInteger(paymentId) || paymentId <= 0) return res.status(400).json({ message: 'Invalid payment.' });
+  const paymentId = paymentIdOf(req);
+  const siteId = siteIdOf(req);
   const { rows } = await pool.query(`UPDATE partner_profit_payments SET status='rejected', voided_by=$3, voided_at=NOW(), void_reason=$4
-    WHERE site_id=$1 AND id=$2 AND status='approved' RETURNING *`, [siteIdOf(req), paymentId, req.user.id, reason]);
-  if (!rows[0]) return res.status(409).json({ message: 'Payment was not found or has already been voided. Refresh the history.' });
+    WHERE site_id=$1 AND id=$2 AND status='approved' AND entry_transfer_id IS NULL RETURNING *`, [siteId, paymentId, req.user.id, reason]);
+  if (!rows[0]) {
+    const existing = await pool.query('SELECT entry_transfer_id FROM partner_profit_payments WHERE site_id=$1 AND id=$2', [siteId, paymentId]);
+    if (existing.rows[0]?.entry_transfer_id) return res.status(409).json({ message: 'This payment belongs to a balanced transfer and cannot be voided.' });
+    return res.status(409).json({ message: 'Payment was not found or has already been voided. Refresh the history.' });
+  }
   res.json({ payment: rows[0], message: 'Payment voided; its ledger debit has been reversed.' });
 });

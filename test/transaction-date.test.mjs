@@ -38,7 +38,7 @@ test('all money creation routes replace submitted dates only when disabled', asy
   }
 });
 test('editing preserves the original date across native and Day Book routes', async () => {
-  const paths = ['/expenses/1', '/farmers/2/payments/1', '/plots/payments/1', '/registries/payments/1', '/firms/transactions/1', '/plot-commission/payment/1', '/vendors/inventory/inv-payments/1', '/daybook/expense/1', '/daybook/farmer-payment/1', '/daybook/commission/1', '/daybook/cashflow-entry/1', '/daybook/firm-transaction/1', '/daybook/plot-payment/1', '/daybook/module-entry/plot_installment_payments/1', '/daybook/module-entry/vendor_payments/1', '/daybook/module-entry/plot_commission_payments/1', '/daybook/module-entry/plot_registry_payments/1'];
+  const paths = ['/expenses/1', '/farmers/2/payments/1', '/plots/payments/1', '/registries/payments/1', '/firms/transactions/1', '/plot-commission/payment/1', '/vendors/inventory/inv-payments/1', '/daybook/expense/1', '/daybook/farmer-payment/1', '/daybook/commission/1', '/daybook/cashflow-entry/1', '/daybook/firm-transaction/1', '/daybook/plot-payment/1', '/daybook/module-entry/plot_installment_payments/1', '/daybook/module-entry/vendor_payments/1', '/daybook/module-entry/plot_commission_payments/1', '/daybook/module-entry/plot_registry_payments/1', '/daybook/module-entry/partner_profit_payments/1'];
   for (const path of paths) {
     const target = transactionDateTarget(path);
     assert.ok(target, path);

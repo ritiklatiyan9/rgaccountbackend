@@ -11,7 +11,7 @@ import {
   getSiteProfitShares,
   saveSiteProfitShares,
 } from '../controllers/sitePartnerShare.controller.js';
-import { getPartnerPaymentSummary, listPaymentPartners, listPartnerPayments, createPartnerPayment, voidPartnerPayment } from '../controllers/partnerPayments.controller.js';
+import { getPartnerPaymentSummary, listPaymentPartners, listPartnerPayments, createPartnerPayment, updatePartnerPayment, deletePartnerPayment, voidPartnerPayment } from '../controllers/partnerPayments.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
@@ -38,6 +38,8 @@ router.get('/:id/profit-payments/summary', requireRole('admin'), getPartnerPayme
 router.get('/:id/profit-payments/partners', requireRole('admin'), listPaymentPartners);
 router.get('/:id/profit-payments', requireRole('admin'), listPartnerPayments);
 router.post('/:id/profit-payments', requireRole('admin'), bustProfitPayments, createPartnerPayment);
+router.put('/:id/profit-payments/:paymentId', requireRole('admin'), bustProfitPayments, updatePartnerPayment);
+router.delete('/:id/profit-payments/:paymentId', requireRole('admin'), bustProfitPayments, deletePartnerPayment);
 router.post('/:id/profit-payments/:paymentId/void', requireRole('admin'), bustProfitPayments, voidPartnerPayment);
 router.get('/:id/profit-shares', requireRole('admin'), profitCache, getSiteProfitShares);
 router.put('/:id/profit-shares', requireRole('admin'), invalidateCacheOnSuccess(['site-profit|']), saveSiteProfitShares);

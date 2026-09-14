@@ -562,6 +562,25 @@ export const searchMembers = asyncHandler(async (req, res) => {
   res.json({ members });
 });
 
+/**
+ * GET /members/options?site_id=X
+ * Name + phone only, for entry-modal pickers ("Money Related To", …). The full
+ * /members payload carries KYC, documents and plot rollups a dropdown never
+ * shows, so it gets its own tiny, long-cached response instead.
+ */
+export const getMemberOptions = asyncHandler(async (req, res) => {
+  const siteId = Number.parseInt(req.query.site_id, 10);
+  if (!Number.isInteger(siteId) || siteId <= 0) return res.status(400).json({ message: 'site_id is required' });
+  const { rows } = await pool.query(
+    `SELECT id, full_name, phone, member_type
+       FROM members
+      WHERE site_id = $1 AND UPPER(COALESCE(status, 'ACTIVE')) <> 'BLOCKED'
+      ORDER BY full_name ASC`,
+    [siteId]
+  );
+  res.json({ members: rows });
+});
+
 /** GET /members/autocomplete?site_id=X */
 export const getMemberAutocomplete = asyncHandler(async (req, res) => {
   const { site_id } = req.query;

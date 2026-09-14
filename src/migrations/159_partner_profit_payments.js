@@ -52,8 +52,13 @@ export async function up(db = pool) {
           CONCAT_WS(' · ', NEW.bank_reference, NEW.remarks), NEW.created_by, 'partner_profit_payments', NEW.id,
           NEW.voucher_url, NEW.status, NEW.created_by, NEW.created_at
         ) ON CONFLICT (source_module, source_id) DO UPDATE SET
-          debit = EXCLUDED.debit, status = EXCLUDED.status, bank_account_id = EXCLUDED.bank_account_id,
-          remarks = EXCLUDED.remarks, updated_at = NOW();
+          cash_flow_month_id = EXCLUDED.cash_flow_month_id, site_id = EXCLUDED.site_id,
+          date = EXCLUDED.date, transaction_time = EXCLUDED.transaction_time,
+          particular = EXCLUDED.particular, debit = EXCLUDED.debit, credit = EXCLUDED.credit,
+          cash_type = EXCLUDED.cash_type, bank_account_id = EXCLUDED.bank_account_id,
+          remarks = EXCLUDED.remarks, voucher_url = EXCLUDED.voucher_url,
+          status = EXCLUDED.status, approved_by = EXCLUDED.approved_by,
+          approved_at = EXCLUDED.approved_at, updated_at = NOW();
         RETURN NEW;
       END;
     $$`);

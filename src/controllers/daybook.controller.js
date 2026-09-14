@@ -1114,12 +1114,14 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         source_key: m.source_module,
         source_id: m.source_id,
         source: meta.source,
-        read_only: true,
+        // Partner-profit payments can be corrected from either their history
+        // or the daybook. Other mirrored modules retain their existing owner-only UI.
+        read_only: m.source_module !== 'partner_profit_payments',
       };
     });
 
   // Merge and sort ASC by id
-  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000, vip: 1000000 };
+  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000, vip: 1000000, ppp: 1100000 };
   const sortId = (x) => {
     if (typeof x.id === 'string') {
       const [prefix, n] = x.id.split('_');
@@ -2026,6 +2028,11 @@ const MODULE_TABLES = Object.freeze({
   plot_registry_payments: {
     date: 'payment_date', amount: 'amount', mode: 'payment_mode', remarks: 'notes',
     modeCase: 'upper', direction: 'debit',
+  },
+  partner_profit_payments: {
+    date: 'date', amount: 'amount', mode: 'payment_mode', remarks: 'remarks',
+    modeCase: 'upper', direction: 'debit',
+    modeValues: ['CASH', 'BANK', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'TRANSFER'],
   },
 });
 

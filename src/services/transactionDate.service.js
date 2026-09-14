@@ -31,6 +31,7 @@ const SOURCES = {
   vendor_inventory_payment: { table: 'vendor_inventory_payments', date: 'payment_date', parent: ['vendor_inventory_orders', 'order_id'] },
   land_deal_payment: { table: 'land_deal_payments', parent: ['land_deals', 'land_deal_id'] },
   misc_income: { table: 'misc_income_entries' },
+  partner_profit_payment: { table: 'partner_profit_payments' },
 };
 
 const ROUTES = [
@@ -46,7 +47,7 @@ const ROUTES = [
   [/^\/vendors\/payments\/(\d+)$/, 'vendor_payment'],
   [/^\/vendors\/inventory\/inv-payments\/(\d+)$/, 'vendor_inventory_payment'],
 ];
-const MODULE_SOURCES = { plot_installment_payments: 'plot_installment_payment', vendor_payments: 'vendor_payment', plot_commission_payments: 'plot_commission_payment', plot_registry_payments: 'registry_payment' };
+const MODULE_SOURCES = { plot_installment_payments: 'plot_installment_payment', vendor_payments: 'vendor_payment', plot_commission_payments: 'plot_commission_payment', plot_registry_payments: 'registry_payment', partner_profit_payments: 'partner_profit_payment' };
 const DAYBOOK_SOURCES = { expense: 'expense', 'farmer-payment': 'farmer_payment', commission: 'commission', 'cashflow-entry': 'cashflow', 'firm-transaction': 'firm_transaction', 'plot-payment': 'plot_payment' };
 
 export function transactionDateTarget(path, body = {}) {

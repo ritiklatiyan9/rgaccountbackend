@@ -589,6 +589,25 @@ export const listInstallments = asyncHandler(async (req, res) => {
 });
 
 /** POST /plots/:id/installments — Create installment(s) for a plot */
+export const bookingScheduleError = (plot, installments) => {
+  const salePrice = Number(plot?.sale_price) || 0;
+  const storedFirst = Number(plot?.first_installment) || 0;
+  const expectedFirst = Math.round(salePrice * 25) / 100;
+  // Only new bookings opt into this contract by storing the canonical first
+  // installment. Historic plans keep their existing rules.
+  if (salePrice <= 0 || Math.abs(storedFirst - expectedFirst) >= 0.01) return '';
+  const bookingDate = plot.booking_date instanceof Date
+    ? plot.booking_date.toISOString().slice(0, 10) : String(plot.booking_date || '').slice(0, 10);
+  const first = installments[0];
+  if (installments.length < 2) return 'A booking plan needs installment 1 plus at least one later installment.';
+  if (String(first?.due_date || '').slice(0, 10) !== bookingDate || Math.abs(Number(first?.amount) - expectedFirst) >= 0.01) {
+    return 'Installment 1 must be 25% of the sale price on the booking date.';
+  }
+  const scheduled = installments.reduce((sum, row) => sum + (Number(row?.amount) || 0), 0);
+  if (Math.abs(scheduled - salePrice) >= 0.01) return 'The installment schedule must cover the full sale price.';
+  return '';
+};
+
 export const createInstallments = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { installments } = req.body; // Array of { installment_name, amount, due_date }
@@ -601,6 +620,8 @@ export const createInstallments = asyncHandler(async (req, res) => {
 
   // Get existing installments to determine sort_order
   const existing = await installmentModel.findByPlotId(parseInt(id), pool);
+  const scheduleError = existing.length === 0 ? bookingScheduleError(plot, installments) : '';
+  if (scheduleError) return res.status(400).json({ message: scheduleError });
   let nextOrder = existing.length > 0 ? Math.max(...existing.map(e => e.sort_order)) + 1 : 1;
 
   const created = [];
@@ -649,8 +670,10 @@ export const replaceInstallments = asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const plot = (await client.query('SELECT id, installments_enabled FROM plots WHERE id = $1 FOR UPDATE', [plotId])).rows[0];
+    const plot = (await client.query('SELECT id, installments_enabled, sale_price, first_installment, booking_date FROM plots WHERE id = $1 FOR UPDATE', [plotId])).rows[0];
     if (!plot) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Plot not found' }); }
+    const scheduleError = bookingScheduleError(plot, installments);
+    if (scheduleError) { await client.query('ROLLBACK'); return res.status(400).json({ message: scheduleError }); }
 
     const { rows: linked } = await client.query(
       `SELECT DISTINCT installment_id FROM plot_installment_payments WHERE plot_id = $1 AND installment_id IS NOT NULL`, [plotId]);

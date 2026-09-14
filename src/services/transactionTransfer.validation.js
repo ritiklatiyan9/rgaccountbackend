@@ -207,10 +207,16 @@ export const normalizeTransferFields = (type, entry) => {
     result[key] = null;
   };
   const vendor = ['vendor_payment','vendor_inventory_payment'].includes(type);
+  if (type === 'partner_profit') {
+    if (String(result.payment_mode).toUpperCase() === 'BANK TRANSFER')
+      result.payment_mode = result.raw_mode = 'TRANSFER';
+    if (!['CASH','BANK','UPI','NEFT','RTGS','IMPS','TRANSFER'].includes(String(result.payment_mode).toUpperCase()))
+      throw new TransferError(422, 'Select a supported Partner Profit payment mode');
+  }
   if (vendor && !['CASH','BANK','UPI','NEFT','RTGS','IMPS'].includes(result.payment_mode)) {
     result.payment_mode = result.raw_mode = 'BANK';
   }
-  if (['plot_payment','plot_commission','vendor_payment','vendor_inventory_payment','land_sale'].includes(type)) moveToNarrative('particular','PARTY');
+  if (['plot_payment','plot_commission','vendor_payment','vendor_inventory_payment','land_sale','partner_profit'].includes(type)) moveToNarrative('particular','PARTY');
   if (!['expense','daybook'].includes(type)) {
     moveToNarrative('category','CATEGORY');
     moveToNarrative('from_entity','FROM');
@@ -225,6 +231,7 @@ export const normalizeTransferFields = (type, entry) => {
     vendor_payment: ['bank_reference'], vendor_inventory_payment: ['bank_reference'],
     misc_income: ['bank_name','bank_account_no','bank_ifsc','bank_reference'],
     land_sale: ['bank_name','bank_account_no','bank_ifsc','bank_reference'],
+    partner_profit: ['bank_reference'],
     daybook: ['bank_account_no','bank_ifsc'],
   }[type] || [];
   for (const [key,label] of Object.entries({bank_name:'BANK',bank_account_no:'ACCOUNT',bank_ifsc:'IFSC',bank_reference:'REFERENCE'}))
@@ -258,6 +265,7 @@ export const normalizeTransferFields = (type, entry) => {
     vendor_payment: { bank_reference: 120 }, vendor_inventory_payment: { bank_reference: 120 },
     misc_income: { particular: 255, bank_name: 150, bank_account_no: 50, bank_reference: 120, bank_ifsc: 20 },
     land_sale: { bank_name: 150, bank_account_no: 50, bank_reference: 120, bank_ifsc: 20 },
+    partner_profit: { bank_reference: 200 },
     daybook: { particular: 500, from_entity: 255, to_entity: 255, category: 100, bank_account_no: 100, bank_ifsc: 255 },
   }[type] || {};
   for(const [key,limit] of Object.entries(nativeLimits)) if(result[key] && Array.from(String(result[key])).length>limit)

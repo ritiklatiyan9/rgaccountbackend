@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pool from '../src/config/db.js';
 import { up } from '../src/migrations/159_partner_profit_payments.js';
-import { createPartnerPayment, listPartnerPayments, voidPartnerPayment } from '../src/controllers/partnerPayments.controller.js';
+import { createPartnerPayment, deletePartnerPayment, listPartnerPayments, updatePartnerPayment, voidPartnerPayment } from '../src/controllers/partnerPayments.controller.js';
 import { getPartnerProfitPaid, partnerPaidByMember, paymentPartners } from '../src/services/partnerPayments.service.js';
 import { getRunningExpense, getExpenseBreakdown, getSiteBalanceDetail } from '../src/graphql/services/kpi.service.js';
 
@@ -88,20 +88,27 @@ test('payment, bank, duplicate retry, cutoff and void reconcile without reducing
     assert.equal(wrongBank.status, 400);
     const bank = await invoke(createPartnerPayment, { body: { ...input, member_id: 2, amount: '40.50', date: '2026-02-01', payment_mode: 'UPI', bank_account_id: 1, request_id: randomUUID() } });
     assert.equal(bank.status, 201);
+    const edited = await invoke(updatePartnerPayment, {
+      params: { id: '1', paymentId: String(first.body.payment.id) },
+      body: { amount: '35.25', date: '2026-01-16', payment_mode: 'NEFT', bank_account_id: 1, bank_reference: 'CORRECTED-REF', remarks: 'Corrected payment' },
+    });
+    assert.equal(edited.status, 200);
     assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM cash_flow_entries WHERE source_module='partner_profit_payments'")).rows[0].n, 2);
     assert.equal((await db.query("SELECT bank_account_id FROM cash_flow_entries WHERE source_module='partner_profit_payments' AND source_id=$1", [bank.body.payment.id])).rows[0].bank_account_id, 1);
-    assert.equal(await getPartnerProfitPaid(1, '2026-03-01'), 70.75);
-    assert.equal(await getPartnerProfitPaid(1, '2026-02-01'), 30.25, 'end date is exclusive');
+    const mirroredEdit = (await db.query("SELECT date::text AS date, debit::float AS debit, cash_type, bank_account_id, remarks FROM cash_flow_entries WHERE source_module='partner_profit_payments' AND source_id=$1", [first.body.payment.id])).rows[0];
+    assert.deepEqual(mirroredEdit, { date: '2026-01-16', debit: 35.25, cash_type: 'bank', bank_account_id: 1, remarks: 'CORRECTED-REF · Corrected payment' });
+    assert.equal(await getPartnerProfitPaid(1, '2026-03-01'), 75.75);
+    assert.equal(await getPartnerProfitPaid(1, '2026-02-01'), 35.25, 'end date is exclusive');
     assert.equal(await getPartnerProfitPaid(2, '2026-03-01'), 0, 'site scope cannot leak');
     assert.equal(await getRunningExpense(1, '2026-03-01'), 100);
     assert.equal((await getExpenseBreakdown(1, '2026-01-01', '2026-03-01')).total, 100);
-    assert.equal((await getSiteBalanceDetail(1, '2026-01-01', '2026-03-01')).siteBalance, 329.25);
-    assert.equal((await partnerPaidByMember(1, '2026-03-01')).reduce((sum, row) => sum + row.paid, 0), 70.75);
+    assert.equal((await getSiteBalanceDetail(1, '2026-01-01', '2026-03-01')).siteBalance, 324.25);
+    assert.equal((await partnerPaidByMember(1, '2026-03-01')).reduce((sum, row) => sum + row.paid, 0), 75.75);
     await db.query('DELETE FROM site_partner_shares WHERE site_id=1');
     assert.ok((await paymentPartners(1)).some((row) => row.id === 1), 'history retains a recipient after their split is removed');
     const history = await invoke(listPartnerPayments, { query: { end: '2026-02-01' } });
     assert.equal(history.body.entries.length, 1);
-    assert.equal(history.body.entries[0].posted_amount, 30.25);
+    assert.equal(history.body.entries[0].posted_amount, 35.25);
     const voidReq = { params: { id: '1', paymentId: String(first.body.payment.id) }, body: { reason: 'Duplicate entered outside this request' } };
     assert.equal((await invoke(voidPartnerPayment, voidReq)).status, 200);
     assert.equal((await invoke(voidPartnerPayment, voidReq)).status, 409);
@@ -114,6 +121,9 @@ test('payment, bank, duplicate retry, cutoff and void reconcile without reducing
     const voided = finalHistory.body.entries.find((entry) => entry.status === 'rejected');
     assert.equal(voided.posted_amount, 0);
     assert.ok(voided.void_reason);
+    assert.equal((await invoke(deletePartnerPayment, { params: { id: '1', paymentId: String(bank.body.payment.id) } })).status, 200);
+    assert.equal(await getPartnerProfitPaid(1, '2026-03-01'), 0);
+    assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM cash_flow_entries WHERE source_module='partner_profit_payments'")).rows[0].n, 1, 'delete removes its mirrored daybook row');
   } finally {
     pool.query = originalQuery; pool.connect = originalConnect;
     await db.query('ROLLBACK'); db.release(); await pool.end();

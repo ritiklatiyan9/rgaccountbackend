@@ -144,6 +144,12 @@ test('normalized transfer fields preserve unmatched values and enforce native le
   assert.equal(personal.particular, 'BANK TRANSFER');
   assert.match(personal.remarks, /REFERENCE: UTR/);
   assert.equal(fields.particular, 'Chosen party');
+  const partner = normalizeTransferFields('partner_profit', fields);
+  assert.equal(partner.payment_mode, 'TRANSFER');
+  assert.equal(partner.particular, null);
+  assert.equal(partner.bank_reference, 'UTR');
+  assert.equal(partner.bank_name, null);
+  assert.match(partner.remarks, /PARTY: Chosen party/);
   assert.throws(() => normalizeTransferFields('expense', { ...fields, from_entity: null, parent_name: 'A'.repeat(256) }), /255-character/);
   assert.throws(() => normalizeTransferFields('expense', { ...fields, category: 'ß'.repeat(100) }), /100-character/);
   assert.doesNotThrow(() => normalizeTransferFields('expense', { ...fields, remarks: 'Long note '.repeat(400) }));

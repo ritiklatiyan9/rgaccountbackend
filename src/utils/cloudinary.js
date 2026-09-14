@@ -1,4 +1,5 @@
 import { v2 as cloudinary } from 'cloudinary';
+import path from 'path';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -12,14 +13,15 @@ cloudinary.config({
  * destroy a just-uploaded object when their database transaction fails.
  */
 export const uploadCloudinaryAsset = async (filePath, folder = 'uploads') => {
+  const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+  const isImage = imageExtensions.has(path.extname(filePath).toLowerCase());
   const result = await cloudinary.uploader.upload(filePath, {
     folder,
-    // Compress & resize images to reduce size
-    transformation: [
+    ...(isImage ? { transformation: [
       { width: 1200, crop: 'limit' },     // max width 1200px
       { quality: 'auto:good' },            // auto quality optimization
       { fetch_format: 'auto' },            // auto format (webp/avif where supported)
-    ],
+    ] } : {}),
     resource_type: 'auto',
   });
   return {

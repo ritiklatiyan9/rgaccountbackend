@@ -29,7 +29,9 @@ async function setup(){
   const query=async(sql,args)=>{const r=args?.length?await pg.query(sql,args):(await pg.exec(sql)).at(-1);return {...r,rowCount:r?.affectedRows??r?.rows?.length??0};};
   pool.query=query;pool.connect=async()=>({query,release(){}});pool.end=async()=>pg.close();
   await pg.exec(`CREATE TABLE sites(id int PRIMARY KEY,name text);CREATE TABLE users(id int PRIMARY KEY,name text,email text,role text,is_active boolean DEFAULT true);CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
-    CREATE TABLE members(id int PRIMARY KEY,full_name text);CREATE TABLE user_sites(user_id int,site_id int);CREATE TABLE user_approval_modules(user_id int,module text);
+    CREATE TABLE members(id int PRIMARY KEY,full_name text,phone text);CREATE TABLE user_sites(user_id int,site_id int);CREATE TABLE user_approval_modules(user_id int,module text);
+    CREATE TABLE site_partner_shares(site_id int,member_id int,share_pct numeric);
+    CREATE TABLE land_partner_shares(farmer_id int,member_id int,share_pct numeric);
     CREATE TABLE application_settings(site_id int,setting_key text,setting_value jsonb);
     CREATE TABLE cash_flow_months(id serial PRIMARY KEY,site_id int,year int,month int,ledger_name text,ledger_type text,is_locked boolean DEFAULT false,opening_balance numeric DEFAULT 0,created_by int,linked_member_id int,linked_user_id int);
     CREATE TABLE farmers(id int PRIMARY KEY,site_id int,name text);
@@ -43,10 +45,11 @@ async function setup(){
     CREATE TABLE plot_registry_payments(id int PRIMARY KEY,source_plot_payment_id int);
     CREATE TABLE compliance_finance_links(expense_id int);
     CREATE TABLE bank_reconciliation_links(site_id int,candidate_entry_id int,candidate_source text);
-    CREATE TABLE bank_accounts(id int PRIMARY KEY,site_id int);
+    CREATE TABLE bank_accounts(id int PRIMARY KEY,site_id int,name text,is_active boolean DEFAULT true);
+    CREATE TABLE partner_profit_payments(id serial PRIMARY KEY,site_id int,member_id int,date date,amount numeric CHECK(amount>0),payment_mode text,bank_account_id int,bank_reference text,remarks text,voucher_url text,customer_signature_url text,authority_signature_url text,status text DEFAULT 'approved',request_id uuid,created_by int,transaction_time time,created_at timestamptz DEFAULT now(),UNIQUE(site_id,created_by,request_id));
     CREATE TABLE plot_money_transfers(id uuid PRIMARY KEY,source_payment_id int,amount numeric);
     CREATE FUNCTION financial_transaction_posts(text,text,text,text) RETURNS boolean LANGUAGE SQL AS $$ SELECT $2='approved' AND ($4 IS NULL OR $4='CLEARED') $$;
-    INSERT INTO sites VALUES(1,'Site one'),(2,'Site two');INSERT INTO users(id,name,email,role) VALUES(1,'Admin','admin@test.invalid','admin'),(2,'Reviewer','reviewer@test.invalid','sub_admin');INSERT INTO user_sites VALUES(2,1);INSERT INTO members VALUES(1,'Agent');
+    INSERT INTO sites VALUES(1,'Site one'),(2,'Site two');INSERT INTO users(id,name,email,role) VALUES(1,'Admin','admin@test.invalid','admin'),(2,'Reviewer','reviewer@test.invalid','sub_admin');INSERT INTO user_sites VALUES(2,1);INSERT INTO members(id,full_name) VALUES(1,'Agent');INSERT INTO site_partner_shares VALUES(1,1,50);
     INSERT INTO cash_flow_months(site_id,year,month,ledger_name,ledger_type,created_by) VALUES(1,2026,10,'ALICE','person',1),(1,2026,10,'BOB','person',1);
     INSERT INTO farmers VALUES(1,1,'Farmer'),(2,2,'Other site farmer');
     INSERT INTO plots VALUES(1,1,'A1','Buyer A',1,'BOOKED'),(2,1,'A2','Buyer B',1,'BOOKED');
@@ -55,7 +58,7 @@ async function setup(){
     INSERT INTO vendor_commitments VALUES(1,1,'Vendor','Work','open');
     INSERT INTO vendor_inventory_orders VALUES(1,1,'Vendor','Bricks','open');
     INSERT INTO misc_income_categories VALUES(1,'Other',true);
-    INSERT INTO bank_accounts VALUES(1,1);`);
+    INSERT INTO bank_accounts(id,site_id,name) VALUES(1,1,'Site Bank');`);
   for(const table of Object.values(tables)) await pg.exec(`CREATE TABLE ${table}(${columns})`);
   await pg.exec('ALTER TABLE vendor_payments ADD CONSTRAINT vendor_payments_amount_check CHECK(amount>0);ALTER TABLE land_deal_payments ADD CONSTRAINT land_deal_payments_amount_check CHECK(amount>0)');
   await pg.exec(`CREATE FUNCTION native_test_mirror() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE v jsonb:=to_jsonb(NEW);n numeric;m text; BEGIN

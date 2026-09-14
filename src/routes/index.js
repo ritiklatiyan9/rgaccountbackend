@@ -56,6 +56,8 @@ import managementAnalyticsRoutes from './managementAnalytics.routes.js';
 import receiptHistoryRoutes from './receiptHistory.routes.js';
 import recycleBinRoutes from './recycleBin.routes.js';
 import transactionTransferRoutes from './transactionTransfer.routes.js';
+import transactionPartyRoutes from './transactionParty.routes.js';
+import manualProfitSandboxRoutes from './manualProfitSandbox.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -115,4 +117,6 @@ router.use('/management-analytics', managementAnalyticsRoutes);
 router.use('/receipt-history', receiptHistoryRoutes);
 router.use('/recycle-bin', recycleBinRoutes);
 router.use('/transaction-transfers', transactionTransferRoutes);
+router.use('/transaction-parties', transactionPartyRoutes);
+router.use('/manual-profit-sandboxes', manualProfitSandboxRoutes);
 export default router;

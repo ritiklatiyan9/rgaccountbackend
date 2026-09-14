@@ -70,14 +70,17 @@ export const SIGN_TARGETS = {
 
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);
 
-const requireTargetSiteAccess = async (req, res, target, id) => {
+// Resolves the record, enforces the site boundary and hands the row back, so a
+// caller that needs the owning site (party links) does not re-query for it.
+// Falsy return means a response has already been sent.
+export const requireTargetSiteAccess = async (req, res, target, id) => {
   const { rows } = await pool.query(target.siteQuery, [id]);
   if (!rows[0]) {
     res.status(404).json({ message: 'Record not found' });
     return false;
   }
 
-  if (ADMIN_ROLES.has(req.user.role)) return true;
+  if (ADMIN_ROLES.has(req.user.role)) return rows[0];
 
   const siteId = Number(rows[0].site_id);
   if (!Number.isInteger(siteId) || siteId <= 0) {
@@ -94,7 +97,7 @@ const requireTargetSiteAccess = async (req, res, target, id) => {
     return false;
   }
 
-  return true;
+  return rows[0];
 };
 
 /**

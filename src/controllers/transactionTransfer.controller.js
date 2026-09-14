@@ -27,6 +27,14 @@ export const MODULES = {
     table: 'cash_flow_entries',
     parent: 'cash_flow_month_id',
   },
+  partner_profit: {
+    label: 'Partner Profit Payment',
+    table: 'partner_profit_payments',
+    parent: 'member_id',
+    direction: 'debit',
+    adminOnly: true,
+    targetOnly: true,
+  },
   expense: { label: 'Expenses', permission: 'expenses', table: 'expenses' },
   farmer_payment: {
     label: 'Land Purchase (Farmer Payment)',
@@ -101,6 +109,8 @@ const dateParts = (value) => {
 };
 const hasPermission = async (req, type, action) => {
   if (!Object.hasOwn(MODULES, type)) return false;
+  if (MODULES[type].adminOnly)
+    return ['admin', 'super_admin'].includes(req.user.role);
   if (['admin', 'super_admin'].includes(req.user.role)) return true;
   if (req.user.role !== 'sub_admin') return false;
   const p = await permissionModel.getPermission(
@@ -127,6 +137,8 @@ const ensureSiteAccess = async (db, req, siteId) => {
   if (!rows.length) throw new TransferError(403, 'Access denied to this site');
 };
 const loadSource = async (db, req, type, id, lock = false) => {
+  if (MODULES[type]?.targetOnly)
+    throw new TransferError(422, `${LABEL_BY_TYPE[type]} can only be used as a transfer destination`);
   await requirePermission(req, type, 'write');
   if (['registry_payment', 'commission'].includes(type))
     throw new TransferError(422, 'This module is a record of an underlying payment and does not post to the site balance. Transfer the original payment instead.');
@@ -371,7 +383,7 @@ const publicSource = ({ raw, ...source }) => ({
   ...source,
   type_label: LABEL_BY_TYPE[source.type],
 });
-const targetOptions = async (db, siteId) => {
+const targetOptions = async (db, siteId, onlyTypes = null) => {
   const queries = {
     personal_ledger: `SELECT id,ledger_name AS label,CONCAT(year,'-',LPAD(month::text,2,'0')) AS period,CONCAT(ledger_name,' · ',TO_CHAR(MAKE_DATE(year,month,1),'Mon YYYY')) AS meta
       FROM (SELECT DISTINCT ON (COALESCE('member:'||linked_member_id::text,'user:'||linked_user_id::text,'name:'||UPPER(TRIM(ledger_name)))) cfm.*
@@ -387,11 +399,24 @@ const targetOptions = async (db, siteId) => {
     misc_income: `SELECT id,name AS label FROM misc_income_categories WHERE is_active AND $1::int IS NOT NULL ORDER BY name`,
     registry_payment: `SELECT id,CONCAT('Plot ',plot_no,' · ',customer_name) AS label FROM plot_registries WHERE site_id=$1 ORDER BY plot_no`,
     land_sale: `SELECT id,CONCAT(COALESCE(deal_no,''),' · ',buyer_name) AS label FROM land_deals WHERE site_id=$1 AND status <> 'cancelled' ORDER BY buyer_name`,
+    partner_profit: `SELECT m.id, m.full_name AS label,
+        CONCAT_WS(' · ', NULLIF(TRIM(m.phone),''),
+          CASE WHEN COALESCE(sps.share_pct,0)>0 THEN sps.share_pct::float::text||'% site share' END) AS meta
+      FROM members m
+      LEFT JOIN site_partner_shares sps ON sps.site_id=$1 AND sps.member_id=m.id
+      WHERE m.id IN (
+        SELECT member_id FROM site_partner_shares WHERE site_id=$1
+        UNION SELECT lps.member_id FROM land_partner_shares lps JOIN farmers f ON f.id=lps.farmer_id WHERE f.site_id=$1
+        UNION SELECT member_id FROM partner_profit_payments WHERE site_id=$1
+      )
+      ORDER BY m.full_name,m.id`,
   };
   const options = {};
   // One connection, sequential SQL to avoid filling the pool per selected row.
-  for (const [type, query] of Object.entries(queries))
+  for (const [type, query] of Object.entries(queries)) {
+    if (onlyTypes && !onlyTypes.includes(type)) continue;
     options[type] = (await db.query(query, [siteId])).rows;
+  }
   return options;
 };
 export const getTransferOptions = asyncHandler(async (req, res) => {
@@ -409,10 +434,28 @@ export const getTransferOptions = asyncHandler(async (req, res) => {
     if (String(source.status).toLowerCase()!=='approved' || !transactionMovesMoney({direction:source.direction,status:source.status,paymentMode:source.payment_mode,chequeStatus:source.cheque_status})) throw new TransferError(409,'Approve the original transaction and clear its cheque before transferring');
     if (source.remaining_amount<=0) throw new TransferError(409,'The full amount of this original entry has already been transferred');
   }
-  const options = await targetOptions(pool, sources[0].site_id);
+  const bankIds = [...new Set(sources.map((source) => Number(source.bank_account_id)).filter((id) => Number.isSafeInteger(id) && id > 0))];
+  if (bankIds.length) {
+    const { rows: banks } = await pool.query(
+      'SELECT id,name,is_active FROM bank_accounts WHERE site_id=$1 AND id=ANY($2::int[])',
+      [sources[0].site_id, bankIds],
+    );
+    const bankDetails = new Map(banks.map((bank) => [Number(bank.id), bank]));
+    for (const source of sources) {
+      const bank = bankDetails.get(Number(source.bank_account_id));
+      source.bank_account_name = bank?.name || null;
+      source.bank_account_active = bank?.is_active === true;
+    }
+  }
+  const permittedTargets = [];
+  for (const type of Object.keys(MODULES)) {
+    if (type === 'partner_profit' && sources.some((source) => source.type !== 'personal_ledger')) continue;
+    if (await hasPermission(req, type, 'write')) permittedTargets.push(type);
+  }
+  const options = await targetOptions(pool, sources[0].site_id, permittedTargets);
   const targets = [];
   for (const [type, cfg] of Object.entries(MODULES)) {
-    if (!(await hasPermission(req, type, 'write'))) continue;
+    if (!permittedTargets.includes(type)) continue;
     let approvalReason=null;
     try { await requireApproval(pool,req,type); } catch(error) { if (!(error instanceof TransferError)) throw error; approvalReason=error.message; }
     targets.push({
@@ -421,7 +464,9 @@ export const getTransferOptions = asyncHandler(async (req, res) => {
       requires_selection: Boolean(cfg.parent),
       direction: null,
       default_direction: cfg.direction || null,
-      disabled_reason: approvalReason || (['registry_payment', 'commission'].includes(type)
+      disabled_reason: approvalReason || (type === 'partner_profit' && sources.some((source) => source.mode !== 'cash' && (!source.bank_account_id || source.bank_account_active !== true))
+        ? 'Map every selected bank entry to an active site bank before transferring it to Partner Profit.'
+        : ['registry_payment', 'commission'].includes(type)
         ? 'This record does not post to the site balance. Transfer the original payment instead.'
         : cfg.parent && !options[type]?.length
           ? `No eligible destination exists in ${cfg.label} for this site`
@@ -486,6 +531,67 @@ const insertPersonalLedger = async (client, source, targetId, userId) => {
     ],
   );
   return { row: rows[0], parent: month, path: `/cashflow/${month.id}` };
+};
+
+const insertPartnerProfit = async (client, source, targetId, userId, transferId) => {
+  if (source.direction !== 'debit')
+    throw new TransferError(422, 'Partner Profit payments must be Debit / Money Out entries');
+  const { rows: partners } = await client.query(
+    `SELECT m.id,m.full_name
+       FROM members m
+      WHERE m.id=$1 AND m.id IN (
+        SELECT member_id FROM site_partner_shares WHERE site_id=$2
+        UNION SELECT lps.member_id FROM land_partner_shares lps JOIN farmers f ON f.id=lps.farmer_id WHERE f.site_id=$2
+        UNION SELECT member_id FROM partner_profit_payments WHERE site_id=$2
+      )
+      FOR SHARE OF m`,
+    [targetId, source.site_id],
+  );
+  const partner = partners[0];
+  if (!partner)
+    throw new TransferError(404, 'Destination profit partner not found for this site');
+  const mode = upper(source.payment_mode) === 'BANK TRANSFER'
+    ? 'TRANSFER'
+    : upper(source.payment_mode);
+  if (!['CASH','BANK','UPI','NEFT','RTGS','IMPS','TRANSFER'].includes(mode))
+    throw new TransferError(422, 'Select a supported Partner Profit payment mode');
+  if (mode !== 'CASH') {
+    if (!source.bank_account_id)
+      throw new TransferError(422, 'Map the original bank entry to an active site bank before transferring it to Partner Profit');
+    const bank = await client.query(
+      'SELECT 1 FROM bank_accounts WHERE id=$1 AND site_id=$2 AND is_active=true FOR SHARE',
+      [source.bank_account_id, source.site_id],
+    );
+    if (!bank.rows[0])
+      throw new TransferError(422, 'The original bank entry is not mapped to an active bank for this site');
+  }
+  const { rows } = await client.query(
+    `INSERT INTO partner_profit_payments
+       (site_id,member_id,date,amount,payment_mode,bank_account_id,bank_reference,remarks,
+        voucher_url,customer_signature_url,authority_signature_url,status,request_id,created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'approved',$12,$13)
+     RETURNING *`,
+    [
+      source.site_id,
+      partner.id,
+      source.date,
+      source.amount,
+      mode,
+      mode === 'CASH' ? null : source.bank_account_id,
+      source.bank_reference || null,
+      source.remarks || null,
+      source.voucher_url,
+      source.customer_signature_url,
+      source.authority_signature_url,
+      transferId,
+      source.created_by || userId,
+    ],
+  );
+  return {
+    row: rows[0],
+    parent: partner,
+    path: `/site-director/profit/overall?partner=${encodeURIComponent(partner.id)}`,
+  };
 };
 
 const insertExpense = async (client, source, userId) => {
@@ -885,8 +991,9 @@ const resolveTransferApprover = async (db, value, siteId) => {
   return rows[0];
 };
 const assertTransferSchema = async (db) => {
-  const { rows } = await db.query("SELECT to_regclass('transaction_money_transfers') IS NOT NULL AS ready");
-  if (!rows[0]?.ready) throw new TransferError(503, 'Transfer database update is required. Run migrate:paired-transfers on the backend.');
+  const { rows } = await db.query(`SELECT to_regclass('transaction_money_transfers') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='partner_profit_payments' AND column_name='entry_transfer_id') AS ready`);
+  if (!rows[0]?.ready) throw new TransferError(503, 'Transfer database update is required. Run migrate:partner-profit-transfers on the backend.');
 };
 const assertTransferApprovalSchema = async (db) => {
   const { rows } = await db.query("SELECT to_regclass('public.transaction_transfer_approval_requests') IS NOT NULL AS ready");
@@ -936,10 +1043,14 @@ export const prepareTransfer = async (db, req, lock = false) => {
   const reason = String(req.body.reason || '').trim();
   if (reason.length < 5 || reason.length > 500) throw new TransferError(422, 'Enter a transfer reason between 5 and 500 characters');
   let date = validDate(req.body.transfer_date || currentTransactionDate());
+  if (targetType === 'partner_profit' && date > currentTransactionDate())
+    throw new TransferError(422, 'Partner Profit payments cannot use a future date');
   const plans = [], identities = new Set();
   const ordered = [...entries].sort((a,b) => a.source_type.localeCompare(b.source_type) || a.source_id-b.source_id);
   for (const entry of ordered) {
     const source = await loadSource(db, req, entry.source_type, entry.source_id, lock);
+    if (targetType === 'partner_profit' && source.type !== 'personal_ledger')
+      throw new TransferError(422, 'Only original Personal Ledger entries can be transferred to Partner Profit');
     const identity = `${source.type}:${source.id}`;
     if (identities.has(identity)) throw new TransferError(422, 'The same underlying transaction was selected twice');
     identities.add(identity);
@@ -950,6 +1061,12 @@ export const prepareTransfer = async (db, req, lock = false) => {
     if (!await transactionDateEditable(source.site_id, db)) date = currentTransactionDate();
     if (date < source.date) throw new TransferError(422, 'Transfer date cannot be earlier than the original entry date');
     const edited = editSource(source, { ...entry.edits, date, payment_mode: entry.edits?.payment_mode || (source.mode === 'cheque' ? 'BANK' : source.payment_mode) });
+    if (targetType === 'partner_profit') {
+      if (edited.direction !== 'debit')
+        throw new TransferError(422, 'Partner Profit payments must be Debit / Money Out entries');
+      if (edited.mode !== 'cash' && !source.bank_account_id)
+        throw new TransferError(422, 'Map the original bank entry to an active site bank before transferring it to Partner Profit');
+    }
     const legs = buildTransferLegs(source, edited, { date, userId: req.user.id, reason });
     const sourceMonth = source.type === 'personal_ledger' ? await resolvePersonalLedger(db, source) : null;
     plans.push({ source, ...legs, sourceMonth });
@@ -958,7 +1075,7 @@ export const prepareTransfer = async (db, req, lock = false) => {
   const siteId = plans[0].source.site_id;
   await assertNoOtherPendingTransfer(db, plans, req.body.request_id);
   const approver = await resolveTransferApprover(db, req.body.assigned_admin_id, siteId);
-  const options = await targetOptions(db, siteId);
+  const options = await targetOptions(db, siteId, [targetType]);
   let parent = targetId ? options[targetType]?.find(p => Number(p.id) === targetId) : { id: null, label: LABEL_BY_TYPE[targetType] };
   if (!parent) throw new TransferError(422, 'Choose an eligible destination in the same site');
   if(targetType==='plot_commission') {
@@ -1043,6 +1160,7 @@ const insertTransferLeg = async (db, source, type, parentId, userId, transferId,
   const writer = transferDatabase(db,MODULES[type].table,transferId,role);
   let target;
   if (type==='personal_ledger') target=await insertPersonalLedger(writer,source,parentId,userId);
+  else if (type==='partner_profit') target=await insertPartnerProfit(writer,source,parentId,userId,transferId);
   else if (type==='expense') target=await insertExpense(writer,source,userId);
   else if (type==='farmer_payment') target=await insertFarmerPayment(writer,source,parentId,userId);
   else if (type==='plot_payment') target=await insertPlotPayment(writer,source,parentId,userId);
@@ -1079,6 +1197,7 @@ const clearTransferCaches = () => clearCacheByPrefixes([
   'cashflow', 'expenses', 'farmers', 'plots', 'plot-commission', 'plotCommission',
   'commissions', 'vendors', 'misc-income', 'misc_income', 'registries', 'land-deals',
   'daybook', 'dashboard', 'imprest', 'balance', 'graphql', 'analytics', 'approvals',
+  'site-profit',
 ]).catch(() => {});
 
 const approvalResponse = (row) => ({
@@ -1301,7 +1420,7 @@ export const handleTransferError = (error, req, res, next) => {
       .status(503)
       .json({
         message:
-          'Transfer database update is required. Run migrate:paired-transfers on the backend.',
+          'Transfer database update is required. Run migrate:partner-profit-transfers on the backend.',
         transfer_state: 'not_applied',
       });
   if (error.transferRolledBack) {

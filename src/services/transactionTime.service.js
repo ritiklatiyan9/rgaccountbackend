@@ -5,6 +5,7 @@ export const TRANSACTION_TIME_TABLES = new Set([
   'plot_registry_payments', 'plot_commissions', 'plot_commission_payments',
   'vendor_payments', 'vendor_inventory_payments', 'firm_transactions', 'cash_flow_entries',
   'misc_income_entries', 'land_deal_payments', 'imprest_allocations', 'imprest_ledger',
+  'partner_profit_payments',
   'imprest_transfers', 'imprest_expense_requests', 'imprest_returns', 'payment_qrs',
 ]);
 export const transactionTimeContext = new AsyncLocalStorage();

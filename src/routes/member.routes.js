@@ -2,7 +2,7 @@ import express from 'express';
 const router = express.Router();
 
 import {
-  getMemberPlotOptions, createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete,
+  getMemberPlotOptions, createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete, getMemberOptions,
   getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo,
   extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites,
 } from '../controllers/member.controller.js';
@@ -67,6 +67,7 @@ router.get('/by-plot', requireRole('admin', 'sub_admin'), requirePermission('cli
   requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' }), searchMembersByPlot);
 router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, searchMembers);
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), autocompleteCache, getMemberAutocomplete);
+router.get('/options', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberOptions);
 router.post('/kyc/extract', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), acceptKycUpload, extractKycDocument);
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, listMembers);
 

@@ -6,20 +6,21 @@ import { addBookingMonths, buildPercentagePlan, buildPendingPaymentReport, valid
 
 const plot = { id: 1, plot_no: 'A2', buyer_name: 'Customer A', booking_by: 'Broker A', booking_date: '2026-06-07', sale_price: '1000000', status: 'BOOKED' };
 const schedule = buildPercentagePlan({ bookingDate: plot.booking_date, salePrice: plot.sale_price,
-  milestones: [{ months: 3, percent: 50 }, { months: 6, percent: 100 }],
+  milestones: [{ months: 0, percent: 25 }, { months: 3, percent: 50 }, { months: 6, percent: 100 }],
 }).map((row, index) => ({ ...row, id: index + 1, plot_id: 1 }));
 const report = (overrides = {}) => buildPendingPaymentReport({
   plots: [plot], installments: schedule, receipts: [{ plot_id: 1, amount: 200000 }],
   today: '2026-09-07', dateFrom: '2026-09-08', dateTo: '2026-12-07', asOf: '2026-12-07', ...overrides,
 });
 
-test('50% at three months becomes due on the exact anniversary and overdue the following day', () => {
-  assert.equal(report({ today: '2026-09-06' }).summary.pending_today, 0);
+test('25% is due on booking and the next cumulative target uses that date as its anchor', () => {
+  assert.equal(report({ today: '2026-06-06' }).summary.pending_today, 0);
+  assert.equal(report({ today: '2026-09-06' }).summary.pending_today, 50000);
   const due = report();
   assert.equal(due.summary.pending_today, 300000);
-  assert.equal(due.rows[0].required_percent, 50);
-  assert.equal(due.rows[0].payment_status, 'due_today');
-  assert.equal(report({ today: '2026-09-08' }).rows[0].payment_status, 'overdue');
+  assert.deepEqual(due.rows.map((row) => row.required_percent), [25, 50, 100]);
+  assert.equal(due.rows[1].payment_status, 'due_today');
+  assert.equal(report({ today: '2026-09-08' }).rows[1].payment_status, 'overdue');
 });
 
 test('future period amounts are incremental; due-by includes arrears exactly once', () => {
@@ -27,8 +28,8 @@ test('future period amounts are incremental; due-by includes arrears exactly onc
   assert.equal(result.summary.expected_in_period, 500000);
   assert.equal(result.summary.upcoming_in_period, 500000);
   assert.equal(result.summary.due_by_date, 800000);
-  assert.deepEqual(result.rows.map((row) => row.required_percent), [50, 100]);
-  assert.equal(report({ dateFrom: '2026-09-07', dateTo: '2026-12-07' }).summary.expected_in_period, 800000);
+  assert.deepEqual(result.rows.map((row) => row.required_percent), [25, 50, 100]);
+  assert.equal(report({ dateFrom: '2026-09-07', dateTo: '2026-12-07' }).summary.expected_in_period, 750000);
   assert.equal(report({ dateFrom: '2026-09-08', dateTo: '2026-12-06' }).summary.expected_in_period, 0);
 });
 
@@ -44,8 +45,8 @@ test('advance receipts, fully paid plots and refunds update the projection witho
 test('legacy direct payments remain assigned and are not counted twice with plot receipts', () => {
   const result = report({ receipts: [{ plot_id: 1, amount: 200000 }, { plot_id: 1, installment_id: 2, amount: 100000 }] });
   assert.equal(result.rows[0].payment_received, 300000);
-  assert.equal(result.summary.pending_today, 300000);
-  assert.equal(result.summary.expected_in_period, 400000);
+  assert.equal(result.summary.pending_today, 200000);
+  assert.equal(result.summary.expected_in_period, 500000);
   assert.equal(result.summary.due_by_date, 700000);
 });
 
@@ -70,8 +71,8 @@ test('missing and partial schedules expose unscheduled balances without inventin
   assert.equal(missing.needs_plan[0].unscheduled_amount, 800000);
   assert.equal(missing.needs_plan[0].has_schedule, false);
   const partial = report({ installments: [schedule[0]] });
-  assert.equal(partial.summary.pending_today, 300000);
-  assert.equal(partial.needs_plan[0].unscheduled_amount, 500000);
+  assert.equal(partial.summary.pending_today, 50000);
+  assert.equal(partial.needs_plan[0].unscheduled_amount, 750000);
   assert.equal(partial.needs_plan[0].has_schedule, true);
 });
 
@@ -80,7 +81,7 @@ test('calendar months clamp month ends, respect leap years and cross years', () 
   assert.equal(addBookingMonths('2024-01-31', 1), '2024-02-29');
   assert.equal(addBookingMonths('2026-11-30', 3), '2027-02-28');
   const plan = buildPercentagePlan({ bookingDate: '2026-01-31', salePrice: 100.01, milestones: [
-    { months: 0, percent: 33.33 }, { months: 1, percent: 66.66 }, { months: 2, percent: 100 },
+    { months: 0, percent: 25 }, { months: 1, percent: 66.66 }, { months: 2, percent: 100 },
   ] });
   assert.equal(Math.round(plan.reduce((sum, row) => sum + row.amount, 0) * 100), 10001);
   assert.equal(plan[1].due_date, '2026-02-28');
@@ -88,7 +89,9 @@ test('calendar months clamp month ends, respect leap years and cross years', () 
 
 test('invalid dates and ambiguous cumulative schedules are rejected before writing', () => {
   for (const milestones of [[], [null], [{ months: -1, percent: 50 }], [{ months: '', percent: 50 }], [{ months: 3, percent: 101 }],
-    [{ months: 3, percent: 50 }, { months: 6, percent: 40 }], [{ months: 3, percent: 50 }, { months: 3, percent: 100 }]]) {
+    [{ months: 0, percent: 20 }, { months: 3, percent: 100 }],
+    [{ months: 0, percent: 25 }, { months: 6, percent: 40 }, { months: 9, percent: 30 }],
+    [{ months: 0, percent: 25 }, { months: 3, percent: 50 }, { months: 3, percent: 100 }]]) {
     assert.throws(() => buildPercentagePlan({ bookingDate: plot.booking_date, salePrice: plot.sale_price, milestones }));
   }
   for (const dateFrom of ['2026-02-30', '2026-09-10', 'garbage']) {
@@ -133,9 +136,9 @@ test('plan creation atomically saves incremental installments; existing plans ar
     if (sql.includes('SELECT id FROM plot_installments')) return { rows: exists ? [{ id: 1 }] : [] };
     return { rows: [] };
   } }));
-  const req = { params: { id: '1' }, body: { milestones: [{ months: 3, percent: 50 }, { months: 6, percent: 100 }] } };
+  const req = { params: { id: '1' }, body: { milestones: [{ months: 0, percent: 25 }, { months: 3, percent: 50 }, { months: 6, percent: 100 }] } };
   assert.equal((await invoke(createPercentagePaymentPlan, req)).status, 201);
-  assert.deepEqual(calls.find(({ sql }) => sql.includes('INSERT INTO plot_installments')).params[2], [500000, 500000]);
+  assert.deepEqual(calls.find(({ sql }) => sql.includes('INSERT INTO plot_installments')).params[2], [250000, 250000, 500000]);
   assert.equal(calls.at(-1).sql, 'COMMIT');
   exists = true; calls.length = 0;
   assert.equal((await invoke(createPercentagePaymentPlan, req)).status, 409);

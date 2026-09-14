@@ -43,7 +43,9 @@ test('real accounting CHECK constraints and native mirror functions accept balan
     await db.exec(`
       CREATE TABLE sites(id int PRIMARY KEY);
       CREATE TABLE users(id int PRIMARY KEY,role text,name text);
-      CREATE TABLE members(id int PRIMARY KEY,full_name text);
+      CREATE TABLE members(id int PRIMARY KEY,full_name text,phone text);
+      CREATE TABLE site_partner_shares(site_id int,member_id int,share_pct numeric);
+      CREATE TABLE land_partner_shares(farmer_id int,member_id int,share_pct numeric);
       CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
       CREATE TABLE user_approval_modules(user_id int,module text);
       CREATE TABLE application_settings(site_id int,setting_key text,setting_value jsonb);
@@ -57,16 +59,17 @@ test('real accounting CHECK constraints and native mirror functions accept balan
       CREATE TABLE plot_registry_payments(id int PRIMARY KEY,source_plot_payment_id int);
       CREATE TABLE compliance_finance_links(expense_id int);
       CREATE TABLE bank_reconciliation_links(site_id int,candidate_entry_id int,candidate_source text);
-      CREATE TABLE bank_accounts(id int PRIMARY KEY,site_id int);
+      CREATE TABLE bank_accounts(id int PRIMARY KEY,site_id int,name text,is_active boolean DEFAULT true);
+      CREATE TABLE partner_profit_payments(id serial PRIMARY KEY,site_id int,member_id int,date date,amount numeric CHECK(amount>0),payment_mode text,bank_account_id int,bank_reference text,remarks text,voucher_url text,customer_signature_url text,authority_signature_url text,status text DEFAULT 'approved',request_id uuid,created_by int,transaction_time time,created_at timestamptz DEFAULT now(),UNIQUE(site_id,created_by,request_id));
       CREATE TABLE plot_money_transfers(id uuid PRIMARY KEY,source_payment_id int,amount numeric);
-      INSERT INTO sites VALUES(1); INSERT INTO users VALUES(1,'admin','Admin'); INSERT INTO members VALUES(1,'Agent');
+      INSERT INTO sites VALUES(1); INSERT INTO users VALUES(1,'admin','Admin'); INSERT INTO members(id,full_name) VALUES(1,'Agent'); INSERT INTO site_partner_shares VALUES(1,1,50);
       INSERT INTO farmers VALUES(1,1,'Farmer'); INSERT INTO plots VALUES(1,1,'A1','Buyer','Dealer','BOOKED');
       INSERT INTO land_deals VALUES(1,1,'L1','Land buyer','open');
       INSERT INTO plot_commissions_v2 VALUES(1,1,1,NULL,NULL,1,100000,'Pending',NULL);
       INSERT INTO vendor_commitments VALUES(1,1,'Vendor','Work','open');
       INSERT INTO vendor_inventory_orders(site_id,vendor_name,item_name,qty_ordered,rate,order_date,commitment_id)
         VALUES(1,'Vendor','Cement',100,100,'2026-10-01',1);
-      INSERT INTO misc_income_categories VALUES(1,'Other',true); INSERT INTO bank_accounts VALUES(1,1);
+      INSERT INTO misc_income_categories VALUES(1,'Other',true); INSERT INTO bank_accounts(id,site_id,name) VALUES(1,1,'Site Bank');
       INSERT INTO cash_flow_months(site_id,month,year,ledger_name,ledger_type,created_by)
         VALUES(1,10,2026,'PERSON','person',1);
     `);

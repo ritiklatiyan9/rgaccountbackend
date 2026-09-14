@@ -29,6 +29,9 @@ export function buildPercentagePlan({ bookingDate, salePrice, milestones }) {
   if (!Array.isArray(milestones) || !milestones.length || milestones.length > 60) {
     throw invalid('Add between 1 and 60 payment milestones.');
   }
+  if (Number(milestones[0]?.months) !== 0 || Number(milestones[0]?.percent) !== 25) {
+    throw invalid('Installment 1 must be 25% on the booking date (month 0).');
+  }
   let previousMonths = -1;
   let previousPercent = 0;
   let previousPaise = 0;
@@ -51,7 +54,7 @@ export function buildPercentagePlan({ bookingDate, salePrice, milestones }) {
     previousPercent = percent;
     previousPaise = cumulativePaise;
     return {
-      installment_name: `${percent}% by month ${months}`,
+      installment_name: index === 0 ? 'Installment 1 · Booking' : `Installment ${index + 1} · ${percent}% by month ${months}`,
       amount, due_date: dueDate, sort_order: index + 1, required_percent: percent,
     };
   });

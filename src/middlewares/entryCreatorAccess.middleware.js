@@ -7,6 +7,7 @@ const DYNAMIC_TABLES = Object.freeze({
   vendor_payments: 'vendor_payments',
   plot_commission_payments: 'plot_commission_payments',
   plot_registry_payments: 'plot_registry_payments',
+  partner_profit_payments: 'partner_profit_payments',
 });
 
 /**
@@ -46,4 +47,3 @@ export const requireAllEntryVisibility = (module) => asyncHandler(async (req, re
   }
   return next();
 });
-

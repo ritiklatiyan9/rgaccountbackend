@@ -211,6 +211,76 @@ export const listPlotCommissions = asyncHandler(async (req, res) => {
 });
 
 /**
+ * GET /plot-commission/portfolio
+ * One read-optimized row per broker commission across every site. This is kept
+ * separate from the site register because the portfolio is broker-first and
+ * includes plot purchases, land purchases and land sales in one result set.
+ */
+export const listAllSitesCommissions = asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `WITH payment_rollup AS (
+       SELECT pcp.plot_commission_id,
+              COALESCE(SUM(pcp.amount), 0) AS total_paid,
+              COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) = 'cash' THEN pcp.amount ELSE 0 END), 0) AS cash_paid,
+              COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) <> 'cash' THEN pcp.amount ELSE 0 END), 0) AS bank_paid,
+              COUNT(*)::int AS payment_count,
+              MAX(pcp.date) AS last_payment_date
+         FROM plot_commission_payments pcp
+        WHERE ${commissionPaymentPostsSql('pcp')}
+          AND pcp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
+        GROUP BY pcp.plot_commission_id
+     )
+     SELECT pc.id AS commission_id, pc.site_id, s.name AS site_name,
+            pc.agent_id, m.full_name AS agent_name, m.phone AS agent_phone, m.team AS agent_team,
+            COALESCE(
+              NULLIF(RIGHT(REGEXP_REPLACE(COALESCE(m.phone, ''), '[^0-9]', '', 'g'), 10), ''),
+              'name:' || UPPER(BTRIM(m.full_name))
+            ) AS broker_key,
+            CASE WHEN pc.plot_id IS NOT NULL THEN 'plot'
+                 WHEN pc.farmer_id IS NOT NULL THEN 'land-purchase'
+                 ELSE 'land-sale' END AS subject_kind,
+            COALESCE(pc.plot_id, pc.farmer_id, pc.land_deal_id) AS subject_id,
+            pc.plot_id, pc.farmer_id, pc.land_deal_id,
+            CASE WHEN pc.plot_id IS NOT NULL THEN 'Plot ' || COALESCE(p.plot_no, '—')
+                 WHEN pc.farmer_id IS NOT NULL THEN COALESCE(f.name, 'Land purchase')
+                 ELSE COALESCE(df.name, 'Land sale') END AS subject_name,
+            CASE WHEN pc.plot_id IS NOT NULL THEN p.buyer_name
+                 WHEN pc.farmer_id IS NOT NULL THEN f.name
+                 ELSE d.buyer_name END AS counterparty,
+            p.plot_no, p.plot_size, p.status AS plot_status,
+            pc.total_commission,
+            COALESCE(pr.total_paid, 0) AS total_paid,
+            COALESCE(pr.cash_paid, 0) AS cash_paid,
+            COALESCE(pr.bank_paid, 0) AS bank_paid,
+            pc.total_commission - COALESCE(pr.total_paid, 0) AS balance,
+            CASE WHEN COALESCE(pr.total_paid, 0) > pc.total_commission + 0.5 THEN 'Over Paid'
+                 WHEN pc.total_commission > 0 AND pc.total_commission - COALESCE(pr.total_paid, 0) <= 0.5 THEN 'Completed'
+                 WHEN COALESCE(pr.total_paid, 0) > 0.5 THEN 'Partial'
+                 ELSE 'Pending' END AS settlement_status,
+            COALESCE(pr.payment_count, 0)::int AS payment_count,
+            pr.last_payment_date, pc.remarks, pc.created_at
+       FROM plot_commissions_v2 pc
+       JOIN sites s ON s.id = pc.site_id
+       JOIN members m ON m.id = pc.agent_id
+       LEFT JOIN plots p ON p.id = pc.plot_id
+       LEFT JOIN farmers f ON f.id = pc.farmer_id
+       LEFT JOIN land_deals d ON d.id = pc.land_deal_id
+       LEFT JOIN farmers df ON df.id = d.farmer_id
+       LEFT JOIN payment_rollup pr ON pr.plot_commission_id = pc.id
+      ORDER BY m.full_name ASC, s.name ASC, pc.created_at DESC, pc.id DESC`,
+  );
+
+  res.json({ commissions: rows.map((item) => ({
+    ...item,
+    total_commission: num(item.total_commission),
+    total_paid: num(item.total_paid),
+    cash_paid: num(item.cash_paid),
+    bank_paid: num(item.bank_paid),
+    balance: num(item.balance),
+  })) });
+});
+
+/**
  * GET /plot-commission/:id
  * Get single commission details and its payments.
  */
