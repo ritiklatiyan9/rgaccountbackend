@@ -851,6 +851,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     // 5. Firm Transactions — mapped client, then an unambiguous legacy name.
     pool.query(
       `SELECT ft.id, ft.date, ft.debit, ft.credit, ft.description, ft.purpose,
+              ft.payment_mode,
               ft.remark, ft.cheque_no, ft.name,
               fi.name AS firm_name
        FROM firm_transactions ft

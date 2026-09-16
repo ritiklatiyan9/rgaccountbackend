@@ -532,6 +532,8 @@ export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
       vp.payment_date,
       vp.amount,
       vp.payment_mode,
+      cfe.bank_account_id,
+      ba.name AS bank_account_name,
       vp.reference_no,
       vp.note,
       vp.voucher_url,
@@ -554,6 +556,10 @@ export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
       asg.name AS assigned_admin_name
      FROM vendor_payments vp
      INNER JOIN vendor_commitments vc ON vc.id = vp.commitment_id
+     LEFT JOIN cash_flow_entries cfe
+       ON cfe.source_module = 'vendor_payments' AND cfe.source_id = vp.id
+     LEFT JOIN bank_accounts ba
+       ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
      LEFT JOIN sites s ON s.id = vp.site_id
      LEFT JOIN users cu ON cu.id = vp.created_by
      LEFT JOIN users au ON au.id = vp.approved_by

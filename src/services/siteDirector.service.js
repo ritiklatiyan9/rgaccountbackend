@@ -604,6 +604,8 @@ export async function getSiteDirectorPerson(identityKey) {
       cfe.debit::float8 AS debit,
       cfe.credit::float8 AS credit,
       LOWER(COALESCE(NULLIF(cfe.cash_type, ''), 'bank')) AS payment_mode,
+      cfe.bank_account_id,
+      ba.name AS bank_account_name,
       COALESCE(cfe.source_module, 'personal_ledger') AS source_module,
       cfe.source_id,
       cfe.status,
@@ -616,6 +618,7 @@ export async function getSiteDirectorPerson(identityKey) {
       cfe.created_at
     FROM target_ledgers tl
     JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = tl.id
+    LEFT JOIN bank_accounts ba ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
     ORDER BY cfe.date DESC, cfe.created_at DESC, cfe.id DESC
   `;
 
@@ -748,6 +751,8 @@ export async function getSiteDirectorPerson(identityKey) {
         debit: round2(row.debit),
         credit: round2(row.credit),
         paymentMode: row.payment_mode,
+        bankAccountId: row.bank_account_id,
+        bankAccountName: row.bank_account_name,
         moduleKey: source,
         moduleLabel: sourceLabel(source),
         sourceId: row.source_id,

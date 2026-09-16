@@ -1166,7 +1166,7 @@ const insertTransferLeg = async (db, source, type, parentId, userId, transferId,
   else if (type==='plot_payment') target=await insertPlotPayment(writer,source,parentId,userId);
   else target=await insertOther(writer,source,type,parentId,userId);
   await db.query(`UPDATE ${MODULES[type].table} SET transaction_time=$2::time WHERE id=$1`, [target.row.id, transactionTimeForWrite()]);
-  if (source.bank_account_id && type!=='personal_ledger') await db.query(`UPDATE cash_flow_entries cfe SET bank_account_id=ba.id FROM bank_accounts ba WHERE ba.id=$1 AND ba.site_id=cfe.site_id AND cfe.source_module=$2 AND cfe.source_id=$3`,[source.bank_account_id,MODULES[type].table,target.row.id]);
+  if (source.bank_account_id && type!=='personal_ledger') await db.query(`UPDATE cash_flow_entries cfe SET bank_account_id=ba.id FROM bank_accounts ba WHERE ba.id=$1 AND ba.site_id = cfe.site_id AND cfe.source_module=$2 AND cfe.source_id=$3`,[source.bank_account_id,MODULES[type].table,target.row.id]);
   return target;
 };
 export const executeTransfer = async (db,req,approvedBy=req.user.id) => {

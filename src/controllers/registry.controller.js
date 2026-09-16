@@ -195,6 +195,21 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
     .map((p) => parseInt(p.source_plot_payment_id))
     .filter(Number.isFinite);
   const manualRows = paymentRows.filter((p) => p && !p.source_plot_payment_id && (parseFloat(p.amount) || 0) > 0);
+  const requestedBankIds = [...new Set(manualRows
+    .map((row) => row.bank_account_id == null || row.bank_account_id === '' ? null : parseInt(row.bank_account_id, 10))
+    .filter((id) => id != null))];
+  if (requestedBankIds.some((id) => !Number.isInteger(id) || id <= 0)) {
+    return { status: 400, body: { message: 'One or more selected bank accounts are invalid' } };
+  }
+  if (requestedBankIds.length) {
+    const { rows: validBanks } = await db.query(
+      'SELECT id FROM bank_accounts WHERE site_id = $1 AND id = ANY($2::int[])',
+      [siteIdInt, requestedBankIds]
+    );
+    if (validBanks.length !== requestedBankIds.length) {
+      return { status: 400, body: { message: 'Choose bank accounts from the same site as the registry' } };
+    }
+  }
 
   let linkedTotal = 0;
   let linkable = [];
@@ -309,11 +324,12 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
     // ── Manual payments ──
     for (const m of manualRows) {
       const mode = m.payment_mode ? String(m.payment_mode).trim().toUpperCase() : null;
-      await client.query(
+      const inserted = await client.query(
         `INSERT INTO plot_registry_payments (
            registry_id, site_id, payment_date, amount, payment_mode, tally_date, tally_amount,
            notes, cheque_no, cheque_status, created_by
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING id`,
         [
           registryId, siteIdInt, m.payment_date || today, parseFloat(m.amount) || 0, mode,
           m.tally_date || null,
@@ -324,6 +340,18 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
           userId,
         ]
       );
+      const bankId = m.bank_account_id == null || m.bank_account_id === ''
+        ? null : parseInt(m.bank_account_id, 10);
+      if (mode !== 'CASH' && bankId) {
+        await client.query(
+          `UPDATE cash_flow_entries
+              SET bank_account_id = $1, updated_at = NOW()
+            WHERE site_id = $2
+              AND source_module = 'plot_registry_payments'
+              AND source_id = $3`,
+          [bankId, siteIdInt, inserted.rows[0].id]
+        );
+      }
     }
 
     if (ownsTransaction) await client.query('COMMIT');
@@ -911,9 +939,14 @@ const buildNocPayload = async (registryId) => {
     )
     .catch(() => ({ rows: [] }));
   const inlinePromise = pool.query(
-    `SELECT prp.*, u.name AS created_by_name
+    `SELECT prp.*, u.name AS created_by_name,
+            cfe.bank_account_id, ba.name AS bank_account_name
        FROM plot_registry_payments prp
        LEFT JOIN users u ON u.id = prp.created_by
+       LEFT JOIN cash_flow_entries cfe
+         ON cfe.source_module = 'plot_registry_payments' AND cfe.source_id = prp.id
+       LEFT JOIN bank_accounts ba
+         ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
       WHERE prp.registry_id = $1 AND prp.source_plot_payment_id IS NULL
       ORDER BY prp.payment_date ASC, prp.created_at ASC`,
     [registryId]
@@ -943,11 +976,16 @@ const buildNocPayload = async (registryId) => {
       `SELECT pp.id, pp.date, pp.amount, pp.payment_type, pp.payment_from, pp.bank_name,
               pp.branch, pp.bank_details, pp.narration, pp.received_by, pp.cheque_status,
               pp.cheque_no, pp.status, pp.created_at,
+              cfe.bank_account_id, ba.name AS bank_account_name,
               prp.id AS registry_payment_id,
               prp.registry_id AS linked_registry_id,
               (prp.registry_id = $2 AND COALESCE(prp.include_in_noc, FALSE)) AS included
          FROM plot_payments pp
          LEFT JOIN plot_registry_payments prp ON prp.source_plot_payment_id = pp.id
+         LEFT JOIN cash_flow_entries cfe
+           ON cfe.source_module = 'plot_payments' AND cfe.source_id = pp.id
+         LEFT JOIN bank_accounts ba
+           ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
         WHERE pp.plot_id = $1
         ORDER BY pp.date ASC, pp.created_at ASC`,
       [plot.id, registryId]
@@ -1433,28 +1471,51 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
 
     // ── Inline (NOC-only) payments — upsert ──
     if (Array.isArray(inline_payments)) {
+      const bankIds = [...new Set(inline_payments
+        .map((row) => row.bank_account_id == null || row.bank_account_id === '' ? null : parseInt(row.bank_account_id, 10))
+        .filter(Number.isInteger))];
+      if (bankIds.length) {
+        const ownedBanks = await client.query(
+          `SELECT id FROM bank_accounts WHERE site_id = $1 AND id = ANY($2::int[])`,
+          [registry.site_id, bankIds]
+        );
+        if (ownedBanks.rows.length !== bankIds.length) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ message: 'Choose bank accounts belonging to this site' });
+        }
+      }
       for (const row of inline_payments) {
         const amount = parseFloat(row.amount) || 0;
         const include = row.include_in_noc === undefined ? true : !!row.include_in_noc;
         const mode = row.payment_mode ? String(row.payment_mode).trim().toUpperCase() : null;
+        const bankId = mode === 'CASH' || row.bank_account_id == null || row.bank_account_id === ''
+          ? null : parseInt(row.bank_account_id, 10);
+        if (amount > 0 && mode !== 'CASH' && !Number.isInteger(bankId)) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ message: 'Select a bank account for every non-cash manual payment' });
+        }
+        let paymentId = row.id ? parseInt(row.id, 10) : null;
         if (row.id) {
-          await client.query(
+          const updatedPayment = await client.query(
             `UPDATE plot_registry_payments
                 SET payment_date = $2, amount = $3, payment_mode = $4, notes = $5,
                     include_in_noc = $6, updated_at = NOW()
-              WHERE id = $1 AND registry_id = $7 AND source_plot_payment_id IS NULL`,
+              WHERE id = $1 AND registry_id = $7 AND source_plot_payment_id IS NULL
+              RETURNING id`,
             [
               parseInt(row.id), row.payment_date || today, amount, mode,
               row.notes ? String(row.notes).trim().toUpperCase() : null, include, registryId,
             ]
           );
+          paymentId = updatedPayment.rows[0]?.id || null;
         } else if (amount > 0) {
-          await client.query(
+          const insertedPayment = await client.query(
             `INSERT INTO plot_registry_payments (
                registry_id, site_id, payment_date, amount, payment_mode, notes,
                include_in_noc, cheque_no, cheque_status, status, approved_by,
                approved_at, created_by
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', $10, NOW(), $10)`,
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', $10, NOW(), $10)
+             RETURNING id`,
             [
               registryId, registry.site_id, row.payment_date || today, amount, mode,
               row.notes ? String(row.notes).trim().toUpperCase() : null, include,
@@ -1462,6 +1523,17 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
               mode === 'CHEQUE' ? 'PENDING' : null,
               req.user.id,
             ]
+          );
+          paymentId = insertedPayment.rows[0]?.id || null;
+        }
+        if (paymentId) {
+          await client.query(
+            `UPDATE cash_flow_entries
+                SET bank_account_id = $1, updated_at = NOW()
+              WHERE site_id = $2
+                AND source_module = 'plot_registry_payments'
+                AND source_id = $3`,
+            [bankId, registry.site_id, paymentId]
           );
         }
       }
@@ -1526,11 +1598,16 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
              'date', pp.date,
              'amount', pp.amount,
              'mode', COALESCE(NULLIF(UPPER(TRIM(pp.payment_from)), ''), UPPER(COALESCE(pp.payment_type, ''))),
+             'bank_account_name', ba.name,
              'notes', COALESCE(pp.narration, pp.bank_details),
              'cheque_no', pp.cheque_no
            ) AS payment
          FROM plot_registry_payments prp
          JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
+         LEFT JOIN cash_flow_entries cfe
+           ON cfe.source_module = 'plot_payments' AND cfe.source_id = pp.id
+         LEFT JOIN bank_accounts ba
+           ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
          WHERE prp.registry_id = $1
            AND COALESCE(prp.include_in_noc, FALSE)
            AND NOT (COALESCE(NULLIF(UPPER(TRIM(pp.payment_type)), ''), 'CASH') = 'CASH'
@@ -1552,10 +1629,15 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
              'date', prp.payment_date,
              'amount', prp.amount,
              'mode', prp.payment_mode,
+             'bank_account_name', ba.name,
              'notes', prp.notes,
              'cheque_no', prp.cheque_no
            ) AS payment
          FROM plot_registry_payments prp
+         LEFT JOIN cash_flow_entries cfe
+           ON cfe.source_module = 'plot_registry_payments' AND cfe.source_id = prp.id
+         LEFT JOIN bank_accounts ba
+           ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
          WHERE prp.registry_id = $1
            AND prp.source_plot_payment_id IS NULL
            AND COALESCE(prp.include_in_noc, FALSE)

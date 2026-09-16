@@ -754,7 +754,8 @@ const expenseAnalyticsData = async (siteId, { from, to }) => {
          FROM expenses WHERE site_id = $1 AND date >= $2::date AND date <= LEAST($3::date,CURRENT_DATE)`, P),
     q(`SELECT e.id, l.entry_date::text AS date, COALESCE(e.category,'Uncategorised') AS category,
               COALESCE(e.to_entity,'') AS payee, COALESCE(e.remark,'') AS remark,
-              COALESCE(l.raw_mode,e.payment_mode,'') AS payment_mode, l.debit::numeric(18,2) AS amount,
+              COALESCE(l.raw_mode,e.payment_mode,'') AS payment_mode, l.bank_account_name,
+              l.debit::numeric(18,2) AS amount,
               CASE WHEN NULLIF(e.voucher_url,'') IS NOT NULL OR COALESCE(cardinality(e.voucher_urls),0) > 0 THEN true ELSE false END AS has_voucher,
               CASE WHEN NULLIF(e.bill_url,'') IS NOT NULL OR COALESCE(cardinality(e.bill_urls),0) > 0 THEN true ELSE false END AS has_bill
          FROM ledger_entries l JOIN expenses e ON e.id = l.source_id
@@ -909,7 +910,8 @@ const landAnalyticsData = async (siteId, { from, to }) => {
          FROM farmers f LEFT JOIN farmer_paid fpd ON fpd.farmer_id = f.id
         WHERE f.site_id = $1 ORDER BY unpaid DESC, overpaid DESC, paid DESC LIMIT 60`, [siteId]),
     q(`SELECT fp.id, l.entry_date::text AS date, f.name AS farmer, COALESCE(fp.particular,'') AS particular,
-              COALESCE(l.raw_mode,fp.payment_mode,'') AS payment_mode, l.debit::numeric(18,2) AS amount,
+              COALESCE(l.raw_mode,fp.payment_mode,'') AS payment_mode, l.bank_account_name,
+              l.debit::numeric(18,2) AS amount,
               COALESCE(fp.interest_amount,0)::numeric(18,2) AS interest,
               CASE WHEN NULLIF(fp.voucher_url,'') IS NOT NULL THEN true ELSE false END AS has_voucher
          FROM ledger_entries l JOIN farmer_payments fp ON fp.id = l.source_id JOIN farmers f ON f.id = fp.farmer_id

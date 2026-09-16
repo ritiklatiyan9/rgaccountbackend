@@ -16,6 +16,7 @@ const MAP_SOURCES = new Set([
   'day_book', 'expenses', 'farmer_payments', 'plot_commissions',
   'firm_transactions', 'plot_payments', 'plot_installment_payments',
   'vendor_payments', 'plot_commission_payments', 'land_deal_payments',
+  'vendor_inventory_payments', 'plot_registry_payments',
   'misc_income_entries', 'cashflow_entry',
 ]);
 
@@ -48,9 +49,58 @@ async function assertSiteAccess(db, user, rawSiteId) {
 }
 
 async function entryTarget(db, sourceKey, sourceId) {
-  const result = sourceKey === 'cashflow_entry'
+  // Registry payments linked to an existing plot receipt are allocations, not
+  // another movement of money. Their bank therefore belongs to the underlying
+  // plot payment. Legacy/unlinked registry receipts fall back to their own
+  // mirror row so their historical printout can still identify a bank.
+  const result = sourceKey === 'plot_registry_payments'
     ? await db.query(
-        `SELECT cfe.id, cfe.site_id, cfe.bank_account_id, ba.name AS bank_account_name
+        `SELECT cfe.id, cfe.site_id, cfe.bank_account_id, ba.name AS bank_account_name,
+                cfe.source_module, cfe.source_id
+           FROM plot_registry_payments prp
+           JOIN LATERAL (
+             SELECT candidate.*
+               FROM cash_flow_entries candidate
+              WHERE (prp.source_plot_payment_id IS NOT NULL
+                     AND candidate.source_module = 'plot_payments'
+                     AND candidate.source_id = prp.source_plot_payment_id)
+                 OR (prp.source_plot_payment_id IS NULL
+                     AND candidate.source_module = 'plot_registry_payments'
+                     AND candidate.source_id = prp.id)
+              ORDER BY (candidate.source_module = 'plot_payments') DESC
+              LIMIT 1
+           ) cfe ON TRUE
+           LEFT JOIN bank_accounts ba
+             ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
+          WHERE prp.id = $1`,
+        [sourceId]
+      )
+    : sourceKey === 'vendor_inventory_payments'
+    ? await db.query(
+        `SELECT cfe.id, cfe.site_id, cfe.bank_account_id, ba.name AS bank_account_name,
+                cfe.source_module, cfe.source_id
+           FROM vendor_inventory_payments vip
+           JOIN LATERAL (
+             SELECT candidate.*
+               FROM cash_flow_entries candidate
+              WHERE (vip.source_vendor_payment_id IS NOT NULL
+                     AND candidate.source_module = 'vendor_payments'
+                     AND candidate.source_id = vip.source_vendor_payment_id)
+                 OR (vip.source_vendor_payment_id IS NULL
+                     AND candidate.source_module = 'vendor_inventory_payments'
+                     AND candidate.source_id = vip.id)
+              ORDER BY (candidate.source_module = 'vendor_payments') DESC
+              LIMIT 1
+           ) cfe ON TRUE
+           LEFT JOIN bank_accounts ba
+             ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
+          WHERE vip.id = $1`,
+        [sourceId]
+      )
+    : sourceKey === 'cashflow_entry'
+    ? await db.query(
+        `SELECT cfe.id, cfe.site_id, cfe.bank_account_id, ba.name AS bank_account_name,
+                cfe.source_module, cfe.source_id
            FROM cash_flow_entries cfe
            LEFT JOIN bank_accounts ba
              ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
@@ -58,7 +108,8 @@ async function entryTarget(db, sourceKey, sourceId) {
         [sourceId]
       )
     : await db.query(
-        `SELECT cfe.id, cfe.site_id, cfe.bank_account_id, ba.name AS bank_account_name
+        `SELECT cfe.id, cfe.site_id, cfe.bank_account_id, ba.name AS bank_account_name,
+                cfe.source_module, cfe.source_id
            FROM cash_flow_entries cfe
            LEFT JOIN bank_accounts ba
              ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
@@ -169,6 +220,80 @@ export const getEntryBankMapping = asyncHandler(async (req, res) => {
   res.json({ bank_account_id: target.bank_account_id ?? null, bank_account_name: target.bank_account_name ?? null });
 });
 
+// Resolve a whole rendered transaction table in one round-trip. Frontend
+// tables may contain hundreds of mixed module rows; one batched lookup avoids
+// an N+1 request for every non-cash badge while keeping bank ownership on the
+// canonical cash-flow mirror row.
+export const listEntryBankMappings = asyncHandler(async (req, res) => {
+  const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
+  if (entries.length > 2000) {
+    return res.status(413).json({ message: 'At most 2,000 entry references can be resolved at once' });
+  }
+  const normalized = entries.map((entry) => ({
+    source_key: String(entry?.source_key || ''),
+    source_id: Number.parseInt(entry?.source_id, 10),
+  }));
+  if (normalized.some((entry) => !MAP_SOURCES.has(entry.source_key)
+      || !Number.isInteger(entry.source_id) || entry.source_id <= 0)) {
+    return res.status(400).json({ message: 'One or more entry references are invalid' });
+  }
+  if (!normalized.length) return res.json({ mappings: [] });
+
+  const { rows } = await pool.query(
+    `WITH requested AS (
+       SELECT DISTINCT source_key, source_id
+         FROM jsonb_to_recordset($1::jsonb) AS x(source_key text, source_id integer)
+     ), canonical_targets AS (
+       SELECT requested.source_key, requested.source_id,
+              CASE
+                WHEN requested.source_key = 'plot_registry_payments' AND prp.source_plot_payment_id IS NOT NULL
+                  THEN prp.source_plot_payment_id
+                WHEN requested.source_key = 'vendor_inventory_payments' AND vip.source_vendor_payment_id IS NOT NULL
+                  THEN vip.source_vendor_payment_id
+                ELSE requested.source_id
+              END AS target_id,
+              CASE
+                WHEN requested.source_key = 'plot_registry_payments' AND prp.source_plot_payment_id IS NOT NULL
+                  THEN 'plot_payments'
+                WHEN requested.source_key = 'vendor_inventory_payments' AND vip.source_vendor_payment_id IS NOT NULL
+                  THEN 'vendor_payments'
+                ELSE requested.source_key
+              END AS target_key
+         FROM requested
+         LEFT JOIN plot_registry_payments prp
+           ON requested.source_key = 'plot_registry_payments'
+          AND prp.id = requested.source_id
+         LEFT JOIN vendor_inventory_payments vip
+           ON requested.source_key = 'vendor_inventory_payments'
+          AND vip.id = requested.source_id
+     ), resolved AS (
+       SELECT target.source_key, target.source_id, cfe.site_id,
+              cfe.bank_account_id, ba.name AS bank_account_name
+         FROM canonical_targets target
+         JOIN cash_flow_entries cfe
+           ON (
+             (target.source_key = 'cashflow_entry'
+               AND cfe.id = target.source_id AND cfe.source_module IS NULL)
+             OR
+             (target.source_key <> 'cashflow_entry'
+               AND cfe.source_module = target.target_key AND cfe.source_id = target.target_id)
+           )
+         JOIN sites s ON s.id = cfe.site_id
+         LEFT JOIN bank_accounts ba
+           ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
+        WHERE s.organization_id = $2
+          AND ($4 <> 'sub_admin' OR EXISTS (
+            SELECT 1 FROM user_sites us WHERE us.site_id = cfe.site_id AND us.user_id = $3
+          ))
+     )
+     SELECT source_key, source_id, bank_account_id, bank_account_name
+       FROM resolved
+      ORDER BY source_key, source_id`,
+    [JSON.stringify(normalized), Number(req.user.organization_id) || 1, req.user.id, req.user.role]
+  );
+  res.json({ mappings: rows });
+});
+
 // Map (or unmap: bank_account_id = null) any money entry to a bank account.
 export const mapEntryToBank = asyncHandler(async (req, res) => {
   const { source_key, source_id, bank_account_id } = req.body;
@@ -184,16 +309,18 @@ export const mapEntryToBank = asyncHandler(async (req, res) => {
     const { rows } = await pool.query('SELECT id FROM bank_accounts WHERE id = $1 AND site_id = $2', [bankId, site.id]);
     if (!rows.length) return res.status(409).json({ message: 'Choose a bank account from the same site as this entry' });
   }
-  const result = source_key === 'cashflow_entry'
+  // Use the already-resolved mirror identity. This is important for registry
+  // allocations, whose canonical money row is the linked plot payment.
+  const result = target.source_module == null
     ? await pool.query(
         `UPDATE cash_flow_entries SET bank_account_id = $1, updated_at = NOW()
           WHERE id = $2 AND source_module IS NULL AND site_id = $3 RETURNING id`,
-        [bankId, sid, site.id]
+        [bankId, target.id, site.id]
       )
     : await pool.query(
         `UPDATE cash_flow_entries SET bank_account_id = $1, updated_at = NOW()
           WHERE source_module = $2 AND source_id = $3 AND site_id = $4 RETURNING id`,
-        [bankId, source_key, sid, site.id]
+        [bankId, target.source_module, target.source_id, site.id]
       );
   if (!result.rowCount) return res.status(404).json({ message: 'Ledger row not found for this entry' });
   res.json({ message: bankId == null ? 'Bank unmapped' : 'Entry mapped to bank', ledger_id: result.rows[0].id });

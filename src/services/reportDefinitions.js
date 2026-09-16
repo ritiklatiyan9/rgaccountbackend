@@ -10,6 +10,12 @@
  * `permission` is the existing permission module key — reports never widen access.
  */
 
+const mappedBankName = (sourceKey, idExpr, siteExpr) => `(SELECT ba.name
+  FROM cash_flow_entries cfe
+  JOIN bank_accounts ba ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
+ WHERE cfe.source_module = '${sourceKey}' AND cfe.source_id = ${idExpr} AND cfe.site_id = ${siteExpr}
+ LIMIT 1)`;
+
 export const REPORTS = Object.freeze({
   plot_payments: {
     label: 'Plot Payments (Collections)',
@@ -29,7 +35,8 @@ export const REPORTS = Object.freeze({
       { key: 'block', expr: 'p.block', label: 'Block' },
       { key: 'buyer_name', expr: `COALESCE(pp.buyer_name, p.buyer_name)`, label: 'Buyer' },
       { key: 'amount', expr: 'pp.amount', label: 'Amount', type: 'money' },
-      { key: 'payment_from', expr: 'pp.payment_from', label: 'Mode' },
+      { key: 'payment_from', expr: 'pp.payment_from', label: 'Mode / Bank' },
+      { key: 'bank_account_name', expr: mappedBankName('plot_payments', 'pp.id', 'pp.site_id'), label: 'Bank account' },
       { key: 'payment_type', expr: 'pp.payment_type', label: 'Settlement account' },
       { key: 'cheque_status', expr: 'pp.cheque_status', label: 'Cheque status' },
       { key: 'received_by', expr: 'pp.received_by', label: 'Received by' },
@@ -87,7 +94,8 @@ export const REPORTS = Object.freeze({
       { key: 'from_entity', expr: 'e.from_entity', label: 'Paid from' },
       { key: 'debit', expr: 'e.debit', label: 'Debit', type: 'money' },
       { key: 'credit', expr: 'e.credit', label: 'Credit', type: 'money' },
-      { key: 'payment_mode', expr: 'e.payment_mode', label: 'Mode' },
+      { key: 'payment_mode', expr: 'e.payment_mode', label: 'Mode / Bank' },
+      { key: 'bank_account_name', expr: mappedBankName('expenses', 'e.id', 'e.site_id'), label: 'Bank account' },
       { key: 'status', expr: 'e.status', label: 'Status' },
       { key: 'remark', expr: 'e.remark', label: 'Remark' },
     ],
@@ -111,7 +119,8 @@ export const REPORTS = Object.freeze({
       { key: 'work_title', expr: 'vc.work_title', label: 'Work' },
       { key: 'head_name', expr: 'vc.head_name', label: 'Head' },
       { key: 'amount', expr: 'vp.amount', label: 'Amount', type: 'money' },
-      { key: 'payment_mode', expr: 'vp.payment_mode', label: 'Mode' },
+      { key: 'payment_mode', expr: 'vp.payment_mode', label: 'Mode / Bank' },
+      { key: 'bank_account_name', expr: mappedBankName('vendor_payments', 'vp.id', 'vp.site_id'), label: 'Bank account' },
       { key: 'cheque_status', expr: 'vp.cheque_status', label: 'Cheque status' },
       { key: 'reference_no', expr: 'vp.reference_no', label: 'Reference' },
     ],
@@ -228,7 +237,8 @@ export const REPORTS = Object.freeze({
       { key: 'particular', expr: 'fp.particular', label: 'Particular' },
       { key: 'amount', expr: 'fp.amount', label: 'Amount', type: 'money' },
       { key: 'interest_amount', expr: 'fp.interest_amount', label: 'Interest', type: 'money' },
-      { key: 'payment_mode', expr: 'fp.payment_mode', label: 'Mode' },
+      { key: 'payment_mode', expr: 'fp.payment_mode', label: 'Mode / Bank' },
+      { key: 'bank_account_name', expr: mappedBankName('farmer_payments', 'fp.id', 'f.site_id'), label: 'Bank account' },
       { key: 'status', expr: 'fp.status', label: 'Status' },
     ],
   },
@@ -252,7 +262,8 @@ export const REPORTS = Object.freeze({
       { key: 'category', expr: 'db.category', label: 'Category' },
       { key: 'debit', expr: 'db.debit', label: 'Debit', type: 'money' },
       { key: 'credit', expr: 'db.credit', label: 'Credit', type: 'money' },
-      { key: 'payment_mode', expr: 'db.payment_mode', label: 'Mode' },
+      { key: 'payment_mode', expr: 'db.payment_mode', label: 'Mode / Bank' },
+      { key: 'bank_account_name', expr: mappedBankName('day_book', 'db.id', 'db.site_id'), label: 'Bank account' },
       { key: 'from_entity', expr: 'db.from_entity', label: 'From' },
       { key: 'to_entity', expr: 'db.to_entity', label: 'To' },
     ],
@@ -263,7 +274,7 @@ export const REPORTS = Object.freeze({
     description: 'Cash in/out entries by cash type.',
     permission: 'cashflow',
     icon: 'ArrowLeftRight',
-    from: `cash_flow_entries ce`,
+    from: `cash_flow_entries ce LEFT JOIN bank_accounts ba ON ba.id = ce.bank_account_id AND ba.site_id = ce.site_id`,
     siteCol: 'ce.site_id',
     dateCol: 'ce.date',
     where: `financial_transaction_posts('credit', ce.status, ce.cash_type, ce.cheque_status)`,
@@ -275,7 +286,8 @@ export const REPORTS = Object.freeze({
       { key: 'particular', expr: 'ce.particular', label: 'Particular' },
       { key: 'credit', expr: 'ce.credit', label: 'In', type: 'money' },
       { key: 'debit', expr: 'ce.debit', label: 'Out', type: 'money' },
-      { key: 'cash_type', expr: 'ce.cash_type', label: 'Cash type' },
+      { key: 'cash_type', expr: 'ce.cash_type', label: 'Mode / Bank' },
+      { key: 'bank_account_name', expr: 'ba.name', label: 'Bank account' },
       { key: 'status', expr: 'ce.status', label: 'Status' },
       { key: 'remarks', expr: 'ce.remarks', label: 'Remarks' },
     ],
@@ -300,7 +312,8 @@ export const REPORTS = Object.freeze({
       { key: 'purpose', expr: 'ft.purpose', label: 'Purpose' },
       { key: 'debit', expr: 'ft.debit', label: 'Debit', type: 'money' },
       { key: 'credit', expr: 'ft.credit', label: 'Credit', type: 'money' },
-      { key: 'payment_mode', expr: 'ft.payment_mode', label: 'Mode' },
+      { key: 'payment_mode', expr: 'ft.payment_mode', label: 'Mode / Bank' },
+      { key: 'bank_account_name', expr: mappedBankName('firm_transactions', 'ft.id', 'ft.site_id'), label: 'Bank account' },
       { key: 'status', expr: 'ft.status', label: 'Status' },
     ],
   },

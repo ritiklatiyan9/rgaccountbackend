@@ -6,6 +6,7 @@ import {
   deleteBankAccount,
   mapEntryToBank,
   getEntryBankMapping,
+  listEntryBankMappings,
   listBankEntries,
   listUnmappedEntries,
 } from '../controllers/bank.controller.js';
@@ -29,6 +30,7 @@ const bustBankCache = invalidateCacheOnSuccess(['/daybook', '/balance-sheet', '/
 router.get('/', listBankAccounts);
 router.get('/map', getEntryBankMapping);
 router.put('/map', bustBankCache, mapEntryToBank);
+router.post('/mappings', listEntryBankMappings);
 router.post('/', requirePermission('daybook', 'write'), bustBankCache, createBankAccount);
 router.get('/unmapped/entries', requirePermission('daybook', 'read'), listUnmappedEntries);
 router.get('/:id/entries', requirePermission('daybook', 'read'), listBankEntries);

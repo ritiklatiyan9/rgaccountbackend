@@ -2874,6 +2874,7 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
 
   const result = await pool.query(
     `SELECT cfe.id, cfe.date, cfe.particular, cfe.debit, cfe.credit, cfe.cash_type,
+            cfe.bank_account_id, ba.name AS bank_account_name,
             cfe.remarks, cfe.status, cfe.source_module, cfe.source_id,
             cfe.voucher_url, cfe.created_at, cfe.cheque_status, cfe.cheque_no,
             COALESCE(u.name, u.email) AS created_by_name,
@@ -2903,6 +2904,7 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
                      pcp.authority_signature_url, prp.authority_signature_url, vp.authority_signature_url)
               AS authority_signature_url
      FROM cash_flow_entries cfe
+     LEFT JOIN bank_accounts ba ON ba.id = cfe.bank_account_id AND ba.site_id = cfe.site_id
      LEFT JOIN users u ON cfe.created_by = u.id
      LEFT JOIN plot_payments pp ON cfe.source_module = 'plot_payments' AND cfe.source_id = pp.id
      LEFT JOIN plots pl ON pp.plot_id = pl.id
