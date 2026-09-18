@@ -54,6 +54,100 @@ export const mergeVerifiedKycProfile = (submitted, source) => {
   return merged;
 };
 
+/**
+ * Adopt one site's verified KYC for the same person's registration in another
+ * site. Existing verified KYC always wins; an unfinished member-level case is
+ * completed in place so it disappears from the pending queue, otherwise a
+ * small audited VERIFIED case is created.
+ */
+export const reuseVerifiedKycForMember = async (db, {
+  source, targetMember, siteId, userId,
+}) => {
+  const sourceCaseId = Number(source?.verified_kyc_case_id);
+  const targetMemberId = Number(targetMember?.id);
+  if (!Number.isInteger(sourceCaseId) || sourceCaseId <= 0
+    || !Number.isInteger(targetMemberId) || targetMemberId <= 0) {
+    return { kycReused: false, reason: 'NO_VERIFIED_SOURCE' };
+  }
+  if (normalizeMemberName(source.full_name) !== normalizeMemberName(targetMember.full_name)) {
+    return { kycReused: false, reason: 'NAME_MISMATCH' };
+  }
+
+  const { rows: verifiedCases } = await db.query(
+    `SELECT id FROM kyc_cases
+      WHERE client_member_id = $1 AND site_id = $2 AND status = 'VERIFIED'
+      ORDER BY verified_at DESC NULLS LAST, id DESC
+      LIMIT 1 FOR SHARE`,
+    [targetMemberId, siteId]
+  );
+  if (verifiedCases[0]) {
+    return { kycReused: false, reason: 'ALREADY_VERIFIED', kycCaseId: verifiedCases[0].id };
+  }
+
+  const merged = mergeVerifiedKycProfile(targetMember, source);
+  const profile = {};
+  for (const field of REUSABLE_KYC_PROFILE_FIELDS) {
+    if (source[field] !== undefined && source[field] !== null && source[field] !== '') {
+      profile[field] = merged[field];
+    }
+  }
+  if (merged.phone) profile.phone = merged.phone;
+  const profileFields = Object.keys(profile);
+  if (profileFields.length) {
+    const values = profileFields.map((field) => profile[field]);
+    values.push(targetMemberId);
+    await db.query(
+      `UPDATE members
+          SET ${profileFields.map((field, index) => `${field} = $${index + 1}`).join(', ')},
+              updated_at = now()
+        WHERE id = $${values.length}`,
+      values
+    );
+  }
+
+  const { rows: openCases } = await db.query(
+    `SELECT id FROM kyc_cases
+      WHERE client_member_id = $1 AND site_id = $2 AND booking_id IS NULL
+        AND status NOT IN ('VERIFIED', 'REJECTED')
+      ORDER BY updated_at DESC NULLS LAST, id DESC
+      LIMIT 1 FOR UPDATE`,
+    [targetMemberId, siteId]
+  );
+
+  let kycCaseId;
+  if (openCases[0]) {
+    const { rows } = await db.query(
+      `UPDATE kyc_cases
+          SET status = 'VERIFIED', verified_by = $1,
+              verified_at = COALESCE($2, now()), updated_at = now(),
+              reused_from_case_id = $3
+        WHERE id = $4
+        RETURNING id`,
+      [source.kyc_verified_by || userId, source.kyc_verified_at, sourceCaseId, openCases[0].id]
+    );
+    kycCaseId = rows[0]?.id || openCases[0].id;
+  } else {
+    const { rows } = await db.query(
+      `INSERT INTO kyc_cases
+         (booking_id, client_member_id, site_id, mode, status, created_by,
+          verified_by, verified_at, created_at, updated_at, reused_from_case_id)
+       VALUES
+         (NULL, $1, $2, 'MANUAL_OCR', 'VERIFIED', $3,
+          $4, COALESCE($5, now()), now(), now(), $6)
+       RETURNING id`,
+      [
+        targetMemberId, siteId, userId,
+        source.kyc_verified_by || userId,
+        source.kyc_verified_at,
+        sourceCaseId,
+      ]
+    );
+    kycCaseId = rows[0]?.id;
+  }
+
+  return { kycReused: true, reason: 'REUSED', kycCaseId };
+};
+
 const siteAccessSql = (siteAlias = 's') => `AND ($4::boolean OR EXISTS (
        SELECT 1 FROM user_sites permitted_site
         WHERE permitted_site.user_id = $5 AND permitted_site.site_id = ${siteAlias}.id

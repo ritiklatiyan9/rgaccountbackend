@@ -15,6 +15,7 @@ import {
   mergeVerifiedKycProfile,
   normalizeMemberName,
   normalizeMemberPhone,
+  reuseVerifiedKycForMember,
 } from '../services/memberPhoneReuse.service.js';
 
 export const searchMembersByPlot = asyncHandler(async (req, res) => {
@@ -405,7 +406,20 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
   try {
     await client.query('BEGIN');
     const { rows: sources } = await client.query(
-      'SELECT * FROM members WHERE id = ANY($1::int[]) FOR SHARE',
+      `SELECT m.*,
+              verified.id AS verified_kyc_case_id,
+              verified.verified_by AS kyc_verified_by,
+              verified.verified_at AS kyc_verified_at
+         FROM members m
+         LEFT JOIN LATERAL (
+           SELECT k.id, k.verified_by, k.verified_at
+             FROM kyc_cases k
+            WHERE k.client_member_id = m.id AND k.status = 'VERIFIED'
+            ORDER BY k.verified_at DESC NULLS LAST, k.id DESC
+            LIMIT 1
+         ) verified ON true
+        WHERE m.id = ANY($1::int[])
+        FOR SHARE OF m`,
       [memberIds]
     );
     if (sources.length !== memberIds.length) {
@@ -476,11 +490,22 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
           matchConditions.push(`(${fallback})`);
         }
         const { rows: [matched] } = await client.query(
-          `SELECT id FROM members WHERE site_id = $1 AND (${matchConditions.join(' OR ')}) LIMIT 1`,
+          `SELECT * FROM members WHERE site_id = $1 AND (${matchConditions.join(' OR ')}) LIMIT 1 FOR UPDATE`,
           matchParams
         );
         if (matched) {
-          existing.push({ source_member_id: source.id, site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: matched.id });
+          const reuse = await reuseVerifiedKycForMember(client, {
+            source, targetMember: matched, siteId: targetSiteId, userId: user.id,
+          });
+          existing.push({
+            source_member_id: source.id,
+            site_id: targetSiteId,
+            site_name: siteNames.get(targetSiteId),
+            member_id: matched.id,
+            kyc_reused: reuse.kycReused,
+            kyc_case_id: reuse.kycCaseId || null,
+            kyc_reuse_reason: reuse.reason,
+          });
           continue;
         }
 
@@ -489,7 +514,18 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
           if (source[field] !== undefined) copy[field] = source[field];
         });
         const cloned = await memberModel.create(copy, client);
-        created.push({ source_member_id: source.id, site_id: targetSiteId, site_name: siteNames.get(targetSiteId), member_id: cloned.id });
+        const reuse = await reuseVerifiedKycForMember(client, {
+          source, targetMember: cloned, siteId: targetSiteId, userId: user.id,
+        });
+        created.push({
+          source_member_id: source.id,
+          site_id: targetSiteId,
+          site_name: siteNames.get(targetSiteId),
+          member_id: cloned.id,
+          kyc_reused: reuse.kycReused,
+          kyc_case_id: reuse.kycCaseId || null,
+          kyc_reuse_reason: reuse.reason,
+        });
       }
     }
 
@@ -507,10 +543,18 @@ const respondWithRegistrations = async (res, memberIds, siteIds, user) => {
   try {
     const { created, existing } = await copyMemberToSites({ memberIds, siteIds, user });
     const memberLabel = memberIds.length === 1 ? 'member' : 'members';
-    const message = created.length
-      ? `Registered ${created.length} ${created.length === 1 ? 'user' : 'users'} across the selected sites`
-      : `The selected ${memberLabel} are already registered in those sites`;
-    return res.status(created.length ? 201 : 200).json({ message, created, existing });
+    const kycUpdated = [...created, ...existing].filter((entry) => entry.kyc_reused);
+    let message;
+    if (created.length && kycUpdated.length) {
+      message = `Registered ${created.length} ${created.length === 1 ? 'user' : 'users'} and reused verified KYC in ${kycUpdated.length} site ${kycUpdated.length === 1 ? 'registration' : 'registrations'}`;
+    } else if (created.length) {
+      message = `Registered ${created.length} ${created.length === 1 ? 'user' : 'users'} across the selected sites`;
+    } else if (kycUpdated.length) {
+      message = `Completed KYC for ${kycUpdated.length} existing site ${kycUpdated.length === 1 ? 'registration' : 'registrations'}`;
+    } else {
+      message = `The selected ${memberLabel} are already registered in those sites`;
+    }
+    return res.status(created.length ? 201 : 200).json({ message, created, existing, kyc_updated: kycUpdated });
   } catch (error) {
     if (error?.code === '23505') {
       return res.status(409).json({ message: 'A matching member is already registered in one of the selected sites' });
