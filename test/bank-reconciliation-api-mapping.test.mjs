@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getConfiguration, requireAiMatchMode, requireChequeListStatus, transactionDto } from '../src/controllers/bankReconciliation.controller.js';
+import { readFile } from 'node:fs/promises';
+import {
+  getConfiguration,
+  requireAiMatchMode,
+  requireChequeListStatus,
+  requireManualStatusReason,
+  requireManualChequeStatus,
+  transactionDto,
+} from '../src/controllers/bankReconciliation.controller.js';
 
 test('bank reconciliation API DTO preserves imported lineage fields and blank references', () => {
   const dto = transactionDto({
@@ -64,5 +72,38 @@ test('cheque history status filter is strict and defaults to pending', () => {
   assert.throws(
     () => requireChequeListStatus('deleted'),
     (error) => error.code === 'INVALID_CHEQUE_STATUS' && error.statusCode === 400,
+  );
+});
+
+test('manual cheque status requires a concise audit reason', () => {
+  assert.equal(requireManualStatusReason('  Verified   with bank manager  '), 'Verified with bank manager');
+  assert.throws(
+    () => requireManualStatusReason('ok'),
+    (error) => error.code === 'MANUAL_STATUS_REASON_REQUIRED' && error.statusCode === 400,
+  );
+  assert.throws(
+    () => requireManualStatusReason('x'.repeat(501)),
+    (error) => error.code === 'MANUAL_STATUS_REASON_TOO_LONG' && error.statusCode === 400,
+  );
+});
+
+test('manual cheque status route is permission gated and auditable', async () => {
+  const [routes, controller] = await Promise.all([
+    readFile(new URL('../src/routes/bankReconciliation.routes.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/controllers/bankReconciliation.controller.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(routes, /cheques\/:source\/:entryId\/manual-status[\s\S]*requirePermission\('expense_approval', 'update'\)/);
+  const manualHandler = controller.slice(controller.indexOf('export async function manuallyUpdateChequeStatus'));
+  assert.match(manualHandler, /loadPendingChequeCandidates\([\s\S]*null/);
+  assert.match(controller, /status,\n      expectedSiteId/);
+  assert.match(controller, /eventType: 'MANUAL_CHEQUE_STATUS'/);
+  assert.match(controller, /bank_statement_linked: false/);
+});
+
+test('manual cheque status accepts only the three requested decisions', () => {
+  for (const status of ['PENDING', 'CLEARED', 'BOUNCED']) assert.equal(requireManualChequeStatus(status), status);
+  assert.throws(
+    () => requireManualChequeStatus('RETURNED'),
+    (error) => error.code === 'INVALID_MANUAL_CHEQUE_STATUS' && error.statusCode === 400,
   );
 });

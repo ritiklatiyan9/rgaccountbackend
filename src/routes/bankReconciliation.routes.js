@@ -17,6 +17,7 @@ import {
   getRun,
   getUpload,
   listPendingCheques,
+  manuallyUpdateChequeStatus,
   matchUpload,
 } from '../controllers/bankReconciliation.controller.js';
 import {
@@ -108,6 +109,11 @@ router.post('/uploads', upload.single('statement'), createUpload);
 router.get('/uploads/:uploadId', getUpload);
 router.post('/uploads/:uploadId/match', matchUpload);
 router.get('/runs/:runId', getRun);
+router.post(
+  '/cheques/:source/:entryId/manual-status',
+  requirePermission('expense_approval', 'update'),
+  manuallyUpdateChequeStatus,
+);
 router.post('/uploads/:uploadId/confirm', requirePermission('expense_approval', 'update'), confirmMatches);
 
 export default router;

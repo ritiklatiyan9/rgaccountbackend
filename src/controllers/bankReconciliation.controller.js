@@ -46,6 +46,34 @@ export function requireChequeListStatus(value) {
   return status;
 }
 
+export function requireManualStatusReason(value) {
+  const reason = String(value || '').trim().replace(/\s+/g, ' ');
+  if (reason.length < 10) {
+    const error = new Error('Enter a clear manual status reason of at least 10 characters.');
+    error.statusCode = 400;
+    error.code = 'MANUAL_STATUS_REASON_REQUIRED';
+    throw error;
+  }
+  if (reason.length > 500) {
+    const error = new Error('Manual status reason must be 500 characters or fewer.');
+    error.statusCode = 400;
+    error.code = 'MANUAL_STATUS_REASON_TOO_LONG';
+    throw error;
+  }
+  return reason;
+}
+
+export function requireManualChequeStatus(value) {
+  const status = String(value || '').trim().toUpperCase();
+  if (!['PENDING', 'CLEARED', 'BOUNCED'].includes(status)) {
+    const error = new Error('Manual cheque status must be PENDING, CLEARED, or BOUNCED.');
+    error.statusCode = 400;
+    error.code = 'INVALID_MANUAL_CHEQUE_STATUS';
+    throw error;
+  }
+  return status;
+}
+
 function sendError(res, error) {
   const status = Number(error.statusCode) || 500;
   if (status >= 500) console.error('[bank-reconciliation]', error);
@@ -459,6 +487,86 @@ export async function getRun(req, res) {
     return res.json(await loadRun(pool, req.user, req.params.runId));
   } catch (error) {
     return sendError(res, error);
+  }
+}
+
+/**
+ * Explicit human fallback when no bank statement is available. This changes
+ * cheque metadata only; the existing transaction approval remains separate.
+ */
+export async function manuallyUpdateChequeStatus(req, res) {
+  const client = await pool.connect();
+  try {
+    if (req.body.confirmed !== true) {
+      const error = new Error('Confirm that the cheque was independently verified before changing its status.');
+      error.statusCode = 400;
+      error.code = 'MANUAL_STATUS_CONFIRMATION_REQUIRED';
+      throw error;
+    }
+    const source = String(req.params.source || '').trim();
+    const entryId = numericId(req.params.entryId, 'cheque entry id');
+    const reason = requireManualStatusReason(req.body.reason);
+    const status = requireManualChequeStatus(req.body.status);
+
+    await client.query('BEGIN');
+    const site = await assertSiteAccess(client, req.user, req.body.site_id ?? req.body.siteId);
+    const candidates = await loadPendingChequeCandidates(
+      client,
+      Number(req.user.organization_id) || 1,
+      site.id,
+      null,
+    );
+    const candidate = candidates.find((item) => item.source === source && Number(item.entry_id) === entryId);
+    if (!candidate) {
+      throw new ChequeStatusError('This cheque no longer exists in the selected site. Refresh and try again.', 409, 'STALE_CANDIDATE');
+    }
+
+    const changed = await updateChequeStatusRecord(client, {
+      source,
+      entryId,
+      status,
+      expectedSiteId: site.id,
+      expectedAmount: candidate.amount,
+      requirePending: false,
+    });
+    await writeAuditLog({
+      organizationId: Number(req.user.organization_id) || 1,
+      siteId: site.id,
+      userId: req.user.id,
+      action: status === 'BOUNCED' ? 'BOUNCE' : status === 'CLEARED' ? 'CLEAR' : 'REOPEN',
+      eventType: 'MANUAL_CHEQUE_STATUS',
+      module: 'bank_reconciliation',
+      transactionName: candidate.customer_name || candidate.entry_label,
+      amount: candidate.amount,
+      entityType: source,
+      entityId: entryId,
+      requestMethod: req.method,
+      requestPath: req.originalUrl,
+      statusCode: 200,
+      outcome: 'SUCCESS',
+      description: `Cheque ${candidate.cheque_no || `#${entryId}`} manually set to ${status} after independent verification`,
+      oldValues: { cheque_status: changed.before?.cheque_status },
+      newValues: { cheque_status: status, transaction_approval_status: changed.after?.status || 'pending' },
+      metadata: {
+        status_change_method: 'MANUAL',
+        reason,
+        bank_statement_linked: false,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get?.('user-agent'),
+    }, client);
+    await client.query('COMMIT');
+
+    return res.json({
+      entry: changed.after,
+      cheque: { ...candidate, cheque_status: status },
+      message: `Cheque status set to ${status}.`,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    return sendError(res, error);
+  } finally {
+    client.release();
   }
 }
 
