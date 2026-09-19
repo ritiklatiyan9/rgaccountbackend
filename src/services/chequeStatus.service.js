@@ -1,3 +1,4 @@
+import { completeDeferredChequeBooking } from './quickPlotBooking.service.js';
 const SOURCE_CONFIG = Object.freeze({
   farmer_payment: { table: 'farmer_payments', mirror: 'farmer_payments' },
   plot_commission_payment: { table: 'plot_commission_payments', mirror: 'plot_commission_payments' },
@@ -176,6 +177,9 @@ export async function updateChequeStatusRecord(db, {
     if (!sourceBefore) throw new ChequeStatusError('Cheque entry not found.', 404, 'ENTRY_NOT_FOUND');
     if (requirePending && normalizedStatus(sourceBefore.cheque_status) !== 'PENDING') {
       throw new ChequeStatusError('This cheque is no longer pending.', 409, 'STALE_STATUS');
+    }
+    if (source === 'plot_payment' && targetStatus === 'CLEARED') {
+      await completeDeferredChequeBooking(db, sourceBefore);
     }
     const setParts = ['cheque_status = $1', 'updated_at = NOW()'];
     const params = [targetStatus];

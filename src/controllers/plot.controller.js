@@ -1,3 +1,4 @@
+import { chequeReadySql } from '../utils/chequeWorkflow.js';
 import { validatePlotApprover } from '../services/plotApproval.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
@@ -723,7 +724,7 @@ export const createPayment = asyncHandler(async (req, res) => {
       assigned_admin_id ? parseInt(assigned_admin_id) : null,             // $12
       req.body.cheque_no ? String(req.body.cheque_no).trim() : null,      // $13
       normalizedPaymentType === 'CHEQUE' ? 'PENDING' : null,              // $14
-      req.body.require_booked_plot === true,                             // $15
+      req.body.require_booked_plot === true && !(normalizedPaymentType === 'CHEQUE' && req.body.booking_client_id !== undefined), // $15
       transactionTimeForWrite(),                                        // $16
     ]
   );
@@ -737,6 +738,7 @@ export const createPayment = asyncHandler(async (req, res) => {
       ({ result, bookedPlot } = await withCompanyPlotBooking({
         pool, plotId: plotIdInt, memberId: req.body.booking_client_id,
         requestedBy: req.user.id, assignedAdminId: assigned_admin_id,
+        deferBooking: normalizedPaymentType === 'CHEQUE',
         date: date || new Date().toISOString().slice(0, 10), savePayment,
       }));
     } catch (error) {
@@ -809,6 +811,7 @@ export const listPayments = asyncHandler(async (req, res) => {
          LEFT JOIN users u ON u.id = pp.created_by
          LEFT JOIN users aa ON aa.id = pp.assigned_admin_id
         WHERE pp.plot_id = $1
+          AND ${chequeReadySql('pp')}
           AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
         ORDER BY pp.date ASC, pp.created_at ASC`,
       [plotIdInt, entryVisibility.creatorId]

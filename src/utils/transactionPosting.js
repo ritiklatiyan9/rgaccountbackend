@@ -9,7 +9,7 @@ const normalizeMode = (value) => String(value || '').trim().toUpperCase();
  * One accounting-posting rule for non-SQL calculations.
  *
  * Credits post immediately while they await approval. Debits post only after
- * approval. A cheque on either side posts only after it is CLEARED.
+ * approval. A cheque on either side requires both clearance and approval.
  */
 export const transactionMovesMoney = ({ direction, status, paymentMode, chequeStatus }) => {
   const normalizedDirection = normalizeDirection(direction);
@@ -20,7 +20,7 @@ export const transactionMovesMoney = ({ direction, status, paymentMode, chequeSt
   if (TERMINAL_STATUSES.has(normalizedStatus)) return false;
 
   const isCheque = CHEQUE_MODES.has(normalizedMode) || normalizedChequeStatus.length > 0;
-  if (isCheque && normalizedChequeStatus !== 'CLEARED') return false;
+  if (isCheque && (normalizedChequeStatus !== 'CLEARED' || String(status || '').trim().toLowerCase() !== 'approved')) return false;
 
   if (normalizedDirection === 'credit') return true;
   if (normalizedDirection === 'debit') return normalizedStatus === 'approved';

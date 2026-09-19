@@ -1,3 +1,4 @@
+import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import express from 'express';
 import multer from 'multer';
 import authMiddleware from '../middlewares/auth.middleware.js';
@@ -43,6 +44,9 @@ const upload = multer({
 });
 
 router.use(authMiddleware);
+router.use((req, res, next) => req.method === 'GET' ? next() : invalidateCacheOnSuccess([
+  'approvals|', 'plots|', 'plots:pageData:', '/plots', '/cashflow', '/daybook', '/registries', 'registries|', 'registries-meta|',
+])(req, res, next));
 router.use(requireRole('admin', 'sub_admin'));
 
 // General Bank Day Book reconciliation is presentation-only and follows the

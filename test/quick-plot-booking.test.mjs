@@ -107,3 +107,49 @@ test('invalid buyer IDs fail before acquiring a database connection', async () =
     assert.deepEqual(f.calls, []);
   }
 });
+
+test('a pending cheque saves booking intent without modifying the plot or generating plot approval', async () => {
+  const calls = [];
+  const connection = {
+    async query(sql, params) {
+      calls.push(sql);
+      if (sql.startsWith('SELECT * FROM plots')) return { rows: [{id:12,site_id:4,status:'COMPANY'}] };
+      if (sql.includes('FROM members')) return { rows: [{id:8,full_name:'NEW BUYER'}] };
+      if (sql.includes('UPDATE plot_payments')) {
+        assert.deepEqual(params, [24,8,'NEW BUYER',null]);
+        return { rows: [{id:24,pending_booking_member_id:8,cheque_status:'PENDING',status:'pending'}] };
+      }
+      if (sql.startsWith('UPDATE plots')) assert.fail('An uncleared cheque must not book the plot');
+      return {rows:[]};
+    }, release() {},
+  };
+  const result = await withCompanyPlotBooking({pool:{connect:async()=>connection},plotId:12,memberId:8,
+    date:'2026-09-19',deferBooking:true,savePayment:async()=>({rows:[{id:24}]})});
+  assert.equal(result.bookedPlot,null);
+  assert.equal(result.result.rows[0].pending_booking_member_id,8);
+  assert.equal(calls.at(-1),'COMMIT');
+});
+
+test('clearing a deferred booking checks the plot again and never overwrites a new buyer', async () => {
+  const { completeDeferredChequeBooking } = await import('../src/services/quickPlotBooking.service.js');
+  const calls=[];
+  const db={query:async(sql)=>{calls.push(sql);return {rows:[{id:12,status:'BOOKED'}]};}};
+  await assert.rejects(completeDeferredChequeBooking(db,{id:24,plot_id:12,pending_booking_member_id:8}),
+    {statusCode:409,code:'PLOT_BOOKING_CHANGED'});
+  assert.equal(calls.length,1);
+});
+
+test('clearance completes a deferred booking with its original buyer and reviewer', async () => {
+  const { completeDeferredChequeBooking } = await import('../src/services/quickPlotBooking.service.js');
+  const calls=[];
+  const db={query:async(sql,params)=>{
+    calls.push({sql,params});
+    if(sql.startsWith('SELECT * FROM plots')) return {rows:[{id:12,site_id:4,status:'COMPANY'}]};
+    if(sql.includes('FROM members')) return {rows:[{id:8,full_name:' New Buyer '}]};
+    if(sql.includes('FROM users')) return {rows:[{id:7}]};
+    return {rows:[]};
+  }};
+  await completeDeferredChequeBooking(db,{id:24,plot_id:12,pending_booking_member_id:8,assigned_admin_id:7,created_by:9,date:'2026-09-19'});
+  assert.deepEqual(calls.find(c=>c.sql.startsWith('UPDATE plots')).params,[12,'NEW BUYER',8,'2026-09-19',7,9]);
+  assert.match(calls.at(-1).sql,/pending_booking_member_id = NULL/);
+});

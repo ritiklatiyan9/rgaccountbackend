@@ -1,3 +1,4 @@
+import { chequeReadyForApproval, chequeReadySql } from '../utils/chequeWorkflow.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { hasRelation } from '../utils/schemaProbe.js';
@@ -226,7 +227,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   //   don't hold a module grant but still need to see entries explicitly delegated to them).
   const buildWhere = (tableAlias, siteAlias, extraConditions = [], scopedAssigneeId = null, status = 'pending', dateColumn = 'date') => {
     const sAlias = siteAlias || tableAlias;
-    const conditions = [`${tableAlias}.status = '${status}'`, ...extraConditions];
+    const conditions = [`${tableAlias}.status = '${status}'`, chequeReadySql(tableAlias), ...extraConditions];
     const params = [];
     let idx = 1;
     if (site_id) {
@@ -839,9 +840,10 @@ export const getPendingCounts = asyncHandler(async (req, res) => {
   // they still need counts for entries delegated directly to them.
   const isSubAdmin = req.user.role === 'sub_admin';
   const scopeClauseFor = (alias, moduleKey) => {
-    if (!isSubAdmin) return '';
-    if (isModuleAllowed(allowedModules, moduleKey)) return '';
-    return ` AND ${alias}.assigned_admin_id = ${parseInt(req.user.id)}`;
+    const ready = ` AND ${chequeReadySql(alias)}`;
+    if (!isSubAdmin) return ready;
+    if (isModuleAllowed(allowedModules, moduleKey)) return ready;
+    return `${ready} AND ${alias}.assigned_admin_id = ${parseInt(req.user.id)}`;
   };
 
   const siteFilter = site_id ? 'AND site_id = $1' : '';
@@ -948,9 +950,10 @@ export const approveEntry = asyncHandler(async (req, res) => {
   // Check current status + assignment up-front — assignment overrides module-level permission,
   // so a sub-admin can approve an entry that was explicitly delegated to them even without a
   // blanket module grant.
-  const check = await pool.query(`SELECT status, assigned_admin_id FROM ${table} WHERE id = $1`, [entryId]);
+  const check = await pool.query(`SELECT * FROM ${table} WHERE id = $1`, [entryId]);
   if (!check.rows[0]) return res.status(404).json({ message: 'Entry not found' });
   if (check.rows[0].status === 'approved') return res.status(400).json({ message: 'Entry is already approved' });
+  if (!chequeReadyForApproval(check.rows[0])) return res.status(409).json({ message: 'Clear the cheque in Pending Cheque Matching before approving it.' });
 
   const assignedTo = check.rows[0].assigned_admin_id ? parseInt(check.rows[0].assigned_admin_id) : null;
   const isAssignedToCaller = assignedTo === parseInt(req.user.id);
@@ -966,7 +969,7 @@ export const approveEntry = asyncHandler(async (req, res) => {
   }
 
   const result = await pool.query(
-    `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1${source === 'plot_status' ? " AND status = 'pending'" : ''}${req.assignedApprovalsOnly ? ' AND assigned_admin_id = $2' : ''} RETURNING *`,
+    `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1 AND ${chequeReadySql(table)} AND status = 'pending'${req.assignedApprovalsOnly ? ' AND assigned_admin_id = $2' : ''} RETURNING *`,
     [entryId, req.user.id]
   );
   
@@ -1214,7 +1217,7 @@ export const bulkApprove = asyncHandler(async (req, res) => {
   }
 
   let totalApproved = 0;
-  let skippedAssignedToOthers = 0;
+  let skippedEntries = 0;
   const affectedCommissions = new Set();
   const canOverrideAssignment = hasGlobalApprovalOverride(req.user);
 
@@ -1231,7 +1234,7 @@ export const bulkApprove = asyncHandler(async (req, res) => {
       : ' AND (assigned_admin_id IS NULL OR assigned_admin_id = $3)';
     const result = await pool.query(
       `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW()
-       WHERE id = ANY($1::int[]) AND status = 'pending'${assignmentClause}
+       WHERE id = ANY($1::int[]) AND status = 'pending' AND ${chequeReadySql(table)}${assignmentClause}
        RETURNING *`,
       canOverrideAssignment ? [ids, req.user.id] : [ids, req.user.id, req.user.id]
     );
@@ -1290,7 +1293,7 @@ export const bulkApprove = asyncHandler(async (req, res) => {
       }
     }
     totalApproved += result.rowCount;
-    skippedAssignedToOthers += (ids.length - result.rowCount);
+    skippedEntries += (ids.length - result.rowCount);
   }
 
   // Update commission statuses for all affected commissions
@@ -1322,10 +1325,10 @@ export const bulkApprove = asyncHandler(async (req, res) => {
     }
   }
 
-  const msg = skippedAssignedToOthers > 0
-    ? `${totalApproved} entries approved, ${skippedAssignedToOthers} skipped (assigned to other admins)`
+  const msg = skippedEntries > 0
+    ? `${totalApproved} entries approved, ${skippedEntries} skipped (uncleared, already decided, or assigned to another approver)`
     : `${totalApproved} entries approved successfully`;
-  res.json({ message: msg, count: totalApproved, skippedAssignedToOthers });
+  res.json({ message: msg, count: totalApproved, skippedEntries });
 });
 
 /**

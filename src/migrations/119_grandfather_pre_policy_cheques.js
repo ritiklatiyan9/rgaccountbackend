@@ -29,6 +29,14 @@ export async function up() {
   try {
     await client.query('BEGIN');
     await client.query(`SELECT pg_advisory_xact_lock(hashtext('119_grandfather_pre_policy_cheques'))`);
+    // Historical conversion runs once. A newly entered backdated cheque must
+    // never be cleared automatically by a later server restart.
+    const applied = await client.query("SELECT 1 FROM app_schema_migrations WHERE version = '119_grandfather_pre_policy_cheques'");
+    if (applied.rows.length) {
+      await client.query('COMMIT');
+      return;
+    }
+
 
     // ── 1. Posting rule: an unmanaged cheque (no status) is not in-flight ──
     await client.query(`

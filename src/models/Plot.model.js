@@ -1,8 +1,9 @@
+import { chequeReadySql } from '../utils/chequeWorkflow.js';
 import MasterModel from './MasterModel.js';
 import { PLOT_BUYER_MEMBER_JOIN, PLOT_BUYER_KYC_JOIN, PLOT_BUYER_KYC_STATUS } from '../services/plotMemberLinks.service.js';
 
 // Plot payments are credits: pending rows count immediately, but cheque rows
-// wait until CLEARED. The sane-date guard stays aligned with the ledger.
+// require clearance and approval. The sane-date guard stays aligned with the ledger.
 const PP_COUNTABLE = `
   financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
   AND pp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
@@ -50,10 +51,10 @@ class PlotModel extends MasterModel {
           ) AS received_cash,
           COUNT(*) FILTER (WHERE ${PP_COUNTABLE})::int AS payment_count,
           STRING_AGG(DISTINCT pp.buyer_name, ', ') FILTER (
-            WHERE pp.buyer_name IS NOT NULL AND pp.buyer_name != ''
+            WHERE pp.buyer_name IS NOT NULL AND pp.buyer_name != '' AND ${chequeReadySql('pp')}
           ) AS payment_buyer_names,
           STRING_AGG(DISTINCT pp.booked_by, ', ') FILTER (
-            WHERE pp.booked_by IS NOT NULL AND pp.booked_by != ''
+            WHERE pp.booked_by IS NOT NULL AND pp.booked_by != '' AND ${chequeReadySql('pp')}
           ) AS payment_booked_bys
         FROM plot_payments pp
         WHERE pp.plot_id = p.id
@@ -134,7 +135,7 @@ class PlotModel extends MasterModel {
         SELECT
           (SELECT COUNT(*)::int FROM matched_plots) AS booking_count,
           (SELECT COUNT(*)::int FROM plot_payments pp
-            WHERE pp.plot_id IN (SELECT id FROM matched_plots)) AS payment_count,
+            WHERE pp.plot_id IN (SELECT id FROM matched_plots) AND ${chequeReadySql('pp')}) AS payment_count,
           (SELECT COUNT(*)::int FROM plot_installments pi
             WHERE pi.plot_id IN (SELECT id FROM matched_plots)) AS installment_count,
           (SELECT COUNT(*)::int FROM plot_installment_payments pip
@@ -200,7 +201,7 @@ class PlotModel extends MasterModel {
         LIMIT 10
       )
       SELECT p.*,
-        (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id) AS payment_count,
+        (SELECT COUNT(*)::int FROM plot_payments pp WHERE pp.plot_id = p.id AND ${chequeReadySql('pp')}) AS payment_count,
         (SELECT COUNT(*)::int FROM plot_installments pi WHERE pi.plot_id = p.id) AS installment_count,
         (SELECT COUNT(*)::int FROM plot_installment_payments pip WHERE pip.plot_id = p.id) AS installment_payment_count,
         (SELECT COUNT(*)::int FROM plot_commissions_v2 pc WHERE pc.plot_id = p.id) AS commission_count,
@@ -293,6 +294,7 @@ class PlotPaymentModel extends MasterModel {
       LEFT JOIN users u ON u.id = pp.created_by
       LEFT JOIN users aa ON aa.id = pp.assigned_admin_id
       WHERE pp.plot_id = $1
+        AND ${chequeReadySql('pp')}
       ORDER BY pp.date ASC, pp.created_at ASC
     `;
     const result = await pool.query(query, [plotId]);

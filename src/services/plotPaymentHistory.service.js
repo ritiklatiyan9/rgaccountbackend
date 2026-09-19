@@ -1,3 +1,4 @@
+import { chequeReadySql } from '../utils/chequeWorkflow.js';
 // Match a physical unit within its site, block and unit type. Tower/floor keep
 // identically numbered flats in separate buildings from sharing a history.
 export async function readPlotPaymentHistory(pool, plotId, creatorId = null) {
@@ -21,6 +22,7 @@ export async function readPlotPaymentHistory(pool, plotId, creatorId = null) {
     LEFT JOIN users u ON u.id = pp.created_by
     LEFT JOIN users aa ON aa.id = pp.assigned_admin_id
     WHERE anchor.id = $1
+          AND ${chequeReadySql('pp')}
       AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
     ORDER BY pp.date ASC, pp.created_at ASC, pp.id ASC
   `, [plotId, creatorId]);
