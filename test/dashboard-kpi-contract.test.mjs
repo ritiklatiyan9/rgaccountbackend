@@ -20,6 +20,8 @@ test('dashboard profit cards use cumulative plot and land positions with one run
   assert.match(service, /SUM\(sale_value\) FROM pricing_plots[\s\S]*?AS final_sale_value/);
   assert.match(service, /finalSaleValue:\s*roundMoney\(finalSaleValue\)/);
   assert.match(service, /LEAST\([\s\S]*?sold_purchase_cost[\s\S]*?posted_cost/);
+  assert.match(service, /currentProfit:\s*roundMoney\(received - paidToFarmers\)/);
+  assert.match(service, /paidToFarmers:\s*roundMoney\(paidToFarmers\)/);
   assert.match(service, /LOWER\(TRIM\(COALESCE\(d\.status, ''\)\)\) IN \('open', 'completed'\)/);
 });
 
@@ -68,7 +70,7 @@ test('registry and frontend contracts expose cash, bank, remaining balance, land
 
   for (const field of [
     'plotIncoming', 'finalSaleValue', 'matchedReceived', 'unmatchedReceived', 'landProfitDetail',
-    'purchaseCostAlreadyExpensed', 'registryPaymentDetail', 'runningExpense',
+    'purchaseCostAlreadyExpensed', 'paidToFarmers', 'registryPaymentDetail', 'runningExpense',
     'expectedProfit', 'currentProfit', 'adminImprestReserved',
     'pendingImprestReservations', 'distributableBalance',
   ]) {
@@ -77,6 +79,7 @@ test('registry and frontend contracts expose cash, bank, remaining balance, land
   }
 
   assert.match(dashboard, /navigate\('\/farmers\/land-profit'\)/);
+  assert.match(dashboard, /const landProfit = parseFloat\(land\?\.currentProfit\)/);
   assert.match(dashboard, /finalPlotSaleValue[\s\S]*?Plot Payments sale price \(100%\)/);
   assert.match(dashboard, /eligiblePlotSaleValue[\s\S]*?Eligible collection book/);
   assert.match(dashboard, /Plot Payments Pricing sale price \(not received money\)/);

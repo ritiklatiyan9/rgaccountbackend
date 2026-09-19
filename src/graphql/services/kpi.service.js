@@ -190,6 +190,7 @@ export async function getLandProfitDetail(siteId, end) {
        COALESCE(SUM(cash_received), 0)::numeric AS cash_received,
        COALESCE(SUM(bank_received), 0)::numeric AS bank_received,
        (SELECT purchase_cost_already_expensed FROM attributed_cost)::numeric AS purchase_cost_already_expensed,
+       (SELECT COALESCE(SUM(posted_cost), 0) FROM posted_farmer_cost)::numeric AS paid_to_farmers,
        COUNT(*)::int AS deal_count
      FROM sold_deals`,
     [siteId, end]
@@ -200,12 +201,15 @@ export async function getLandProfitDetail(siteId, end) {
   const received = numberOf(row.received);
   const remaining = numberOf(row.remaining);
   const bookProfit = numberOf(row.book_profit);
+  const paidToFarmers = numberOf(row.paid_to_farmers);
   return {
     saleValue: roundMoney(saleValue),
     purchaseCost: roundMoney(row.purchase_cost),
     otherCost: roundMoney(row.other_cost),
     bookProfit: roundMoney(bookProfit),
+    currentProfit: roundMoney(received - paidToFarmers),
     received: roundMoney(received),
+    paidToFarmers: roundMoney(paidToFarmers),
     remaining: roundMoney(remaining),
     cashReceived: roundMoney(row.cash_received),
     bankReceived: roundMoney(row.bank_received),

@@ -26,6 +26,7 @@ function normalizeFilters(filters = {}) {
     created_by: Number.isInteger(Number(filters.created_by)) && Number(filters.created_by) > 0
       ? Number(filters.created_by)
       : undefined,
+    entry_origin: ['original', 'transfer'].includes(filters.entry_origin) ? filters.entry_origin : undefined,
   };
 
   // Multi-category OR filter (ILIKE tokens). Pass-through only when it's a non-empty array so

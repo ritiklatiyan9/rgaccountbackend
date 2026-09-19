@@ -386,7 +386,7 @@ class ExpenseModel extends MasterModel {
    * Calculates running balance dynamically across both tables.
    */
   async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
-    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by, related_member_ids } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by, related_member_ids, entry_origin } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
     const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -396,6 +396,8 @@ class ExpenseModel extends MasterModel {
     let whereClause = '';
 
     if (only_site === 'true') { whereClause += ` AND u.source = 'expenses'`; }
+    if (entry_origin === 'transfer') whereClause += ` AND u.entry_transfer_id IS NOT NULL`;
+    else if (entry_origin === 'original') whereClause += ` AND u.entry_transfer_id IS NULL`;
     if (created_by) { whereClause += ` AND u.created_by = ANY(string_to_array($${pIdx++}::text, ',' )::int[])`; params.push(created_by); }
     if (status) { whereClause += ` AND u.status = $${pIdx++}`; params.push(status); }
     const md = buildModeWhere(mode, params, pIdx);
@@ -440,7 +442,7 @@ class ExpenseModel extends MasterModel {
           -- bill_url, so fall back to those here instead of in every reader.
           COALESCE(voucher_urls, ARRAY_REMOVE(ARRAY[voucher_url], NULL)) as voucher_urls,
           COALESCE(bill_urls, ARRAY_REMOVE(ARRAY[bill_url], NULL)) as bill_urls,
-          display_order, transaction_time,
+          display_order, transaction_time, entry_transfer_id, entry_transfer_role,
           'expenses' as source
         FROM expenses
         WHERE site_id = $1
@@ -457,7 +459,7 @@ class ExpenseModel extends MasterModel {
           NULL::int as assigned_user_id, fp.assigned_admin_id, fp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[fp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order, fp.transaction_time,
+          NULL::int as display_order, fp.transaction_time, fp.entry_transfer_id, fp.entry_transfer_role,
           'farmer_payment' as source
         FROM farmer_payments fp
         JOIN farmers f ON f.id = fp.farmer_id
@@ -475,7 +477,7 @@ class ExpenseModel extends MasterModel {
           NULL::int as assigned_user_id, pcp.assigned_admin_id, pcp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[pcp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order, pcp.transaction_time,
+          NULL::int as display_order, pcp.transaction_time, pcp.entry_transfer_id, pcp.entry_transfer_role,
           'commission' as source
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
@@ -495,7 +497,7 @@ class ExpenseModel extends MasterModel {
           NULL::int as assigned_user_id, vp.assigned_admin_id, vp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[vp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order, vp.transaction_time,
+          NULL::int as display_order, vp.transaction_time, vp.entry_transfer_id, vp.entry_transfer_role,
           'vendor_payment' as source
         FROM vendor_payments vp
         JOIN vendor_commitments vc ON vp.commitment_id = vc.id
@@ -513,7 +515,7 @@ class ExpenseModel extends MasterModel {
           NULL::int as assigned_user_id, NULL::int as assigned_admin_id, cfe.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[cfe.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order, cfe.transaction_time,
+          NULL::int as display_order, cfe.transaction_time, cfe.entry_transfer_id, cfe.entry_transfer_role,
           'personal_ledger' as source
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
@@ -532,7 +534,7 @@ class ExpenseModel extends MasterModel {
           d.assigned_user_id, d.assigned_admin_id, d.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[d.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
-          NULL::int as display_order, d.transaction_time,
+          NULL::int as display_order, d.transaction_time, d.entry_transfer_id, d.entry_transfer_role,
           'daybook' as source
         FROM day_book d
         WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
@@ -613,10 +615,13 @@ class ExpenseModel extends MasterModel {
    * Unified Breakdown stats based on the active filters
    */
   async getUnifiedBreakdowns(siteId, filters, pool) {
-    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, only_site, created_by, related_member_ids } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, only_site, created_by, related_member_ids, entry_origin } = filters;
     const params = [siteId];
     let pIdx = 2;
     let whereClause = '';
+
+    if (only_site === 'true' && entry_origin === 'transfer') whereClause += ` AND u.entry_transfer_id IS NOT NULL`;
+    else if (only_site === 'true' && entry_origin === 'original') whereClause += ` AND u.entry_transfer_id IS NULL`;
 
     if (created_by) { whereClause += ` AND u.created_by = ANY(string_to_array($${pIdx++}::text, ',' )::int[])`; params.push(created_by); }
     if (status) { whereClause += ` AND u.status = $${pIdx++}`; params.push(status); }
@@ -655,7 +660,7 @@ class ExpenseModel extends MasterModel {
           SELECT payment_mode,
                  CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
                  CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-                 id, date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status
+                 id, date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status, entry_transfer_id
           FROM expenses WHERE site_id = $1
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(payment_mode, 'UNSPECIFIED') ORDER BY total_debit DESC`;
@@ -668,7 +673,7 @@ class ExpenseModel extends MasterModel {
           SELECT payment_mode,
                  CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
                  CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-                 id, date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status
+                 id, date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status, entry_transfer_id
           FROM expenses WHERE site_id = $1
         ) u WHERE 1=1 ${whereClause}
         GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY category ASC`;

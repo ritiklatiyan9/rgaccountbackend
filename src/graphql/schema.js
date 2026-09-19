@@ -103,6 +103,7 @@ const ExpensesPageFiltersInput = new GraphQLInputObjectType({
     order:       { type: ExpenseSortOrderEnum },
     onlySite:    { type: GraphQLBoolean },
     createdBy:   { type: GraphQLInt },
+    entryOrigin: { type: GraphQLString },
   },
 });
 
@@ -236,7 +237,9 @@ const LandProfitDetailType = new GraphQLObjectType({
     purchaseCost:  { type: new GraphQLNonNull(GraphQLFloat) },
     otherCost:     { type: new GraphQLNonNull(GraphQLFloat) },
     bookProfit:    { type: new GraphQLNonNull(GraphQLFloat) },
+    currentProfit: { type: new GraphQLNonNull(GraphQLFloat) },
     received:      { type: new GraphQLNonNull(GraphQLFloat) },
+    paidToFarmers: { type: new GraphQLNonNull(GraphQLFloat) },
     remaining:     { type: new GraphQLNonNull(GraphQLFloat) },
     cashReceived:  { type: new GraphQLNonNull(GraphQLFloat) },
     bankReceived:  { type: new GraphQLNonNull(GraphQLFloat) },
@@ -427,6 +430,8 @@ const ExpenseEntryType = new GraphQLObjectType({
     source:            { type: GraphQLString },
     cheque_no:         { type: GraphQLString },
     cheque_status:     { type: GraphQLString },
+    entry_transfer_id: { type: GraphQLString },
+    entry_transfer_role: { type: GraphQLString },
     verifyUrl:         { type: GraphQLString },
   },
 });
@@ -1098,6 +1103,7 @@ const QueryType = new GraphQLObjectType({
           dateTo: filters.dateTo || undefined,
           missing_bill: filters.missingBill ? 'true' : undefined,
           related_member_ids: positiveIntList(filters.relatedMemberIds),
+          entry_origin: ['original', 'transfer'].includes(filters.entryOrigin) ? filters.entryOrigin : undefined,
           order: filters.order || 'desc',
           // Expenses module should show only entries from expense page.
           only_site: filters.onlySite === false ? undefined : 'true',
@@ -1159,6 +1165,7 @@ const QueryType = new GraphQLObjectType({
           dateTo: filters.dateTo || undefined,
           missing_bill: filters.missingBill ? 'true' : undefined,
           related_member_ids: positiveIntList(filters.relatedMemberIds),
+          entry_origin: ['original', 'transfer'].includes(filters.entryOrigin) ? filters.entryOrigin : undefined,
           order: filters.order || 'desc',
           only_site: filters.onlySite === false ? undefined : 'true',
           created_by: canViewAllEntries
