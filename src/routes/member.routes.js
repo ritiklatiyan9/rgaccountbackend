@@ -7,6 +7,7 @@ import {
   extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites,
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
+import { getKycSources, incorporateKyc } from '../controllers/memberKycIncorporation.controller.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import requirePlotSiteAccess from '../middlewares/plotSiteAccess.middleware.js';
@@ -79,6 +80,8 @@ router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('clie
 router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), bustMemberCache, bulkDeleteMembers);
 router.post('/bulk-register-sites', requireRole('admin', 'sub_admin'), requirePermission('clients', 'write'), bustMemberCache, registerMembersInSites);
 router.post('/:id/register-sites', requireRole('admin', 'sub_admin'), requirePermission('clients', 'write'), bustMemberCache, registerMemberInSites);
+router.get('/:id/kyc-sources', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getKycSources);
+router.post('/:id/incorporate-kyc', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), requirePermission('clients', 'update'), bustMemberCache, incorporateKyc);
 
 // Member transactions
 router.get('/:id/transactions', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberTransactions);
