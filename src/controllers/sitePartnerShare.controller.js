@@ -42,6 +42,8 @@ export const getSiteProfitShares = asyncHandler(async (req, res) => {
       expectedProfit: kpis.expectedProfit,
       currentProfit: kpis.currentProfit,
       runningExpense: kpis.runningExpense,
+      siteBalance: kpis.siteBalance,
+      siteBalanceDetail: kpis.siteBalanceDetail,
       plotIncoming: kpis.plotIncoming,
       landProfitDetail: kpis.landProfitDetail,
       plot: kpis.plot,

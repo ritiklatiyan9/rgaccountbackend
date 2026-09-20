@@ -698,23 +698,25 @@ export async function getLandProfitByFarmer(siteId, end) {
 }
 
 /**
- * Only what the profit page needs — 4 of getAllKpis' 15 queries, so it loads in a fraction
+ * Only what the profit page needs — a small subset of getAllKpis' queries, so it loads in a fraction
  * of the time. `plot` and `land` split the same totals so each side can carry its own
  * partner percentages; they add up to expectedProfit / currentProfit.
  */
 export async function getProfitKpis(siteId, end, excludeOldPlots = false) {
-  const [plotIncoming, landProfitDetail, runningExpense, lands] = await Promise.all([
+  const [plotIncoming, landProfitDetail, runningExpense, lands, siteBalanceDetail] = await Promise.all([
     getPlotIncoming(siteId, end, excludeOldPlots),
     getLandProfitDetail(siteId, end),
     getRunningExpense(siteId, end),
     getLandProfitByFarmer(siteId, end),
+    getSiteBalanceDetail(siteId, '1900-01-01', end),
   ]);
   const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);
   const farmerPaid = lands.reduce((sum, land) => sum + land.paid, 0);
   const landExpected = lands.reduce((sum, land) => sum + land.expectedProfit, 0);
   const landCurrent = lands.reduce((sum, land) => sum + land.currentProfit, 0);
   return {
-    plotIncoming, landProfitDetail, lands,
+    plotIncoming, landProfitDetail, lands, siteBalanceDetail,
+    siteBalance: siteBalanceDetail.siteBalance,
     runningExpense: roundMoney(runningExpense),
     expectedProfit: roundMoney(expectedProfit),
     currentProfit: roundMoney(currentProfit),
