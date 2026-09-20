@@ -92,8 +92,22 @@ export const getSignatureImages = asyncHandler(async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json({ images });
   } catch (error) {
-    console.error('Receipt signature retrieval failed:', error.name);
-    res.status(502).json({ message: 'The saved signature could not be read from storage. Check the backend S3 read permission and bucket configuration, then retry.' });
+    const failedBucket = urls.map((url) => {
+      try { return new URL(url).hostname.match(/^(.+)\.s3[.-]/)?.[1]; } catch { return null; }
+    }).find(Boolean);
+    console.error('Receipt signature retrieval failed:', {
+      name: error.name,
+      code: error.Code || error.code,
+      bucket: failedBucket,
+    });
+    const denied = error.name === 'AccessDenied' || error.Code === 'AccessDenied' || error.code === 'AccessDenied';
+    res.status(502).json({
+      message: denied
+        ? `The backend AWS identity cannot read saved signatures from ${failedBucket || 'the configured S3 bucket'}. Grant s3:GetObject for its vouchers/* objects, then retry.`
+        : 'The saved signature could not be read from storage. Check the backend S3 read permission and bucket configuration, then retry.',
+      code: denied ? 'SIGNATURE_STORAGE_ACCESS_DENIED' : 'SIGNATURE_STORAGE_READ_FAILED',
+      ...(failedBucket ? { bucket: failedBucket } : {}),
+    });
   }
 });
 

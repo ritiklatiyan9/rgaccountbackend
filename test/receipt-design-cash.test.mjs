@@ -37,6 +37,21 @@ test('legacy cash designs gain broker settings without losing customization', ()
   assert.equal(DEFAULT_RECEIPT_DESIGN.cash.template_id, 'cash-simple');
 });
 
+test('legacy particulars gain independent narration and remarks controls without duplicate output', () => {
+  const design = normalizeReceiptDesign({ cash: {
+    detail_items: [
+      { key: 'particulars', label: 'Particulars', sample: 'Old narration', enabled: true },
+      { key: 'remarks', label: 'My Remarks', sample: 'Old remark', enabled: true },
+    ],
+  } });
+  assert.deepEqual(design.cash.detail_items.find((item) => item.key === 'narration'), {
+    key: 'narration', label: 'Narration', sample: 'Installment received against account', enabled: true,
+  });
+  assert.equal(design.cash.detail_items.find((item) => item.key === 'particulars').enabled, false);
+  assert.equal(design.cash.detail_items.find((item) => item.key === 'remarks').label, 'My Remarks');
+  assert.deepEqual(normalizeReceiptDesign(design), design);
+});
+
 test('plain cash formats retain small uniform text and optional fields after save and reload', () => {
   for (const template_id of ['cash-plain-note', 'cash-plain-slip', 'cash-plain-letter']) {
     const saved = normalizeReceiptDesign({ cash: {

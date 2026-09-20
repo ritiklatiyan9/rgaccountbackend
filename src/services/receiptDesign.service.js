@@ -27,7 +27,8 @@ export const RECEIPT_DETAIL_ITEM_DEFAULTS = Object.freeze([
   { key: 'module', label: 'Account / Module', sample: 'Plot Payment · Plot A-18', enabled: true },
   { key: 'payment_mode', label: 'Payment Mode', sample: 'Cash', enabled: true },
   { key: 'reference', label: 'Reference', sample: 'Cash Book 18', enabled: true },
-  { key: 'particulars', label: 'Particulars', sample: 'Installment received against account', enabled: true },
+  { key: 'narration', label: 'Narration', sample: 'Installment received against account', enabled: true },
+  { key: 'particulars', label: 'Particulars', sample: 'Transaction particulars', enabled: false },
   { key: 'transaction_time', label: 'Time (IST)', sample: '10:30 AM', enabled: true },
   { key: 'bank_account', label: 'Bank account', sample: 'Current account', enabled: true },
   { key: 'bank_name', label: 'Bank name', sample: 'Sample Bank', enabled: true },
@@ -217,6 +218,12 @@ const normalizeMode = (value, mode) => {
   const fields = isObject(input.fields) ? input.fields : {};
   const content = isObject(input.content) ? input.content : {};
   const detailItems = Array.isArray(input.detail_items) ? input.detail_items : [];
+  // Designs saved before Narration was a first-class field used Particulars
+  // for the same value. Keep Particulars available, but hide that legacy row
+  // when adding Narration so existing receipts do not print the text twice.
+  const normalizedInputDetailItems = detailItems.some((item) => item?.key === 'narration')
+    ? detailItems
+    : detailItems.map((item) => item?.key === 'particulars' ? { ...item, enabled: false } : item);
   const nameItems = Array.isArray(input.name_items) ? input.name_items : [];
   const plainCashTemplate = ['cash-plain-note', 'cash-plain-slip', 'cash-plain-letter'].includes(input.template_id);
   const isPlainCash = mode === 'cash' && plainCashTemplate;
@@ -253,7 +260,7 @@ const normalizeMode = (value, mode) => {
         sample: cleanText(candidate.sample, fallback.sample, 140),
       };
     }),
-    detail_items: [...(detailItems.length ? detailItems : defaults.detail_items), ...defaults.detail_items.filter(item => !detailItems.some(row => row?.key === item.key))]
+    detail_items: [...(normalizedInputDetailItems.length ? normalizedInputDetailItems : defaults.detail_items), ...defaults.detail_items.filter(item => !normalizedInputDetailItems.some(row => row?.key === item.key))]
       .filter((item, index, all) => isObject(item) && /^[a-z][a-z0-9_]{0,79}$/.test(item.key) && all.findIndex(row => row?.key === item.key) === index)
       .slice(0, 120).map((item) => ({ key: item.key,
         label: cleanText(item.label, item.key, 80), sample: cleanText(item.sample, '', 300), enabled: item.enabled !== false,
