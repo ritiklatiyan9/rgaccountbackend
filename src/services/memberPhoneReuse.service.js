@@ -61,7 +61,7 @@ export const mergeVerifiedKycProfile = (submitted, source) => {
  * small audited VERIFIED case is created.
  */
 export const reuseVerifiedKycForMember = async (db, {
-  source, targetMember, siteId, userId,
+  source, targetMember, siteId, userId, samePersonConfirmed = false,
 }) => {
   const sourceCaseId = Number(source?.verified_kyc_case_id);
   const targetMemberId = Number(targetMember?.id);
@@ -69,7 +69,10 @@ export const reuseVerifiedKycForMember = async (db, {
     || !Number.isInteger(targetMemberId) || targetMemberId <= 0) {
     return { kycReused: false, reason: 'NO_VERIFIED_SOURCE' };
   }
-  if (normalizeMemberName(source.full_name) !== normalizeMemberName(targetMember.full_name)) {
+  const confirmedMobileMatch = samePersonConfirmed === true
+    && Boolean(normalizeMemberPhone(targetMember.phone))
+    && normalizeMemberPhone(source.phone) === normalizeMemberPhone(targetMember.phone);
+  if (normalizeMemberName(source.full_name) !== normalizeMemberName(targetMember.full_name) && !confirmedMobileMatch) {
     return { kycReused: false, reason: 'NAME_MISMATCH' };
   }
 

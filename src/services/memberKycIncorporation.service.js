@@ -9,12 +9,14 @@ const fail = (statusCode, message) => {
 const positiveId = (value) => Number.isSafeInteger(Number(value)) && Number(value) > 0;
 const identityValue = (value) => String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-export const assertMatchingKycIdentity = (target, source) => {
+export const assertMatchingKycIdentity = (target, source, { samePersonConfirmed = false } = {}) => {
   const phone = normalizeMemberPhone(target.phone);
   const name = normalizeMemberName(target.full_name);
-  if (!phone || !name || phone !== normalizeMemberPhone(source.phone)
-    || name !== normalizeMemberName(source.full_name)) {
-    fail(409, 'The client name and mobile number must match in both sites. Review the registrations first.');
+  if (!phone || !name || !normalizeMemberName(source.full_name) || phone !== normalizeMemberPhone(source.phone)) {
+    fail(409, 'Both registrations must have a name and the same valid mobile number. Review the registrations first.');
+  }
+  if (name !== normalizeMemberName(source.full_name) && samePersonConfirmed !== true) {
+    fail(409, 'The names differ. Confirm that these registrations belong to the same person before incorporating KYC.');
   }
   for (const [field, label] of [['aadhar_no', 'Aadhaar'], ['pan_no', 'PAN']]) {
     const existing = identityValue(target[field]);
@@ -45,13 +47,12 @@ export const listMemberKycSources = async (db, { user, memberId }) => {
     user, siteId: target.site_id, phone: target.phone,
   });
   const name = normalizeMemberName(target.full_name);
-  const sources = matches.filter((source) => name
-    && Number(source.site_id) !== Number(target.site_id)
+  const sources = matches.filter((source) => Number(source.site_id) !== Number(target.site_id)
     && source.verified_kyc_case_id
-    && normalizeMemberPhone(source.phone) === normalizeMemberPhone(target.phone)
-    && normalizeMemberName(source.full_name) === name).map((source) => ({
+    && normalizeMemberPhone(source.phone) === normalizeMemberPhone(target.phone)).map((source) => ({
     id: source.id, site_id: source.site_id, site_name: source.site_name,
     full_name: source.full_name, phone: source.phone, verified_at: source.kyc_verified_at,
+    name_matches: Boolean(name && normalizeMemberName(source.full_name) === name),
   }));
   return { already_verified: Boolean(verified.length), has_mobile: Boolean(normalizeMemberPhone(target.phone)), sources };
 };
@@ -100,7 +101,7 @@ export const copyIncorporatedKycDocuments = async (db, {
   }
 };
 
-export const incorporateMemberKyc = async (pool, { user, memberId, sourceMemberId }) => {
+export const incorporateMemberKyc = async (pool, { user, memberId, sourceMemberId, samePersonConfirmed = false }) => {
   if (!positiveId(memberId) || !positiveId(sourceMemberId) || Number(memberId) === Number(sourceMemberId)) {
     fail(400, 'Choose a client registration from another site.');
   }
@@ -118,7 +119,7 @@ export const incorporateMemberKyc = async (pool, { user, memberId, sourceMemberI
       requestedMemberId: Number(sourceMemberId),
     });
     if (!source) fail(409, 'Verified KYC is no longer available from this registration. Refresh and choose a source again.');
-    assertMatchingKycIdentity(target, source);
+    assertMatchingKycIdentity(target, source, { samePersonConfirmed });
     const { rows: sourceCases } = await db.query(
       "SELECT id FROM kyc_cases WHERE id = $1 AND status = 'VERIFIED' FOR SHARE",
       [source.verified_kyc_case_id],
@@ -126,6 +127,7 @@ export const incorporateMemberKyc = async (pool, { user, memberId, sourceMemberI
     if (!sourceCases.length) fail(409, 'The source KYC has changed. Refresh and try again.');
     const result = await reuseVerifiedKycForMember(db, {
       source, targetMember: target, siteId: target.site_id, userId: user.id,
+      samePersonConfirmed: samePersonConfirmed === true,
     });
     if (result.kycReused) {
       await copyIncorporatedKycDocuments(db, {

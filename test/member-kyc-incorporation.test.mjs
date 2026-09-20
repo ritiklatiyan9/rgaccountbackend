@@ -69,7 +69,10 @@ test('sources include only verified matches in another accessible site and expos
   const result = await listMemberKycSources(db, { user, memberId: 22 });
   assert.deepEqual(result, {
     already_verified: false, has_mobile: true,
-    sources: [{ id: 10, site_id: 2, site_name: 'Source site', full_name: 'TEST CLIENT', phone: '+91 98765-43210', verified_at: source.kyc_verified_at }],
+    sources: [
+      { id: 10, site_id: 2, site_name: 'Source site', full_name: 'TEST CLIENT', phone: '+91 98765-43210', verified_at: source.kyc_verified_at, name_matches: true },
+      { id: 12, site_id: 2, site_name: 'Source site', full_name: 'Other Person', phone: '+91 98765-43210', verified_at: source.kyc_verified_at, name_matches: false },
+    ],
   });
 });
 
@@ -103,6 +106,29 @@ test('identity matching accepts formatting but rejects missing or conflicting id
   ]) {
     assert.throws(() => assertMatchingKycIdentity({ ...target, ...change }, source), { statusCode: 409 });
   }
+});
+
+test('different registered names on the same mobile are offered for explicit confirmation', async () => {
+  const { db } = fixture({ target: { full_name: 'ANUJ GOLIYAN' }, matches: [{ ...source, full_name: 'ANUJ KUMAR (GOLIYAN)', site_name: 'DG ASSOCIATES' }] });
+  const result = await listMemberKycSources(db, { user, memberId: 22 });
+  assert.equal(result.sources.length, 1);
+  assert.equal(result.sources[0].site_name, 'DG ASSOCIATES');
+  assert.equal(result.sources[0].name_matches, false);
+});
+
+test('explicitly confirmed same-mobile name variation completes incorporation', async () => {
+  const { pool, calls } = fixture({ target: { full_name: 'ANUJ GOLIYAN' }, source: { full_name: 'ANUJ KUMAR (GOLIYAN)' } });
+  const result = await incorporateMemberKyc(pool, { user, memberId: 22, sourceMemberId: 10, samePersonConfirmed: true });
+  assert.equal(result.kyc_reused, true);
+  assert.equal(calls.at(-1).sql, 'COMMIT');
+  assert.ok(calls.find(({ sql }) => sql.includes('UPDATE members')).values.includes('ANUJ KUMAR (GOLIYAN)'));
+});
+
+test('confirmation cannot bypass different mobiles, missing names or conflicting identity documents', () => {
+  for (const change of [{ phone: '9123456789' }, { phone: '' }, { full_name: '' }, { aadhar_no: '999922223333' }, { pan_no: 'ABCDE9999F' }]) {
+    assert.throws(() => assertMatchingKycIdentity({ ...target, ...change }, source, { samePersonConfirmed: true }), { statusCode: 409 });
+  }
+  assert.throws(() => assertMatchingKycIdentity({ ...target, full_name: 'Other name' }, source, { samePersonConfirmed: 'true' }), { statusCode: 409 });
 });
 
 for (const openCase of [false, true]) {
