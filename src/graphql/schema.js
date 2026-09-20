@@ -558,6 +558,8 @@ const PlotType = new GraphQLObjectType({
     // Payment aggregates
     total_received:        { type: GraphQLFloat },
     received_bank:         { type: GraphQLFloat },
+    has_registry:          { type: GraphQLBoolean },
+    registry_bank_received: { type: GraphQLFloat },
     received_cash:         { type: GraphQLFloat },
     payment_count:         { type: GraphQLInt },
     payment_buyer_names:   { type: GraphQLString },

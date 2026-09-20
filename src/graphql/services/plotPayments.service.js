@@ -20,6 +20,11 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
   const query = `
     SELECT
       p.*,
+      EXISTS (SELECT 1 FROM plot_registries pr
+        WHERE pr.site_id = p.site_id AND (pr.plot_id = p.id
+          OR (pr.plot_id IS NULL AND UPPER(pr.plot_no) = UPPER(p.plot_no)
+            AND UPPER(COALESCE(p.plot_tag, '')) <> 'OLD'))) AS has_registry,
+      COALESCE(registry_bank.amount, 0) AS registry_bank_received,
       plot_buyer.id AS buyer_member_id,
       ${PLOT_BUYER_KYC_STATUS} AS buyer_kyc_status,
       -- booking_date is a DATE column → pg hands it back as a JS Date, which the
@@ -38,6 +43,22 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
       COALESCE(pp_agg.payment_buyer_names, '')  AS payment_buyer_names,
       COALESCE(pp_agg.payment_booked_bys, '')   AS payment_booked_bys
     FROM plots p
+    LEFT JOIN LATERAL (
+      SELECT SUM(prp.amount) AS amount
+      FROM plot_registries pr
+      JOIN plot_registry_payments prp ON prp.registry_id = pr.id
+      LEFT JOIN plot_payments linked ON linked.id = prp.source_plot_payment_id
+      WHERE pr.site_id = p.site_id AND (pr.plot_id = p.id
+        OR (pr.plot_id IS NULL AND UPPER(pr.plot_no) = UPPER(p.plot_no)
+          AND UPPER(COALESCE(p.plot_tag, '')) <> 'OLD'))
+        AND ($2::int IS NULL OR prp.created_by = $2::int)
+        AND ((prp.source_plot_payment_id IS NULL
+          AND ledger_bucket(prp.payment_mode) = 'bank'
+          AND financial_transaction_posts('credit', prp.status, prp.payment_mode, prp.cheque_status))
+        OR (linked.plot_id = p.id
+          AND ledger_bucket(linked.payment_type) = 'bank'
+          AND financial_transaction_posts('credit', linked.status, linked.payment_type, linked.cheque_status)))
+    ) registry_bank ON true
     LEFT JOIN LATERAL (
       SELECT
         SUM(pp.amount) FILTER (WHERE ${PP_POSTS})

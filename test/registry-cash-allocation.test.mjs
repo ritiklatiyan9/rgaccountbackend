@@ -16,7 +16,8 @@ test('existing CASH covers the registry without posting money or counting linked
       CREATE TABLE plot_registry_payments(id int PRIMARY KEY, registry_id int, source_plot_payment_id int,
         amount numeric, payment_mode text, payment_date date, notes text, cheque_no text, include_in_noc boolean DEFAULT true,
         status text DEFAULT 'approved', cheque_status text, created_by int);
-      CREATE TABLE cash_flow_entries(id serial PRIMARY KEY, source_module text, source_id int, debit numeric, credit numeric);
+      CREATE TABLE cash_flow_entries(id serial PRIMARY KEY, source_module text, source_id int, debit numeric, credit numeric, bank_account_id int, site_id int);
+      CREATE TABLE bank_accounts(id int PRIMARY KEY, site_id int, name text);
       INSERT INTO plots VALUES (22,5,'A22'),(23,5,'A23');
       INSERT INTO plot_registries VALUES (693,22,5,'A22');
       INSERT INTO plot_payments(id,plot_id,date,amount,payment_type,status) VALUES
@@ -33,6 +34,7 @@ test('existing CASH covers the registry without posting money or counting linked
       CREATE TRIGGER trg_sync_cfe_plot_registry_payments AFTER INSERT OR UPDATE ON plot_registry_payments
         FOR EACH ROW EXECUTE FUNCTION test_registry_sync();`);
     await db.exec(read('../src/migrations/118_credit_first_posting.js').match(/CREATE OR REPLACE FUNCTION financial_transaction_posts\([\s\S]+?\$\$\s*`/)[0].slice(0, -1));
+    await db.exec(read('../src/migrations/079_ledger_entries_view.js').match(/CREATE FUNCTION ledger_bucket\(raw text\)[\s\S]+?\$fn\$;/)[0]);
     const query = (sql, params) => db.query(sql, params);
     const pool = { connect: async () => ({ query, release() {} }) };
     const migration = read('../src/migrations/161_registry_cash_allocation.js');
@@ -72,6 +74,7 @@ test('existing CASH covers the registry without posting money or counting linked
     const aggregate = modelSource.match(/SELECT\n          \$\{registryCoverageSql\}[\s\S]+?\n      \) agg/)[0].replace(/\n      \) agg$/, '');
     const aggregateSql = vm.runInNewContext('`'+aggregate+'`', { registryCoverageSql, registryCashAllocationSql });
     const totals = (await db.query(`SELECT agg.* FROM plot_registries pr LEFT JOIN LATERAL (${aggregateSql}) agg ON TRUE WHERE pr.id=$1`, [693,null])).rows[0];
+    assert.equal(Number(totals.bank_paid), 550000);
     assert.equal(Number(totals.total_paid), 600000); assert.equal(totals.payment_count, 2);
     // Changes replace the allocation amount; source receipts remain intact.
     await db.exec('UPDATE plot_registry_payments SET amount=60000 WHERE id=3');

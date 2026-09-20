@@ -50,6 +50,7 @@ class PlotRegistryModel extends MasterModel {
       SELECT pr.*,
         aa.name AS assigned_admin_name,
         COALESCE(agg.total_paid,    0) AS total_paid,
+        COALESCE(agg.bank_paid, 0) AS bank_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
         ${handoverSelect}
@@ -64,6 +65,9 @@ class PlotRegistryModel extends MasterModel {
       LEFT JOIN LATERAL (
         SELECT
           ${registryCoverageSql}::numeric AS total_paid,
+          COALESCE(SUM(prp.amount) FILTER (WHERE ledger_bucket(
+            CASE WHEN prp.source_plot_payment_id IS NULL THEN prp.payment_mode
+              ELSE pp.payment_type END) = 'bank'), 0)::numeric AS bank_paid,
           COUNT(*) FILTER (WHERE NOT ${registryCashAllocationSql})::int AS payment_count
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
@@ -118,6 +122,7 @@ class PlotRegistryModel extends MasterModel {
     const query = `
       SELECT pr.*,
         COALESCE(agg.total_paid,    0) AS total_paid,
+        COALESCE(agg.bank_paid, 0) AS bank_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
         ${hasHandovers ? 'COALESCE(ho.handover_count, 0) AS handover_count, ho.last_handover_at,' : '0 AS handover_count, NULL::timestamp AS last_handover_at,'}
@@ -129,6 +134,9 @@ class PlotRegistryModel extends MasterModel {
       LEFT JOIN LATERAL (
         SELECT
           ${registryCoverageSql}::numeric AS total_paid,
+          COALESCE(SUM(prp.amount) FILTER (WHERE ledger_bucket(
+            CASE WHEN prp.source_plot_payment_id IS NULL THEN prp.payment_mode
+              ELSE pp.payment_type END) = 'bank'), 0)::numeric AS bank_paid,
           COUNT(*) FILTER (WHERE NOT ${registryCashAllocationSql})::int AS payment_count
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
