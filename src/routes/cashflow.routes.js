@@ -3,7 +3,7 @@ import express from 'express';
 const router = express.Router();
 
 import {
-  createMonth, listMonths, getMonth, updateMonth, deleteMonth,
+  createMonth, listMonths, getMonth, updateMonth, deleteMonth, listPersonalLedgerPortfolio,
   createEntry, listEntries, getAutocomplete, getEntry, updateEntry, deleteEntry, bulkDeleteEntries, listFirmsForCashFlow,
 } from '../controllers/cashflow.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
@@ -20,6 +20,9 @@ const cashflowReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'cashflow' 
 const cashflowMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'cashflow-meta' });
 // Anchored prefix so 'cashflow|...' is busted but 'cashflow-meta|...' survives.
 const bustCashflowCache = invalidateCacheOnSuccess(['cashflow|', '/daybook']);
+
+// Matches the organisation-wide commission page's admin-only scope.
+router.get('/portfolio', requireRole('admin'), requirePermission('cashflow', 'read'), cashflowReadCache, listPersonalLedgerPortfolio);
 
 // ── Month endpoints ──
 router.get('/months', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), cashflowReadCache, listMonths);                                // ?site_id=X

@@ -10,6 +10,12 @@ import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisib
 //  CASH FLOW MONTH ENDPOINTS
 // ══════════════════════════════════════════════════
 
+/** GET /cashflow/portfolio — admin-only personal ledger balances across sites. */
+export const listPersonalLedgerPortfolio = asyncHandler(async (_req, res) => {
+  const ledgers = await cashFlowMonthModel.findAllPersonal(pool);
+  res.json({ ledgers });
+});
+
 /**
  * POST /cashflow/months
  * Create a new cash-flow month for a site

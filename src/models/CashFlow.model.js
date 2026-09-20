@@ -14,9 +14,9 @@ class CashFlowMonthModel extends MasterModel {
    *
    *  Now: a single LATERAL aggregation that scans cash_flow_entries once
    *  per month and computes all six sums + the count using FILTER clauses. */
-  async findBySiteId(siteId, pool, creatorId = null) {
+  async findBySiteId(siteId, pool, creatorId = null, personalPortfolio = false) {
     const query = `
-      SELECT cfm.*,
+      SELECT cfm.*, s.name AS site_name,
         lu.name AS linked_user_name,
         lu.email AS linked_user_email,
         lu.phone AS linked_user_phone,
@@ -33,6 +33,7 @@ class CashFlowMonthModel extends MasterModel {
         COALESCE(agg.bank_received,  0) AS bank_received,
         COALESCE(agg.entry_count,    0) AS entry_count
       FROM cash_flow_months cfm
+      JOIN sites s ON s.id = cfm.site_id
       LEFT JOIN users lu ON lu.id = cfm.linked_user_id
       LEFT JOIN members lm ON lm.id = cfm.linked_member_id
       LEFT JOIN LATERAL (
@@ -65,11 +66,17 @@ class CashFlowMonthModel extends MasterModel {
           AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
       ) agg ON TRUE
-      WHERE cfm.site_id = $1
+      WHERE (cfm.site_id = $1 OR ($1::int IS NULL AND $3::boolean))
+        AND (NOT $3::boolean OR cfm.ledger_type = 'person')
       ORDER BY cfm.year DESC, cfm.month DESC, cfm.ledger_name ASC
     `;
-    const result = await pool.query(query, [siteId, creatorId]);
+    const result = await pool.query(query, [siteId, creatorId, personalPortfolio]);
     return result.rows;
+  }
+
+  /** Admin-only portfolio; reuse the site register's posting and duplicate rules. */
+  async findAllPersonal(pool) {
+    return this.findBySiteId(null, pool, null, true);
   }
 
   /** Find a specific month record by period + ledger name */
