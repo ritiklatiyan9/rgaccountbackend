@@ -118,6 +118,7 @@ export const recordReceiptPrint = asyncHandler(async (req, res) => {
           direction: String(req.body.direction || '').slice(0, 20) || null,
           amount: Number.isFinite(Number(req.body.amount)) ? Math.abs(Number(req.body.amount)) : null,
           form_snapshot: Array.isArray(req.body.form_snapshot) ? req.body.form_snapshot.slice(0, 80) : [],
+          blank_signatures: req.body.blank_signatures === true,
         },
       ]
     );

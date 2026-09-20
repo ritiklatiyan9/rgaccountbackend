@@ -1,5 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
+import { loadReceiptImage } from '../utils/receiptImages.js';
 
 // One endpoint signs any receipt row. Strict allowlist: target → table +
 // permission module. Only the two signature columns are writable here, so
@@ -69,6 +70,32 @@ export const SIGN_TARGETS = {
 };
 
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);
+
+export const getSignatureImages = asyncHandler(async (req, res) => {
+  const target = SIGN_TARGETS[req.params.target];
+  const id = Number(req.params.id);
+  if (!target || !Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid signature record' });
+  if (!await requireTargetSiteAccess(req, res, target, id)) return;
+  const { rows } = await pool.query(
+    `SELECT to_jsonb(t)->>'customer_signature_url' AS customer_signature_url,
+            to_jsonb(t)->>'authority_signature_url' AS authority_signature_url
+       FROM ${target.table} t WHERE id = $1`, [id]
+  );
+  const history = await pool.query(
+    `SELECT customer_signature_url, authority_signature_url FROM transaction_receipts
+      WHERE organization_id = $1 AND module = $2 AND record_id = $3 LIMIT 1`,
+    [Number(req.user.organization_id) || 1, req.params.target, String(id)]
+  );
+  const urls = [...new Set([...Object.values(rows[0] || {}), ...Object.values(history.rows[0] || {})].filter(Boolean))];
+  try {
+    const images = Object.fromEntries(await Promise.all(urls.map(async (url) => [url, await loadReceiptImage(url)])));
+    res.set('Cache-Control', 'no-store');
+    res.json({ images });
+  } catch (error) {
+    console.error('Receipt signature retrieval failed:', error.name);
+    res.status(502).json({ message: 'The saved signature could not be read from storage. Check the backend S3 read permission and bucket configuration, then retry.' });
+  }
+});
 
 // Resolves the record, enforces the site boundary and hands the row back, so a
 // caller that needs the owning site (party links) does not re-query for it.
