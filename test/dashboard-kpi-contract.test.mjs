@@ -81,8 +81,8 @@ test('registry and frontend contracts expose cash, bank, remaining balance, land
   assert.match(dashboard, /navigate\('\/farmers\/land-profit'\)/);
   assert.match(dashboard, /const landProfit = parseFloat\(land\?\.currentProfit\)/);
   assert.match(dashboard, /finalPlotSaleValue[\s\S]*?Plot Payments sale price \(100%\)/);
-  assert.match(dashboard, /eligiblePlotSaleValue[\s\S]*?Eligible collection book/);
+  assert.match(dashboard, /Sale price ·[\s\S]*?current plots[\s\S]*?fmt\(eligiblePlotSaleValue\)/);
   assert.match(dashboard, /Plot Payments Pricing sale price \(not received money\)/);
-  assert.match(dashboard, /kpiKey="plotPayments"[\s\S]*?Remaining balance/);
+  assert.match(dashboard, /kpiKey="plotPayments"[\s\S]*?Still to collect[\s\S]*?fmt\(plotRemaining\)/);
   assert.match(dashboard, /kpiKey="registryPayments"[\s\S]*?\+ Bank/);
 });
