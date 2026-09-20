@@ -12,7 +12,7 @@ import { expenseModel } from '../models/Expense.model.js';
 import { findEligibleImprestParticipant } from '../middlewares/imprestSiteAccess.middleware.js';
 import { uploadPlotDoc, getPlotDocUrl, deletePlotDoc } from '../utils/plotDocStorage.js';
 import pool from '../config/db.js';
-import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
+import { getAccessibleSiteBalances, getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 
 // ── Camera-proof helpers (same S3/local store as document imprest) ──
 const IMPREST_PROOF_PREFIX = 'imprest';
@@ -110,6 +110,13 @@ export const getSiteBalance = asyncHandler(async (req, res) => {
     observer: req.user.role === 'super_admin',
     funding_hint: numbers.available <= 0 ? FUNDING_HINT : null,
   });
+});
+
+/** GET /imprest/site-balances — one grouped read for the Sites workspace. */
+export const getSiteBalances = asyncHandler(async (req, res) => {
+  const canReadAllSites = ADMIN_ROLES.has(req.user.role);
+  const balances = await getAccessibleSiteBalances(req.user.id, canReadAllSites, indiaTomorrow(), pool);
+  res.json({ balances });
 });
 
 export const createAllocation = asyncHandler(async (req, res) => {

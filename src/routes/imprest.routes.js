@@ -27,6 +27,7 @@ import {
   createTransfer,
   listTransfers,
   getSiteBalance,
+  getSiteBalances,
 } from '../controllers/imprest.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
@@ -75,6 +76,7 @@ router.use(authMiddleware);
 // ── Balance & Ledger (any authenticated user) ──
 router.get('/balance', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, getBalance);
 router.get('/site-balance', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, getSiteBalance);
+router.get('/site-balances', requirePermission('imprest', 'read'), imprestReadCache, getSiteBalances);
 router.get('/ledger', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, getLedger);
 router.get('/peers', requirePermission('imprest', 'read'), accessByQuerySite, imprestReadCache, listTransferPeers);
 

@@ -392,6 +392,52 @@ export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
   };
 }
 
+/**
+ * Cash and bank balances for every site the caller may access.
+ *
+ * The Sites workspace previously called getSiteBalanceDetail once per site.
+ * That repeated the ledger view scan and the HTTP/auth work for every card.
+ * This grouped query lets PostgreSQL scan the posted ledger once and returns
+ * zero rows as zero balances through the accessible-sites left join.
+ */
+export async function getAccessibleSiteBalances(userId, canReadAllSites, end, db = pool) {
+  const { rows } = await db.query(
+    `WITH accessible_sites AS MATERIALIZED (
+       SELECT s.id
+         FROM sites s
+        WHERE $2::boolean
+           OR EXISTS (
+             SELECT 1
+               FROM user_sites us
+              WHERE us.user_id = $1
+                AND us.site_id = s.id
+           )
+     ), ledger_balances AS (
+       SELECT le.site_id,
+              COALESCE(SUM(le.credit - le.debit)
+                FILTER (WHERE le.bucket = 'cash'), 0)::numeric AS cash_balance,
+              COALESCE(SUM(le.credit - le.debit)
+                FILTER (WHERE le.bucket <> 'cash'), 0)::numeric AS bank_balance
+         FROM ledger_entries le
+         JOIN accessible_sites access ON access.id = le.site_id
+        WHERE le.entry_date < $3::date
+        GROUP BY le.site_id
+     )
+     SELECT access.id::int AS site_id,
+            COALESCE(balance.cash_balance, 0)::numeric AS cash_balance,
+            COALESCE(balance.bank_balance, 0)::numeric AS bank_balance
+       FROM accessible_sites access
+       LEFT JOIN ledger_balances balance ON balance.site_id = access.id
+      ORDER BY access.id`,
+    [userId, Boolean(canReadAllSites), end]
+  );
+  return rows.map((row) => ({
+    site_id: Number(row.site_id),
+    cash_balance: roundMoney(row.cash_balance),
+    bank_balance: roundMoney(row.bank_balance),
+  }));
+}
+
 // Kept as the small compatibility API used by consistency checks and any
 // callers that only need the final number.
 export async function getSiteBalance(siteId, end) {
