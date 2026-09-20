@@ -138,7 +138,9 @@
     "migrate:all-sites-commission-indexes": "node src/migrations/169_all_sites_commission_indexes.js",
     "migrate:chat-site-scope": "node src/migrations/170_chat_site_scope.js",
     "migrate:cheque-approval-flow": "node src/migrations/171_cheque_clearance_before_approval.js",
-    "test:cheque-approval-flow": "node --test test/cheque-approval-flow.test.mjs test/cheque-approval-flow-db.test.mjs"
+    "test:cheque-approval-flow": "node --test test/cheque-approval-flow.test.mjs test/cheque-approval-flow-db.test.mjs",
+    "test:receipts": "node --test test/receipt-studio.test.mjs test/receipt-design-cash.test.mjs test/receipt-design-cheque.test.mjs test/receipt-images.test.mjs test/receipt-token.test.mjs",
+    "dev:api": "node scripts/dev-api.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

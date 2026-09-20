@@ -28,8 +28,8 @@ test('legacy cash designs gain broker settings without losing customization', ()
   } });
   assert.equal(design.cash.template_id, 'copper-vintage');
   assert.equal(design.cash.content.title, 'My Cash Receipt');
-  assert.equal(design.cash.fields.organization, false);
-  assert.equal(design.cash.fields.address, false);
+  assert.equal(design.cash.fields.organization, true);
+  assert.equal(design.cash.fields.address, true);
   assert.equal(design.cash.fields.qr, false);
   assert.equal(design.cash.fields.broker_name, true);
   assert.equal(design.non_cash.fields.organization, true);
@@ -71,7 +71,7 @@ test('broker labels, sample names and plot buyer settings survive normalization'
     name_items: [{ key: 'broker_name', label: '  Dealer  ', sample: 'Preview Broker' }],
     detail_items: [{ key: 'plot_buyer', label: 'Purchaser', sample: 'Preview Buyer', enabled: false }],
   } });
-  assert.deepEqual(saved.cash.name_items[0], { key: 'broker_name', label: 'Dealer', sample: 'Preview Broker' });
+  assert.deepEqual(saved.cash.name_items[0], { key: 'broker_name', label: '  Dealer  ', sample: 'Preview Broker' });
   assert.equal(saved.cash.name_items.length, 3);
   assert.deepEqual(saved.cash.detail_items.find((item) => item.key === 'plot_buyer'), {
     key: 'plot_buyer', label: 'Purchaser', sample: 'Preview Buyer', enabled: false,

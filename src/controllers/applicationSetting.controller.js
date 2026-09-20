@@ -233,6 +233,7 @@ export const getReceiptDesign = asyncHandler(async (req, res) => {
 
   res.json({
     site_id: siteId,
+    scope: 'global',
     design: await readReceiptDesign(siteId),
     template_ids: RECEIPT_TEMPLATE_IDS,
     field_keys: RECEIPT_FIELD_KEYS,
@@ -249,5 +250,5 @@ export const updateReceiptDesign = asyncHandler(async (req, res) => {
   }
 
   const design = await saveReceiptDesign(siteId, req.body.design, req.user.id);
-  res.json({ site_id: siteId, design, message: 'Receipt designs saved for this site' });
+  res.json({ site_id: siteId, design, message: 'Receipt designs saved for all sites' });
 });

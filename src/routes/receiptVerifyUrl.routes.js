@@ -1,3 +1,4 @@
+import { getReceiptRecord, requireReceiptPermission } from '../controllers/receiptRecord.controller.js';
 import express from 'express';
 import {
   getReceiptVerifyUrl,
@@ -13,6 +14,8 @@ router.get('/verify', verifyPublicReceipt);
 
 // Signed-in users only — the token is minted from stored data, and site access
 // is checked per record inside the controller.
+router.get('/records/:module/:id', authMiddleware, requireReceiptPermission, getReceiptRecord);
+
 router.get('/verify-url', authMiddleware, getReceiptVerifyUrl);
 
 export default router;

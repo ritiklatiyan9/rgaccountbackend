@@ -1,0 +1,2 @@
+# Local backups of site settings are not part of a software release.
+*.json
