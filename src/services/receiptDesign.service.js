@@ -138,6 +138,7 @@ const baseModeDefaults = (mode) => ({
   page_size: mode === 'cash' ? 'A5' : 'A4',
   font_family: mode === 'cash' ? 'Arial' : 'Inter',
   base_font_size: mode === 'cash' ? 11 : 12,
+  line_spacing: 100,
   heading_size: mode === 'cash' ? 26 : 30,
   amount_size: mode === 'cash' ? 34 : 48,
   colors: {
@@ -245,6 +246,8 @@ const normalizeMode = (value, mode) => {
     page_size: PAGE_SIZES.includes(input.page_size) ? input.page_size : defaults.page_size,
     font_family: FONT_FAMILIES.includes(input.font_family) ? input.font_family : defaults.font_family,
     base_font_size: cleanNumber(input.base_font_size, defaults.base_font_size, 8, 18),
+    // Percent of the template's vertical spacing; the client clamps to the same 70–160 range.
+    line_spacing: cleanNumber(input.line_spacing, defaults.line_spacing, 70, 160),
     heading_size: cleanNumber(input.heading_size, defaults.heading_size, isPlainCash ? 8 : 18, 48),
     amount_size: cleanNumber(input.amount_size, defaults.amount_size, isPlainCash ? 8 : 22, 72),
     colors: Object.fromEntries(Object.entries(defaults.colors).map(([key, fallback]) => [
