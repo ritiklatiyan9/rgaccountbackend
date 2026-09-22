@@ -685,7 +685,7 @@ export const listPlotKycMembers = asyncHandler(async (req, res) => {
 
 /** POST /plots/payments — Create a payment, optionally booking a company plot. */
 export const createPayment = asyncHandler(async (req, res) => {
-  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id } = req.body;
+  const { plot_id, date, payment_from, payment_type, bank_details, bank_name, branch, narration, amount, voucher_url, assigned_admin_id, received_by } = req.body;
 
   if (!plot_id) return res.status(400).json({ message: 'Plot is required' });
 
@@ -703,10 +703,10 @@ export const createPayment = asyncHandler(async (req, res) => {
      INSERT INTO plot_payments (
        plot_id, site_id, date, payment_from, payment_type, bank_details, bank_name,
        branch, narration, amount, created_by, voucher_url, assigned_admin_id, status,
-       cheque_no, cheque_status, buyer_name, booked_by, transaction_time
+       cheque_no, cheque_status, buyer_name, booked_by, transaction_time, received_by
      )
      SELECT $1, plot.site_id, $2::date, $3, $4, $5, $6, $7, $8, $9::numeric,
-            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by, $16::time
+            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by, $16::time, $17
        FROM plot
      RETURNING *`,
     [
@@ -726,6 +726,7 @@ export const createPayment = asyncHandler(async (req, res) => {
       normalizedPaymentType === 'CHEQUE' ? 'PENDING' : null,              // $14
       req.body.require_booked_plot === true && !(normalizedPaymentType === 'CHEQUE' && req.body.booking_client_id !== undefined), // $15
       transactionTimeForWrite(),                                        // $16
+      received_by ? received_by.trim().toUpperCase() : null,             // $17
     ]
   );
   let result;
@@ -836,12 +837,14 @@ export const listPayments = asyncHandler(async (req, res) => {
     ...p,
     // Older Dashboard Quick Entry rows may have omitted these duplicated
     // display fields. Use the parent plot identity without rewriting history.
-    buyer_name: p.buyer_name || plot?.buyer_name || null,
+    // The plot is authoritative. A duplicated payment buyer may be stale
+    // after the booking name is corrected.
+    buyer_name: plot?.buyer_name || p.buyer_name || null,
     booked_by: plot?.booking_by || p.booked_by || null,
     verifyUrl: buildVerifyUrl({
       t: ReceiptType.PLOT,
       i: p.id,
-      pn: p.buyer_name || plot?.buyer_name || null,
+      pn: plot?.buyer_name || p.buyer_name || null,
       pl: plot?.plot_no || null,
       a: p.amount,
       d: p.date,
