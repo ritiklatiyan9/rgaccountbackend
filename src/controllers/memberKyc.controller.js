@@ -7,6 +7,7 @@ import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 import {
   deletePlotDoc, getPlotDocBytes, getPlotDocPublicUrl, getPlotDocUrl, uploadPlotDoc,
 } from '../utils/plotDocStorage.js';
+import { memberDocumentStorage, signMemberDocumentUrl } from '../utils/memberDocumentUrls.js';
 
 const DOCUMENT_FIELDS_BY_TYPE = {
   PHOTO: ['photo'],
@@ -149,8 +150,11 @@ const selectActiveDocuments = (rows = []) => {
 const getCaseDocuments = async (caseId) => {
   const { rows } = await pool.query(
     `SELECT d.*, r.raw_text, r.extracted_fields, r.confidence_overall,
-            r.confidence_map, r.engine AS result_engine, r.processed_at
+            r.confidence_map, r.engine AS result_engine, r.processed_at,
+            to_jsonb(m)->>d.member_document_field AS member_document_url
        FROM documents d
+       JOIN kyc_cases k ON k.id = d.kyc_case_id
+       LEFT JOIN members m ON m.id = k.client_member_id
        LEFT JOIN LATERAL (
          SELECT * FROM ocr_results o
           WHERE o.document_id = d.id
@@ -164,12 +168,23 @@ const getCaseDocuments = async (caseId) => {
   const activeDocuments = selectActiveDocuments(rows);
   await Promise.all(activeDocuments.map(async (document) => {
     try {
-      document.file_url = await getPlotDocUrl(document.file_path);
+      document.file_url = await getCaseDocumentUrl(document);
     } catch {
       document.file_url = null;
+    } finally {
+      delete document.member_document_url;
     }
   }));
   return activeDocuments.map(reviewDocument);
+};
+
+const getCaseDocumentUrl = async (document) => {
+  const original = memberDocumentStorage(document.member_document_url);
+  if (original?.Key === document.file_path) {
+    return signMemberDocumentUrl(document.member_document_url);
+  }
+  if (memberDocumentStorage(document.file_path)) return signMemberDocumentUrl(document.file_path);
+  return getPlotDocUrl(document.file_path);
 };
 
 const hasValidSignature = (file) => {
@@ -558,7 +573,8 @@ export const getCase = asyncHandler(async (req, res) => {
   if (access.missing) return res.status(404).json({ message: 'KYC case not found' });
   if (access.denied) return res.status(403).json({ message: 'This KYC case is unavailable to your account' });
   const documents = await getCaseDocuments(access.kycCase.id);
-  res.json({ ...access.kycCase, documents });
+  const clientPhoto = await signMemberDocumentUrl(access.kycCase.client_photo);
+  res.json({ ...access.kycCase, client_photo: clientPhoto, documents });
 });
 
 /** PATCH /member-kyc/case/:id/customer */
@@ -731,10 +747,18 @@ export const getDocument = asyncHandler(async (req, res) => {
   if (access.missing) return res.status(404).json({ message: 'KYC case not found' });
   if (access.denied) return res.status(403).json({ message: 'This KYC document is unavailable to your account' });
   try {
-    document.file_url = await getPlotDocUrl(document.file_path);
+    if (document.member_document_field) {
+      const { rows } = await pool.query(
+        'SELECT to_jsonb(m)->>$2 AS member_document_url FROM members m WHERE m.id = $1',
+        [access.kycCase.client_member_id, document.member_document_field]
+      );
+      document.member_document_url = rows[0]?.member_document_url;
+    }
+    document.file_url = await getCaseDocumentUrl(document);
   } catch {
     document.file_url = null;
   }
+  delete document.member_document_url;
   res.json(reviewDocument(document));
 });
 

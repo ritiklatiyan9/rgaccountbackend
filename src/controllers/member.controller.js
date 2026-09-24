@@ -7,6 +7,7 @@ import { invalidateChangedAddress } from '../services/clientLocation.js';
 import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 import { findPeopleByPlot } from '../services/plotPeople.service.js';
 import { findMemberPlots, findMemberPlotNumbers } from '../services/plotMemberLinks.service.js';
+import { signMemberDocumentUrl } from '../utils/memberDocumentUrls.js';
 import { uniqueMemberNameMatch, memberTransactionMatch, LEDGER_PLOT_BUYER_JOIN, MEMBER_PLOT_PAYMENT_MATCH } from '../services/memberLedgerIdentity.service.js';
 import {
   assertMemberSiteAccess,
@@ -586,16 +587,23 @@ export const registerMembersInSites = asyncHandler(async (req, res) => {
 export const listMembers = asyncHandler(async (req, res) => {
   const { site_id, type } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const site = await assertMemberSiteAccess(pool, req.user, Number(site_id));
+  if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
 
   const [members, summary, plotNumbers] = await Promise.all([
     memberModel.findBySiteIdList(parseInt(site_id), pool, type || null),
     memberModel.getSummary(parseInt(site_id), pool),
     findMemberPlots(parseInt(site_id), pool),
   ]);
-  res.json({ members: members.map((member) => {
+  res.json({ members: await Promise.all(members.map(async (member) => {
     const plots = plotNumbers.get(String(member.id)) || [];
-    return { ...member, plots, plot_numbers: [...new Set(plots.map((plot) => plot.plot_no))] };
-  }), summary });
+    return {
+      ...member,
+      photo: await signMemberDocumentUrl(member.photo),
+      plots,
+      plot_numbers: [...new Set(plots.map((plot) => plot.plot_no))],
+    };
+  })), summary });
 });
 
 /** GET /members/search?site_id=X&q=... */
@@ -651,8 +659,13 @@ export const getMemberAutocomplete = asyncHandler(async (req, res) => {
 export const getMember = asyncHandler(async (req, res) => {
   const member = await memberModel.findByIdWithKyc(parseInt(req.params.id), pool);
   if (!member) return res.status(404).json({ message: 'Member not found' });
+  const site = await assertMemberSiteAccess(pool, req.user, member.site_id);
+  if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
   const plots = await findMemberPlots(member.site_id, pool);
-  res.json({ member: { ...member, plots: plots.get(String(member.id)) || [] } });
+  const documentUrls = await Promise.all(DOC_FIELDS.map(async (field) => [
+    field, await signMemberDocumentUrl(member[field]),
+  ]));
+  res.json({ member: { ...member, ...Object.fromEntries(documentUrls), plots: plots.get(String(member.id)) || [] } });
 });
 
 /** PUT /members/:id */
@@ -747,10 +760,25 @@ export const updateMember = asyncHandler(async (req, res) => {
 });
 
 /** DELETE /members/:id */
+const respondToMemberDeleteConflict = (error, res) => {
+  if (error.code !== '23503') throw error;
+  const commission = error.constraint === 'plot_commissions_v2_agent_id_fkey';
+  return res.status(409).json({
+    code: 'MEMBER_HAS_LINKED_RECORDS',
+    message: commission
+      ? 'This member is assigned to a commission. Reassign the commission before deleting the member.'
+      : 'This member has linked records. Reassign or remove those links before deleting the member.',
+  });
+};
+
 export const deleteMember = asyncHandler(async (req, res) => {
   const existing = await memberModel.findById(parseInt(req.params.id), pool);
   if (!existing) return res.status(404).json({ message: 'Member not found' });
-  await memberModel.delete(parseInt(req.params.id), pool);
+  try {
+    await memberModel.delete(parseInt(req.params.id), pool);
+  } catch (error) {
+    return respondToMemberDeleteConflict(error, res);
+  }
   res.json({ message: 'Member deleted' });
 });
 
@@ -762,7 +790,12 @@ export const bulkDeleteMembers = asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
 
-  const result = await pool.query(`DELETE FROM members WHERE id = ANY($1::int[]) RETURNING id`, [ids]);
+  let result;
+  try {
+    result = await pool.query(`DELETE FROM members WHERE id = ANY($1::int[]) RETURNING id`, [ids]);
+  } catch (error) {
+    return respondToMemberDeleteConflict(error, res);
+  }
   res.json({ message: `${result.rows.length} client(s) deleted`, deleted: result.rows.map((r) => r.id) });
 });
 
