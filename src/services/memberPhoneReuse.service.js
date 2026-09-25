@@ -69,10 +69,9 @@ export const reuseVerifiedKycForMember = async (db, {
     || !Number.isInteger(targetMemberId) || targetMemberId <= 0) {
     return { kycReused: false, reason: 'NO_VERIFIED_SOURCE' };
   }
-  const confirmedMobileMatch = samePersonConfirmed === true
-    && Boolean(normalizeMemberPhone(targetMember.phone))
-    && normalizeMemberPhone(source.phone) === normalizeMemberPhone(targetMember.phone);
-  if (normalizeMemberName(source.full_name) !== normalizeMemberName(targetMember.full_name) && !confirmedMobileMatch) {
+  // Only Incorporate KYC passes a confirmation, after its own identity checks
+  // (assertMatchingKycIdentity); site registration and create never do.
+  if (normalizeMemberName(source.full_name) !== normalizeMemberName(targetMember.full_name) && samePersonConfirmed !== true) {
     return { kycReused: false, reason: 'NAME_MISMATCH' };
   }
 
@@ -95,6 +94,12 @@ export const reuseVerifiedKycForMember = async (db, {
     }
   }
   if (merged.phone) profile.phone = merged.phone;
+  // A verified mobile may replace a different one; keep the old number as the
+  // alternate rather than dropping it.
+  const previousPhone = normalizeMemberPhone(targetMember.phone);
+  if (previousPhone && profile.phone && profile.phone !== previousPhone && !profile.alt_phone && !targetMember.alt_phone) {
+    profile.alt_phone = previousPhone;
+  }
   const profileFields = Object.keys(profile);
   if (profileFields.length) {
     const values = profileFields.map((field) => profile[field]);

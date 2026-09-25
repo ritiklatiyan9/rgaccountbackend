@@ -1,4 +1,3 @@
-import { chequeReadySql } from '../utils/chequeWorkflow.js';
 import { validatePlotApprover } from '../services/plotApproval.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
@@ -812,7 +811,6 @@ export const listPayments = asyncHandler(async (req, res) => {
          LEFT JOIN users u ON u.id = pp.created_by
          LEFT JOIN users aa ON aa.id = pp.assigned_admin_id
         WHERE pp.plot_id = $1
-          AND ${chequeReadySql('pp')}
           AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
         ORDER BY pp.date ASC, pp.created_at ASC`,
       [plotIdInt, entryVisibility.creatorId]

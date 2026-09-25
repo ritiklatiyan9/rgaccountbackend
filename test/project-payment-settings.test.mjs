@@ -52,4 +52,5 @@ test('related history keeps site, physical unit and creator restrictions in the 
   assert.deepEqual(captured.params, [34, '5,8']);
   for (const fragment of ['p.site_id = anchor.site_id', 'pp.site_id = p.site_id', 'BTRIM(p.plot_no)', "BTRIM(COALESCE(p.block, ''))", "'unit_type'", "'tower'", "'floor'", 'anchor.id = $1', "string_to_array($2::text, ',')::int[]"]) assert.ok(captured.sql.includes(fragment), fragment);
   assert.doesNotMatch(captured.sql, /ILIKE|LIKE\s/i);
+  assert.doesNotMatch(captured.sql, /cheque_status/, 'payment history must retain pending and bounced receipts');
 });

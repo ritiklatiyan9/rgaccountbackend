@@ -3,7 +3,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { incorporateMemberKyc, listMemberKycSources } from '../services/memberKycIncorporation.service.js';
 
 export const getKycSources = asyncHandler(async (req, res) => {
-  res.json(await listMemberKycSources(pool, { user: req.user, memberId: req.params.id }));
+  res.json(await listMemberKycSources(pool, { user: req.user, memberId: req.params.id, query: req.query.q }));
 });
 
 export const incorporateKyc = asyncHandler(async (req, res) => {

@@ -39,11 +39,15 @@ test('approval lists, badge counts and atomic approval writes use the same clear
   assert.match(s, /WHERE id = ANY\(\$1::int\[\]\) AND status = 'pending' AND \$\{chequeReadySql\(table\)\}/);
 });
 
-test('plot payment list and historical statements exclude uncleared cheques', async () => {
-  for (const path of ['controllers/plot.controller.js', 'models/Plot.model.js', 'services/plotPaymentHistory.service.js']) {
-    const s = await readFile(new URL(`../src/${path}`, import.meta.url), 'utf8');
-    assert.match(s, /AND \$\{chequeReadySql\('pp'\)\}/);
-  }
+test('plot payment records retain pending and bounced cheques while money totals stay gated', async () => {
+  const controller = await readFile(new URL('../src/controllers/plot.controller.js', import.meta.url), 'utf8');
+  const list = controller.slice(controller.indexOf('export const listPayments'), controller.indexOf('/** GET /plots/payments/:id'));
+  const history = await readFile(new URL('../src/services/plotPaymentHistory.service.js', import.meta.url), 'utf8');
+  const model = await readFile(new URL('../src/models/Plot.model.js', import.meta.url), 'utf8');
+  assert.match(list, /FILTER \(WHERE \$\{PP_COUNTABLE\}\)/);
+  assert.doesNotMatch(list, /chequeReadySql\('pp'\)/);
+  assert.doesNotMatch(history, /chequeReadySql\('pp'\)/);
+  assert.match(model, /financial_transaction_posts\('credit', pp\.status, pp\.payment_type, pp\.cheque_status\)/);
 });
 
 test('backdated cheques cannot be grandfathered again on server restart', async () => {
