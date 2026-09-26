@@ -4,6 +4,7 @@ import { nocRegistryDate } from '../utils/nocRegistryDate.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { withRegistryPaymentVerifyUrl } from '../utils/registryPaymentReceipt.js';
+import { registryMetresFromGaz } from '../utils/registryPayment.js';
 import pool from '../config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
@@ -260,7 +261,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
         siteIdInt,                                                              // $1
         trimmed,                                                                // $2
         customer_name ? customer_name.trim().toUpperCase() : null,              // $3
-        parseFloat(size_meter) || null,                                         // $4
+        registryMetresFromGaz(size_sqyard) ?? (parseFloat(size_meter) || null), // $4
         parseFloat(size_sqyard) || null,                                        // $5
         registry_date || null,                                                  // $6
         farmer_name ? farmer_name.trim().toUpperCase() : null,                  // $7
@@ -364,6 +365,7 @@ export const updateRegistry = asyncHandler(async (req, res) => {
   if (customer_name !== undefined) updateData.customer_name = customer_name ? customer_name.trim().toUpperCase() : null;
   if (size_meter !== undefined) updateData.size_meter = parseFloat(size_meter) || null;
   if (size_sqyard !== undefined) updateData.size_sqyard = parseFloat(size_sqyard) || null;
+  if (updateData.size_sqyard) updateData.size_meter = registryMetresFromGaz(updateData.size_sqyard);
   if (registry_date !== undefined) updateData.registry_date = registry_date || null;
   if (farmer_name !== undefined) updateData.farmer_name = farmer_name ? farmer_name.trim().toUpperCase() : null;
   if (plot_id !== undefined) {

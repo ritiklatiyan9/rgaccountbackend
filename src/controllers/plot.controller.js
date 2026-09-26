@@ -11,7 +11,7 @@ import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { withCompanyPlotBooking } from '../services/quickPlotBooking.service.js';
 import { PLOT_BUYER_MEMBER_JOIN, validatePlotBuyerMember } from '../services/plotMemberLinks.service.js';
-import { registryPaymentFromGaz } from '../utils/registryPayment.js';
+import { registryPaymentFromGaz, registryMetresFromGaz } from '../utils/registryPayment.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -1113,7 +1113,7 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
         plot.id,
         String(plot.plot_no || '').trim().toUpperCase(),
         customerName ? String(customerName).trim().toUpperCase() : null,
-        parseFloat(plot.plot_size_mtr) || null,
+        registryMetresFromGaz(gaz),
         gaz || null,
         parseFloat(plot.circle_rate) || null,
         parseFloat(plot.to_receive_bank) || 0,
