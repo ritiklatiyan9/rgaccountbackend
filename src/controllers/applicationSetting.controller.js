@@ -94,6 +94,10 @@ const FEATURE_MESSAGES = {
     on: 'KYC is required before a NOC can be generated',
     off: 'NOCs can now be generated without KYC — every issue is still recorded',
   },
+  [FEATURE_KEYS.NOC_REQUIRED_FOR_REGISTRY]: {
+    on: 'A NOC is required before a plot can be set to Registry',
+    off: 'Plots can now be set to Registry without a NOC on this site',
+  },
 };
 
 export const updateFeature = asyncHandler(async (req, res) => {

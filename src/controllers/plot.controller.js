@@ -1,4 +1,5 @@
 import { validatePlotApprover } from '../services/plotApproval.service.js';
+import { isRegistryStatusTransitionBlocked } from '../services/registryStatusPolicy.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -512,7 +513,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
     const currentStatus = String(existing.status || '').trim().toUpperCase();
     const nextStatus = String(status || '').trim().toUpperCase();
     if (!nextStatus) return res.status(400).json({ message: 'Plot status is required' });
-    if (nextStatus !== currentStatus && (nextStatus === 'REGISTRY' || currentStatus === 'REGISTRY')) {
+    if (await isRegistryStatusTransitionBlocked(existing.site_id, currentStatus, nextStatus)) {
       return res.status(409).json({
         code: 'PLOT_REGISTRY_WORKFLOW_REQUIRED',
         message: 'Registry status is controlled by NOC generation in Plot Payments',
