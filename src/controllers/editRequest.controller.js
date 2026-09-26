@@ -1,5 +1,6 @@
 import { protectProposedTransactionDate } from '../services/transactionDate.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
+import { isRegistryStatusTransitionBlocked } from '../services/registryStatusPolicy.service.js';
 import { transactionTimeContext, normalizeTransactionTime, withTransactionTime } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { editRequestModel } from '../models/EditRequest.model.js';
@@ -158,11 +159,13 @@ const MODULE_MAP = {
       for (const key of ['plot_no', 'block', 'buyer_name', 'plot_size', 'plot_size_mtr', 'plot_rate', 'sale_price', 'registry_area', 'circle_rate', 'to_receive_bank', 'first_installment', 'booking_by', 'booking_date', 'notes']) {
         if (data[key] !== undefined) allowed[key] = data[key];
       }
-      // Never write REGISTRY from this generic path. The validation below gives
-      // a clear error for a promotion attempt; omitting it here is the final
-      // race-safe backstop when editing a plot that is already registered.
-      if (data.status !== undefined && String(data.status).trim().toUpperCase() !== 'REGISTRY') {
-        allowed.status = data.status;
+      if (data.status !== undefined) {
+        const currentStatus = String(existing.status || '').trim().toUpperCase();
+        const nextStatus = String(data.status || '').trim().toUpperCase();
+        if (await isRegistryStatusTransitionBlocked(existing.site_id, currentStatus, nextStatus, undefined, db)) {
+          throw new Error('Registry status is controlled by NOC generation in Plot Payments');
+        }
+        allowed.status = nextStatus;
       }
       if (Object.keys(allowed).length > 0) {
         return plotModel.update(parseInt(id), allowed, db);
@@ -569,8 +572,8 @@ const validateProposedDestinationSite = async ({
   if (module === 'plot' && proposedData?.status !== undefined) {
     const currentStatus = String(currentRecord?.status || '').trim().toUpperCase();
     const nextStatus = String(proposedData.status || '').trim().toUpperCase();
-    if (nextStatus !== currentStatus && (nextStatus === 'REGISTRY' || currentStatus === 'REGISTRY')) {
-      return 'Registry status can only be changed through the Plot Registry NOC workflow';
+    if (await isRegistryStatusTransitionBlocked(siteId, currentStatus, nextStatus, undefined, db)) {
+      return 'Registry status is controlled by NOC generation in Plot Payments';
     }
   }
 

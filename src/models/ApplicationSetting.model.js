@@ -43,10 +43,10 @@ class ApplicationSettingModel {
     return features;
   }
 
-  async isFeatureEnabled(siteId, featureKey) {
+  async isFeatureEnabled(siteId, featureKey, db = pool) {
     if (!Object.prototype.hasOwnProperty.call(FEATURE_DEFAULTS, featureKey)) return false;
 
-    const { rows } = await pool.query(
+    const { rows } = await db.query(
       `SELECT setting_value
        FROM application_settings
        WHERE site_id = $1 AND setting_key = $2

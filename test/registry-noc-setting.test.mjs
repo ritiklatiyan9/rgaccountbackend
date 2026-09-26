@@ -30,3 +30,15 @@ test('Registry transition is allowed only when the site disables its NOC require
   assert.equal(await isRegistryStatusTransitionBlocked(5, 'BOOKED', 'RESALE', required), false);
   assert.equal(await isRegistryStatusTransitionBlocked(5, 'REGISTRY', 'REGISTRY', required), false);
 });
+
+test('Registry transition reads the setting through the edit approval transaction', async () => {
+  const queries = [];
+  const db = {
+    query: async (_sql, params) => {
+      queries.push(params);
+      return { rows: [{ setting_value: false }] };
+    },
+  };
+  assert.equal(await isRegistryStatusTransitionBlocked(5, 'BOOKED', 'REGISTRY', applicationSettingModel, db), false);
+  assert.deepEqual(queries, [[5, FEATURE_KEYS.NOC_REQUIRED_FOR_REGISTRY]]);
+});
