@@ -41,3 +41,34 @@ test('unknown targets and invalid IDs never reach database or storage', async ()
     const res=response();await getSignatureImages({...request(),params},res);assert.equal(res.code,400);
   }
 });
+
+test('evidence is read from the authorized record and history, alongside readable signatures', async () => {
+  const signature = 'https://bucket.s3.us-east-1.amazonaws.com/sign.png';
+  const photo = 'https://bucket.s3.us-east-1.amazonaws.com/proof.jpg';
+  const stale = 'https://bucket.s3.us-east-1.amazonaws.com/old-proof.jpg';
+  const loaded = [];
+  globalThis.signatureTest = {
+    query: async sql => {
+      if (sql.includes('SELECT site_id')) return { rows: [{ site_id: 9 }] };
+      if (sql.includes('user_sites')) return { rows: [{}] };
+      assert.match(sql, /evidence_photo_url/);
+      if (sql.includes('to_jsonb')) {
+        assert.match(sql, /voucher_url/);
+        return { rows: [{ customer_signature_url: signature, evidence_photo_url: photo }] };
+      }
+      return { rows: [{ customer_signature_url: signature, evidence_photo_url: stale }] };
+    },
+    load: async url => {
+      loaded.push(url);
+      if (url === stale) throw new Error('Missing old object');
+      return `data:image/png;base64,${url === photo ? 'photo' : 'ink'}`;
+    },
+  };
+  const res = response();
+  await getSignatureImages({ ...request(), query: { include_evidence: 'true', url: 'https://untrusted.test/file' } }, res);
+  assert.equal(res.code, 200);
+  assert.equal(res.body.images[photo], 'data:image/png;base64,photo');
+  assert.equal(res.body.images[signature], 'data:image/png;base64,ink');
+  assert.equal(res.body.images[stale], undefined);
+  assert.deepEqual(loaded.sort(), [signature, photo, stale].sort());
+});

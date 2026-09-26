@@ -76,19 +76,26 @@ export const getSignatureImages = asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   if (!target || !Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid signature record' });
   if (!await requireTargetSiteAccess(req, res, target, id)) return;
+  const includeEvidence = req.query?.include_evidence === 'true';
   const { rows } = await pool.query(
     `SELECT to_jsonb(t)->>'customer_signature_url' AS customer_signature_url,
             to_jsonb(t)->>'authority_signature_url' AS authority_signature_url
+            ${includeEvidence ? `, COALESCE(NULLIF(to_jsonb(t)->>'evidence_photo_url', ''),
+              NULLIF(to_jsonb(t)->>'photo_url', ''), NULLIF(to_jsonb(t)->>'voucher_url', ''),
+              NULLIF(to_jsonb(t)->>'proof_url', '')) AS evidence_photo_url` : ''}
        FROM ${target.table} t WHERE id = $1`, [id]
   );
   const history = await pool.query(
-    `SELECT customer_signature_url, authority_signature_url FROM transaction_receipts
+    `SELECT customer_signature_url, authority_signature_url${includeEvidence ? ', evidence_photo_url' : ''} FROM transaction_receipts
       WHERE organization_id = $1 AND module = $2 AND record_id = $3 LIMIT 1`,
     [Number(req.user.organization_id) || 1, req.params.target, String(id)]
   );
   const urls = [...new Set([...Object.values(rows[0] || {}), ...Object.values(history.rows[0] || {})].filter(Boolean))];
   try {
-    const images = Object.fromEntries(await Promise.all(urls.map(async (url) => [url, await loadReceiptImage(url)])));
+    // An inaccessible old attachment must not discard readable current signatures.
+    const results = await Promise.allSettled(urls.map(async (url) => [url, await loadReceiptImage(url)]));
+    const images = Object.fromEntries(results.filter(result => result.status === 'fulfilled').map(result => result.value));
+    if (results.length && !Object.keys(images).length) throw results.find(result => result.status === 'rejected').reason;
     res.set('Cache-Control', 'no-store');
     res.json({ images });
   } catch (error) {
