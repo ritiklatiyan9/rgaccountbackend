@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { PLOT_BUYER_MEMBER_JOIN } from '../src/services/plotMemberLinks.service.js';
+import { registryPaymentFromGaz } from '../src/utils/registryPayment.js';
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
 
@@ -16,6 +18,9 @@ test('NOC drafts work before and after migration 152 without changing payments o
       CREATE TABLE plots(id integer PRIMARY KEY, site_id integer, plot_no text, buyer_name text,
         plot_size numeric, plot_size_mtr numeric, circle_rate numeric, to_receive_bank numeric,
         assigned_admin_id integer, status text, plot_tag text);
+      CREATE TABLE members(id integer PRIMARY KEY, site_id integer, full_name text);
+      CREATE TABLE bookings(id integer PRIMARY KEY, site_id integer, plot_id integer,
+        client_member_id integer, status text);
       CREATE TABLE plot_payments(id integer PRIMARY KEY, plot_id integer, site_id integer, date date,
         amount numeric, payment_type text, payment_from text, bank_details text, narration text,
         cheque_no text, cheque_status text, status text, approved_by integer, approved_at timestamptz,
@@ -30,6 +35,8 @@ test('NOC drafts work before and after migration 152 without changing payments o
         notes text, source_plot_payment_id integer UNIQUE, include_in_noc boolean, cheque_no text,
         cheque_status text, status text, approved_by integer, approved_at timestamptz, created_by integer);
       INSERT INTO sites VALUES (5, 'Test project');
+      INSERT INTO members VALUES (34, 5, 'Client Name');
+      INSERT INTO bookings VALUES (1, 5, 438, 34, 'BOOKED');
       INSERT INTO plots VALUES (438, 5, 'A38', 'Test Buyer', 100, 83.61, 15000, 1000, 7, 'BOOKED', 'NEW'),
         (439, 5, 'A39', 'Other Buyer', 200, 167.22, 15000, 2000, 7, 'BOOKED', 'OLD');
       INSERT INTO plot_payments(id,plot_id,site_id,date,amount,payment_type,status,cheque_status) VALUES
@@ -49,7 +56,7 @@ test('NOC drafts work before and after migration 152 without changing payments o
     };
     const pool = { query, connect: async () => ({ query, release() {} }), end: async () => {} };
     const source = read('../src/controllers/plot.controller.js').replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
-    const ctx = vm.createContext({ pool, asyncHandler: fn => fn, console });
+    const ctx = vm.createContext({ pool, asyncHandler: fn => fn, console, PLOT_BUYER_MEMBER_JOIN, registryPaymentFromGaz });
     vm.runInContext(`${source}\nthis.handlers = { getPlotNocRegistry, createPlotNocRegistry };`, ctx);
     const invoke = async (name, id = 438) => {
       let status = 200, body;
@@ -75,7 +82,8 @@ test('NOC drafts work before and after migration 152 without changing payments o
     failMapping = false;
     const created = await invoke('createPlotNocRegistry');
     assert.equal(created.status, 201);
-    assert.equal(Number(created.body.registry.registry_payment), 1200);
+    assert.equal(Number(created.body.registry.registry_payment), 1500000);
+    assert.equal((await rows('plot_registries'))[0].customer_name, 'CLIENT NAME');
     assert.equal(Number((await rows('plot_registries'))[0].size_sqyard), 100, 'legacy schema defaults to plots');
     assert.deepEqual((await rows('plot_registry_payments')).map(p => p.source_plot_payment_id), [1, 2]);
     const repeat = await invoke('createPlotNocRegistry');

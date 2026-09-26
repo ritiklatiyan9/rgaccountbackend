@@ -1,4 +1,3 @@
-import { transactionDateEditable, currentTransactionDate } from '../services/transactionDate.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { registryCoverageSql } from '../utils/registryCashAllocation.js';
 import { nocRegistryDate } from '../utils/nocRegistryDate.js';
@@ -142,10 +141,8 @@ export const createRegistry = asyncHandler(async (req, res) => {
 /** Core create logic, callable outside the HTTP handler (admin-approval flow
  *  applies an approved 'plot_registry_create' edit request through this).
  *  A registry can only be created with money mapped to it — `payments` is an
- *  array of either
- *    { source_plot_payment_id }                              (link a bank/cheque plot payment)
- *    { payment_date, amount, payment_mode, tally_date, tally_amount, notes, cheque_no }  (manual)
- *  totalling > 0. Registry + payments are created in ONE transaction, so a
+ *  array of { source_plot_payment_id } records linked to plot receipts,
+ *  totaling > 0. Registry + payments are created in ONE transaction, so a
  *  registry can never exist without its money. An optional transaction client
  *  lets the edit-request approval commit the registry and approval state as one
  *  unit. Returns { status, body }. */
@@ -188,28 +185,14 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
   }
 
   // ── Money-mapped gate ──
-  const paymentDateEditable = await transactionDateEditable(siteIdInt, db);
-  const paymentRows = (Array.isArray(payments) ? payments : []).map(row => !paymentDateEditable && row && !row.source_plot_payment_id ? { ...row, payment_date: currentTransactionDate() } : row);
+  const paymentRows = Array.isArray(payments) ? payments : [];
+  if (paymentRows.some((row) => row && !row.source_plot_payment_id && Number(row.amount) > 0)) {
+    return { status: 400, body: { message: 'Link existing plot payments; manual registry entries are no longer available' } };
+  }
   const linkedIds = paymentRows
     .filter((p) => p && p.source_plot_payment_id)
     .map((p) => parseInt(p.source_plot_payment_id))
     .filter(Number.isFinite);
-  const manualRows = paymentRows.filter((p) => p && !p.source_plot_payment_id && (parseFloat(p.amount) || 0) > 0);
-  const requestedBankIds = [...new Set(manualRows
-    .map((row) => row.bank_account_id == null || row.bank_account_id === '' ? null : parseInt(row.bank_account_id, 10))
-    .filter((id) => id != null))];
-  if (requestedBankIds.some((id) => !Number.isInteger(id) || id <= 0)) {
-    return { status: 400, body: { message: 'One or more selected bank accounts are invalid' } };
-  }
-  if (requestedBankIds.length) {
-    const { rows: validBanks } = await db.query(
-      'SELECT id FROM bank_accounts WHERE site_id = $1 AND id = ANY($2::int[])',
-      [siteIdInt, requestedBankIds]
-    );
-    if (validBanks.length !== requestedBankIds.length) {
-      return { status: 400, body: { message: 'Choose bank accounts from the same site as the registry' } };
-    }
-  }
 
   let linkedTotal = 0;
   let linkable = [];
@@ -231,8 +214,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
     linkable = rows;
     linkedTotal = rows.reduce((n, r) => n + (parseFloat(r.amount) || 0), 0);
   }
-  const manualTotal = manualRows.reduce((n, r) => n + (parseFloat(r.amount) || 0), 0);
-  if (linkable.length + manualRows.length === 0 || linkedTotal + manualTotal <= 0) {
+  if (linkable.length === 0 || linkedTotal <= 0) {
     return { status: 400, body: {
       message: 'Map at least one payment before creating a registry — a registry cannot be created without money mapped to it',
     } };
@@ -321,39 +303,6 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
       );
     }
 
-    // ── Manual payments ──
-    for (const m of manualRows) {
-      const mode = m.payment_mode ? String(m.payment_mode).trim().toUpperCase() : null;
-      const inserted = await client.query(
-        `INSERT INTO plot_registry_payments (
-           registry_id, site_id, payment_date, amount, payment_mode, tally_date, tally_amount,
-           notes, cheque_no, cheque_status, created_by
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         RETURNING id`,
-        [
-          registryId, siteIdInt, m.payment_date || today, parseFloat(m.amount) || 0, mode,
-          m.tally_date || null,
-          m.tally_amount !== undefined && m.tally_amount !== '' ? parseFloat(m.tally_amount) : null,
-          m.notes ? String(m.notes).trim().toUpperCase() : null,
-          m.cheque_no ? String(m.cheque_no).trim() : null,
-          mode === 'CHEQUE' ? 'PENDING' : null,
-          userId,
-        ]
-      );
-      const bankId = m.bank_account_id == null || m.bank_account_id === ''
-        ? null : parseInt(m.bank_account_id, 10);
-      if (mode !== 'CASH' && bankId) {
-        await client.query(
-          `UPDATE cash_flow_entries
-              SET bank_account_id = $1, updated_at = NOW()
-            WHERE site_id = $2
-              AND source_module = 'plot_registry_payments'
-              AND source_id = $3`,
-          [bankId, siteIdInt, inserted.rows[0].id]
-        );
-      }
-    }
-
     if (ownsTransaction) await client.query('COMMIT');
   } catch (err) {
     if (ownsTransaction) await client.query('ROLLBACK');
@@ -365,7 +314,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
   return { status: 201, body: {
     registry: row.registry,
     plot_status_updated: row.plot_status_updated,
-    payments_created: linkable.length + manualRows.length,
+    payments_created: linkable.length,
     payments_skipped: linkedIds.length - linkable.length,
   } };
 }
@@ -667,6 +616,10 @@ export const createRegistryPayment = asyncHandler(async (req, res) => {
     };
     const linkedPayment = await plotRegistryPaymentModel.create(linkedData, pool);
     return res.status(201).json({ payment: linkedPayment, linked: true });
+  }
+
+  if (!payment_mode || String(payment_mode).trim().toUpperCase() === 'CASH') {
+    return res.status(400).json({ message: 'Select a bank payment mode, or link an existing plot CASH receipt' });
   }
 
   // ── Non-linked payment: registry lookup + INSERT in parallel(ish). ──
@@ -1201,7 +1154,7 @@ export const getRegistryNoc = asyncHandler(async (req, res) => {
 /** PUT /registries/:id/noc — batch-save NOC meta + payment selections.
  *  Body: { noc_no, noc_date, noc_place, noc_notes,
  *          included_plot_payment_ids: [plotPaymentId, ...],
- *          inline_payments: [{ id?, payment_date, amount, payment_mode, notes, cheque_no, include_in_noc }] }
+ *          inline_payments: [{ id, payment_date, amount, payment_mode, notes, include_in_noc }] }
  *  Toggling a plot payment ON links it to the registry (reusing the
  *  payment-assign infra); toggling OFF keeps the link but flags it out of
  *  the NOC, so registry accounting is never silently deleted. */
@@ -1216,6 +1169,9 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
   const includedIds = Array.isArray(included_plot_payment_ids)
     ? [...new Set(included_plot_payment_ids.map((n) => parseInt(n)).filter(Number.isFinite))]
     : null;
+  if (Array.isArray(inline_payments) && inline_payments.some((row) => !row?.id && Number(row?.amount) > 0)) {
+    return res.status(400).json({ message: 'Manual NOC payments are no longer available. Select recorded plot receipts instead.' });
+  }
   const today = new Date().toISOString().split('T')[0];
 
   const client = await pool.connect();
@@ -1469,7 +1425,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
       );
     }
 
-    // ── Inline (NOC-only) payments — upsert ──
+    // ── Existing legacy inline payments may still be corrected ──
     if (Array.isArray(inline_payments)) {
       const bankIds = [...new Set(inline_payments
         .map((row) => row.bank_account_id == null || row.bank_account_id === '' ? null : parseInt(row.bank_account_id, 10))
@@ -1485,6 +1441,7 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
         }
       }
       for (const row of inline_payments) {
+        if (!row.id) continue;
         const amount = parseFloat(row.amount) || 0;
         const include = row.include_in_noc === undefined ? true : !!row.include_in_noc;
         const mode = row.payment_mode ? String(row.payment_mode).trim().toUpperCase() : null;
@@ -1494,38 +1451,18 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
           await client.query('ROLLBACK');
           return res.status(400).json({ message: 'Select a bank account for every non-cash manual payment' });
         }
-        let paymentId = row.id ? parseInt(row.id, 10) : null;
-        if (row.id) {
-          const updatedPayment = await client.query(
-            `UPDATE plot_registry_payments
-                SET payment_date = $2, amount = $3, payment_mode = $4, notes = $5,
-                    include_in_noc = $6, updated_at = NOW()
-              WHERE id = $1 AND registry_id = $7 AND source_plot_payment_id IS NULL
-              RETURNING id`,
-            [
-              parseInt(row.id), row.payment_date || today, amount, mode,
-              row.notes ? String(row.notes).trim().toUpperCase() : null, include, registryId,
-            ]
-          );
-          paymentId = updatedPayment.rows[0]?.id || null;
-        } else if (amount > 0) {
-          const insertedPayment = await client.query(
-            `INSERT INTO plot_registry_payments (
-               registry_id, site_id, payment_date, amount, payment_mode, notes,
-               include_in_noc, cheque_no, cheque_status, status, approved_by,
-               approved_at, created_by
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', $10, NOW(), $10)
-             RETURNING id`,
-            [
-              registryId, registry.site_id, row.payment_date || today, amount, mode,
-              row.notes ? String(row.notes).trim().toUpperCase() : null, include,
-              row.cheque_no ? String(row.cheque_no).trim() : null,
-              mode === 'CHEQUE' ? 'PENDING' : null,
-              req.user.id,
-            ]
-          );
-          paymentId = insertedPayment.rows[0]?.id || null;
-        }
+        const updatedPayment = await client.query(
+          `UPDATE plot_registry_payments
+              SET payment_date = $2, amount = $3, payment_mode = $4, notes = $5,
+                  include_in_noc = $6, updated_at = NOW()
+            WHERE id = $1 AND registry_id = $7 AND source_plot_payment_id IS NULL
+            RETURNING id`,
+          [
+            parseInt(row.id), row.payment_date || today, amount, mode,
+            row.notes ? String(row.notes).trim().toUpperCase() : null, include, registryId,
+          ]
+        );
+        const paymentId = updatedPayment.rows[0]?.id || null;
         if (paymentId) {
           await client.query(
             `UPDATE cash_flow_entries

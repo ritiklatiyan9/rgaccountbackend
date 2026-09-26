@@ -1,6 +1,7 @@
 import MasterModel from './MasterModel.js';
 import { registryCoverageSql, registryCashAllocationSql } from '../utils/registryCashAllocation.js';
 import { decorateRegistryStage } from '../utils/registryStage.js';
+import { PLOT_BUYER_MEMBER_JOIN } from '../services/plotMemberLinks.service.js';
 
 // Memoized existence check for the handover table (migration 068) so the list
 // endpoint keeps working on databases where the migration hasn't run yet —
@@ -309,9 +310,12 @@ class PlotRegistryPaymentModel extends MasterModel {
       pool.query(`SELECT DISTINCT payment_mode AS val FROM plot_registry_payments WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val ASC`, [siteId]),
       pool.query(`
         SELECT
-          p.id, p.plot_no, p.buyer_name, p.plot_size, p.plot_tag,
+          p.id, p.plot_no, p.buyer_name, plot_buyer.full_name AS client_name,
+          p.plot_size, p.plot_size_mtr,
+          COALESCE(to_jsonb(p)->>'unit_type', 'plot') AS unit_type, p.plot_tag,
           p.circle_rate, p.to_receive_bank, p.registry_area
         FROM plots p
+        ${PLOT_BUYER_MEMBER_JOIN}
         WHERE p.site_id = $1
           AND UPPER(TRIM(COALESCE(p.plot_tag, ''))) <> 'OLD'
         ORDER BY p.plot_no ASC

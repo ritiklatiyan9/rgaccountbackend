@@ -10,7 +10,8 @@ import { hasRelation } from '../utils/schemaProbe.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { withCompanyPlotBooking } from '../services/quickPlotBooking.service.js';
-import { validatePlotBuyerMember } from '../services/plotMemberLinks.service.js';
+import { PLOT_BUYER_MEMBER_JOIN, validatePlotBuyerMember } from '../services/plotMemberLinks.service.js';
+import { registryPaymentFromGaz } from '../utils/registryPayment.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -1088,7 +1089,16 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
       [plot.id]
     );
     const validPayments = validPaymentsResult.rows;
-    const nocAmount = validPayments.reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
+    const gaz = plot.unit_type === 'flat' ? Number(plot.plot_size) / 9 : Number(plot.plot_size);
+    const registryPayment = registryPaymentFromGaz(gaz, plot.circle_rate) || 0;
+    const buyerResult = await client.query(
+      `SELECT plot_buyer.full_name AS client_name
+         FROM plots p
+         ${PLOT_BUYER_MEMBER_JOIN}
+        WHERE p.id = $1`,
+      [plot.id]
+    );
+    const customerName = buyerResult.rows[0]?.client_name || plot.buyer_name;
 
     const registryResult = await client.query(
       `INSERT INTO plot_registries (
@@ -1102,12 +1112,12 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
         plot.site_id,
         plot.id,
         String(plot.plot_no || '').trim().toUpperCase(),
-        plot.buyer_name ? String(plot.buyer_name).trim().toUpperCase() : null,
+        customerName ? String(customerName).trim().toUpperCase() : null,
         parseFloat(plot.plot_size_mtr) || null,
-        (plot.unit_type === 'flat' ? Number(plot.plot_size) / 9 : parseFloat(plot.plot_size)) || null,
+        gaz || null,
         parseFloat(plot.circle_rate) || null,
         parseFloat(plot.to_receive_bank) || 0,
-        nocAmount,
+        registryPayment,
         'NOC workspace draft created automatically from Plot Payments.',
         plot.assigned_admin_id || null,
         req.user.id,
