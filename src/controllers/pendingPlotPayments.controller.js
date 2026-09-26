@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { PLOT_BUYER_MEMBER_JOIN } from '../services/plotMemberLinks.service.js';
 import { buildPendingPaymentReport, buildPercentagePlan, todayInIndia, validatePendingFilters } from '../services/pendingPlotPayments.service.js';
 
 export const pendingPlotPayments = asyncHandler(async (req, res) => {
@@ -11,9 +12,21 @@ export const pendingPlotPayments = asyncHandler(async (req, res) => {
   validatePendingFilters(filters);
   const visibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
   const { rows: plots } = await pool.query(
-    `SELECT id, plot_no, block, buyer_name, booking_by, TO_CHAR(booking_date, 'YYYY-MM-DD') AS booking_date,
-            sale_price, status, plot_tag
-       FROM plots WHERE site_id = $1 ORDER BY plot_no, id`, [siteId]
+    `SELECT p.id, p.plot_no, p.block, p.buyer_name, p.booking_by,
+            TO_CHAR(p.booking_date, 'YYYY-MM-DD') AS booking_date,
+            p.sale_price, p.status, p.plot_tag,
+            COALESCE(NULLIF(BTRIM(plot_buyer.phone), ''), NULLIF(BTRIM(plot_buyer.alt_phone), '')) AS buyer_phone,
+            broker_contact.phone AS broker_phone
+       FROM plots p
+       ${PLOT_BUYER_MEMBER_JOIN}
+       LEFT JOIN LATERAL (
+         SELECT CASE WHEN COUNT(*) = 1 THEN MAX(COALESCE(NULLIF(BTRIM(m.phone), ''), NULLIF(BTRIM(m.alt_phone), ''))) END AS phone
+           FROM members m
+          WHERE m.site_id = p.site_id
+            AND NULLIF(BTRIM(p.booking_by), '') IS NOT NULL
+            AND UPPER(BTRIM(m.full_name)) = UPPER(BTRIM(p.booking_by))
+       ) broker_contact ON true
+      WHERE p.site_id = $1 ORDER BY p.plot_no, p.id`, [siteId]
   );
   const ids = plots.map((plot) => plot.id);
   const [schedule, received] = ids.length ? await Promise.all([

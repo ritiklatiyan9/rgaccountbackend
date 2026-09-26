@@ -113,7 +113,8 @@ export function buildPendingPaymentReport({
     const value = round(plot.sale_price);
     const common = {
       plot_id: plot.id, plot_no: plot.plot_no, block: plot.block,
-      customer_name: plot.buyer_name || '', broker: String(plot.booking_by || '').trim(),
+      customer_name: plot.buyer_name || '', buyer_phone: plot.buyer_phone || '',
+      broker: String(plot.booking_by || '').trim(), broker_phone: plot.broker_phone || '',
       booking_date: plot.booking_date, total_plot_value: value, payment_received: totalReceived,
     };
     const scheduled = round(schedule.reduce((sum, row) => sum + Number(row.amount), 0));

@@ -4,7 +4,8 @@ import pool from '../src/config/db.js';
 import { pendingPlotPayments, createPercentagePaymentPlan } from '../src/controllers/pendingPlotPayments.controller.js';
 import { addBookingMonths, buildPercentagePlan, buildPendingPaymentReport, validatePendingFilters } from '../src/services/pendingPlotPayments.service.js';
 
-const plot = { id: 1, plot_no: 'A2', buyer_name: 'Customer A', booking_by: 'Broker A', booking_date: '2026-06-07', sale_price: '1000000', status: 'BOOKED' };
+const plot = { id: 1, plot_no: 'A2', buyer_name: 'Customer A', buyer_phone: '9876543210',
+  booking_by: 'Broker A', broker_phone: '9123456780', booking_date: '2026-06-07', sale_price: '1000000', status: 'BOOKED' };
 const schedule = buildPercentagePlan({ bookingDate: plot.booking_date, salePrice: plot.sale_price,
   milestones: [{ months: 0, percent: 25 }, { months: 3, percent: 50 }, { months: 6, percent: 100 }],
 }).map((row, index) => ({ ...row, id: index + 1, plot_id: 1 }));
@@ -70,6 +71,8 @@ test('missing and partial schedules expose unscheduled balances without inventin
   assert.equal(missing.summary.pending_today, 0);
   assert.equal(missing.needs_plan[0].unscheduled_amount, 800000);
   assert.equal(missing.needs_plan[0].has_schedule, false);
+  assert.equal(missing.needs_plan[0].buyer_phone, '9876543210');
+  assert.equal(missing.needs_plan[0].broker_phone, '9123456780');
   const partial = report({ installments: [schedule[0]] });
   assert.equal(partial.summary.pending_today, 50000);
   assert.equal(partial.needs_plan[0].unscheduled_amount, 750000);
@@ -109,7 +112,7 @@ test('read API scopes receipts to the site, posting rules, today and creator vis
   const calls = [];
   t.mock.method(pool, 'query', async (sql, params) => {
     calls.push({ sql, params });
-    if (sql.includes('FROM plots WHERE')) return { rows: [plot] };
+    if (sql.includes('FROM plots p')) return { rows: [plot] };
     if (sql.includes('FROM plot_installments WHERE')) return { rows: schedule };
     return { rows: [{ plot_id: 1, amount: 200000 }] };
   });
@@ -124,6 +127,10 @@ test('read API scopes receipts to the site, posting rules, today and creator vis
   assert.match(receipts.sql, /payment_date BETWEEN DATE '1900-01-01' AND \$3::date/);
   assert.equal((receipts.sql.match(/financial_transaction_posts/g) || []).length, 2);
   assert.equal(response.data.receipt_scope, 'creator');
+  assert.equal(response.data.rows[0].buyer_phone, '9876543210');
+  assert.equal(response.data.rows[0].broker_phone, '9123456780');
+  assert.match(calls[0].sql, /PLOT_BUYER_MEMBER_JOIN|buyer_link/);
+  assert.match(calls[0].sql, /COUNT\(\*\) = 1/);
   assert.ok(calls.every(({ sql }) => !/\b(?:INSERT|UPDATE|DELETE)\b/.test(sql)));
 });
 
