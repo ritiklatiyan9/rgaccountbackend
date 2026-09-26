@@ -4,7 +4,7 @@ import { nocRegistryDate } from '../utils/nocRegistryDate.js';
 import { plotRegistryModel, plotRegistryPaymentModel } from '../models/PlotRegistry.model.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { withRegistryPaymentVerifyUrl } from '../utils/registryPaymentReceipt.js';
-import { registryMetresFromGaz } from '../utils/registryPayment.js';
+import { registryMetresFromGaz, registryPaymentFromMetres } from '../utils/registryPayment.js';
 import pool from '../config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
@@ -150,7 +150,7 @@ export const createRegistry = asyncHandler(async (req, res) => {
 export async function createRegistryRecord(body, userId, transactionClient = null) {
   const {
     site_id, plot_no, customer_name, size_meter, size_sqyard, registry_date, farmer_name,
-    registry_payment, notes, plot_id, circle_rate, firm_name, seller_name, created_entry_date, bank_amount,
+    notes, plot_id, circle_rate, firm_name, seller_name, created_entry_date, bank_amount,
     payments,
   } = body;
 
@@ -222,6 +222,8 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
   }
 
   const today = new Date().toISOString().split('T')[0];
+  const registrySizeMetres = registryMetresFromGaz(size_sqyard) ?? (parseFloat(size_meter) || null);
+  const calculatedRegistryPayment = registryPaymentFromMetres(registrySizeMetres, circle_rate) ?? 0;
   const ownsTransaction = !transactionClient;
   const client = transactionClient || await pool.connect();
   let row;
@@ -261,7 +263,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
         siteIdInt,                                                              // $1
         trimmed,                                                                // $2
         customer_name ? customer_name.trim().toUpperCase() : null,              // $3
-        registryMetresFromGaz(size_sqyard) ?? (parseFloat(size_meter) || null), // $4
+        registrySizeMetres,                                                    // $4
         parseFloat(size_sqyard) || null,                                        // $5
         registry_date || null,                                                  // $6
         farmer_name ? farmer_name.trim().toUpperCase() : null,                  // $7
@@ -271,7 +273,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
         seller_name ? seller_name.trim().toUpperCase() : null,                  // $11
         created_entry_date || today,                                            // $12
         bank_amount !== undefined && bank_amount !== '' ? (parseFloat(bank_amount) || 0) : null, // $13
-        parseFloat(registry_payment) || 0,                                      // $14
+        calculatedRegistryPayment,                                             // $14
         notes ? notes.trim() : null,                                            // $15
         body.assigned_admin_id ? parseInt(body.assigned_admin_id) : null,       // $16
         userId,                                                                 // $17
@@ -365,7 +367,7 @@ export const updateRegistry = asyncHandler(async (req, res) => {
   if (customer_name !== undefined) updateData.customer_name = customer_name ? customer_name.trim().toUpperCase() : null;
   if (size_meter !== undefined) updateData.size_meter = parseFloat(size_meter) || null;
   if (size_sqyard !== undefined) updateData.size_sqyard = parseFloat(size_sqyard) || null;
-  if (updateData.size_sqyard) updateData.size_meter = registryMetresFromGaz(updateData.size_sqyard);
+  if (size_sqyard !== undefined) updateData.size_meter = registryMetresFromGaz(updateData.size_sqyard);
   if (registry_date !== undefined) updateData.registry_date = registry_date || null;
   if (farmer_name !== undefined) updateData.farmer_name = farmer_name ? farmer_name.trim().toUpperCase() : null;
   if (plot_id !== undefined) {
@@ -392,7 +394,11 @@ export const updateRegistry = asyncHandler(async (req, res) => {
     updateData.ro_updated_at = new Date();
     updateData.ro_updated_by = req.user.id;
   }
-  if (registry_payment !== undefined) updateData.registry_payment = parseFloat(registry_payment) || 0;
+  if (size_meter !== undefined || size_sqyard !== undefined || circle_rate !== undefined || registry_payment !== undefined) {
+    const metres = updateData.size_meter !== undefined ? updateData.size_meter : existing.size_meter;
+    const rate = updateData.circle_rate !== undefined ? updateData.circle_rate : existing.circle_rate;
+    updateData.registry_payment = registryPaymentFromMetres(metres, rate) ?? 0;
+  }
   if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
   if (req.body.assigned_admin_id !== undefined) updateData.assigned_admin_id = req.body.assigned_admin_id ? parseInt(req.body.assigned_admin_id) : null;
 

@@ -11,7 +11,7 @@ import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { withCompanyPlotBooking } from '../services/quickPlotBooking.service.js';
 import { PLOT_BUYER_MEMBER_JOIN, validatePlotBuyerMember } from '../services/plotMemberLinks.service.js';
-import { registryPaymentFromGaz, registryMetresFromGaz } from '../utils/registryPayment.js';
+import { registryPaymentFromMetres, registryMetresFromGaz } from '../utils/registryPayment.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -1090,7 +1090,8 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
     );
     const validPayments = validPaymentsResult.rows;
     const gaz = plot.unit_type === 'flat' ? Number(plot.plot_size) / 9 : Number(plot.plot_size);
-    const registryPayment = registryPaymentFromGaz(gaz, plot.circle_rate) || 0;
+    const sizeMetres = registryMetresFromGaz(gaz);
+    const registryPayment = registryPaymentFromMetres(sizeMetres, plot.circle_rate) || 0;
     const buyerResult = await client.query(
       `SELECT plot_buyer.full_name AS client_name
          FROM plots p
@@ -1113,7 +1114,7 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
         plot.id,
         String(plot.plot_no || '').trim().toUpperCase(),
         customerName ? String(customerName).trim().toUpperCase() : null,
-        registryMetresFromGaz(gaz),
+        sizeMetres,
         gaz || null,
         parseFloat(plot.circle_rate) || null,
         parseFloat(plot.to_receive_bank) || 0,

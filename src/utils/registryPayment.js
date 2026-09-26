@@ -1,6 +1,6 @@
-/** Registry consideration is Gaz (square yards) multiplied by Circle Rate. */
-export const registryPaymentFromGaz = (gaz, circleRate) => {
-  const area = Number(gaz);
+/** Registry consideration is the displayed Size (m²) multiplied by Circle Rate. */
+export const registryPaymentFromMetres = (metres, circleRate) => {
+  const area = Number(metres);
   const rate = Number(circleRate);
   if (!Number.isFinite(area) || !Number.isFinite(rate) || area <= 0 || rate <= 0) return null;
   return Math.round(area * rate * 100) / 100;

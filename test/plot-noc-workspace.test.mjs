@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { PLOT_BUYER_MEMBER_JOIN } from '../src/services/plotMemberLinks.service.js';
-import { registryPaymentFromGaz } from '../src/utils/registryPayment.js';
+import { registryPaymentFromMetres, registryMetresFromGaz } from '../src/utils/registryPayment.js';
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
 
@@ -56,7 +56,7 @@ test('NOC drafts work before and after migration 152 without changing payments o
     };
     const pool = { query, connect: async () => ({ query, release() {} }), end: async () => {} };
     const source = read('../src/controllers/plot.controller.js').replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
-    const ctx = vm.createContext({ pool, asyncHandler: fn => fn, console, PLOT_BUYER_MEMBER_JOIN, registryPaymentFromGaz });
+    const ctx = vm.createContext({ pool, asyncHandler: fn => fn, console, PLOT_BUYER_MEMBER_JOIN, registryPaymentFromMetres, registryMetresFromGaz });
     vm.runInContext(`${source}\nthis.handlers = { getPlotNocRegistry, createPlotNocRegistry };`, ctx);
     const invoke = async (name, id = 438) => {
       let status = 200, body;
@@ -82,7 +82,8 @@ test('NOC drafts work before and after migration 152 without changing payments o
     failMapping = false;
     const created = await invoke('createPlotNocRegistry');
     assert.equal(created.status, 201);
-    assert.equal(Number(created.body.registry.registry_payment), 1500000);
+    assert.equal(Number(created.body.registry.registry_payment), 1254600);
+    assert.equal(Number((await rows('plot_registries'))[0].size_meter), 83.64);
     assert.equal((await rows('plot_registries'))[0].customer_name, 'CLIENT NAME');
     assert.equal(Number((await rows('plot_registries'))[0].size_sqyard), 100, 'legacy schema defaults to plots');
     assert.deepEqual((await rows('plot_registry_payments')).map(p => p.source_plot_payment_id), [1, 2]);
