@@ -25,20 +25,26 @@ export function decorateRegistryStage(row) {
   if (!(n(row.circle_rate) > 0)) missing.push('Circle rate');
   if (!String(row.farmer_name || row.seller_name || '').trim()) missing.push('Farmer / seller name');
   if (!(n(row.registry_payment) > 0)) missing.push('Registry amount');
-  // Registry Value RO — the rounded amount actually received (cash + bank), kept beside the
-  // exact figures. ro_diff is the round-off: RO total minus what the payments record says.
-  const roCash = row.ro_cash_amount === null || row.ro_cash_amount === undefined ? null : n(row.ro_cash_amount);
-  const roBank = row.ro_bank_amount === null || row.ro_bank_amount === undefined ? null : n(row.ro_bank_amount);
-  const roSet = roCash !== null || roBank !== null;
-  const roTotal = roSet ? Math.round(((roCash || 0) + (roBank || 0)) * 100) / 100 : null;
+  // Registry Value RO — the rounded amount actually received (cash + bank). Manual RO fields win;
+  // otherwise it is the actual receipts. ro_diff is the round-off: RO total minus the exact
+  // consideration (registry_payment = Size m² × Circle Rate).
+  const roManual = (row.ro_cash_amount !== null && row.ro_cash_amount !== undefined)
+    || (row.ro_bank_amount !== null && row.ro_bank_amount !== undefined);
+  const roCash = roManual ? n(row.ro_cash_amount) : n(row.total_paid) - n(row.bank_paid);
+  const roBank = roManual ? n(row.ro_bank_amount) : n(row.bank_paid);
+  const roSet = roManual || n(row.total_paid) > 0;
+  const roTotal = roSet ? Math.round((roCash + roBank) * 100) / 100 : null;
   const deed = n(row.registry_doc_count) > 0;
   const handedOver = n(row.handover_count) > 0;
   const stage = handedOver ? 'green' : deed ? 'blue' : missing.length === 0 ? 'yellow' : 'red';
   return {
     ...row,
     ro_set: roSet,
+    ro_manual: roManual,
+    ro_cash: roSet ? roCash : null,
+    ro_bank: roSet ? roBank : null,
     ro_total: roTotal,
-    ro_diff: roSet ? Math.round((roTotal - n(row.total_paid)) * 100) / 100 : null,
+    ro_diff: roSet ? Math.round((roTotal - n(row.registry_payment)) * 100) / 100 : null,
     noc_generated: Boolean(row.noc_generated_at),
     deed_uploaded: deed,
     handed_over: handedOver,

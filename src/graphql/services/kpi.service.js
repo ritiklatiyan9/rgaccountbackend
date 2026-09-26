@@ -539,10 +539,9 @@ export async function getRegistryPayments(siteId, start, end) {
     [siteId, start, end]
   );
   const r = rows[0];
-  // Registry Value RO — the rounded amounts the office actually received, entered manually per
-  // registry (cash + bank). Reported beside the exact receipts, never instead of them. The
-  // round-off is like-for-like: RO minus the exact amount paid on THOSE SAME registries, using
-  // the registry rows' own total_paid so there is one definition of "exact paid" app-wide.
+  // Registry Value RO — the rounded amounts the office actually received per registry (manual
+  // RO fields, else the actual receipts; see decorateRegistryStage). The round-off is
+  // like-for-like: RO minus the exact consideration (Size m² × Circle Rate) of THOSE registries.
   const { plotRegistryModel } = await import('../../models/PlotRegistry.model.js');
   const registryRows = await plotRegistryModel.findBySiteId(siteId, pool);
   const inWindow = (row) => {
@@ -551,9 +550,9 @@ export async function getRegistryPayments(siteId, start, end) {
     return iso && iso >= String(start).slice(0, 10) && iso < String(end).slice(0, 10);
   };
   const roRows = registryRows.filter((row) => row.ro_set && inWindow(row));
-  const roCash = roundMoney(roRows.reduce((sum, row) => sum + (parseFloat(row.ro_cash_amount) || 0), 0));
-  const roBank = roundMoney(roRows.reduce((sum, row) => sum + (parseFloat(row.ro_bank_amount) || 0), 0));
-  const roExact = roundMoney(roRows.reduce((sum, row) => sum + (parseFloat(row.total_paid) || 0), 0));
+  const roCash = roundMoney(roRows.reduce((sum, row) => sum + (row.ro_cash || 0), 0));
+  const roBank = roundMoney(roRows.reduce((sum, row) => sum + (row.ro_bank || 0), 0));
+  const roExact = roundMoney(roRows.reduce((sum, row) => sum + (parseFloat(row.registry_payment) || 0), 0));
   return {
     roCash,
     roBank,
