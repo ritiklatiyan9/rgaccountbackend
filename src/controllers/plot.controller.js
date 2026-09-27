@@ -1,3 +1,4 @@
+import { registrySizeFromPlot } from '../utils/registrySize.js';
 import { validatePlotApprover } from '../services/plotApproval.service.js';
 import { isRegistryStatusTransitionBlocked } from '../services/registryStatusPolicy.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
@@ -11,7 +12,7 @@ import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { withCompanyPlotBooking } from '../services/quickPlotBooking.service.js';
 import { PLOT_BUYER_MEMBER_JOIN, validatePlotBuyerMember } from '../services/plotMemberLinks.service.js';
-import { registryPaymentFromMetres, registryMetresFromGaz } from '../utils/registryPayment.js';
+import { registryPaymentFromMetres } from '../utils/registryPayment.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -1089,8 +1090,7 @@ export const createPlotNocRegistry = asyncHandler(async (req, res) => {
       [plot.id]
     );
     const validPayments = validPaymentsResult.rows;
-    const gaz = plot.unit_type === 'flat' ? Number(plot.plot_size) / 9 : Number(plot.plot_size);
-    const sizeMetres = registryMetresFromGaz(gaz);
+    const { size_sqyard: gaz, size_meter: sizeMetres } = registrySizeFromPlot(plot);
     const registryPayment = registryPaymentFromMetres(sizeMetres, plot.circle_rate) || 0;
     const buyerResult = await client.query(
       `SELECT plot_buyer.full_name AS client_name

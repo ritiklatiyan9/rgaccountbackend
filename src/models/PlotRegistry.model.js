@@ -1,3 +1,4 @@
+import { normalizeRegistrySize } from '../utils/registrySize.js';
 import MasterModel from './MasterModel.js';
 import { registryCoverageSql, registryCashAllocationSql } from '../utils/registryCashAllocation.js';
 import { decorateRegistryStage } from '../utils/registryStage.js';
@@ -49,6 +50,8 @@ class PlotRegistryModel extends MasterModel {
       : '';
     const query = `
       SELECT pr.*,
+        p.id AS size_source_plot_id, p.plot_size AS source_plot_size,
+        p.plot_size_mtr AS source_plot_size_mtr, p.unit_type AS source_unit_type,
         aa.name AS assigned_admin_name,
         COALESCE(agg.total_paid,    0) AS total_paid,
         COALESCE(agg.bank_paid, 0) AS bank_paid,
@@ -61,7 +64,14 @@ class PlotRegistryModel extends MasterModel {
         p.status AS plot_status,
         p.co_applicant_name, p.co_applicant_relation, p.co_applicant_phone, p.co_applicant_aadhar, p.co_applicant_pan
       FROM plot_registries pr
-      LEFT JOIN plots p ON pr.plot_id = p.id
+      LEFT JOIN LATERAL (
+        SELECT source.* FROM plots source
+        WHERE source.site_id = pr.site_id
+          AND (source.id = pr.plot_id OR (pr.plot_id IS NULL
+            AND UPPER(source.plot_no) = UPPER(pr.plot_no)
+            AND UPPER(COALESCE(source.plot_tag, '')) <> 'OLD'))
+        ORDER BY source.id DESC LIMIT 1
+      ) p ON TRUE
       LEFT JOIN users aa ON aa.id = pr.assigned_admin_id
       LEFT JOIN LATERAL (
         SELECT
@@ -107,7 +117,7 @@ class PlotRegistryModel extends MasterModel {
       ORDER BY pr.plot_no ASC
     `;
     const result = await pool.query(query, [siteId, creatorId]);
-    return result.rows.map(decorateRegistryStage);
+    return result.rows.map(row => decorateRegistryStage(normalizeRegistrySize(row)));
   }
 
   /** Check for duplicate plot_no within a site */
@@ -122,6 +132,8 @@ class PlotRegistryModel extends MasterModel {
     const hasHandovers = await _resolveHandoverTableOnce(pool);
     const query = `
       SELECT pr.*,
+        p.id AS size_source_plot_id, p.plot_size AS source_plot_size,
+        p.plot_size_mtr AS source_plot_size_mtr, p.unit_type AS source_unit_type,
         COALESCE(agg.total_paid,    0) AS total_paid,
         COALESCE(agg.bank_paid, 0) AS bank_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
@@ -131,7 +143,14 @@ class PlotRegistryModel extends MasterModel {
         p.status AS plot_status,
         p.co_applicant_name, p.co_applicant_relation, p.co_applicant_phone, p.co_applicant_aadhar, p.co_applicant_pan
       FROM plot_registries pr
-      LEFT JOIN plots p ON pr.plot_id = p.id
+      LEFT JOIN LATERAL (
+        SELECT source.* FROM plots source
+        WHERE source.site_id = pr.site_id
+          AND (source.id = pr.plot_id OR (pr.plot_id IS NULL
+            AND UPPER(source.plot_no) = UPPER(pr.plot_no)
+            AND UPPER(COALESCE(source.plot_tag, '')) <> 'OLD'))
+        ORDER BY source.id DESC LIMIT 1
+      ) p ON TRUE
       LEFT JOIN LATERAL (
         SELECT
           ${registryCoverageSql}::numeric AS total_paid,
@@ -179,7 +198,7 @@ class PlotRegistryModel extends MasterModel {
       WHERE pr.id = $1
     `;
     const result = await pool.query(query, [id, creatorId]);
-    return decorateRegistryStage(result.rows[0]);
+    return decorateRegistryStage(normalizeRegistrySize(result.rows[0]));
   }
 }
 
