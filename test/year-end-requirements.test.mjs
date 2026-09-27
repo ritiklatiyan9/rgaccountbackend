@@ -17,16 +17,17 @@ test('checklist accepts only known statuses, bounded notes and all 14 requiremen
 });
 
 test('document collection enforces permissions, financial year and registry filename dates',()=>{
-  const report={period:{financial_year:2025},selectedLoanIds:[],loanAccounts:[],bills:[],reports:{registries:{rows:[{id:9,plot_id:3,party:'Party / One',plot_no:'A/1',firm:'Firm A',registry_date:'2025-08-13'}]},land_purchases:{rows:[]}},documents:[
+  const report={site:{id:4,name:'Selected site'},period:{financial_year:2025},selectedLoanIds:[],loanAccounts:[],bills:[],reports:{registries:{rows:[{id:9,plot_id:3,party:'Party / One',plot_no:'A/1',firm:'Firm A',registry_date:'2025-08-13'}]},land_purchases:{rows:[]}},documents:[
     {id:1,plot_id:3,category:'REGISTRY',original_name:'deed.pdf',file_path:'key'},
     {id:2,farmer_id:5,category:'AGREEMENT',original_name:'mou.pdf',file_path:'private'},
     {id:3,entity_type:'balance_sheet_requirement',metadata:{requirement:'registries',financial_year:2024},original_name:'old.pdf'},
-    {id:4,entity_type:'balance_sheet_requirement',metadata:{requirement:'registries',financial_year:2025,party:'Party B'},date:'2025-04-02',original_name:'new.pdf'},
+    {id:4,entity_type:'balance_sheet_requirement',metadata:{requirement:'registries',financial_year:2025,party:'Party B',firm:'Forged owner'},date:'2025-04-02',original_name:'new.pdf'},
   ]};
   const documents=collectYearEndDocuments(report,new Set(['registries']));
   assert.equal(documents.length,2);
   assert.equal(documents[0].download_name,'2025-08-13_Party _ One_Plot-A_1_1.pdf');
-  assert.equal(documents[0].firm,'Firm A');
+  assert.ok(documents.every(document=>document.site_id===4 && document.site_name==='Selected site'));
+  assert.ok(documents.every(document=>!Object.hasOwn(document,'firm')));
   assert.equal(documents[1].download_name,'2025-04-02_Party B_4.pdf');
   assert.ok(!safeFilePart('../outside\n/escape').includes('/'));
   assert.ok(!safeFilePart('../outside\n/escape').includes('..'));
@@ -70,5 +71,6 @@ test('financial schedules use the posting policy, cutoff and no trigger mirror d
   assert.match(YEAR_END_QUERIES.registries,/pp\.date END\) BETWEEN DATE '1900-01-01' AND \$3::date/);
   assert.match(YEAR_END_QUERIES.farmer_balances,/le\.debit-le\.credit/);
   assert.match(YEAR_END_QUERIES.farmer_balances,/le\.bucket<>'cash'/);
-  assert.match(YEAR_END_QUERIES.firm_balances,/source_module,''\)<>'firm_transactions'/);
+  assert.match(YEAR_END_QUERIES.firm_balances,/FROM sites s LEFT JOIN ledger_entries le/);
+  assert.match(YEAR_END_QUERIES.inter_firm,/t.counterparty_site_id<>\$1/);
 });

@@ -10,7 +10,7 @@ export function collectYearEndDocuments(report, allowed) {
     const extension = /\.[a-z0-9]{1,8}$/i.exec(name)?.[0] || ({'application/pdf':'.pdf','image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp'}[document.mime_type] || '');
     const date = owner.date || document.date || 'Undated';
     result.push({ id: `${requirement}-${document.id}`, requirement, title:document.title || name,
-      party:owner.party || document.farmer || '', firm:owner.firm || 'Unassigned firm', date,
+      party:owner.party || document.farmer || '', site_id:report.site.id, site_name:report.site.name, date,
       file_path:document.file_path, file_size:document.file_size,
       download_name:`${safeFilePart(date)}_${safeFilePart(owner.party || document.farmer || name.replace(/\.[^.]+$/,''))}_${safeFilePart(document.id)}${extension}` });
   };
@@ -18,7 +18,7 @@ export function collectYearEndDocuments(report, allowed) {
     if (document.entity_type === 'balance_sheet_requirement') {
       const metadata = document.metadata || {};
       if (Number(metadata.financial_year)===report.period.financial_year && REQUIREMENT_IDS.includes(metadata.requirement)) {
-        add(document,metadata.requirement,{ party:metadata.party,firm:metadata.firm,date:document.date });
+        add(document,metadata.requirement,{ party:metadata.party,date:document.date });
       }
       continue;
     }
@@ -28,7 +28,7 @@ export function collectYearEndDocuments(report, allowed) {
       ? registries.filter(row=>row.plot_id===document.plot_id):[];
     const datedRegistries=plotRegistries.filter(row=>row.registry_date===document.date);
     const registry=directRegistry || (plotRegistries.length===1?plotRegistries[0]:datedRegistries.length===1?datedRegistries[0]:null);
-    if (registry) add(document,'registries',{ party:`${registry.party || 'Party'}_Plot-${registry.plot_no}`,firm:registry.firm,date:registry.registry_date });
+    if (registry) add(document,'registries',{ party:`${registry.party || 'Party'}_Plot-${registry.plot_no}`,date:registry.registry_date });
     else if(plotRegistries.length) {
       // Several deeds/resales can share a plot. Do not invent a registry date
       // or buyer from whichever row happens to sort first.

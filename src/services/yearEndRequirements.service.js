@@ -5,8 +5,8 @@ export const REPORT_PERMISSIONS = Object.freeze({
   registries: ['plot_registry'], remaining_plots: ['plot_payments', 'plot_registry'],
   payment_kyc: ['commissions', 'expenses', 'clients'], land_purchases: ['farmers'],
   farmer_mous: ['farmers'], farmer_balances: ['farmers'], purchase_bills: ['expenses'],
-  loans: ['cashflow'], bank_accounts: ['daybook'], firm_balances: ['firm_transactions'], firm_ledger: ['firm_transactions'],
-  inter_firm: ['firm_transactions'], partner_payments: ['daybook', 'clients', 'cashflow', 'expenses', 'firm_transactions', 'commissions', 'farmers'],
+  loans: ['cashflow'], bank_accounts: ['daybook'], firm_balances: ['daybook'], firm_ledger: ['daybook'],
+  inter_firm: ['daybook', 'firm_transactions', 'cashflow'], partner_payments: ['daybook', 'clients', 'cashflow', 'expenses', 'firm_transactions', 'commissions', 'farmers'],
 });
 
 const invalid = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
@@ -29,7 +29,7 @@ export function validateRequirementUpdate(body) {
 
 // Receipts use their effective source date/mode and posting policy. Registry
 // allocations are coverage only: they must never be added to site cash flow.
-const REGISTRIES = `SELECT pr.id, COALESCE(pr.plot_id,p.id) AS plot_id, COALESCE(NULLIF(pr.firm_name,''), 'Unassigned firm') AS firm,
+const REGISTRIES = `SELECT pr.id, COALESCE(pr.plot_id,p.id) AS plot_id, pr.site_id,
   COALESCE(NULLIF(p.buyer_name,''), pr.customer_name) AS party, pr.plot_no,
   pr.registry_date::text AS registry_date, pr.bank_amount AS bank_due,
   COALESCE(paid.bank_received,0) AS bank_received,
@@ -53,9 +53,9 @@ const REGISTRIES = `SELECT pr.id, COALESCE(pr.plot_id,p.id) AS plot_id, COALESCE
          AND (pp.plot_id=pr.plot_id OR (pr.plot_id IS NULL AND EXISTS (SELECT 1 FROM plots target
            WHERE target.id=pp.plot_id AND target.site_id=pr.site_id AND UPPER(target.plot_no)=UPPER(pr.plot_no))))))
  ) paid ON TRUE WHERE pr.site_id=$1 AND pr.registry_date BETWEEN $2::date AND $3::date
- ORDER BY firm, pr.registry_date, pr.id`;
+ ORDER BY pr.registry_date, pr.id`;
 
-const REMAINING = `SELECT p.id, COALESCE(NULLIF(r.firm_name,''),'Unassigned firm') AS firm, p.plot_no, p.block, p.status,
+const REMAINING = `SELECT p.id, p.site_id, p.plot_no, p.block, p.status,
  CASE WHEN p.unit_type='flat' THEN p.plot_size/9 ELSE p.plot_size END AS size_yards,
  COALESCE(p.plot_size_mtr,ROUND((CASE WHEN p.unit_type='flat' THEN p.plot_size/9 ELSE p.plot_size END)*0.8364,2)) AS size_mtr,
  COALESCE(r.registry_payment, p.registry_area*p.circle_rate) AS registry_value,
@@ -66,7 +66,7 @@ const REMAINING = `SELECT p.id, COALESCE(NULLIF(r.firm_name,''),'Unassigned firm
    AND $2::date IS NOT NULL AND UPPER(TRIM(COALESCE(p.plot_tag,'')))<>'OLD'
    AND NOT EXISTS (SELECT 1 FROM plot_registries pr WHERE pr.site_id=p.site_id
      AND (pr.plot_id=p.id OR (pr.plot_id IS NULL AND UPPER(pr.plot_no)=UPPER(p.plot_no))) AND pr.registry_date <= $3::date)
- ORDER BY firm, p.block, p.plot_no, p.id`;
+ ORDER BY p.block, p.plot_no, p.id`;
 
 const PAYMENT_KYC = `WITH payments AS (
  SELECT le.id, le.entry_date, COALESCE(pcp.mapped_member_id,pc.agent_id) AS member_id,
@@ -103,45 +103,50 @@ const LAND = `SELECT ld.id, f.id AS farmer_id, f.name AS farmer,ld.deal_no,ld.pu
  WHERE ld.site_id=$1 AND ld.purchase_date BETWEEN $2::date AND $3::date AND ld.status<>'cancelled'
  ORDER BY ld.purchase_date,ld.id`;
 
-const BANKS = `SELECT id,COALESCE(NULLIF(account_holder,''),'Unassigned firm') AS firm,name AS bank,
+const BANKS = `SELECT id,site_id,account_holder,name AS bank,
  account_no,ifsc,branch,CASE WHEN is_active THEN 'Active' ELSE 'Inactive' END AS status
- FROM bank_accounts WHERE site_id=$1 AND $2::date IS NOT NULL AND $3::date IS NOT NULL ORDER BY firm,name,id`;
+ FROM bank_accounts WHERE site_id=$1 AND $2::date IS NOT NULL AND $3::date IS NOT NULL ORDER BY name,id`;
 
-// Firm books contain direct transactions and Day Book firm mappings. Exclude
-// trigger mirrors of firm_transactions from the second leg to count each once.
-const FIRM_ENTRIES = `WITH entries AS (
- SELECT ft.id::text AS id,ft.firm_id,ft.date,ft.description AS particular,ft.name AS party,
- CASE WHEN financial_transaction_posts('debit',ft.status,ft.payment_mode,ft.cheque_status) THEN ft.debit ELSE 0 END AS debit,
- CASE WHEN financial_transaction_posts('credit',ft.status,ft.payment_mode,ft.cheque_status) THEN ft.credit ELSE 0 END AS credit,
- ft.is_firm_to_firm_transfer AS inter_firm,ft.transfer_group_id AS reference,ft.purpose
- FROM firm_transactions ft WHERE ft.site_id=$1 AND ft.date BETWEEN DATE '1900-01-01' AND $3::date
- UNION ALL
- SELECT CONCAT('mapped-',c.id,'-',f.id),f.id,c.date,c.particular,
- CASE WHEN f.id=c.from_firm_id THEN dest.name ELSE origin.name END,
- CASE WHEN f.id=c.from_firm_id AND financial_transaction_posts('debit',c.status,c.cash_type,c.cheque_status) THEN COALESCE(c.debit,0)+COALESCE(c.credit,0) ELSE 0 END,
- CASE WHEN f.id=c.to_firm_id AND financial_transaction_posts('credit',c.status,c.cash_type,c.cheque_status) THEN COALESCE(c.debit,0)+COALESCE(c.credit,0) ELSE 0 END,
- c.from_firm_id IS NOT NULL AND c.to_firm_id IS NOT NULL,CONCAT('daybook-',c.id),c.remarks
- FROM cash_flow_entries c JOIN firms f ON f.id IN (c.from_firm_id,c.to_firm_id) AND f.site_id=$1
- LEFT JOIN firms origin ON origin.id=c.from_firm_id LEFT JOIN firms dest ON dest.id=c.to_firm_id
- WHERE c.site_id=$1 AND c.is_firm_transaction=TRUE AND COALESCE(c.source_module,'')<>'firm_transactions'
- AND COALESCE(c.source_module,'') !~ '_person$' AND c.date BETWEEN DATE '1900-01-01' AND $3::date
- )`;
+// The selected site is the accounting entity. Use the same canonical posted
+// ledger as Balance Sheet, including its mirror/cheque/reversal policies.
+// Legacy requirement keys are retained so saved checklist reviews still apply.
+const SITE_BALANCE = `SELECT s.id,s.id AS site_id,s.name AS site_name,
+ COALESCE(SUM(le.credit-le.debit) FILTER (WHERE le.entry_date<$2::date),0) AS opening,
+ COALESCE(SUM(le.credit) FILTER (WHERE le.entry_date >= $2::date),0) AS received,
+ COALESCE(SUM(le.debit) FILTER (WHERE le.entry_date >= $2::date),0) AS paid,
+ COALESCE(SUM(le.credit-le.debit),0) AS balance
+ FROM sites s LEFT JOIN ledger_entries le ON le.site_id=s.id AND le.entry_date <= $3::date
+ WHERE s.id=$1 GROUP BY s.id,s.name`;
+const SITE_LEDGER = `SELECT le.id,le.site_id,le.entry_date::text AS date,le.entity_name AS party,le.particular,
+ le.debit AS paid,le.credit AS received,le.remarks AS purpose,le.raw_mode AS mode,le.source_key AS source,
+ SUM(le.credit-le.debit) OVER (ORDER BY le.entry_date,le.id ROWS UNBOUNDED PRECEDING) AS balance
+ FROM ledger_entries le WHERE le.site_id=$1 AND le.entry_date <= $3::date
+ AND (le.debit<>0 OR le.credit<>0) AND $2::date IS NOT NULL ORDER BY le.entry_date,le.id`;
 
-const FIRMS = `${FIRM_ENTRIES} SELECT f.id,f.name AS firm,
- COALESCE(f.opening_balance,0)+COALESCE(SUM(e.credit-e.debit) FILTER (WHERE e.date<$2::date),0) AS opening,
- COALESCE(SUM(e.credit) FILTER (WHERE e.date >= $2::date),0) AS received,
- COALESCE(SUM(e.debit) FILTER (WHERE e.date >= $2::date),0) AS paid,
- COALESCE(f.opening_balance,0)+COALESCE(SUM(e.credit-e.debit),0) AS balance
- FROM firms f LEFT JOIN entries e ON e.firm_id=f.id WHERE f.site_id=$1 GROUP BY f.id,f.name,f.opening_balance ORDER BY f.name,f.id`;
-const INTER_FIRM = `${FIRM_ENTRIES} SELECT e.id,f.name AS firm,e.date::text AS date,e.party,e.particular,
- e.debit AS paid,e.credit AS received,e.reference,e.purpose,
- SUM(e.credit-e.debit) OVER (PARTITION BY e.firm_id,COALESCE(e.party,'') ORDER BY e.date,e.id ROWS UNBOUNDED PRECEDING) AS balance
- FROM entries e JOIN firms f ON f.id=e.firm_id WHERE e.inter_firm AND (e.debit<>0 OR e.credit<>0) AND $2::date IS NOT NULL
- ORDER BY f.name,e.party,e.date,e.id`;
-const FIRM_LEDGER = `${FIRM_ENTRIES} SELECT e.id,f.name AS firm,e.date::text AS date,e.party,e.particular,
- e.debit AS paid,e.credit AS received,e.purpose,
- COALESCE(f.opening_balance,0)+SUM(e.credit-e.debit) OVER (PARTITION BY e.firm_id ORDER BY e.date,e.id ROWS UNBOUNDED PRECEDING) AS balance
- FROM entries e JOIN firms f ON f.id=e.firm_id WHERE (e.debit<>0 OR e.credit<>0) AND $2::date IS NOT NULL ORDER BY f.name,e.date,e.id`;
+// Count only the selected site's posted leg. Counterparty identity comes from
+// explicit site/firm links, never a free-text name or another site's entries.
+// Transfers between two legacy firm records inside this site are internal.
+const INTER_SITE = `WITH transfers AS (
+ SELECT le.id,le.site_id,le.entry_date,le.particular,le.debit,le.credit,
+ CASE WHEN ft.is_firm_to_firm_transfer THEN COALESCE(ft.transfer_to_site_id,target.site_id)
+      WHEN c.is_firm_transaction AND origin.site_id=$1 THEN destination.site_id
+      WHEN c.is_firm_transaction AND destination.site_id=$1 THEN origin.site_id END AS counterparty_site_id,
+ CASE WHEN ft.is_firm_to_firm_transfer THEN ft.transfer_group_id ELSE CONCAT('daybook-',c.id) END AS reference,
+ COALESCE(ft.purpose,le.remarks) AS purpose
+ FROM ledger_entries le
+ LEFT JOIN firm_transactions ft ON le.source_key='firm_transactions' AND ft.id=le.source_id AND ft.site_id=le.site_id
+ LEFT JOIN firms target ON target.id=ft.transfer_to_firm_id
+ LEFT JOIN cash_flow_entries c ON c.id=NULLIF(SPLIT_PART(le.id,':',1),'')::int AND c.site_id=le.site_id
+   AND COALESCE(c.source_module,'')<>'firm_transactions'
+ LEFT JOIN firms origin ON origin.id=c.from_firm_id
+ LEFT JOIN firms destination ON destination.id=c.to_firm_id
+ WHERE le.site_id=$1 AND le.entry_date <= $3::date AND (le.debit<>0 OR le.credit<>0)
+ ) SELECT t.id,t.site_id,t.entry_date::text AS date,t.counterparty_site_id,peer.name AS party,t.particular,
+ t.debit AS paid,t.credit AS received,t.reference,t.purpose,
+ SUM(t.credit-t.debit) OVER (PARTITION BY t.counterparty_site_id ORDER BY t.entry_date,t.id ROWS UNBOUNDED PRECEDING) AS balance
+ FROM transfers t JOIN sites peer ON peer.id=t.counterparty_site_id
+ WHERE t.counterparty_site_id<>$1 AND $2::date IS NOT NULL
+ ORDER BY peer.name,t.counterparty_site_id,t.entry_date,t.id`;
 
 const LOAN_ACCOUNTS = `SELECT id,COALESCE(NULLIF(ledger_name,''),CONCAT('Ledger ',id)) AS name,ledger_type,opening_balance
  FROM cash_flow_months WHERE site_id=$1 AND ledger_type<>'site' AND $2::date IS NOT NULL AND $3::date IS NOT NULL ORDER BY ledger_name,id`;
@@ -174,7 +179,7 @@ const PARTNERS = `SELECT le.id,le.entry_date::text AS date,m.full_name AS partne
 
 export const YEAR_END_QUERIES = Object.freeze({ registries: REGISTRIES, remaining_plots: REMAINING,
   payment_kyc: PAYMENT_KYC, farmer_balances: FARMER_BALANCES, land_purchases: LAND,
-  bank_accounts: BANKS, firm_balances: FIRMS, firm_ledger: FIRM_LEDGER, inter_firm: INTER_FIRM, loans: LOANS, partner_payments: PARTNERS });
+  bank_accounts: BANKS, firm_balances: SITE_BALANCE, firm_ledger: SITE_LEDGER, inter_firm: INTER_SITE, loans: LOANS, partner_payments: PARTNERS });
 
 const DOCUMENTS = `SELECT d.id,d.title,d.original_name,d.file_path,d.mime_type,d.file_size,d.category,
  d.doc_date::text AS date,COALESCE(d.plot_id,b.plot_id) AS plot_id,d.entity_type,d.entity_id,d.metadata,(to_jsonb(d)->>'farmer_id')::int AS farmer_id,
@@ -202,7 +207,7 @@ export async function getYearEndReport(scope, allowed, database = pool) {
       const result = await db.query(`${sql} LIMIT 20001`, key === 'loans' ? [...params,scope.loanIds] : params);
       reports[key] = result.rows.length > 20000
         ? { rows: [], error: 'This schedule exceeds 20,000 rows. Use the source module to export it in smaller periods.' }
-        : { rows: result.rows };
+        : { rows: result.rows.map(row => ({...row,site_id:site.id,site_name:site.name})) };
     }
     const loanAccounts = allowed.has('loans') ? (await db.query(LOAN_ACCOUNTS,params)).rows : [];
     if (allowed.has('loans') && scope.loanIds.some(id => !loanAccounts.some(account => account.id===id))) invalid('A selected loan ledger does not belong to this site.');

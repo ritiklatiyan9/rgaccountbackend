@@ -23,7 +23,7 @@ async function allowedReports(user) {
   const modules=[...new Set(Object.values(REPORT_PERMISSIONS).flat())];
   const permissions=new Map(await Promise.all(modules.map(async module => [module,await permissionModel.getPermission(user.id,module)])));
   // A year-end balance must include the whole book. Do not label a creator-only
-  // subset as the firm's balance, or expose data from an ungranted module.
+  // subset as the site's balance, or expose data from an ungranted module.
   return new Set(Object.entries(REPORT_PERMISSIONS).filter(([,required]) => required.every(module =>
     permissions.get(module)?.can_read===true && permissions.get(module)?.can_view_all===true)).map(([key]) => key));
 }
@@ -65,7 +65,7 @@ export const uploadYearEndAttachment = asyncHandler(async (req,res) => {
   const date=String(req.body.document_date || '');
   if (date && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0,10)!==date)) return res.status(400).json({message:'Enter a valid document date.'});
   if (requirement==='registries' && !date) return res.status(400).json({message:'Registry copies need a registry date for the filename.'});
-  const metadata={requirement,financial_year:scope.year,party:String(req.body.party || '').trim().slice(0,200),firm:String(req.body.firm || '').trim().slice(0,200)};
+  const metadata={requirement,financial_year:scope.year,party:String(req.body.party || '').trim().slice(0,200),site_id:scope.siteId};
   let key;
   try {
     key=await uploadPlotDoc(req.file.buffer,req.file.originalname,req.file.mimetype,'year_end_documents');
