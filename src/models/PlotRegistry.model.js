@@ -50,6 +50,7 @@ class PlotRegistryModel extends MasterModel {
       : '';
     const query = `
       SELECT pr.*,
+        COALESCE(NULLIF(BTRIM(p.buyer_name), ''), pr.customer_name) AS customer_name,
         p.id AS size_source_plot_id, p.plot_size AS source_plot_size,
         p.plot_size_mtr AS source_plot_size_mtr, p.unit_type AS source_unit_type,
         aa.name AS assigned_admin_name,
@@ -132,6 +133,7 @@ class PlotRegistryModel extends MasterModel {
     const hasHandovers = await _resolveHandoverTableOnce(pool);
     const query = `
       SELECT pr.*,
+        COALESCE(NULLIF(BTRIM(p.buyer_name), ''), pr.customer_name) AS customer_name,
         p.id AS size_source_plot_id, p.plot_size AS source_plot_size,
         p.plot_size_mtr AS source_plot_size_mtr, p.unit_type AS source_unit_type,
         COALESCE(agg.total_paid,    0) AS total_paid,

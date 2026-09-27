@@ -2,13 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { PLOT_BUYER_MEMBER_JOIN } from '../src/services/plotMemberLinks.service.js';
+import { ensurePlotRegistryWorkspace } from '../src/services/plotRegistryWorkspace.service.js';
+import { plotModel } from '../src/models/Plot.model.js';
+import { migrationSql as registeredPlotWorkspaceSql } from '../src/migrations/174_registered_plot_workspace.js';
 import { registryPaymentFromMetres, registryMetresFromGaz } from '../src/utils/registryPayment.js';
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
 
 // In-memory PostgreSQL only. No application credentials or real NOC records.
-test('NOC drafts work before and after migration 152 without changing payments or plot status', { skip: !process.env.PGLITE_MODULE }, async () => {
+test('registry workspaces stay atomic across NOC drafts, status edits, imports and resales', { skip: !process.env.PGLITE_MODULE }, async () => {
   const { PGlite } = await import(process.env.PGLITE_MODULE);
   const db = new PGlite();
   try {
@@ -56,7 +58,7 @@ test('NOC drafts work before and after migration 152 without changing payments o
     };
     const pool = { query, connect: async () => ({ query, release() {} }), end: async () => {} };
     const source = read('../src/controllers/plot.controller.js').replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
-    const ctx = vm.createContext({ pool, asyncHandler: fn => fn, console, PLOT_BUYER_MEMBER_JOIN, registryPaymentFromMetres, registryMetresFromGaz });
+    const ctx = vm.createContext({ pool, asyncHandler: fn => fn, console, ensurePlotRegistryWorkspace, registryPaymentFromMetres, registryMetresFromGaz });
     vm.runInContext(`${source}\nthis.handlers = { getPlotNocRegistry, createPlotNocRegistry };`, ctx);
     const invoke = async (name, id = 438) => {
       let status = 200, body;
@@ -82,9 +84,9 @@ test('NOC drafts work before and after migration 152 without changing payments o
     failMapping = false;
     const created = await invoke('createPlotNocRegistry');
     assert.equal(created.status, 201);
-    assert.equal(Number(created.body.registry.registry_payment), 1254600);
-    assert.equal(Number((await rows('plot_registries'))[0].size_meter), 83.64);
-    assert.equal((await rows('plot_registries'))[0].customer_name, 'CLIENT NAME');
+    assert.equal(Number(created.body.registry.registry_payment), 1254150);
+    assert.equal(Number((await rows('plot_registries'))[0].size_meter), 83.61);
+    assert.equal((await rows('plot_registries'))[0].customer_name, 'TEST BUYER');
     assert.equal(Number((await rows('plot_registries'))[0].size_sqyard), 100, 'legacy schema defaults to plots');
     assert.deepEqual((await rows('plot_registry_payments')).map(p => p.source_plot_payment_id), [1, 2]);
     const repeat = await invoke('createPlotNocRegistry');
@@ -93,6 +95,49 @@ test('NOC drafts work before and after migration 152 without changing payments o
     assert.equal((await rows('plot_registries')).length, 1);
     assert.equal((await invoke('getPlotNocRegistry')).body.registry.id, created.body.registry.id);
     assert.deepEqual({ plots: await rows('plots'), payments: await rows('plot_payments') }, before);
+
+    // A direct status edit (NOC optional) used to persist REGISTRY without a
+    // registry row. Both it and approved edits use the real PlotModel.update.
+    await db.query(`INSERT INTO plots(id,site_id,plot_no,buyer_name,plot_size,plot_size_mtr,circle_rate,status,plot_tag)
+      VALUES (441,5,'A40','Current Buyer',100,83.61,15000,'BOOKED','NEW'),
+             (442,5,'A41','Approved Buyer',100,83.61,15000,'BOOKED','NEW'),
+             (443,5,'A42','Metadata Buyer',100,83.61,15000,'BOOKED','NEW')`);
+    await db.query(`INSERT INTO plot_payments(id,plot_id,site_id,date,amount,payment_type,status)
+      VALUES (6,441,5,'2026-09-01',400,'CASH','approved'), (7,442,5,'2026-09-01',500,'CASH','approved')`);
+    const sourcePayments = await rows('plot_payments');
+    failMapping = true;
+    await assert.rejects(plotModel.update(441, { status: 'REGISTRY' }, pool), /Mapping unavailable/);
+    assert.equal((await rows('plots')).find(p => p.id === 441).status, 'BOOKED', 'status rolls back with failed registry mapping');
+    assert.equal((await rows('plot_registries')).some(r => r.plot_id === 441), false);
+    failMapping = false;
+    await plotModel.update(441, { status: 'REGISTRY' }, pool);
+    const registered = (await rows('plot_registries')).find(r => r.plot_id === 441);
+    assert.equal(registered.customer_name, 'CURRENT BUYER');
+    assert.equal(registered.noc_generated_at, null);
+    assert.equal(registered.noc_approved_at, null);
+    assert.equal((await rows('plots')).find(p => p.id === 441).status, 'REGISTRY');
+    const mappedCount = (await rows('plot_registry_payments')).length;
+    await plotModel.update(441, { status: 'REGISTRY' }, pool);
+    assert.equal((await rows('plot_registries')).filter(r => r.plot_id === 441).length, 1);
+    assert.equal((await rows('plot_registry_payments')).length, mappedCount, 'repeat save does not duplicate receipts');
+
+    // Approval already owns a transaction. The model must not commit it early.
+    const approvalClient = await pool.connect();
+    await approvalClient.query('BEGIN');
+    await plotModel.update(442, { status: 'REGISTRY' }, approvalClient);
+    await approvalClient.query('ROLLBACK');
+    assert.equal((await rows('plots')).find(p => p.id === 442).status, 'BOOKED');
+    assert.equal((await rows('plot_registries')).some(r => r.plot_id === 442), false);
+    await approvalClient.query('BEGIN');
+    await plotModel.update(442, { status: 'REGISTRY' }, approvalClient);
+    await approvalClient.query('COMMIT');
+    assert.equal((await rows('plot_registries')).find(r => r.plot_id === 442).customer_name, 'APPROVED BUYER');
+    await plotModel.update(443, { buyer_name: 'Edited Buyer' }, pool);
+    assert.equal((await rows('plot_registries')).some(r => r.plot_id === 443), false, 'identity edit does not create financial records');
+    await assert.rejects(plotModel.update(439, { status: 'REGISTRY' }, pool), /OLD/);
+    assert.equal((await rows('plots')).find(p => p.id === 439).status, 'BOOKED');
+    assert.deepEqual(await rows('plot_payments'), sourcePayments, 'registry mappings never create or modify source receipts');
+    const plotsBeforeMigration = await rows('plots');
 
     // Run the real migration twice, including its preservation fingerprint.
     const migration = read('../src/migrations/152_site_project_profiles.js').replace(/^import .*;\n/gm, '').split('up().catch')[0];
@@ -106,10 +151,59 @@ test('NOC drafts work before and after migration 152 without changing payments o
       assert.deepEqual(unit_details, {});
       return plot;
     });
-    assert.deepEqual(after, before.plots);
+    assert.deepEqual(after, plotsBeforeMigration);
     await db.query(`UPDATE sites SET project_profile = '{"inventory_type":"mixed"}'::jsonb WHERE id=5`);
     await db.query(`INSERT INTO plots(id,site_id,plot_no,plot_size,status,plot_tag,unit_type) VALUES (440,5,'F1',900,'BOOKED','NEW','flat')`);
     assert.equal((await invoke('createPlotNocRegistry', 440)).status, 201);
     assert.equal(Number((await rows('plot_registries')).find(r => r.plot_id === 440).size_sqyard), 100, 'flat square feet convert to square yards');
+    // The database invariant also covers old APIs, imports and new registered
+    // records without depending on the JavaScript model being deployed.
+    await db.query(`INSERT INTO plots(id,site_id,plot_no,buyer_name,plot_size,plot_size_mtr,circle_rate,status,plot_tag)
+      VALUES (444,5,'A43','Legacy Registered',100,83.61,7200,'REGISTRY','NEW'),
+             (445,5,'A44','Import Buyer',100,83.61,7200,'BOOKED','NEW'),
+             (446,5,'A45','Rollback Buyer',100,83.61,7200,'BOOKED','NEW'),
+             (447,5,'A46','Old Buyer',100,83.61,7200,'REGISTRY','OLD')`);
+    await db.query(`INSERT INTO plot_payments(id,plot_id,site_id,date,amount,payment_type,status)
+      VALUES (8,444,5,'2026-09-01',800,'BANK','approved'),
+             (9,445,5,'2026-09-01',900,'BANK','approved'),
+             (10,446,5,'2026-09-01',1000,'BANK','approved')`);
+    // Existing databases were unique by number, preventing a current resale
+    // booking from getting its own registry while the old history was retained.
+    await db.exec('ALTER TABLE plot_registries ADD CONSTRAINT plot_registries_site_id_plot_no_key UNIQUE(site_id, plot_no)');
+    await db.query("UPDATE plots SET status = 'RESALE', plot_tag = 'OLD' WHERE id = 438");
+    await db.query(`INSERT INTO plots(id,site_id,plot_no,buyer_name,plot_size,plot_size_mtr,circle_rate,status,plot_tag)
+      VALUES (449,5,'A38','Resale Buyer',100,83.61,7200,'REGISTRY','NEW')`);
+    const paymentsBeforeTrigger = await rows('plot_payments');
+    const registriesBeforeTrigger = await rows('plot_registries');
+    await db.exec(registeredPlotWorkspaceSql);
+    assert.equal((await rows('plot_registries')).find(r => r.plot_id === 444).customer_name, 'LEGACY REGISTERED');
+    assert.equal((await rows('plot_registries')).find(r => r.plot_id === 449).customer_name, 'RESALE BUYER');
+    assert.equal((await rows('plot_registries')).filter(r => r.plot_no === 'A38').length, 2, 'each resale booking keeps its own registry');
+    assert.equal((await rows('plot_registries')).some(r => r.plot_id === 447), false, 'old resale history stays excluded');
+    await db.exec(registeredPlotWorkspaceSql); // rerunnable, including backfill
+    assert.equal((await rows('plot_registries')).filter(r => r.plot_id === 444).length, 1);
+    await db.query("UPDATE plots SET status = ' Registry ' WHERE id = 445");
+    const imported = (await rows('plot_registries')).find(r => r.plot_id === 445);
+    assert.equal(imported.customer_name, 'IMPORT BUYER');
+    assert.equal(imported.noc_generated_at, null);
+    assert.equal(imported.noc_approved_at, null);
+    await db.query("UPDATE plots SET status = 'REGISTRY' WHERE id = 445");
+    assert.equal((await rows('plot_registries')).filter(r => r.plot_id === 445).length, 1);
+    assert.equal((await rows('plot_registry_payments')).filter(r => r.source_plot_payment_id === 9).length, 1);
+    await db.query(`INSERT INTO plots(id,site_id,plot_no,buyer_name,status,plot_tag)
+      VALUES (448,5,'A47','New Registered','REGISTRY','NEW')`);
+    assert.equal((await rows('plot_registries')).find(r => r.plot_id === 448).customer_name, 'NEW REGISTERED');
+    await db.exec(`CREATE FUNCTION reject_test_mapping() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.source_plot_payment_id = 10 THEN RAISE EXCEPTION 'Test mapping failure'; END IF; RETURN NEW; END; $$;
+      CREATE TRIGGER reject_test_mapping BEFORE INSERT ON plot_registry_payments FOR EACH ROW EXECUTE FUNCTION reject_test_mapping();`);
+    await assert.rejects(db.query("UPDATE plots SET status = 'REGISTRY' WHERE id = 446"), /Test mapping failure/);
+    assert.equal((await rows('plots')).find(p => p.id === 446).status, 'BOOKED');
+    assert.equal((await rows('plot_registries')).some(r => r.plot_id === 446), false);
+    await db.exec('DROP TRIGGER reject_test_mapping ON plot_registry_payments');
+    await plotModel.update(446, { status: 'REGISTRY' }, pool);
+    assert.equal((await rows('plot_registries')).filter(r => r.plot_id === 446).length, 1, 'DB trigger and application fallback coexist');
+    assert.deepEqual(await rows('plot_payments'), paymentsBeforeTrigger);
+    assert.deepEqual((await rows('plot_registries')).filter(r => registriesBeforeTrigger.some(old => old.id === r.id)), registriesBeforeTrigger,
+      'migration preserves existing registry and NOC data');
   } finally { await db.close(); }
 });

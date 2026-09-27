@@ -172,7 +172,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
     return { status: 400, body: { message: 'A valid plot is required' } };
   }
   const { rows: plotRows } = await db.query(
-    'SELECT site_id, plot_no, plot_tag, plot_size, plot_size_mtr, unit_type FROM plots WHERE id = $1 LIMIT 1',
+    'SELECT site_id, plot_no, buyer_name, plot_tag, plot_size, plot_size_mtr, unit_type FROM plots WHERE id = $1 LIMIT 1',
     [plotIdInt]
   );
   if (!plotRows[0]) return { status: 404, body: { message: 'Plot not found' } };
@@ -264,7 +264,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
       [
         siteIdInt,                                                              // $1
         trimmed,                                                                // $2
-        customer_name ? customer_name.trim().toUpperCase() : null,              // $3
+        String(plotRows[0].buyer_name || customer_name || '').trim().toUpperCase() || null, // $3
         registrySizeMetres,                                                    // $4
         masterSize.size_sqyard,                                                // $5
         registry_date || null,                                                  // $6
@@ -417,13 +417,17 @@ export const updateRegistry = asyncHandler(async (req, res) => {
     });
   }
   if (prospectivePlotId) {
-    const { rows } = await pool.query('SELECT site_id, plot_no, plot_size, plot_size_mtr, unit_type FROM plots WHERE id = $1 LIMIT 1', [prospectivePlotId]);
+    const { rows } = await pool.query('SELECT site_id, plot_no, buyer_name, plot_size, plot_size_mtr, unit_type FROM plots WHERE id = $1 LIMIT 1', [prospectivePlotId]);
     if (!rows[0]) return res.status(404).json({ message: 'Plot not found' });
     if (parseInt(rows[0].site_id) !== parseInt(existing.site_id)) {
       return res.status(400).json({ message: 'Selected plot does not belong to the registry site' });
     }
     if (String(rows[0].plot_no || '').trim().toUpperCase() !== String(prospectivePlotNo || '').trim().toUpperCase()) {
       return res.status(400).json({ message: 'Registry plot number does not match the selected plot' });
+    }
+    // Plot Payments owns the buyer; stale form/member names must not overwrite it.
+    if (String(rows[0].buyer_name || '').trim()) {
+      updateData.customer_name = rows[0].buyer_name.trim().toUpperCase();
     }
     if (size_meter !== undefined || size_sqyard !== undefined || circle_rate !== undefined || registry_payment !== undefined || plotIdentityChanging) {
       Object.assign(updateData, registrySizeFromPlot(rows[0]));

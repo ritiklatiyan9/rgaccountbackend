@@ -39,7 +39,8 @@ test('NOC resolution and NOC data routes authorize Plot Payments users', () => {
 
   assert.match(plotRoutes, /router\.post\('\/:id\/noc-workspace'.*createPlotNocRegistry\)/);
   assert.match(controller, /export const createPlotNocRegistry/);
-  assert.match(controller, /NOC workspace draft created automatically from Plot Payments/);
+  assert.match(controller, /ensurePlotRegistryWorkspace\(client, plotId, req.user.id\)/);
+  assert.match(read('../src/services/plotRegistryWorkspace.service.js'), /NOC workspace draft created automatically from Plot Payments/);
   assert.match(controller, /FOR UPDATE/);
   assert.match(registryController, /SET status = 'REGISTRY', updated_at = NOW\(\)/);
   assert.match(registryController, /payload\.registry_deed_unlocked/);

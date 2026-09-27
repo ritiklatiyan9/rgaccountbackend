@@ -1,3 +1,4 @@
+import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
 import { chequeReadySql } from '../utils/chequeWorkflow.js';
 import MasterModel from './MasterModel.js';
 import { PLOT_BUYER_MEMBER_JOIN, PLOT_BUYER_KYC_JOIN, PLOT_BUYER_KYC_STATUS } from '../services/plotMemberLinks.service.js';
@@ -13,6 +14,30 @@ const PP_COUNTABLE = `
 class PlotModel extends MasterModel {
   constructor() {
     super('plots');
+  }
+
+  // Both direct plot edits and approved edit requests use this model. A saved
+  // REGISTRY status must have a registry workspace before its transaction commits.
+  async update(id, data, db) {
+    if (String(data.status || '').trim().toUpperCase() !== 'REGISTRY') {
+      return super.update(id, data, db);
+    }
+    // pg Pool owns a new transaction; a caller-supplied Client is already
+    // inside the edit-request approval transaction and must not be committed here.
+    const ownsTransaction = typeof db.connect === 'function' && typeof db.release !== 'function';
+    const client = ownsTransaction ? await db.connect() : db;
+    try {
+      if (ownsTransaction) await client.query('BEGIN');
+      const plot = await super.update(id, data, client);
+      if (plot) await ensurePlotRegistryWorkspace(client, id, data.approval_requested_by ?? null);
+      if (ownsTransaction) await client.query('COMMIT');
+      return plot;
+    } catch (error) {
+      if (ownsTransaction) await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      if (ownsTransaction) client.release();
+    }
   }
 
   /** All plots for a site with payment aggregates.
