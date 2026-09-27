@@ -33,7 +33,10 @@ BEGIN
   gaz := CASE WHEN p.plot_size > 0 THEN CASE
     WHEN to_jsonb(p)->>'unit_type' = 'flat' THEN ROUND(p.plot_size / 9, 4)
     ELSE p.plot_size END ELSE NULL END;
-  metres := CASE WHEN p.plot_size_mtr > 0 THEN p.plot_size_mtr ELSE ROUND(gaz * 0.8364, 2) END;
+  metres := CASE WHEN p.plot_size_mtr > 0 THEN p.plot_size_mtr
+    WHEN p.plot_size > 0 THEN ROUND(p.plot_size * CASE
+      WHEN to_jsonb(p)->>'unit_type' = 'flat' THEN 0.09290304 ELSE 0.8364 END, 4)
+    ELSE NULL END;
   actor_id := COALESCE((to_jsonb(p)->>'approval_requested_by')::integer,
     (to_jsonb(p)->>'created_by')::integer);
   INSERT INTO plot_registries(site_id, plot_id, plot_no, customer_name, size_meter,

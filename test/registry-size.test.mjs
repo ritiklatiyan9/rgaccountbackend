@@ -12,7 +12,9 @@ test('master plot values replace stale registry sizes on list and detail respons
 });
 test('creation uses master plot sizes and preserves flat units', () => {
   assert.deepEqual(registrySizeFromPlot({ plot_size: 900, plot_size_mtr: 83.6127, unit_type: 'flat' }), { size_sqyard: 100, size_meter: 83.6127 });
-  assert.deepEqual(registrySizeFromPlot({ plot_size: 130.56 }), { size_sqyard: 130.56, size_meter: 109.2 });
+  assert.deepEqual(registrySizeFromPlot({ plot_size: 900, unit_type: 'flat' }), { size_sqyard: 100, size_meter: 83.6127 });
+  assert.deepEqual(registrySizeFromPlot({ plot_size: 130.56 }), { size_sqyard: 130.56, size_meter: 109.2004 });
+  assert.deepEqual(registrySizeFromPlot({ plot_size: 36.67 }), { size_sqyard: 36.67, size_meter: 30.6708 });
   const legacy = { size_sqyard: 100, size_meter: 83.64 };
   assert.equal(normalizeRegistrySize(legacy), legacy);
   assert.equal(normalizeRegistrySize(null), null);

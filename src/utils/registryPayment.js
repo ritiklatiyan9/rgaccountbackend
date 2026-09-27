@@ -6,8 +6,8 @@ export const registryPaymentFromMetres = (metres, circleRate) => {
   return Math.round(area * rate * 100) / 100;
 };
 
-/** Registry m² is always Gaz × 0.8364 — never copied from the plot's stored metres. */
+/** Fallback for an unlinked registry; linked plots use Plot Payments' stored metres. */
 export const registryMetresFromGaz = (gaz) => {
   const area = Number(gaz);
-  return Number.isFinite(area) && area > 0 ? Math.round(area * 0.8364 * 100) / 100 : null;
+  return Number.isFinite(area) && area > 0 ? Number((area * 0.8364).toFixed(4)) : null;
 };

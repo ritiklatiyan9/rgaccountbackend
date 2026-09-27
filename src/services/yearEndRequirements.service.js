@@ -37,8 +37,8 @@ const REGISTRIES = `SELECT pr.id, COALESCE(pr.plot_id,p.id) AS plot_id, pr.site_
   CASE WHEN pr.bank_amount IS NULL THEN 'Bank amount missing'
     WHEN COALESCE(paid.bank_received,0) >= pr.bank_amount THEN 'Received'
     WHEN COALESCE(paid.bank_received,0) > 0 THEN 'Part received' ELSE 'Not received' END AS receipt_status,
-  COALESCE(p.plot_size_mtr, pr.size_meter, ROUND((CASE WHEN p.unit_type='flat' THEN p.plot_size/9 ELSE p.plot_size END)*0.8364,2)) AS size_mtr,
-  COALESCE(CASE WHEN p.unit_type='flat' THEN p.plot_size/9 ELSE p.plot_size END, pr.size_sqyard) AS size_yards
+  COALESCE(p.plot_size_mtr, ROUND(p.plot_size * CASE WHEN p.unit_type='flat' THEN 0.09290304 ELSE 0.8364 END,4), pr.size_meter) AS size_mtr,
+  COALESCE(CASE WHEN p.unit_type='flat' THEN ROUND(p.plot_size/9,4) ELSE p.plot_size END, pr.size_sqyard) AS size_yards
  FROM plot_registries pr LEFT JOIN LATERAL (SELECT source.* FROM plots source WHERE source.site_id=pr.site_id
    AND (source.id=pr.plot_id OR (pr.plot_id IS NULL AND UPPER(source.plot_no)=UPPER(pr.plot_no)
      AND UPPER(COALESCE(source.plot_tag,''))<>'OLD')) ORDER BY source.id DESC LIMIT 1) p ON TRUE
@@ -56,8 +56,8 @@ const REGISTRIES = `SELECT pr.id, COALESCE(pr.plot_id,p.id) AS plot_id, pr.site_
  ORDER BY pr.registry_date, pr.id`;
 
 const REMAINING = `SELECT p.id, p.site_id, p.plot_no, p.block, p.status,
- CASE WHEN p.unit_type='flat' THEN p.plot_size/9 ELSE p.plot_size END AS size_yards,
- COALESCE(p.plot_size_mtr,ROUND((CASE WHEN p.unit_type='flat' THEN p.plot_size/9 ELSE p.plot_size END)*0.8364,2)) AS size_mtr,
+ CASE WHEN p.unit_type='flat' THEN ROUND(p.plot_size/9,4) ELSE p.plot_size END AS size_yards,
+ COALESCE(p.plot_size_mtr,ROUND(p.plot_size * CASE WHEN p.unit_type='flat' THEN 0.09290304 ELSE 0.8364 END,4)) AS size_mtr,
  COALESCE(r.registry_payment, p.registry_area*p.circle_rate) AS registry_value,
  'Current inventory; verify year-end position'::text AS review
  FROM plots p LEFT JOIN LATERAL (SELECT * FROM plot_registries pr WHERE pr.site_id=p.site_id
