@@ -74,7 +74,8 @@ const KEEP_ALIVE_URLS = [
   'https://diwan-city-backend.onrender.com',
   'https://prithivi-backend.onrender.com',
   'https://makeandman.onrender.com',
-  'https://mountreality-backend.onrender.com'
+  'https://mountreality-backend.onrender.com',
+  'https://new-crm-backend-cropland-4n51.onrender.com'
 ];
 const KEEP_ALIVE_INTERVAL_MS = 12 * 60 * 1000;
 
