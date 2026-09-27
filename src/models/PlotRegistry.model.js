@@ -54,6 +54,7 @@ class PlotRegistryModel extends MasterModel {
         p.id AS size_source_plot_id, p.plot_size AS source_plot_size,
         p.plot_size_mtr AS source_plot_size_mtr, p.unit_type AS source_unit_type,
         aa.name AS assigned_admin_name,
+        noc_farmers.names AS noc_farmer_names,
         COALESCE(agg.total_paid,    0) AS total_paid,
         COALESCE(agg.bank_paid, 0) AS bank_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
@@ -74,6 +75,13 @@ class PlotRegistryModel extends MasterModel {
         ORDER BY source.id DESC LIMIT 1
       ) p ON TRUE
       LEFT JOIN users aa ON aa.id = pr.assigned_admin_id
+      LEFT JOIN LATERAL (
+        SELECT STRING_AGG(NULLIF(BTRIM(m.full_name), ''), ', ' ORDER BY picked.ordinality) AS names
+        FROM UNNEST(CASE WHEN CARDINALITY(pr.noc_farmer_member_ids) > 0
+          THEN pr.noc_farmer_member_ids ELSE ARRAY[pr.noc_farmer_member_id] END)
+          WITH ORDINALITY AS picked(member_id, ordinality)
+        JOIN members m ON m.id = picked.member_id AND m.site_id = pr.site_id
+      ) noc_farmers ON TRUE
       LEFT JOIN LATERAL (
         SELECT
           ${registryCoverageSql}::numeric AS total_paid,
