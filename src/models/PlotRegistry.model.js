@@ -55,7 +55,8 @@ class PlotRegistryModel extends MasterModel {
         p.plot_size_mtr AS source_plot_size_mtr, p.unit_type AS source_unit_type,
         aa.name AS assigned_admin_name,
         noc_farmers.names AS noc_farmer_names,
-        COALESCE(agg.total_paid,    0) AS total_paid,
+        (COALESCE(pr.ro_cash_amount, 0) + COALESCE(agg.bank_paid, 0))::numeric AS total_paid,
+        COALESCE(agg.total_paid, 0) AS receipt_total,
         COALESCE(agg.bank_paid, 0) AS bank_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
@@ -85,9 +86,8 @@ class PlotRegistryModel extends MasterModel {
       LEFT JOIN LATERAL (
         SELECT
           ${registryCoverageSql}::numeric AS total_paid,
-          COALESCE(SUM(prp.amount) FILTER (WHERE ledger_bucket(
-            CASE WHEN prp.source_plot_payment_id IS NULL THEN prp.payment_mode
-              ELSE pp.payment_type END) = 'bank'), 0)::numeric AS bank_paid,
+          COALESCE(SUM(pp.amount) FILTER (WHERE prp.source_plot_payment_id IS NOT NULL
+            AND ledger_bucket(pp.payment_type) = 'bank'), 0)::numeric AS bank_paid,
           COUNT(*) FILTER (WHERE NOT ${registryCashAllocationSql})::int AS payment_count
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
@@ -144,7 +144,8 @@ class PlotRegistryModel extends MasterModel {
         COALESCE(NULLIF(BTRIM(p.buyer_name), ''), pr.customer_name) AS customer_name,
         p.id AS size_source_plot_id, p.plot_size AS source_plot_size,
         p.plot_size_mtr AS source_plot_size_mtr, p.unit_type AS source_unit_type,
-        COALESCE(agg.total_paid,    0) AS total_paid,
+        (COALESCE(pr.ro_cash_amount, 0) + COALESCE(agg.bank_paid, 0))::numeric AS total_paid,
+        COALESCE(agg.total_paid, 0) AS receipt_total,
         COALESCE(agg.bank_paid, 0) AS bank_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
@@ -164,9 +165,8 @@ class PlotRegistryModel extends MasterModel {
       LEFT JOIN LATERAL (
         SELECT
           ${registryCoverageSql}::numeric AS total_paid,
-          COALESCE(SUM(prp.amount) FILTER (WHERE ledger_bucket(
-            CASE WHEN prp.source_plot_payment_id IS NULL THEN prp.payment_mode
-              ELSE pp.payment_type END) = 'bank'), 0)::numeric AS bank_paid,
+          COALESCE(SUM(pp.amount) FILTER (WHERE prp.source_plot_payment_id IS NOT NULL
+            AND ledger_bucket(pp.payment_type) = 'bank'), 0)::numeric AS bank_paid,
           COUNT(*) FILTER (WHERE NOT ${registryCashAllocationSql})::int AS payment_count
         FROM plot_registry_payments prp
         LEFT JOIN plot_payments pp ON pp.id = prp.source_plot_payment_id
@@ -248,7 +248,9 @@ class PlotRegistryPaymentModel extends MasterModel {
   /** All payments for a registry, ordered by date ASC */
   async findByRegistryId(registryId, pool, creatorId = null) {
     const query = `
-      SELECT prp.*, u.name AS created_by_name,
+      SELECT prp.*, pp.amount AS source_amount, pp.payment_type AS source_payment_type,
+             pp.status AS source_payment_status, pp.cheque_status AS source_cheque_status,
+             u.name AS created_by_name,
              aa.name AS assigned_admin_name,
              CASE
                WHEN prp.source_plot_payment_id IS NULL THEN TRUE

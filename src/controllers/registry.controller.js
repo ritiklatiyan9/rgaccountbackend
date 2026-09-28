@@ -384,15 +384,15 @@ export const updateRegistry = asyncHandler(async (req, res) => {
   if (seller_name !== undefined) updateData.seller_name = seller_name ? seller_name.trim().toUpperCase() : null;
   if (created_entry_date !== undefined) updateData.created_entry_date = created_entry_date || null;
   if (bank_amount !== undefined) updateData.bank_amount = bank_amount === '' ? null : (parseFloat(bank_amount) || 0);
-  // Registry Value RO (manual, rounded, cash + bank). Empty string clears; negatives rejected.
-  for (const f of ['ro_cash_amount', 'ro_bank_amount']) {
+  // Only RO Cash is entered manually. RO Bank is derived from linked transactions.
+  for (const f of ['ro_cash_amount']) {
     if (req.body[f] === undefined) continue;
     if (req.body[f] === '' || req.body[f] === null) { updateData[f] = null; continue; }
     const v = Number(req.body[f]);
     if (!Number.isFinite(v) || v < 0) return res.status(400).json({ message: 'Registry Value RO must be zero or more' });
     updateData[f] = Math.round(v * 100) / 100;
   }
-  if (updateData.ro_cash_amount !== undefined || updateData.ro_bank_amount !== undefined) {
+  if (updateData.ro_cash_amount !== undefined) {
     updateData.ro_updated_at = new Date();
     updateData.ro_updated_by = req.user.id;
   }

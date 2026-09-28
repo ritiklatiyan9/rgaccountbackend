@@ -25,14 +25,12 @@ export function decorateRegistryStage(row) {
   if (!(n(row.circle_rate) > 0)) missing.push('Circle rate');
   if (!String(row.farmer_name || row.seller_name || '').trim()) missing.push('Farmer / seller name');
   if (!(n(row.registry_payment) > 0)) missing.push('Registry amount');
-  // Registry Value RO — the rounded amount actually received (cash + bank). Manual RO fields win;
-  // otherwise it is the actual receipts. ro_diff is the round-off: RO total minus the exact
-  // consideration (registry_payment = Size m² × Circle Rate).
-  const roManual = (row.ro_cash_amount !== null && row.ro_cash_amount !== undefined)
-    || (row.ro_bank_amount !== null && row.ro_bank_amount !== undefined);
-  const roCash = roManual ? n(row.ro_cash_amount) : n(row.total_paid) - n(row.bank_paid);
-  const roBank = roManual ? n(row.ro_bank_amount) : n(row.bank_paid);
-  const roSet = roManual || n(row.total_paid) > 0;
+  // RO Cash is manual; RO Bank follows linked bank transactions. Plot Payments
+  // cash and legacy manual bank overrides do not cover registry value.
+  const roManual = row.ro_cash_amount != null && row.ro_cash_amount !== '';
+  const roCash = n(row.ro_cash_amount);
+  const roBank = n(row.bank_paid);
+  const roSet = roManual || roBank !== 0;
   const roTotal = roSet ? Math.round((roCash + roBank) * 100) / 100 : null;
   const deed = n(row.registry_doc_count) > 0;
   const handedOver = n(row.handover_count) > 0;

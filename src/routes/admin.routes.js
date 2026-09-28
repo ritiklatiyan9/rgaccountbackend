@@ -14,6 +14,7 @@ import {
 } from '../controllers/admin.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
+import { listPasswordUsers, updateUserPassword } from '../controllers/userPassword.controller.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const adminReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'admin' });
@@ -24,6 +25,10 @@ router.get('/approvers', authMiddleware, requireRole('admin', 'sub_admin'), admi
 
 // Remaining routes are admin-only management routes.
 router.use(authMiddleware, requireRole('admin'));
+
+// Both admin roles may update any account, including their own or a super admin.
+router.get('/password-users', listPasswordUsers);
+router.post('/password-users/:id/password', bustAdminCache, updateUserPassword);
 
 router.post('/sub-admins', bustAdminCache, createSubAdmin);
 router.get('/sub-admins', adminReadCache, listSubAdmins);

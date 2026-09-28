@@ -539,8 +539,8 @@ export async function getRegistryPayments(siteId, start, end) {
     [siteId, start, end]
   );
   const r = rows[0];
-  // Registry Value RO — the rounded amounts the office actually received per registry (manual
-  // RO fields, else the actual receipts; see decorateRegistryStage). The round-off is
+  // Registry Value RO — manual RO Cash plus linked bank transactions per registry
+  // (see decorateRegistryStage). The round-off is
   // like-for-like: RO minus the exact consideration (Size m² × Circle Rate) of THOSE registries.
   const { plotRegistryModel } = await import('../../models/PlotRegistry.model.js');
   const registryRows = await plotRegistryModel.findBySiteId(siteId, pool);
