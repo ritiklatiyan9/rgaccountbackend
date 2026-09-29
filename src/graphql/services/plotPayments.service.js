@@ -329,7 +329,8 @@ export async function getPlotPaymentDetail(plotId, siteId, creatorId = null) {
 }
 
 /**
- * Fetch recent BANK + CHEQUE plot payments for a site — used by PlotRegistry "Link Payments" dropdown.
+ * Fetch posted plot payments for the Registry "Link Payments" dropdown.
+ * CASH receipts and refunds are included for explicit manual selection.
  * Checks if source_plot_payment_id column exists for mapped_registry_payment_id tracking.
  */
 export async function getRegistryBankChequePayments(siteId, creatorId = null) {
@@ -357,8 +358,8 @@ export async function getRegistryBankChequePayments(siteId, creatorId = null) {
       LEFT JOIN plot_registry_payments prp ON prp.source_plot_payment_id = pp.id
       WHERE pp.site_id = $1
         AND ($2::int IS NULL OR pp.created_by = $2::int)
-        AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE', 'CASH')
-        AND (pp.amount IS NOT NULL AND pp.amount > 0)
+        AND COALESCE(NULLIF(UPPER(TRIM(pp.payment_type)), ''), 'CASH') IN ('BANK', 'CHEQUE', 'CASH')
+        AND pp.amount IS NOT NULL AND pp.amount <> 0
         AND ${PP_POSTS}
       ORDER BY pp.date DESC, pp.created_at DESC
     `
@@ -375,8 +376,8 @@ export async function getRegistryBankChequePayments(siteId, creatorId = null) {
       LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
       WHERE pp.site_id = $1
         AND ($2::int IS NULL OR pp.created_by = $2::int)
-        AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE', 'CASH')
-        AND (pp.amount IS NOT NULL AND pp.amount > 0)
+        AND COALESCE(NULLIF(UPPER(TRIM(pp.payment_type)), ''), 'CASH') IN ('BANK', 'CHEQUE', 'CASH')
+        AND pp.amount IS NOT NULL AND pp.amount <> 0
         AND ${PP_POSTS}
       ORDER BY pp.date DESC, pp.created_at DESC
     `;

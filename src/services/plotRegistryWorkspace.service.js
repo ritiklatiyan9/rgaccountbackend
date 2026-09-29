@@ -4,7 +4,7 @@ import { PLOT_BUYER_MEMBER_JOIN } from './plotMemberLinks.service.js';
 
 /** Ensure the registry backing record in the caller's transaction. Shared by
  * NOC drafts and explicit REGISTRY status saves. It never issues an NOC or
- * invents registry dates; receipts are linked without posting new payments.
+ * invents registry dates; non-cash receipts are linked without posting new payments.
  * The plot lock makes repeat/concurrent saves idempotent. */
 export async function ensurePlotRegistryWorkspace(client, plotId, createdBy = null) {
   // Lock the plot so two simultaneous NOC opens cannot create two drafts.
@@ -47,6 +47,7 @@ export async function ensurePlotRegistryWorkspace(client, plotId, createdBy = nu
        FROM plot_payments pp
       WHERE pp.plot_id = $1
         AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
+        AND COALESCE(NULLIF(UPPER(TRIM(pp.payment_type)), ''), 'CASH') <> 'CASH'
         AND pp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
       ORDER BY pp.date ASC, pp.created_at ASC`,
     [plot.id]
@@ -88,8 +89,8 @@ export async function ensurePlotRegistryWorkspace(client, plotId, createdBy = nu
   );
   const registry = registryResult.rows[0];
 
-  // Preselect already-approved receipts in the NOC. This is only a mapping
-  // to the NOC draft; it never creates a second plot payment.
+  // Preselect approved non-cash receipts in the NOC. Cash receipts require
+  // an explicit link in Registry; this never creates a second plot payment.
   for (const payment of validPayments) {
     await client.query(
       `INSERT INTO plot_registry_payments (

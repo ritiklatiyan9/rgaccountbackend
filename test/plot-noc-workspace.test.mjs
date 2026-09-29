@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { ensurePlotRegistryWorkspace } from '../src/services/plotRegistryWorkspace.service.js';
 import { plotModel } from '../src/models/Plot.model.js';
 import { migrationSql as registeredPlotWorkspaceSql } from '../src/migrations/174_registered_plot_workspace.js';
+import { migrationSql as manualCashLinksSql } from '../src/migrations/178_registry_cash_links_manual.js';
 import { registryPaymentFromMetres, registryMetresFromGaz } from '../src/utils/registryPayment.js';
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -29,13 +30,14 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
         created_at timestamptz DEFAULT now());
       CREATE TABLE plot_registries(id serial PRIMARY KEY, site_id integer, plot_id integer UNIQUE,
         plot_no text, customer_name text, size_meter numeric, size_sqyard numeric, circle_rate numeric,
-        created_entry_date date, bank_amount numeric, registry_payment numeric, notes text,
+        created_entry_date date, registry_date date, bank_amount numeric, registry_payment numeric, notes text,
         assigned_admin_id integer, created_by integer, noc_generated_at timestamptz,
-        noc_approved_at timestamptz, updated_at timestamptz DEFAULT now());
+        noc_approved_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
       CREATE TABLE plot_registry_payments(id serial PRIMARY KEY, registry_id integer, site_id integer,
         payment_date date, amount numeric, payment_mode text, tally_date date, tally_amount numeric,
         notes text, source_plot_payment_id integer UNIQUE, include_in_noc boolean, cheque_no text,
-        cheque_status text, status text, approved_by integer, approved_at timestamptz, created_by integer);
+        cheque_status text, status text, approved_by integer, approved_at timestamptz, created_by integer,
+        created_at timestamptz DEFAULT now());
       INSERT INTO sites VALUES (5, 'Test project');
       INSERT INTO members VALUES (34, 5, 'Client Name');
       INSERT INTO bookings VALUES (1, 5, 438, 34, 'BOOKED');
@@ -84,11 +86,12 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
     failMapping = false;
     const created = await invoke('createPlotNocRegistry');
     assert.equal(created.status, 201);
-    assert.equal(Number(created.body.registry.registry_payment), 1254150);
+    assert.equal(Number(created.body.registry.registry_payment), 1255000);
     assert.equal(Number((await rows('plot_registries'))[0].size_meter), 83.61);
     assert.equal((await rows('plot_registries'))[0].customer_name, 'TEST BUYER');
     assert.equal(Number((await rows('plot_registries'))[0].size_sqyard), 100, 'legacy schema defaults to plots');
-    assert.deepEqual((await rows('plot_registry_payments')).map(p => p.source_plot_payment_id), [1, 2]);
+    assert.deepEqual((await rows('plot_registry_payments')).map(p => p.source_plot_payment_id), [2],
+      'approved cash stays available for a manual link');
     const repeat = await invoke('createPlotNocRegistry');
     assert.equal(repeat.body.created, false);
     assert.equal(repeat.body.registry.id, created.body.registry.id);
@@ -103,7 +106,9 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
              (442,5,'A41','Approved Buyer',100,83.61,15000,'BOOKED','NEW'),
              (443,5,'A42','Metadata Buyer',100,83.61,15000,'BOOKED','NEW')`);
     await db.query(`INSERT INTO plot_payments(id,plot_id,site_id,date,amount,payment_type,status)
-      VALUES (6,441,5,'2026-09-01',400,'CASH','approved'), (7,442,5,'2026-09-01',500,'CASH','approved')`);
+      VALUES (6,441,5,'2026-09-01',400,'CASH','approved'),
+             (7,442,5,'2026-09-01',500,'CASH','approved'),
+             (11,441,5,'2026-09-01',400,'BANK','approved')`);
     const sourcePayments = await rows('plot_payments');
     failMapping = true;
     await assert.rejects(plotModel.update(441, { status: 'REGISTRY' }, pool), /Mapping unavailable/);
@@ -116,6 +121,8 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
     assert.equal(registered.noc_generated_at, null);
     assert.equal(registered.noc_approved_at, null);
     assert.equal((await rows('plots')).find(p => p.id === 441).status, 'REGISTRY');
+    assert.deepEqual((await rows('plot_registry_payments')).filter(r => r.registry_id === registered.id)
+      .map(r => r.source_plot_payment_id), [11], 'direct status edit links bank but leaves cash unlinked');
     const mappedCount = (await rows('plot_registry_payments')).length;
     await plotModel.update(441, { status: 'REGISTRY' }, pool);
     assert.equal((await rows('plot_registries')).filter(r => r.plot_id === 441).length, 1);
@@ -132,6 +139,7 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
     await plotModel.update(442, { status: 'REGISTRY' }, approvalClient);
     await approvalClient.query('COMMIT');
     assert.equal((await rows('plot_registries')).find(r => r.plot_id === 442).customer_name, 'APPROVED BUYER');
+    assert.equal((await rows('plot_registry_payments')).some(r => r.source_plot_payment_id === 7), false);
     await plotModel.update(443, { buyer_name: 'Edited Buyer' }, pool);
     assert.equal((await rows('plot_registries')).some(r => r.plot_id === 443), false, 'identity edit does not create financial records');
     await assert.rejects(plotModel.update(439, { status: 'REGISTRY' }, pool), /OLD/);
@@ -166,7 +174,8 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
     await db.query(`INSERT INTO plot_payments(id,plot_id,site_id,date,amount,payment_type,status)
       VALUES (8,444,5,'2026-09-01',800,'BANK','approved'),
              (9,445,5,'2026-09-01',900,'BANK','approved'),
-             (10,446,5,'2026-09-01',1000,'BANK','approved')`);
+             (10,446,5,'2026-09-01',1000,'BANK','approved'),
+             (12,445,5,'2026-09-01',300,'CASH','approved')`);
     // Existing databases were unique by number, preventing a current resale
     // booking from getting its own registry while the old history was retained.
     await db.exec('ALTER TABLE plot_registries ADD CONSTRAINT plot_registries_site_id_plot_no_key UNIQUE(site_id, plot_no)');
@@ -190,6 +199,8 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
     await db.query("UPDATE plots SET status = 'REGISTRY' WHERE id = 445");
     assert.equal((await rows('plot_registries')).filter(r => r.plot_id === 445).length, 1);
     assert.equal((await rows('plot_registry_payments')).filter(r => r.source_plot_payment_id === 9).length, 1);
+    assert.equal((await rows('plot_registry_payments')).filter(r => r.source_plot_payment_id === 12).length, 0,
+      'database trigger does not link cash on an imported status change');
     await db.query(`INSERT INTO plots(id,site_id,plot_no,buyer_name,status,plot_tag)
       VALUES (448,5,'A47','New Registered','REGISTRY','NEW')`);
     assert.equal((await rows('plot_registries')).find(r => r.plot_id === 448).customer_name, 'NEW REGISTERED');
@@ -202,7 +213,22 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
     await db.exec('DROP TRIGGER reject_test_mapping ON plot_registry_payments');
     await plotModel.update(446, { status: 'REGISTRY' }, pool);
     assert.equal((await rows('plot_registries')).filter(r => r.plot_id === 446).length, 1, 'DB trigger and application fallback coexist');
-    assert.deepEqual(await rows('plot_payments'), paymentsBeforeTrigger);
+
+    // Upgrade a database with historic auto-linked cash. A cash receipt
+    // explicitly linked later must survive the one-time cleanup.
+    await db.query(`INSERT INTO plot_payments(id,plot_id,site_id,date,amount,payment_type,status)
+      VALUES (13,438,5,'2026-09-01',150,'CASH','approved')`);
+    const originalRegistryId = (await rows('plot_registries')).find(r => r.plot_id === 438).id;
+    await db.query(`INSERT INTO plot_registry_payments(registry_id,site_id,source_plot_payment_id,payment_mode,amount,created_at)
+      SELECT id, site_id, 1, 'CASH', 1000, created_at FROM plot_registries WHERE id = $1`, [originalRegistryId]);
+    await db.query(`INSERT INTO plot_registry_payments(registry_id,site_id,source_plot_payment_id,payment_mode,amount,created_at)
+      SELECT id, site_id, 13, 'CASH', 150, created_at + interval '1 second' FROM plot_registries WHERE id = $1`, [originalRegistryId]);
+    await db.exec(manualCashLinksSql);
+    assert.equal((await rows('plot_registry_payments')).some(r => r.source_plot_payment_id === 1), false,
+      'historic automatic cash link is removed');
+    assert.equal((await rows('plot_registry_payments')).some(r => r.source_plot_payment_id === 13), true,
+      'manually linked cash is preserved');
+    assert.deepEqual((await rows('plot_payments')).filter(row => row.id !== 13), paymentsBeforeTrigger);
     assert.deepEqual((await rows('plot_registries')).filter(r => registriesBeforeTrigger.some(old => old.id === r.id)), registriesBeforeTrigger,
       'migration preserves existing registry and NOC data');
   } finally { await db.close(); }

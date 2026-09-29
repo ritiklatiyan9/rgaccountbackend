@@ -3,15 +3,7 @@ import pool from '../config/db.js';
 
 // A registry-status plot always owns a registry workspace, including writes
 // made by old API deployments and imports. No NOC, legal date or new money is issued.
-export const migrationSql = `
--- A resold plot number can have multiple bookings and registry histories.
--- Uniqueness belongs to the booking link; unlinked legacy rows remain unique by number.
-ALTER TABLE plot_registries DROP CONSTRAINT IF EXISTS plot_registries_site_id_plot_no_key;
-CREATE UNIQUE INDEX IF NOT EXISTS plot_registries_booking_unique
-  ON plot_registries(site_id, plot_id) WHERE plot_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS plot_registries_unlinked_number_unique
-  ON plot_registries(site_id, plot_no) WHERE plot_id IS NULL;
-CREATE OR REPLACE FUNCTION ensure_registered_plot_workspace(target_plot_id integer)
+export const workspaceFunctionSql = `CREATE OR REPLACE FUNCTION ensure_registered_plot_workspace(target_plot_id integer)
 RETURNS integer LANGUAGE plpgsql AS $$
 DECLARE
   p plots%ROWTYPE;
@@ -58,10 +50,21 @@ BEGIN
     pp.id, TRUE, pp.cheque_no, pp.cheque_status, pp.status, pp.approved_by, pp.approved_at, actor_id
   FROM plot_payments pp WHERE pp.plot_id = p.id
     AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
+    AND COALESCE(NULLIF(UPPER(TRIM(pp.payment_type)), ''), 'CASH') <> 'CASH'
     AND pp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
     AND NOT EXISTS (SELECT 1 FROM plot_registry_payments linked WHERE linked.source_plot_payment_id = pp.id);
   RETURN registry_id;
-END; $$;
+END; $$;`;
+
+export const migrationSql = `
+-- A resold plot number can have multiple bookings and registry histories.
+-- Uniqueness belongs to the booking link; unlinked legacy rows remain unique by number.
+ALTER TABLE plot_registries DROP CONSTRAINT IF EXISTS plot_registries_site_id_plot_no_key;
+CREATE UNIQUE INDEX IF NOT EXISTS plot_registries_booking_unique
+  ON plot_registries(site_id, plot_id) WHERE plot_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS plot_registries_unlinked_number_unique
+  ON plot_registries(site_id, plot_no) WHERE plot_id IS NULL;
+${workspaceFunctionSql}
 
 CREATE OR REPLACE FUNCTION registered_plot_workspace_trigger()
 RETURNS trigger LANGUAGE plpgsql AS $$

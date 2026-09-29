@@ -304,8 +304,8 @@ class PlotRegistryPaymentModel extends MasterModel {
         LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
         LEFT JOIN plot_registry_payments prp ON prp.source_plot_payment_id = pp.id
         WHERE pp.site_id = $1
-          AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
-          AND (pp.amount IS NOT NULL AND pp.amount > 0)
+          AND COALESCE(NULLIF(UPPER(TRIM(pp.payment_type)), ''), 'CASH') IN ('BANK', 'CHEQUE', 'CASH')
+          AND pp.amount IS NOT NULL AND pp.amount <> 0
           AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
         ORDER BY pp.date DESC, pp.created_at DESC
       `
@@ -327,8 +327,8 @@ class PlotRegistryPaymentModel extends MasterModel {
         LEFT JOIN plots p ON p.id = pp.plot_id
         LEFT JOIN members m ON m.site_id = pp.site_id AND UPPER(m.full_name) = UPPER(COALESCE(p.buyer_name, ''))
         WHERE pp.site_id = $1
-          AND UPPER(COALESCE(pp.payment_type, '')) IN ('BANK', 'CHEQUE')
-          AND (pp.amount IS NOT NULL AND pp.amount > 0)
+          AND COALESCE(NULLIF(UPPER(TRIM(pp.payment_type)), ''), 'CASH') IN ('BANK', 'CHEQUE', 'CASH')
+          AND pp.amount IS NOT NULL AND pp.amount <> 0
           AND financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)
         ORDER BY pp.date DESC, pp.created_at DESC
       `;
