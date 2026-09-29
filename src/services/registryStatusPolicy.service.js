@@ -5,5 +5,6 @@ export const isRegistryStatusTransitionBlocked = async (siteId, currentStatus, n
   if (nextStatus === 'REGISTRY') {
     return settings.isFeatureEnabled(siteId, FEATURE_KEYS.NOC_REQUIRED_FOR_REGISTRY, db);
   }
-  return currentStatus === 'REGISTRY';
+  // Correcting a plot away from Registry leaves its existing NOC history intact.
+  return false;
 };

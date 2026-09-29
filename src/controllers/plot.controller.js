@@ -517,7 +517,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
     if (await isRegistryStatusTransitionBlocked(existing.site_id, currentStatus, nextStatus)) {
       return res.status(409).json({
         code: 'PLOT_REGISTRY_WORKFLOW_REQUIRED',
-        message: 'Registry status is controlled by NOC generation in Plot Payments',
+        message: 'Generate the NOC in Plot Payments to set Registry status',
       });
     }
     updateData.status = nextStatus;

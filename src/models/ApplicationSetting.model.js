@@ -6,6 +6,7 @@ export const FEATURE_KEYS = Object.freeze({
   // switch it off from the Settings control panel to issue NOCs without KYC.
   NOC_KYC_REQUIRED: 'noc_kyc_required',
   NOC_REQUIRED_FOR_REGISTRY: 'noc_required_for_registry',
+  PLOT_STATUS_APPROVAL_REQUIRED: 'plot_status_approval_required',
   TRANSACTION_DATE_EDITABLE: 'transaction_date_editable',
 });
 
@@ -13,6 +14,7 @@ const FEATURE_DEFAULTS = Object.freeze({
   [FEATURE_KEYS.PLOT_REGISTRY_WORKFLOW_UNLOCKED]: false,
   [FEATURE_KEYS.NOC_KYC_REQUIRED]: true,
   [FEATURE_KEYS.NOC_REQUIRED_FOR_REGISTRY]: true,
+  [FEATURE_KEYS.PLOT_STATUS_APPROVAL_REQUIRED]: true,
   [FEATURE_KEYS.TRANSACTION_DATE_EDITABLE]: true,
 });
 

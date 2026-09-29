@@ -21,12 +21,15 @@ test('Registry NOC requirement defaults on and respects a site-specific override
   }
 });
 
-test('Registry transition is allowed only when the site disables its NOC requirement', async () => {
+test('entering Registry follows the NOC setting; leaving Registry remains editable', async () => {
   const required = { isFeatureEnabled: async () => true };
   const optional = { isFeatureEnabled: async () => false };
+  const rejectedRegistryPlot = { status: 'REGISTRY', approval_status: 'rejected' };
   assert.equal(await isRegistryStatusTransitionBlocked(5, 'BOOKED', 'REGISTRY', required), true);
   assert.equal(await isRegistryStatusTransitionBlocked(5, 'BOOKED', 'REGISTRY', optional), false);
-  assert.equal(await isRegistryStatusTransitionBlocked(5, 'REGISTRY', 'BOOKED', optional), true);
+  assert.equal(await isRegistryStatusTransitionBlocked(5, 'REGISTRY', 'BOOKED', optional), false);
+  assert.equal(await isRegistryStatusTransitionBlocked(5, 'REGISTRY', 'COMPANY', required), false);
+  assert.equal(await isRegistryStatusTransitionBlocked(5, rejectedRegistryPlot.status, 'COMPANY', required), false);
   assert.equal(await isRegistryStatusTransitionBlocked(5, 'BOOKED', 'RESALE', required), false);
   assert.equal(await isRegistryStatusTransitionBlocked(5, 'REGISTRY', 'REGISTRY', required), false);
 });

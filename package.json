@@ -146,7 +146,8 @@
     "migrate:registered-plot-workspace": "node src/migrations/174_registered_plot_workspace.js",
     "migrate:year-end-requirements": "node src/migrations/175_balance_sheet_requirements.js",
     "test:year-end-requirements": "node --test test/year-end-requirements.test.mjs",
-    "migrate:registry-plot-area": "node src/migrations/176_registry_plot_area_sync.js"
+    "migrate:registry-plot-area": "node src/migrations/176_registry_plot_area_sync.js",
+    "migrate:plot-status-approval-setting": "node src/migrations/177_plot_status_approval_setting.js"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

@@ -163,7 +163,7 @@ const MODULE_MAP = {
         const currentStatus = String(existing.status || '').trim().toUpperCase();
         const nextStatus = String(data.status || '').trim().toUpperCase();
         if (await isRegistryStatusTransitionBlocked(existing.site_id, currentStatus, nextStatus, undefined, db)) {
-          throw new Error('Registry status is controlled by NOC generation in Plot Payments');
+          throw new Error('Generate the NOC in Plot Payments to set Registry status');
         }
         allowed.status = nextStatus;
       }
@@ -573,7 +573,7 @@ const validateProposedDestinationSite = async ({
     const currentStatus = String(currentRecord?.status || '').trim().toUpperCase();
     const nextStatus = String(proposedData.status || '').trim().toUpperCase();
     if (await isRegistryStatusTransitionBlocked(siteId, currentStatus, nextStatus, undefined, db)) {
-      return 'Registry status is controlled by NOC generation in Plot Payments';
+      return 'Generate the NOC in Plot Payments to set Registry status';
     }
   }
 

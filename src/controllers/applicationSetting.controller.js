@@ -44,12 +44,19 @@ const getAccessibleSiteId = async (req, res, rawSiteId) => {
 };
 
 /** GET /settings/features?site_id=123 */
+const plotStatusApprovalReady = async () => {
+  const { rows } = await pool.query(
+    "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE version = '177_plot_status_approval_setting') AS ready"
+  );
+  return rows[0]?.ready === true;
+};
+
 export const getFeatures = asyncHandler(async (req, res) => {
   const siteId = await getAccessibleSiteId(req, res, req.query.site_id);
   if (!siteId) return;
 
   const features = await applicationSettingModel.getFeatures(siteId);
-  res.json({ site_id: siteId, features });
+  res.json({ site_id: siteId, features, capabilities: { plot_status_approval: await plotStatusApprovalReady() } });
 });
 
 /** PUT /settings/features/plot-registry-workflow-unlocked */
@@ -98,6 +105,10 @@ const FEATURE_MESSAGES = {
     on: 'A NOC is required before a plot can be set to Registry',
     off: 'Plots can now be set to Registry without a NOC on this site',
   },
+  [FEATURE_KEYS.PLOT_STATUS_APPROVAL_REQUIRED]: {
+    on: 'Plot status changes now require approval on this site',
+    off: 'Plot status changes now save directly on this site',
+  },
 };
 
 export const updateFeature = asyncHandler(async (req, res) => {
@@ -111,12 +122,16 @@ export const updateFeature = asyncHandler(async (req, res) => {
   if (typeof req.body.enabled !== 'boolean') {
     return res.status(400).json({ message: 'enabled must be a boolean' });
   }
+  if (key === FEATURE_KEYS.PLOT_STATUS_APPROVAL_REQUIRED && !(await plotStatusApprovalReady())) {
+    return res.status(409).json({ message: 'Plot status approval control is not available until the database update is installed' });
+  }
 
   const enabled = await applicationSettingModel.setFeature(siteId, key, req.body.enabled, req.user.id);
   const copy = FEATURE_MESSAGES[key];
   res.json({
     site_id: siteId,
     features: await applicationSettingModel.getFeatures(siteId),
+    capabilities: { plot_status_approval: await plotStatusApprovalReady() },
     message: copy ? (enabled ? copy.on : copy.off) : 'Setting updated',
   });
 });
