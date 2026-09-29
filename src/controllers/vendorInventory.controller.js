@@ -73,10 +73,17 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
   const vendorId = parseInt(req.query.vendor_id) || null;
   const category = (req.query.category || '').trim();
   const projectId = parseInt(req.query.project_id) || null;
+  const { date_from: dateFrom, date_to: dateTo } = req.query;
+  const validDate = (value) => value == null || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!validDate(dateFrom) || !validDate(dateTo) || (dateFrom && dateTo && dateFrom > dateTo)) {
+    return res.status(400).json({ message: 'Invalid order date range' });
+  }
 
   const conditions = ['o.site_id = $1'];
   const values = [siteId];
   let idx = 2;
+  if (dateFrom) { conditions.push(`o.order_date >= $${idx}::date`); values.push(dateFrom); idx++; }
+  if (dateTo) { conditions.push(`o.order_date <= $${idx}::date`); values.push(dateTo); idx++; }
 
   if (search) {
     conditions.push(

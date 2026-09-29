@@ -165,8 +165,12 @@ export const createPlotCommission = asyncHandler(async (req, res) => {
  * agent; the Land Commission page groups them by subject.
  */
 export const listLandCommissions = asyncHandler(async (req, res) => {
-  const { site_id } = req.query;
+  const { site_id, date_from, date_to } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const validDate = (value) => value == null || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!validDate(date_from) || !validDate(date_to) || (date_from && date_to && date_from > date_to)) {
+    return res.status(400).json({ message: 'Invalid date range' });
+  }
   const { rows } = await pool.query(
     `SELECT pc.id, pc.site_id, pc.farmer_id, pc.land_deal_id, pc.agent_id, pc.total_commission, pc.remarks, pc.status, pc.created_at,
             CASE WHEN pc.farmer_id IS NOT NULL THEN 'land-purchase' ELSE 'land-sale' END AS kind,
@@ -177,10 +181,11 @@ export const listLandCommissions = asyncHandler(async (req, res) => {
             df.name AS land_name, d.deal_date, d.status AS deal_status,
             COALESCE(f.land_size_bigha, d.area_bigha) AS area_bigha, COALESCE(f.land_size_gaz, d.area_gaz) AS area_gaz,
             m.full_name AS agent_name, m.phone AS agent_phone,
-            COALESCE(SUM(pcp.amount), 0) AS total_paid,
-            COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) = 'cash' THEN pcp.amount ELSE 0 END), 0) AS cash_paid,
-            COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) <> 'cash' THEN pcp.amount ELSE 0 END), 0) AS bank_paid,
-            COUNT(pcp.id)::int AS payment_count
+            COALESCE(SUM(pcp.amount), 0) AS lifetime_paid,
+            COALESCE(SUM(pcp.amount) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS total_paid,
+            COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) = 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS cash_paid,
+            COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) <> 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS bank_paid,
+            COUNT(pcp.id) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date))::int AS payment_count
        FROM plot_commissions_v2 pc
        JOIN members m ON m.id = pc.agent_id
        LEFT JOIN farmers f ON f.id = pc.farmer_id
@@ -192,10 +197,10 @@ export const listLandCommissions = asyncHandler(async (req, res) => {
       WHERE pc.site_id = $1 AND pc.plot_id IS NULL
       GROUP BY pc.id, f.id, d.id, df.id, m.id
       ORDER BY pc.created_at DESC`,
-    [parseInt(site_id)],
+    [parseInt(site_id), date_from || null, date_to || null],
   );
   res.json({ commissions: rows.map((r) => ({ ...r, area: areaText(r), total_commission: num(r.total_commission), subject_amount: num(r.subject_amount),
-    total_paid: num(r.total_paid), cash_paid: num(r.cash_paid), bank_paid: num(r.bank_paid), balance: num(r.total_commission) - num(r.total_paid) })) });
+    total_paid: num(r.total_paid), lifetime_paid: num(r.lifetime_paid), cash_paid: num(r.cash_paid), bank_paid: num(r.bank_paid), balance: num(r.total_commission) - num(r.lifetime_paid) })) });
 });
 
 /**
@@ -203,10 +208,14 @@ export const listLandCommissions = asyncHandler(async (req, res) => {
  * List commissions grouped by plot (one row per plot).
  */
 export const listPlotCommissions = asyncHandler(async (req, res) => {
-  const { site_id } = req.query;
+  const { site_id, date_from, date_to } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
+  const validDate = (value) => value == null || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!validDate(date_from) || !validDate(date_to) || (date_from && date_to && date_from > date_to)) {
+    return res.status(400).json({ message: 'Invalid date range' });
+  }
 
-  const commissions = await plotCommissionV2Model.findBySiteIdGroupedByPlot(parseInt(site_id), pool);
+  const commissions = await plotCommissionV2Model.findBySiteIdGroupedByPlot(parseInt(site_id), pool, date_from || null, date_to || null);
   res.json({ commissions });
 });
 
@@ -216,15 +225,21 @@ export const listPlotCommissions = asyncHandler(async (req, res) => {
  * separate from the site register because the portfolio is broker-first and
  * includes plot purchases, land purchases and land sales in one result set.
  */
-export const listAllSitesCommissions = asyncHandler(async (_req, res) => {
+export const listAllSitesCommissions = asyncHandler(async (req, res) => {
+  const { date_from, date_to } = req.query;
+  const validDate = (value) => value == null || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!validDate(date_from) || !validDate(date_to) || (date_from && date_to && date_from > date_to)) {
+    return res.status(400).json({ message: 'Invalid date range' });
+  }
   const { rows } = await pool.query(
     `WITH payment_rollup AS (
        SELECT pcp.plot_commission_id,
-              COALESCE(SUM(pcp.amount), 0) AS total_paid,
-              COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) = 'cash' THEN pcp.amount ELSE 0 END), 0) AS cash_paid,
-              COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) <> 'cash' THEN pcp.amount ELSE 0 END), 0) AS bank_paid,
-              COUNT(*)::int AS payment_count,
-              MAX(pcp.date) AS last_payment_date
+              COALESCE(SUM(pcp.amount), 0) AS lifetime_paid,
+              COALESCE(SUM(pcp.amount) FILTER (WHERE ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)), 0) AS total_paid,
+              COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) = 'cash' AND ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)), 0) AS cash_paid,
+              COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) <> 'cash' AND ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)), 0) AS bank_paid,
+              COUNT(*) FILTER (WHERE ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date))::int AS payment_count,
+              MAX(pcp.date) FILTER (WHERE ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)) AS last_payment_date
          FROM plot_commission_payments pcp
         WHERE ${commissionPaymentPostsSql('pcp')}
           AND pcp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
@@ -249,13 +264,14 @@ export const listAllSitesCommissions = asyncHandler(async (_req, res) => {
                  ELSE d.buyer_name END AS counterparty,
             p.plot_no, p.plot_size, p.status AS plot_status,
             pc.total_commission,
+            COALESCE(pr.lifetime_paid, 0) AS lifetime_paid,
             COALESCE(pr.total_paid, 0) AS total_paid,
             COALESCE(pr.cash_paid, 0) AS cash_paid,
             COALESCE(pr.bank_paid, 0) AS bank_paid,
-            pc.total_commission - COALESCE(pr.total_paid, 0) AS balance,
-            CASE WHEN COALESCE(pr.total_paid, 0) > pc.total_commission + 0.5 THEN 'Over Paid'
-                 WHEN pc.total_commission > 0 AND pc.total_commission - COALESCE(pr.total_paid, 0) <= 0.5 THEN 'Completed'
-                 WHEN COALESCE(pr.total_paid, 0) > 0.5 THEN 'Partial'
+            pc.total_commission - COALESCE(pr.lifetime_paid, 0) AS balance,
+            CASE WHEN COALESCE(pr.lifetime_paid, 0) > pc.total_commission + 0.5 THEN 'Over Paid'
+                 WHEN pc.total_commission > 0 AND pc.total_commission - COALESCE(pr.lifetime_paid, 0) <= 0.5 THEN 'Completed'
+                 WHEN COALESCE(pr.lifetime_paid, 0) > 0.5 THEN 'Partial'
                  ELSE 'Pending' END AS settlement_status,
             COALESCE(pr.payment_count, 0)::int AS payment_count,
             pr.last_payment_date, pc.remarks, pc.created_at
@@ -268,12 +284,14 @@ export const listAllSitesCommissions = asyncHandler(async (_req, res) => {
        LEFT JOIN farmers df ON df.id = d.farmer_id
        LEFT JOIN payment_rollup pr ON pr.plot_commission_id = pc.id
       ORDER BY m.full_name ASC, s.name ASC, pc.created_at DESC, pc.id DESC`,
+    [date_from || null, date_to || null],
   );
 
   res.json({ commissions: rows.map((item) => ({
     ...item,
     total_commission: num(item.total_commission),
     total_paid: num(item.total_paid),
+    lifetime_paid: num(item.lifetime_paid),
     cash_paid: num(item.cash_paid),
     bank_paid: num(item.bank_paid),
     balance: num(item.balance),

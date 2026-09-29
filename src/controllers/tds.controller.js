@@ -35,14 +35,18 @@ const assertMember = async (memberId, siteId) => {
 
 export const listDeductions = asyncHandler(async (req, res) => {
   const siteId = await siteFor(req.user, req.query.site_id);
+  const hasDateRange = Boolean(req.query.date_from || req.query.date_to);
   const year = Number(req.query.financial_year);
-  if (!/^\d{4}$/.test(String(req.query.financial_year)) || year < 1900 || year > 2099) fail(400, 'financial_year must be the starting year.');
+  if (!hasDateRange && (!/^\d{4}$/.test(String(req.query.financial_year)) || year < 1900 || year > 2099)) fail(400, 'financial_year must be the starting year.');
+  const from = hasDateRange ? (req.query.date_from ? validDate(req.query.date_from) : '1900-01-01') : `${year}-04-01`;
+  const to = hasDateRange ? (req.query.date_to ? validDate(req.query.date_to) : '2100-12-31') : `${year + 1}-03-31`;
+  if (!from || !to || from > to) fail(400, 'Choose a valid date range.');
   const { rows } = await pool.query(
     `SELECT id, member_id, deductee_name, pan, aadhaar, section, deduction_date::text AS deduction_date,
        gross_amount, tds_rate, tds_amount, nature, deposit_date::text AS deposit_date, challan_no, notes
      FROM tds_deductions WHERE site_id=$1 AND deduction_date BETWEEN $2::date AND $3::date
      ORDER BY deduction_date DESC, id DESC`,
-    [siteId, `${year}-04-01`, `${year + 1}-03-31`],
+    [siteId, from, to],
   );
   res.json({ deductions: rows.map((row) => ({ ...row, due_date: tdsDueDate(row.deduction_date) })) });
 });

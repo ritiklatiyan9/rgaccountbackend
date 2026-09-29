@@ -200,11 +200,18 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
   const statusFilter = (req.query.status || '').trim();
   const headIdFilter = parseInt(req.query.head_id) || null;
   const projectIdFilter = parseInt(req.query.project_id) || null;
+  const { date_from: dateFrom, date_to: dateTo } = req.query;
+  const validDate = (value) => value == null || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!validDate(dateFrom) || !validDate(dateTo) || (dateFrom && dateTo && dateFrom > dateTo)) {
+    return res.status(400).json({ message: 'Invalid start date range' });
+  }
 
   // Build WHERE conditions
   const conditions = ['vc.site_id = $1'];
   const values = [siteId];
   let paramIdx = 2;
+  if (dateFrom) { conditions.push(`vc.start_date >= $${paramIdx}::date`); values.push(dateFrom); paramIdx++; }
+  if (dateTo) { conditions.push(`vc.start_date <= $${paramIdx}::date`); values.push(dateTo); paramIdx++; }
 
   if (search) {
     conditions.push(

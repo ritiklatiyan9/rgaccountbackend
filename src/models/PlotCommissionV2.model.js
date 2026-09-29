@@ -73,7 +73,7 @@ class PlotCommissionV2Model extends MasterModel {
    * Get one row per plot with latest agent info, all agent names, and aggregated financials.
    * Used for the list page (no OLD/NEW logic — one entry per plot).
    */
-  async findBySiteIdGroupedByPlot(siteId, pool) {
+  async findBySiteIdGroupedByPlot(siteId, pool, dateFrom = null, dateTo = null) {
     const query = `
       WITH commission_agg AS (
         SELECT
@@ -95,12 +95,14 @@ class PlotCommissionV2Model extends MasterModel {
           COALESCE(p.plot_commission, 0) AS plot_commission,
           m.full_name AS agent_name,
           m.phone AS agent_phone,
-          COALESCE(SUM(pcp.amount), 0) AS total_paid,
+          COALESCE(SUM(pcp.amount), 0) AS lifetime_paid,
+          COALESCE(SUM(pcp.amount) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS total_paid,
+          COUNT(pcp.id) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date))::int AS payment_count,
           -- Cash vs bank split via ledger_bucket() — the single mode→book rule
           -- the Day Book and Balance Sheet also use, so "Cash paid to agents"
           -- here equals the Day Book's Plot Commissions figure.
-          COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) = 'cash' THEN pcp.amount ELSE 0 END), 0) AS cash_paid,
-          COALESCE(SUM(CASE WHEN ledger_bucket(pcp.payment_mode) <> 'cash' THEN pcp.amount ELSE 0 END), 0) AS bank_paid,
+          COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) = 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS cash_paid,
+          COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) <> 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS bank_paid,
           (pc.total_commission - COALESCE(SUM(pcp.amount), 0)) AS balance,
           ROW_NUMBER() OVER (PARTITION BY pc.plot_id ORDER BY pc.created_at DESC) AS rn
         FROM plot_commissions_v2 pc
@@ -139,16 +141,18 @@ class PlotCommissionV2Model extends MasterModel {
           -- Use fixed plot commission instead of summing per-agent commissions
           COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) AS total_commission,
           SUM(ca.total_paid) AS total_paid,
+          SUM(ca.lifetime_paid) AS lifetime_paid,
+          SUM(ca.payment_count)::int AS payment_count,
           SUM(ca.cash_paid) AS cash_paid,
           SUM(ca.bank_paid) AS bank_paid,
-          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) - SUM(ca.total_paid) AS balance
+          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) - SUM(ca.lifetime_paid) AS balance
         FROM commission_agg ca
         GROUP BY ca.plot_id, ca.plot_no, ca.plot_size, ca.plot_rate, ca.buyer_name, ca.commission_rate, ca.plot_tag, ca.plot_status, ca.site_id
       )
       SELECT * FROM plot_summary
       ORDER BY plot_no ASC
     `;
-    const result = await pool.query(query, [siteId]);
+    const result = await pool.query(query, [siteId, dateFrom, dateTo]);
     return result.rows;
   }
 
