@@ -3,6 +3,7 @@ import MasterModel from './MasterModel.js';
 import { registryCoverageSql, registryCashAllocationSql } from '../utils/registryCashAllocation.js';
 import { decorateRegistryStage } from '../utils/registryStage.js';
 import { PLOT_BUYER_MEMBER_JOIN } from '../services/plotMemberLinks.service.js';
+import { registryFarmerUsers } from '../utils/registryFarmerUsers.js';
 
 // Memoized existence check for the handover table (migration 068) so the list
 // endpoint keeps working on databases where the migration hasn't run yet —
@@ -332,10 +333,10 @@ class PlotRegistryPaymentModel extends MasterModel {
         ORDER BY pp.date DESC, pp.created_at DESC
       `;
 
-    // 7 parallel reads (was 8). `clientNames` is derived from the
+    // `clientNames` is derived from the
     // `clientUsers` result on the JS side — they're DISTINCT on the same
     // member rows.
-    const [customerNames, farmerNames, paymentModes, plotOptions, clientUsers, firmNames, recentBankPlotPayments] = await Promise.all([
+    const [customerNames, farmerNames, paymentModes, plotOptions, clientUsers, farmerPeople, firmNames, recentBankPlotPayments] = await Promise.all([
       pool.query(`SELECT DISTINCT customer_name AS val FROM plot_registries WHERE site_id = $1 AND customer_name IS NOT NULL AND customer_name != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT farmer_name AS val FROM plot_registries WHERE site_id = $1 AND farmer_name IS NOT NULL AND farmer_name != '' ORDER BY val ASC`, [siteId]),
       pool.query(`SELECT DISTINCT payment_mode AS val FROM plot_registry_payments WHERE site_id = $1 AND payment_mode IS NOT NULL AND payment_mode != '' ORDER BY val ASC`, [siteId]),
@@ -359,6 +360,16 @@ class PlotRegistryPaymentModel extends MasterModel {
         ORDER BY name ASC
       `, [siteId]),
       pool.query(`
+        SELECT f.name, COALESCE(f.phone, '') AS phone
+        FROM farmers f
+        WHERE f.site_id = $1 AND NULLIF(BTRIM(f.name), '') IS NOT NULL
+        UNION ALL
+        SELECT m.full_name AS name, COALESCE(m.phone, '') AS phone
+        FROM members m
+        WHERE m.site_id = $1 AND NULLIF(BTRIM(m.full_name), '') IS NOT NULL
+        ORDER BY name ASC
+      `, [siteId]),
+      pool.query(`
         SELECT DISTINCT f.name AS val
         FROM firms f
         WHERE f.site_id = $1 AND f.name IS NOT NULL AND f.name != ''
@@ -369,6 +380,10 @@ class PlotRegistryPaymentModel extends MasterModel {
     return {
       customerNames: customerNames.rows.map(r => r.val),
       farmerNames: farmerNames.rows.map(r => r.val),
+      // A farmer may exist in both Farmers and Members (sometimes with
+      // multiple phone records). The registry stores a name, so offer one
+      // choice per name while keeping every phone searchable.
+      farmerUsers: registryFarmerUsers(farmerPeople.rows, farmerNames.rows.map(r => r.val)),
       paymentModes: paymentModes.rows.map(r => r.val),
       plotOptions: plotOptions.rows,
       // Derived locally from clientUsers — saves one full DISTINCT scan

@@ -541,7 +541,7 @@ export async function getRegistryPayments(siteId, start, end) {
   const r = rows[0];
   // Registry Value RO — manual RO Cash plus linked bank transactions per registry
   // (see decorateRegistryStage). The round-off is
-  // like-for-like: RO minus the exact consideration (Size m² × Circle Rate) of THOSE registries.
+  // like-for-like: RO minus the rounded registry payment of THOSE registries.
   const { plotRegistryModel } = await import('../../models/PlotRegistry.model.js');
   const registryRows = await plotRegistryModel.findBySiteId(siteId, pool);
   const inWindow = (row) => {
