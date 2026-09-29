@@ -36,6 +36,7 @@ class ConversationModel extends MasterModel {
         const query = `
       SELECT 
         c.id as conversation_id,
+        c.site_id,
         c.created_at as conversation_created_at,
         u.id as user_id,
         u.name as user_name,
@@ -47,8 +48,9 @@ class ConversationModel extends MasterModel {
         (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != $1 AND m.is_read = FALSE) as unread_count
       FROM ${this.tableName} c
       JOIN users u ON (u.id = CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END)
+      JOIN users participant_user ON participant_user.id = $1 AND participant_user.organization_id = u.organization_id
       WHERE (c.user1_id = $1 OR c.user2_id = $1)
-        AND c.site_id = $2
+        AND (c.site_id = $2 OR c.site_id IS NULL)
       ORDER BY COALESCE((SELECT created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY created_at DESC LIMIT 1), c.created_at) DESC
     `;
         const result = await pool.query(query, [userId, siteId]);
@@ -57,8 +59,12 @@ class ConversationModel extends MasterModel {
 
     async findForParticipant(conversationId, userId, siteId, pool) {
         const result = await pool.query(
-            `SELECT * FROM ${this.tableName}
-             WHERE id = $1 AND site_id = $2 AND (user1_id = $3 OR user2_id = $3)
+            `SELECT c.* FROM ${this.tableName} c
+             JOIN users participant_user ON participant_user.id = $3
+             JOIN users other_user ON other_user.id = CASE WHEN c.user1_id = $3 THEN c.user2_id ELSE c.user1_id END
+             WHERE c.id = $1 AND (c.site_id = $2 OR c.site_id IS NULL)
+               AND (c.user1_id = $3 OR c.user2_id = $3)
+               AND participant_user.organization_id = other_user.organization_id
              LIMIT 1`,
             [conversationId, siteId, userId]
         );

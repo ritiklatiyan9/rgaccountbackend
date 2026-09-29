@@ -14,7 +14,7 @@ class MessageModel extends MasterModel {
       FROM ${this.tableName} m
       JOIN users u ON m.sender_id = u.id
       JOIN conversations c ON c.id = m.conversation_id
-      WHERE m.conversation_id = $1 AND c.site_id = $2
+      WHERE m.conversation_id = $1 AND (c.site_id = $2 OR c.site_id IS NULL)
       ORDER BY m.created_at ASC
     `;
         const result = await pool.query(query, [conversationId, siteId]);
@@ -51,7 +51,7 @@ class MessageModel extends MasterModel {
       UPDATE ${this.tableName}
       SET is_read = TRUE
       WHERE conversation_id = $1 AND sender_id != $2 AND is_read = FALSE
-        AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = messages.conversation_id AND c.site_id = $3)
+        AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = messages.conversation_id AND (c.site_id = $3 OR c.site_id IS NULL))
       RETURNING *
     `;
         const result = await pool.query(query, [conversationId, userId, siteId]);

@@ -34,6 +34,26 @@ test('conversation and message reads carry the selected site id', async () => {
 
   assert.deepEqual(calls.map(({ params }) => params), [[11, 5], [91, 5], [91, 11, 5]]);
   calls.forEach(({ sql }) => assert.match(sql, /site_id/));
+  assert.match(calls[0].sql, /c\.site_id IS NULL/);
+  assert.match(calls[0].sql, /participant_user\.organization_id = u\.organization_id/);
+  assert.match(calls[1].sql, /c\.site_id IS NULL/);
+});
+
+test('legacy conversations stay readable only to participants in the same organization', async () => {
+  let captured;
+  const db = {
+    query: async (sql, params) => {
+      captured = { sql, params };
+      return { rows: [{ id: 42, site_id: null }] };
+    },
+  };
+
+  const conversation = await Conversation.findForParticipant(42, 11, 5, db);
+  assert.equal(conversation.site_id, null);
+  assert.deepEqual(captured.params, [42, 5, 11]);
+  assert.match(captured.sql, /c\.site_id IS NULL/);
+  assert.match(captured.sql, /c\.user1_id = \$3 OR c\.user2_id = \$3/);
+  assert.match(captured.sql, /participant_user\.organization_id = other_user\.organization_id/);
 });
 
 test('message writes require both site ownership and conversation participation', async () => {
