@@ -12,7 +12,7 @@ const ACTION_WORDS = new Map([
 ]);
 const MODULE_MAP = {
   auth: 'authentication', admin: 'administration', sites: 'sites', farmers: 'farmers',
-  commissions: 'commissions', 'land-deals': 'land_deals', 'misc-income': 'misc_income', 'plot-commission': 'plot_commission', cashflow: 'cashflow',
+  commissions: 'commissions', 'land-deals': 'land_deals', 'misc-income': 'misc_income', tds: 'tds', 'plot-commission': 'plot_commission', cashflow: 'cashflow',
   firms: 'firm_transactions', plots: 'plot_payments', 'plot-documents': 'plot_payments',
   documents: 'document_search', 'record-documents': 'document_search', forecast: 'finance_forecast',
   expenses: 'expenses', registries: 'plot_registry', members: 'clients', 'member-kyc': 'clients',

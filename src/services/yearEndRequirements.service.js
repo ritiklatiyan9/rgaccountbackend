@@ -6,7 +6,7 @@ export const REPORT_PERMISSIONS = Object.freeze({
   payment_kyc: ['commissions', 'expenses', 'clients'], land_purchases: ['farmers'],
   farmer_mous: ['farmers'], farmer_balances: ['farmers'], purchase_bills: ['expenses'],
   loans: ['cashflow'], bank_accounts: ['daybook'], firm_balances: ['daybook'], firm_ledger: ['daybook'],
-  inter_firm: ['daybook', 'firm_transactions', 'cashflow'], partner_payments: ['daybook', 'clients', 'cashflow', 'expenses', 'firm_transactions', 'commissions', 'farmers'],
+  inter_firm: ['daybook', 'firm_transactions', 'cashflow'], tds_reference: ['tds'], partner_payments: ['daybook', 'clients', 'cashflow', 'expenses', 'firm_transactions', 'commissions', 'farmers'],
 });
 
 const invalid = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
@@ -177,9 +177,14 @@ const PARTNERS = `SELECT le.id,le.entry_date::text AS date,m.full_name AS partne
  OR EXISTS(SELECT 1 FROM land_partner_shares s JOIN farmers f ON f.id=s.farmer_id WHERE f.site_id=$1 AND s.member_id=m.id))
  ORDER BY m.full_name,le.entry_date,le.id`;
 
+const TDS = `SELECT t.id,t.deduction_date::text AS date,t.deductee_name AS party,t.pan,t.aadhaar,t.section,t.nature,
+ t.gross_amount,t.tds_amount,t.deposit_date::text AS deposit_date,t.challan_no,
+ CASE WHEN t.deposit_date IS NULL THEN 'Not deposited' WHEN t.pan IS NULL THEN 'PAN missing' ELSE 'Deposited' END AS review
+ FROM tds_deductions t WHERE t.site_id=$1 AND t.deduction_date BETWEEN $2::date AND $3::date ORDER BY t.deduction_date,t.id`;
+
 export const YEAR_END_QUERIES = Object.freeze({ registries: REGISTRIES, remaining_plots: REMAINING,
   payment_kyc: PAYMENT_KYC, farmer_balances: FARMER_BALANCES, land_purchases: LAND,
-  bank_accounts: BANKS, firm_balances: SITE_BALANCE, firm_ledger: SITE_LEDGER, inter_firm: INTER_SITE, loans: LOANS, partner_payments: PARTNERS });
+  bank_accounts: BANKS, firm_balances: SITE_BALANCE, firm_ledger: SITE_LEDGER, inter_firm: INTER_SITE, loans: LOANS, partner_payments: PARTNERS, tds_reference: TDS });
 
 const DOCUMENTS = `SELECT d.id,d.title,d.original_name,d.file_path,d.mime_type,d.file_size,d.category,
  d.doc_date::text AS date,COALESCE(d.plot_id,b.plot_id) AS plot_id,d.entity_type,d.entity_id,d.metadata,(to_jsonb(d)->>'farmer_id')::int AS farmer_id,
@@ -201,8 +206,10 @@ export async function getYearEndReport(scope, allowed, database = pool) {
     if (!site) throw Object.assign(new Error('Site not found.'), { statusCode: 404 });
     const params = [scope.siteId,scope.from,scope.to];
     const reports = {};
+    const tdsReady = (await db.query("SELECT to_regclass('public.tds_deductions') IS NOT NULL AS ready")).rows[0].ready;
     for (const [key, sql] of Object.entries(YEAR_END_QUERIES)) {
       if (!allowed.has(key)) { reports[key] = { restricted: true, rows: [] }; continue; }
+      if (key === 'tds_reference' && !tdsReady) { reports[key] = { rows: [], error: 'The TDS register is not installed yet. Run the TDS register migration.' }; continue; }
       // One bounded report at a time. Never quietly export a partial schedule.
       const result = await db.query(`${sql} LIMIT 20001`, key === 'loans' ? [...params,scope.loanIds] : params);
       reports[key] = result.rows.length > 20000

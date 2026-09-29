@@ -44,6 +44,8 @@ export const ALL_MODULES = Object.freeze([
     'client_messaging',
     // Miscellaneous income (maintenance, tokens, gifts…) — money module, admin opts sub-admins in.
     'misc_income',
+    // TDS register holds deductee PAN/Aadhaar; record-only, never posts to the ledger.
+    'tds',
 ]);
 
 const READ_ONLY_MODULES = new Set(['home', 'dashboard', 'finance_forecast', 'balance_sheet', 'reports', 'settings', 'audit_logs', 'management_analytics']);
@@ -71,6 +73,7 @@ const RESTRICTED_MODULES = new Set([
     'management_analytics',
     'client_messaging',
     'misc_income',
+    'tds',
 ]);
 
 // Route-heavy screens request the same user/module permission several times
