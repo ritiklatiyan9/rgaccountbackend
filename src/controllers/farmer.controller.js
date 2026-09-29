@@ -181,12 +181,6 @@ export const updateFarmer = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Nothing to update' });
   }
 
-  updateData.status = 'pending';
-  updateData.approved_by = null;
-  updateData.approved_at = null;
-  const finalMode = String(payment_mode !== undefined ? payment_mode : '').trim().toUpperCase();
-  if (payment_mode !== undefined) updateData.cheque_status = finalMode === 'CHEQUE' ? 'PENDING' : null;
-
   const updated = await farmerModel.update(farmerId, updateData, pool);
   if (!updated) {
     return res.status(404).json({ message: 'Farmer not found' });

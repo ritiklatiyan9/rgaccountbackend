@@ -93,15 +93,16 @@ const MODULE_MAP = {
     model: farmerModel,
     fetchOriginal: async (id, db = pool) => farmerModel.findById(parseInt(id), db),
     applyUpdate: async (id, data, editReq, db = pool) => {
-      // farmers table columns: name, phone, address, total_amount, interest_rate, notes, status
       const allowed = {};
-      if (data.name !== undefined) allowed.name = data.name;
-      if (data.phone !== undefined) allowed.phone = data.phone;
-      if (data.address !== undefined) allowed.address = data.address;
-      if (data.total_amount !== undefined) allowed.total_amount = data.total_amount;
-      if (data.interest_rate !== undefined) allowed.interest_rate = data.interest_rate;
-      if (data.notes !== undefined) allowed.notes = data.notes;
-      if (data.status !== undefined) allowed.status = data.status;
+      for (const key of [
+        'name', 'phone', 'address', 'total_amount', 'interest_rate', 'notes', 'status',
+        'member_id', 'payment_mode', 'cash_amount', 'bank_amount', 'bank_name',
+        'bank_account_no', 'bank_reference', 'bank_ifsc', 'land_size_bigha',
+        'land_size_gaz', 'land_size_mtr', 'land_rate', 'rate_unit', 'gaz_per_bigha',
+        'commission_percentage', 'commission_amount',
+      ]) {
+        if (data[key] !== undefined) allowed[key] = data[key];
+      }
       if (Object.keys(allowed).length > 0) {
         return farmerModel.update(parseInt(id), allowed, db);
       }
