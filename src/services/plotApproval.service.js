@@ -1,4 +1,8 @@
 /** Validate delegation against the same active/site scope as the approver picker. */
+export const isDirectPlotStatusChange = (body, currentStatus, approvalRequired) =>
+  !approvalRequired && Object.keys(body || {}).length === 1 && typeof body?.status === 'string'
+  && body.status.trim().toUpperCase() !== String(currentStatus || '').trim().toUpperCase();
+
 export async function validatePlotApprover(db, siteId, value) {
   const id = Number(value);
   if (!Number.isSafeInteger(id) || id <= 0) {

@@ -3,7 +3,27 @@ import test from 'node:test';
 import pool from '../src/config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../src/models/ApplicationSetting.model.js';
 import { migrationSql as originalApprovalSql } from '../src/migrations/158_plot_status_approval.js';
-import { migrationSql as statusSettingSql } from '../src/migrations/177_plot_status_approval_setting.js';
+import { migrationSql as statusSettingSql, up as applyStatusSetting } from '../src/migrations/177_plot_status_approval_setting.js';
+import { isDirectPlotStatusChange } from '../src/services/plotApproval.service.js';
+
+test('approval-off status-only saves do not require an assigned admin', () => {
+  assert.equal(isDirectPlotStatusChange({ status: 'BOOKED' }, 'COMPANY', false), true);
+  assert.equal(isDirectPlotStatusChange({ status: 'BOOKED' }, 'COMPANY', true), false);
+  assert.equal(isDirectPlotStatusChange({ status: 'BOOKED', notes: 'changed' }, 'COMPANY', false), false);
+  assert.equal(isDirectPlotStatusChange({ status: 'COMPANY' }, 'COMPANY', false), false);
+});
+
+test('status setting trigger is reapplied after the original startup migration', async () => {
+  const statements = [];
+  const client = {
+    query: async (sql) => { statements.push(sql); return { rows: [] }; },
+    release: () => {},
+  };
+  await applyStatusSetting({ connect: async () => client });
+  assert.ok(statements.includes(statusSettingSql));
+  assert.ok(statements.some((sql) => sql.includes("INSERT INTO app_schema_migrations") && sql.includes('ON CONFLICT DO NOTHING')));
+  assert.equal(statements.at(-1), 'COMMIT');
+});
 
 test('plot status approval defaults on and reads a site override', async () => {
   const query = pool.query;

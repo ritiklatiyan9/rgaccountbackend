@@ -1,5 +1,6 @@
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
-import { validatePlotApprover } from '../services/plotApproval.service.js';
+import { isDirectPlotStatusChange, validatePlotApprover } from '../services/plotApproval.service.js';
+import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 import { isRegistryStatusTransitionBlocked } from '../services/registryStatusPolicy.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
@@ -453,7 +454,13 @@ export const updatePlot = asyncHandler(async (req, res) => {
   const existing = await plotModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
 
-  await validatePlotApprover(pool, existing.site_id, assigned_admin_id === undefined ? existing.assigned_admin_id : assigned_admin_id);
+  const statusOnly = Object.keys(req.body).length === 1 && typeof status === 'string';
+  const approvalRequired = statusOnly
+    ? await applicationSettingModel.isFeatureEnabled(existing.site_id, FEATURE_KEYS.PLOT_STATUS_APPROVAL_REQUIRED)
+    : true;
+  if (!isDirectPlotStatusChange(req.body, existing.status, approvalRequired)) {
+    await validatePlotApprover(pool, existing.site_id, assigned_admin_id === undefined ? existing.assigned_admin_id : assigned_admin_id);
+  }
   const updateData = await unitMetadataForWrite(req.body, existing.site_id, pool, existing);
   if (req.body.buyer_member_id != null) {
     updateData.buyer_member_id = await validatePlotBuyerMember(existing.site_id, req.body.buyer_member_id, pool);
