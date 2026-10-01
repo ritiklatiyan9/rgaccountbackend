@@ -249,6 +249,7 @@ CREATE TABLE misc_income_entries (
 );
 
 CREATE TABLE plot_commission_payments (
+  tds_amount numeric(14,2) DEFAULT 0 NOT NULL,
   id SERIAL PRIMARY KEY,
   site_id integer,
   plot_commission_id integer,

@@ -4,6 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pool from '../src/config/db.js';
 import { up } from '../src/migrations/163_paired_transaction_transfers.js';
+import { up as upTdsRegister } from '../src/migrations/179_tds_register.js';
+import { up as upCommissionTds } from '../src/migrations/183_commission_tds_workflow.js';
+import { createPlotCommissionPayment } from '../src/controllers/plotCommissionV2.controller.js';
 import { getTransferOptions, previewTransfer, transferEntry } from '../src/controllers/transactionTransfer.controller.js';
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -169,6 +172,19 @@ test('real accounting CHECK constraints and native mirror functions accept balan
         }
       });
     }
+    await t.test('TDS commission uses the real native ledger mirror and blocks allocation transfers', async () => {
+      await db.exec("ALTER TABLE members ADD COLUMN pan_no text, ADD COLUMN aadhar_no text; INSERT INTO plot_commissions_v2(id,site_id,plot_id,agent_id,total_commission,status) VALUES(99,1,1,1,100000,'Pending')");
+      await upTdsRegister(pool); await upCommissionTds(pool);
+      await db.exec(`INSERT INTO application_settings VALUES(1,'tds_workflow','{"plot_commission":{"enabled":true,"rate":2,"section":"194H"}}')`);
+      const result = await invoke(createPlotCommissionPayment, { master_id: 99, date: '2026-10-01', amount: 100000, payment_mode: 'BANK', tds_applicable: true });
+      const id = result.payment.id;
+      await query("UPDATE plot_commission_payments SET status='approved' WHERE id=$1", [id]);
+      const rows = (await query("SELECT debit,credit FROM cash_flow_entries WHERE source_module='plot_commission_payments' AND source_id=$1", [id])).rows;
+      assert.equal(rows.length, 1); assert.equal(Number(rows[0].debit), 98000); assert.equal(Number(rows[0].credit), 0);
+      assert.equal((await query('SELECT status FROM plot_commissions_v2 WHERE id=99')).rows[0].status, 'Completed');
+      assert.equal(Number((await query('SELECT tds_amount FROM tds_deductions WHERE commission_payment_id=$1', [id])).rows[0].tds_amount), 2000);
+      await assert.rejects(invoke(getTransferOptions, { source_type: 'plot_commission', source_id: id }), /TDS cannot be transferred/);
+    });
   } finally {
     pool.query = previous.query;
     pool.connect = previous.connect;

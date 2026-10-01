@@ -1,4 +1,5 @@
 import asyncHandler from '../utils/asyncHandler.js';
+import { getTdsWorkflow, parseTdsWorkflow, TDS_WORKFLOW_KEY, TDS_MODULES } from '../services/tdsWorkflow.service.js';
 import pool from '../config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 import { getConfig as getSmsConfig, saveConfig as saveSmsConfig } from '../services/smsReminder.service.js';
@@ -145,6 +146,19 @@ export const getProjectPaymentSettings = asyncHandler(async (req, res) => {
   if (!siteId) return;
   const stored = await applicationSettingModel.getJson(siteId, PROJECT_PAYMENT_VIEW_KEY, 'combined');
   res.json({ site_id: siteId, default_view: paymentViews.includes(stored) ? stored : 'combined' });
+});
+
+export const getTdsWorkflowSettings = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.query.site_id);
+  if (!siteId) return;
+  res.json({ site_id: siteId, modules: await getTdsWorkflow(siteId), module_labels: TDS_MODULES });
+});
+export const updateTdsWorkflowSettings = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.body.site_id);
+  if (!siteId) return;
+  const modules = parseTdsWorkflow(req.body);
+  await applicationSettingModel.setJson(siteId, TDS_WORKFLOW_KEY, modules, req.user.id);
+  res.json({ site_id: siteId, modules, message: 'TDS workflow saved for this site' });
 });
 export const updateProjectPaymentSettings = asyncHandler(async (req, res) => {
   const siteId = await getAccessibleSiteId(req, res, req.body.site_id);

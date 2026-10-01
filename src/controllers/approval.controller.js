@@ -1019,7 +1019,7 @@ export const approveEntry = asyncHandler(async (req, res) => {
           const sumQuery = `
              SELECT 
                 pcm.id, pcm.total_commission, 
-                COALESCE(SUM(pcp.amount), 0) as total_paid
+                COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) as total_paid
              FROM plot_commissions_v2 pcm
              LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
                AND financial_transaction_posts(CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END, pcp.status, pcp.payment_mode, pcp.cheque_status)
@@ -1125,7 +1125,7 @@ export const rejectEntry = asyncHandler(async (req, res) => {
         const sumQuery = `
           SELECT 
             pcm.id, pcm.total_commission, 
-            COALESCE(SUM(pcp.amount), 0) as total_paid
+            COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
           LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
             AND financial_transaction_posts(CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END, pcp.status, pcp.payment_mode, pcp.cheque_status)
@@ -1303,7 +1303,7 @@ export const bulkApprove = asyncHandler(async (req, res) => {
         const sumQuery = `
           SELECT 
             pcm.id, pcm.total_commission, 
-            COALESCE(SUM(pcp.amount), 0) as total_paid
+            COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
           LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
             AND financial_transaction_posts(CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END, pcp.status, pcp.payment_mode, pcp.cheque_status)
@@ -1405,7 +1405,7 @@ export const bulkReject = asyncHandler(async (req, res) => {
         const sumQuery = `
           SELECT 
             pcm.id, pcm.total_commission, 
-            COALESCE(SUM(pcp.amount), 0) as total_paid
+            COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
           LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
             AND financial_transaction_posts(CASE WHEN pcp.amount < 0 THEN 'credit' ELSE 'debit' END, pcp.status, pcp.payment_mode, pcp.cheque_status)

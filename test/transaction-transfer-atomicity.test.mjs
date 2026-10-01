@@ -14,9 +14,9 @@ let pg;
 const tables={personal_ledger:'cash_flow_entries',expense:'expenses',farmer_payment:'farmer_payments',plot_payment:'plot_payments',plot_commission:'plot_commission_payments',vendor_payment:'vendor_payments',vendor_inventory_payment:'vendor_inventory_payments',misc_income:'misc_income_entries',land_sale:'land_deal_payments',daybook:'day_book'};
 const parentIds={personal_ledger:1,farmer_payment:1,plot_payment:1,plot_commission:1,vendor_payment:1,vendor_inventory_payment:1,misc_income:1,land_sale:1};
 const parentColumns={personal_ledger:'cash_flow_month_id',farmer_payment:'farmer_id',plot_payment:'plot_id',plot_commission:'plot_commission_id',vendor_payment:'commitment_id',vendor_inventory_payment:'order_id',misc_income:'category_id',land_sale:'land_deal_id'};
-const columns=`id serial PRIMARY KEY,site_id int DEFAULT 1,date date,payment_date date,amount numeric, debit numeric,credit numeric,direction text,
+const columns=`id serial PRIMARY KEY,site_id int DEFAULT 1,date date,payment_date date,amount numeric,tds_amount numeric DEFAULT 0, debit numeric,credit numeric,direction text,
   cash_flow_month_id int,farmer_id int,plot_id int,plot_commission_id int,commitment_id int,order_id int,source_vendor_payment_id int,category_id int,land_deal_id int,registry_id int,
-  particular text,remarks text,remark text,note text,notes text,narration text,party_name text,from_entity text,to_entity text,category text,entry_type text,
+  particular text,remarks text,remark text,note text,notes text,narration text,party_name text,from_entity text,to_entity text,category text,sub_category text,entry_type text,
   payment_mode text,payment_type text,payment_from text,by_note text,cash_type text,
   voucher_url text,voucher_urls text[],bill_url text,bill_urls text[],bank_account_id int,bank_name text,bank_account_no text,account_no text,branch text,bank_details text,bank_ifsc text,bank_reference text,transaction_id text,reference_no text,
   status text DEFAULT 'approved',approved_by int,approved_at timestamptz,assigned_admin_id int,created_by int DEFAULT 1,transaction_time time,

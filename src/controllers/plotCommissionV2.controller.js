@@ -1,5 +1,6 @@
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
+import { getTdsWorkflow, commissionTdsModule, parsePaymentTds } from '../services/tdsWorkflow.service.js';
 import { plotCommissionV2Model, plotCommissionPaymentModel } from '../models/PlotCommissionV2.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
@@ -34,6 +35,11 @@ const subjectOf = (body) => {
   return given.length === 1 ? { column: given[0][0], id: given[0][1] } : null;
 };
 const num = (v) => parseFloat(v) || 0;
+const assertCommissionSite = async (user, siteId) => {
+  if (['admin', 'super_admin'].includes(user.role)) return;
+  const { rows } = await pool.query('SELECT 1 FROM user_sites WHERE user_id=$1 AND site_id=$2', [user.id, siteId]);
+  if (!rows.length) throw Object.assign(new Error('Access denied to this site'), { statusCode: 403 });
+};
 const areaText = (row) => (num(row.area_bigha) > 0 ? `${num(row.area_bigha).toLocaleString('en-IN', { maximumFractionDigits: 2 })} bigha`
   : num(row.area_gaz) > 0 ? `${num(row.area_gaz).toLocaleString('en-IN', { maximumFractionDigits: 2 })} gaz` : null);
 
@@ -52,7 +58,7 @@ const isValidLedgerDate = (value) => {
 
 /**
  * Helper: Auto-update commission status based on payment completion.
- * Single round-trip — derives the new status from the live SUM(amount) and
+ * Single round-trip — derives the new status from the live SUM(amount + tds_amount) and
  * UPDATEs in one statement. Previously this was SELECT + UPDATE (2 RTTs).
  */
 const autoUpdateCommissionStatus = async (commissionId, poolConn) => {
@@ -66,7 +72,7 @@ const autoUpdateCommissionStatus = async (commissionId, poolConn) => {
               END,
               updated_at = NOW()
         FROM (
-          SELECT COALESCE(SUM(amount), 0) AS total_paid
+          SELECT COALESCE(SUM(amount + tds_amount), 0) AS total_paid
           FROM plot_commission_payments
           WHERE plot_commission_id = $1
             AND ${commissionPaymentPostsSql()}
@@ -181,8 +187,8 @@ export const listLandCommissions = asyncHandler(async (req, res) => {
             df.name AS land_name, d.deal_date, d.status AS deal_status,
             COALESCE(f.land_size_bigha, d.area_bigha) AS area_bigha, COALESCE(f.land_size_gaz, d.area_gaz) AS area_gaz,
             m.full_name AS agent_name, m.phone AS agent_phone,
-            COALESCE(SUM(pcp.amount), 0) AS lifetime_paid,
-            COALESCE(SUM(pcp.amount) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS total_paid,
+            COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) AS lifetime_paid,
+            COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS total_paid,
             COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) = 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS cash_paid,
             COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) <> 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS bank_paid,
             COUNT(pcp.id) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date))::int AS payment_count
@@ -234,8 +240,8 @@ export const listAllSitesCommissions = asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `WITH payment_rollup AS (
        SELECT pcp.plot_commission_id,
-              COALESCE(SUM(pcp.amount), 0) AS lifetime_paid,
-              COALESCE(SUM(pcp.amount) FILTER (WHERE ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)), 0) AS total_paid,
+              COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) AS lifetime_paid,
+              COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)), 0) AS total_paid,
               COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) = 'cash' AND ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)), 0) AS cash_paid,
               COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) <> 'cash' AND ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)), 0) AS bank_paid,
               COUNT(*) FILTER (WHERE ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date))::int AS payment_count,
@@ -407,8 +413,8 @@ const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
      LEFT JOIN members m ON pc.agent_id = m.id
      LEFT JOIN (
        SELECT plot_commission_id,
-              SUM(amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid,
-              SUM(amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid_all,
+              SUM(amount + tds_amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid,
+              SUM(amount + tds_amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid_all,
               COUNT(*) AS payment_count
        FROM plot_commission_payments
        WHERE ($3::text IS NULL OR created_by = ANY(string_to_array($3::text, ',')::int[]))
@@ -513,7 +519,7 @@ const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     const scopedPayments = paymentsByCommission[c.id] || [];
     const totalPaid = scopedPayments
       .filter(commissionPaymentMovesMoney)
-      .reduce((sum, payment) => sum + (parseFloat(payment.amount) || 0), 0);
+      .reduce((sum, payment) => sum + (num(payment.amount) + num(payment.tds_amount)), 0);
     const totalPaidAll = totalPaid;
     return ({
     commission_id: c.id,
@@ -650,7 +656,7 @@ const landSubjectDetail = async (kind, subjectId, numSiteId, entryVisibility) =>
   }
   const agents = commissions.map((c) => {
     const rows = byCommission[c.id] || [];
-    const paid = rows.filter(commissionPaymentMovesMoney).reduce((sum, p) => sum + num(p.amount), 0);
+    const paid = rows.filter(commissionPaymentMovesMoney).reduce((sum, p) => sum + num(p.amount) + num(p.tds_amount), 0);
     const decided = num(c.total_commission);
     return {
       commission_id: c.id, plot_id: null, agent_id: c.agent_id, agent_name: c.agent_name, agent_phone: c.agent_phone,
@@ -700,7 +706,14 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   }
 
   const masterIdInt = parseInt(master_id);
-  const numericAmount = parseFloat(amount);
+  const { rows: masterRows } = await pool.query('SELECT * FROM plot_commissions_v2 WHERE id=$1', [masterIdInt]);
+  const master = masterRows[0];
+  if (!master) return res.status(404).json({ message: 'Commission master not found' });
+  await assertCommissionSite(req.user, master.site_id);
+  const workflow = await getTdsWorkflow(master.site_id);
+  const tds = parsePaymentTds(req.body, workflow[commissionTdsModule(master)]);
+  const numericAmount = tds.amount;
+  const grossAmount = numericAmount + tds.tds_amount;
   const mode = payment_mode || 'CASH';
   const chequeStatus = mode.toUpperCase() === 'CHEQUE' ? 'PENDING' : null;
   const paymentDate = date || new Date().toISOString().split('T')[0];
@@ -717,7 +730,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   // Credits (negative amounts = money received back) are never capped.
   const capCheck = await pool.query(
     `SELECT pc.total_commission,
-            COALESCE(SUM(p.amount) FILTER (
+            COALESCE(SUM(p.amount + p.tds_amount) FILTER (
               WHERE LOWER(COALESCE(p.status, 'approved')) <> 'rejected'
                 AND (p.cheque_status IS NULL OR p.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
             ), 0) AS committed
@@ -731,7 +744,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   if (!cap) return res.status(404).json({ message: 'Commission master not found' });
   const decided = parseFloat(cap.total_commission) || 0;
   const committed = parseFloat(cap.committed) || 0;
-  if (numericAmount > 0 && committed + numericAmount > decided + 0.005) {
+  if (numericAmount > 0 && committed + grossAmount > decided + 0.005) {
     return res.status(400).json({
       code: 'COMMISSION_EXCEEDED',
       decided, committed, remaining: Math.max(decided - committed, 0),
@@ -743,7 +756,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
     `WITH master AS (
        SELECT id, site_id, total_commission,
               COALESCE((
-                SELECT SUM(amount)
+                SELECT SUM(amount + tds_amount)
                 FROM plot_commission_payments
                 WHERE plot_commission_id = $1
                   AND ${commissionPaymentPostsSql()}
@@ -756,14 +769,14 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
          site_id, plot_commission_id, date, amount, balance_after_payment,
          payment_mode, bank_name, transaction_id, remarks, status,
          voucher_number, voucher_url, assigned_admin_id, created_by,
-         cheque_no, cheque_status, transaction_time
+         cheque_no, cheque_status, transaction_time, tds_amount, tds_rate, tds_mode, tds_section
        )
        SELECT
          m.site_id, $1, $2::date, $3::numeric,
-         (m.total_commission - (m.already_paid + $3::numeric)),
+         (m.total_commission - (m.already_paid + $3::numeric + $15::numeric)),
          $4::text, $5::text, $6::text, $7::text, 'pending',
          $8::text, $9::text, $10::int, $11::int,
-         $12::text, $13::text, $14::time
+         $12::text, $13::text, $14::time, $15::numeric, $16::numeric, $17::text, $18::text
        FROM master m
        RETURNING *
      )
@@ -783,6 +796,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
       cheque_no ? cheque_no.trim() : null,                        // $12
       chequeStatus,                                               // $13
       transactionTimeForWrite(),                                  // $14
+      tds.tds_amount, tds.tds_rate, tds.tds_mode, tds.tds_section,
     ]
   );
 
@@ -896,6 +910,10 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Payment not found' });
   }
 
+  await assertCommissionSite(req.user, existing.site_id);
+  const master = (await pool.query('SELECT * FROM plot_commissions_v2 WHERE id=$1', [existing.plot_commission_id])).rows[0];
+  const workflow = await getTdsWorkflow(existing.site_id);
+  const tds = parsePaymentTds(req.body, workflow[commissionTdsModule(master)], existing);
   const { date, amount, payment_mode, bank_name, transaction_id, cheque_no, remarks, voucher_url, assigned_admin_id } = req.body;
 
   if (date !== undefined && !isValidLedgerDate(date)) {
@@ -911,7 +929,8 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
 
   add('transaction_time', transactionTimeForWrite(existing.transaction_time ?? null));
   if (date !== undefined) add('date', date);
-  if (amount !== undefined) add('amount', parseFloat(amount));
+  add('amount', tds.amount);
+  for (const key of ['tds_amount', 'tds_rate', 'tds_mode', 'tds_section']) add(key, tds[key]);
   if (payment_mode !== undefined) add('payment_mode', payment_mode);
   if (bank_name !== undefined) add('bank_name', bank_name ? bank_name.trim() : null);
   if (transaction_id !== undefined) add('transaction_id', transaction_id ? transaction_id.trim() : null);
@@ -936,10 +955,10 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   if (fields.length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
   // Same cap as create: the edited amount plus every other live row must stay within the decided commission.
-  if (amount !== undefined && parseFloat(amount) > 0) {
+  if (tds.amount > 0) {
     const { rows: capRows } = await pool.query(
       `SELECT pc.total_commission,
-              COALESCE(SUM(p.amount) FILTER (
+              COALESCE(SUM(p.amount + p.tds_amount) FILTER (
                 WHERE p.id <> $2
                   AND LOWER(COALESCE(p.status, 'approved')) <> 'rejected'
                   AND (p.cheque_status IS NULL OR p.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
@@ -952,7 +971,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
     );
     const decided = parseFloat(capRows[0]?.total_commission) || 0;
     const committed = parseFloat(capRows[0]?.committed) || 0;
-    if (committed + parseFloat(amount) > decided + 0.005) {
+    if (committed + tds.amount + tds.tds_amount > decided + 0.005) {
       return res.status(400).json({
         code: 'COMMISSION_EXCEEDED',
         decided, committed, remaining: Math.max(decided - committed, 0),
@@ -1006,6 +1025,8 @@ export const deletePlotCommissionPayment = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Payment not found' });
   }
 
+  await assertCommissionSite(req.user, existing.site_id);
+
   // Atomic DELETE with the commission_id returned in the same round-trip.
   // Previously: SELECT plot_commission_id + DELETE (2 RTTs); now 1 RTT.
   const deleted = await pool.query(
@@ -1037,8 +1058,9 @@ export const bulkDeletePlotCommissionPayments = asyncHandler(async (req, res) =>
     `DELETE FROM plot_commission_payments
       WHERE id = ANY($1::int[])
         AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
+        AND ($3::boolean OR EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id=$4 AND us.site_id=plot_commission_payments.site_id))
       RETURNING plot_commission_id`,
-    [ids, entryVisibility.creatorId]
+    [ids, entryVisibility.creatorId, ['admin', 'super_admin'].includes(req.user.role), req.user.id]
   );
   const commissionIds = [...new Set(deleted.rows.map((r) => r.plot_commission_id))];
   commissionIds.forEach((cid) => autoUpdateCommissionStatus(cid, pool).catch(() => {}));

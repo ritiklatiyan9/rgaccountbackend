@@ -67,7 +67,7 @@ async function reconcilePlotCommission(db, paymentId) {
         END,
         updated_at = NOW()
        FROM (
-         SELECT COALESCE(SUM(amount), 0)::numeric AS total
+         SELECT COALESCE(SUM(amount + tds_amount), 0)::numeric AS total
           FROM plot_commission_payments
           WHERE plot_commission_id = $1
             AND financial_transaction_posts(

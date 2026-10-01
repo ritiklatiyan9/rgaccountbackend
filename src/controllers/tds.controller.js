@@ -1,6 +1,6 @@
 // TDS register — who tax was deducted from, and when it reached the government.
-// Record-only: rows never post to the ledger. The challan deposit is already the
-// "TDS PAYMENT" expense, so nothing here can change a balance.
+// Source deductions are synchronized atomically from commission payments.
+// The register and deposit references never post a second cash/bank movement.
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { TDS_FIELDS, parseDeduction, tdsDueDate, validDate } from '../utils/tds.js';
@@ -21,7 +21,7 @@ const siteFor = async (user, value) => {
 const findRow = async (user, value) => {
   const id = Number(value);
   if (!Number.isSafeInteger(id) || id < 1) fail(400, 'Invalid deduction.');
-  const { rows } = await pool.query('SELECT id, site_id FROM tds_deductions WHERE id=$1', [id]);
+  const { rows } = await pool.query('SELECT id, site_id, commission_payment_id, deposit_date FROM tds_deductions WHERE id=$1', [id]);
   if (!rows[0]) fail(404, 'Deduction not found.');
   await siteFor(user, rows[0].site_id);
   return rows[0];
@@ -42,10 +42,26 @@ export const listDeductions = asyncHandler(async (req, res) => {
   const to = hasDateRange ? (req.query.date_to ? validDate(req.query.date_to) : '2100-12-31') : `${year + 1}-03-31`;
   if (!from || !to || from > to) fail(400, 'Choose a valid date range.');
   const { rows } = await pool.query(
-    `SELECT id, member_id, deductee_name, pan, aadhaar, section, deduction_date::text AS deduction_date,
-       gross_amount, tds_rate, tds_amount, nature, deposit_date::text AS deposit_date, challan_no, notes
-     FROM tds_deductions WHERE site_id=$1 AND deduction_date BETWEEN $2::date AND $3::date
-     ORDER BY deduction_date DESC, id DESC`,
+    `SELECT t.id, t.member_id, t.deductee_name, t.pan, t.aadhaar, t.section,
+       t.deduction_date::text AS deduction_date, t.gross_amount, t.tds_rate, t.tds_amount,
+       (t.gross_amount-t.tds_amount) AS net_amount, t.nature, t.deposit_date::text AS deposit_date,
+       t.challan_no, t.notes, t.commission_payment_id, COALESCE(t.source_module,'manual') AS source_module,
+       COALESCE(t.calculation_mode,'manual') AS calculation_mode,
+       pc.plot_id, pc.farmer_id, pc.land_deal_id, pc.id AS commission_id,
+       COALESCE('Plot '||p.plot_no, 'Land purchase #'||pc.farmer_id, 'Land sale #'||pc.land_deal_id, 'Manual entry') AS source_label,
+       pay.payment_mode, pay.transaction_id, pay.cheque_no, pay.cheque_status,
+       COALESCE(u.name,'—') AS created_by_name, t.created_at, t.updated_at,
+       CASE WHEN t.commission_payment_id IS NULL THEN 'active'
+         WHEN lower(COALESCE(pay.status,'approved'))='rejected' OR COALESCE(pay.cheque_status,'') IN ('BOUNCED','RETURNED') THEN 'reversed'
+         WHEN financial_transaction_posts(CASE WHEN pay.amount<0 THEN 'credit' ELSE 'debit' END,pay.status,pay.payment_mode,pay.cheque_status) THEN 'active'
+         ELSE 'pending' END AS payment_state
+     FROM tds_deductions t
+     LEFT JOIN plot_commission_payments pay ON pay.id=t.commission_payment_id
+     LEFT JOIN plot_commissions_v2 pc ON pc.id=pay.plot_commission_id
+     LEFT JOIN plots p ON p.id=pc.plot_id
+     LEFT JOIN users u ON u.id=t.created_by
+     WHERE t.site_id=$1 AND t.deduction_date BETWEEN $2::date AND $3::date
+     ORDER BY t.deduction_date DESC, t.id DESC`,
     [siteId, from, to],
   );
   res.json({ deductions: rows.map((row) => ({ ...row, due_date: tdsDueDate(row.deduction_date) })) });
@@ -65,19 +81,25 @@ export const createDeduction = asyncHandler(async (req, res) => {
 
 export const updateDeduction = asyncHandler(async (req, res) => {
   const row = await findRow(req.user, req.params.id);
+  if (row.commission_payment_id) fail(409, 'Edit deduction details from the source commission payment.');
+  if (row.deposit_date) fail(409, 'Deposited deductions are locked.');
   const data = parseDeduction(req.body || {});
   await assertMember(data.member_id, row.site_id);
-  await pool.query(
+  const updated = await pool.query(
     `UPDATE tds_deductions SET ${TDS_FIELDS.map((key, i) => `${key}=$${i + 2}`).join(', ')},
-       updated_by=$${TDS_FIELDS.length + 2}, updated_at=NOW() WHERE id=$1`,
+       updated_by=$${TDS_FIELDS.length + 2}, updated_at=NOW() WHERE id=$1 AND deposit_date IS NULL AND commission_payment_id IS NULL RETURNING id`,
     [row.id, ...TDS_FIELDS.map((key) => data[key]), req.user.id],
   );
+  if (!updated.rows.length) fail(409, 'Deduction is locked or was changed. Reload the register.');
   res.json({ id: row.id, message: 'Deduction updated' });
 });
 
 export const deleteDeduction = asyncHandler(async (req, res) => {
   const row = await findRow(req.user, req.params.id);
-  await pool.query('DELETE FROM tds_deductions WHERE id=$1', [row.id]);
+  if (row.commission_payment_id) fail(409, 'Delete the source commission payment to remove its deduction.');
+  if (row.deposit_date) fail(409, 'Deposited deductions cannot be deleted.');
+  const deleted = await pool.query('DELETE FROM tds_deductions WHERE id=$1 AND commission_payment_id IS NULL AND deposit_date IS NULL RETURNING id', [row.id]);
+  if (!deleted.rows.length) fail(409, 'Deduction is locked or was changed. Reload the register.');
   res.json({ id: row.id, message: 'Deduction deleted' });
 });
 
@@ -90,15 +112,25 @@ export const recordDeposit = asyncHandler(async (req, res) => {
   if (!date) fail(400, 'Enter a valid deposit date.');
   const challan = String(req.body.challan_no ?? '').trim().slice(0, 40);
   if (!challan) fail(400, 'Challan number is required.');
-  const { rows } = await pool.query(
-    `UPDATE tds_deductions SET deposit_date=$3, challan_no=$4, updated_by=$5, updated_at=NOW()
-     WHERE site_id=$1 AND id=ANY($2::int[])
-       AND (SELECT COUNT(*) FROM tds_deductions x WHERE x.site_id=$1 AND x.id=ANY($2::int[]) AND x.deduction_date <= $3::date) = cardinality($2::int[])
-     RETURNING id`,
-    [siteId, ids, date, challan, req.user.id],
-  );
-  if (rows.length !== ids.length) fail(400, 'Nothing saved: a selected deduction is dated after the deposit date or is not in this site.');
-  res.json({ updated: rows.length, message: 'Deposit recorded' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Match source-write lock order: source payment, then deduction. A deposit
+    // and a rejection/edit cannot both pass using stale payment state.
+    await client.query(`SELECT p.id FROM plot_commission_payments p JOIN tds_deductions t ON t.commission_payment_id=p.id
+      WHERE t.site_id=$1 AND t.id=ANY($2::int[]) ORDER BY p.id FOR UPDATE OF p`, [siteId, ids]);
+    const { rows } = await client.query(`SELECT t.id, t.deduction_date::text AS deduction_date, t.deposit_date,
+      (t.commission_payment_id IS NULL OR financial_transaction_posts(CASE WHEN p.amount<0 THEN 'credit' ELSE 'debit' END,p.status,p.payment_mode,p.cheque_status)) AS active
+      FROM tds_deductions t LEFT JOIN plot_commission_payments p ON p.id=t.commission_payment_id
+      WHERE t.site_id=$1 AND t.id=ANY($2::int[]) ORDER BY t.id FOR UPDATE OF t`, [siteId, ids]);
+    if (rows.length !== ids.length || rows.some(row => !row.active || row.deposit_date || row.deduction_date > date))
+      fail(409, 'Nothing saved: a selected deduction is pending, reversed, already deposited, dated after the deposit, or outside this site.');
+    await client.query(`UPDATE tds_deductions SET deposit_date=$3, challan_no=$4, updated_by=$5, updated_at=NOW()
+      WHERE site_id=$1 AND id=ANY($2::int[])`, [siteId, ids, date, challan, req.user.id]);
+    await client.query('COMMIT');
+    res.json({ updated: rows.length, message: 'Deposit recorded' });
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
 });
 
 // Deductee lookup scoped to this module, so TDS users need no Members grant.

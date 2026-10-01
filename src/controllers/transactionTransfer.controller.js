@@ -157,6 +157,8 @@ const loadSource = async (db, req, type, id, lock = false) => {
   if(type==='vendor_inventory_payment' && row.source_vendor_payment_id) return loadSource(db,req,'vendor_payment',Number(row.source_vendor_payment_id),lock);
   if (row.entry_transfer_role === 'source_offset' || row.money_transfer_id)
     throw new TransferError(409, 'This entry is a protected transfer posting. Select the original transaction to transfer its remaining amount.');
+  if (type === 'plot_commission' && Number(row.tds_amount || 0) > 0)
+    throw new TransferError(409, 'Payments with TDS cannot be transferred. Record an explicit commission correction instead.');
   let siteId = row.site_id;
   let parentName = cfg.label;
   let parentId = cfg.parent ? row[cfg.parent] : null;
@@ -851,7 +853,7 @@ const insertOther = async (db, source, type, targetId, userId) => {
     if (!master || upper(master.plot_status) === 'CANCELLED')
       throw new TransferError(409, 'Choose an active commission destination');
     const totals = await db.query(
-      `SELECT COALESCE(SUM(amount),0) AS paid FROM plot_commission_payments WHERE plot_commission_id=$1 AND LOWER(COALESCE(status,'pending')) <> 'rejected' AND COALESCE(cheque_status,'') NOT IN ('BOUNCED','RETURNED')`,
+      `SELECT COALESCE(SUM(amount + tds_amount),0) AS paid FROM plot_commission_payments WHERE plot_commission_id=$1 AND LOWER(COALESCE(status,'pending')) <> 'rejected' AND COALESCE(cheque_status,'') NOT IN ('BOUNCED','RETURNED')`,
       [targetId],
     );
     const amount =
@@ -964,7 +966,7 @@ const insertOther = async (db, source, type, targetId, userId) => {
 const refreshCommission = async (db, id) => {
   await db.query(
     `UPDATE plot_commissions_v2 pc SET status=CASE WHEN a.paid>=pc.total_commission THEN 'Completed' WHEN a.paid>0 THEN 'Partial' ELSE 'Pending' END, updated_at=NOW()
-    FROM (SELECT COALESCE(SUM(amount),0) AS paid FROM plot_commission_payments WHERE plot_commission_id=$1 AND financial_transaction_posts(CASE WHEN amount<0 THEN 'credit' ELSE 'debit' END,status,payment_mode,cheque_status)) a WHERE pc.id=$1`,
+    FROM (SELECT COALESCE(SUM(amount + tds_amount),0) AS paid FROM plot_commission_payments WHERE plot_commission_id=$1 AND financial_transaction_posts(CASE WHEN amount<0 THEN 'credit' ELSE 'debit' END,status,payment_mode,cheque_status)) a WHERE pc.id=$1`,
     [id],
   );
 };
@@ -1080,7 +1082,7 @@ export const prepareTransfer = async (db, req, lock = false) => {
   if (!parent) throw new TransferError(422, 'Choose an eligible destination in the same site');
   if(targetType==='plot_commission') {
     const master=(await db.query(`SELECT total_commission FROM plot_commissions_v2 WHERE id=$1${lock?' FOR UPDATE':''}`,[targetId])).rows[0];
-    const paid=(await db.query(`SELECT COALESCE(SUM(amount),0) AS amount FROM plot_commission_payments WHERE plot_commission_id=$1 AND LOWER(COALESCE(status,'pending'))<>'rejected' AND COALESCE(cheque_status,'') NOT IN ('BOUNCED','RETURNED')`,[targetId])).rows[0];
+    const paid=(await db.query(`SELECT COALESCE(SUM(amount + tds_amount),0) AS amount FROM plot_commission_payments WHERE plot_commission_id=$1 AND LOWER(COALESCE(status,'pending'))<>'rejected' AND COALESCE(cheque_status,'') NOT IN ('BOUNCED','RETURNED')`,[targetId])).rows[0];
     const change=plans.reduce((sum,p)=>sum+moneyCents(p.destination.amount)*(p.destination.direction==='debit'?1:-1),0);
     if(change>0 && moneyCents(paid.amount)+change>moneyCents(master.total_commission)) throw new TransferError(422,'Commission transfer exceeds the remaining agreed commission');
   }

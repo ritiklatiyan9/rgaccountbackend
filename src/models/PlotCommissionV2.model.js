@@ -22,8 +22,8 @@ class PlotCommissionV2Model extends MasterModel {
         pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission, p.commission_rate, pc.remarks, pc.status, pc.created_at,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.plot_tag,
         m.full_name AS agent_name, m.phone AS agent_phone,
-        COALESCE(SUM(pcp.amount), 0) AS total_paid,
-        (pc.total_commission - COALESCE(SUM(pcp.amount), 0)) AS balance
+        COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) AS total_paid,
+        (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount), 0)) AS balance
       FROM plot_commissions_v2 pc
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id
@@ -46,9 +46,9 @@ class PlotCommissionV2Model extends MasterModel {
         pc.*,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.commission_rate,
         m.full_name AS agent_name, m.phone AS agent_phone,
-        COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid,
-        COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
-        (pc.total_commission - COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
+        COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid,
+        COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
+        (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
       FROM plot_commissions_v2 pc
       LEFT JOIN plots p ON pc.plot_id = p.id -- a land commission has no plot (migration 155)
       JOIN members m ON pc.agent_id = m.id
@@ -95,15 +95,15 @@ class PlotCommissionV2Model extends MasterModel {
           COALESCE(p.plot_commission, 0) AS plot_commission,
           m.full_name AS agent_name,
           m.phone AS agent_phone,
-          COALESCE(SUM(pcp.amount), 0) AS lifetime_paid,
-          COALESCE(SUM(pcp.amount) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS total_paid,
+          COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) AS lifetime_paid,
+          COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS total_paid,
           COUNT(pcp.id) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date))::int AS payment_count,
           -- Cash vs bank split via ledger_bucket() — the single mode→book rule
           -- the Day Book and Balance Sheet also use, so "Cash paid to agents"
           -- here equals the Day Book's Plot Commissions figure.
           COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) = 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS cash_paid,
           COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) <> 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS bank_paid,
-          (pc.total_commission - COALESCE(SUM(pcp.amount), 0)) AS balance,
+          (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount), 0)) AS balance,
           ROW_NUMBER() OVER (PARTITION BY pc.plot_id ORDER BY pc.created_at DESC) AS rn
         FROM plot_commissions_v2 pc
         JOIN plots p ON pc.plot_id = p.id
@@ -168,9 +168,9 @@ class PlotCommissionV2Model extends MasterModel {
         COALESCE(p.plot_commission, 0) AS plot_commission,
         s.name AS site_name,
         m.full_name AS agent_name, m.phone AS agent_phone,
-        COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid,
-        COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
-        (pc.total_commission - COALESCE(SUM(pcp.amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
+        COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid,
+        COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
+        (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
       FROM plot_commissions_v2 pc
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id

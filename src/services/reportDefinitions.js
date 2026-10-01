@@ -334,7 +334,7 @@ export const REPORTS = Object.freeze({
       { key: 'agent_name', expr: 'a.name', label: 'Agent' },
       { key: 'plot_no', expr: 'p.plot_no', label: 'Plot' },
       { key: 'total_commission', expr: 'pc.total_commission', label: 'Commission', type: 'money' },
-      { key: 'paid', expr: `COALESCE((SELECT SUM(amount) FROM plot_commission_payments x WHERE x.plot_commission_id = pc.id AND financial_transaction_posts(CASE WHEN x.amount < 0 THEN 'credit' ELSE 'debit' END, x.status, x.payment_mode, x.cheque_status)), 0)`, label: 'Paid', type: 'money' },
+      { key: 'paid', expr: `COALESCE((SELECT SUM(amount + tds_amount) FROM plot_commission_payments x WHERE x.plot_commission_id = pc.id AND financial_transaction_posts(CASE WHEN x.amount < 0 THEN 'credit' ELSE 'debit' END, x.status, x.payment_mode, x.cheque_status)), 0)`, label: 'Paid', type: 'money' },
       { key: 'status', expr: 'pc.status', label: 'Status' },
     ],
   },
