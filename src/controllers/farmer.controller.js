@@ -1,3 +1,4 @@
+import { tdsInsertColumns, tdsInsertValues, withPaymentTds } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { farmerModel, farmerPaymentModel } from '../models/Farmer.model.js';
@@ -299,9 +300,9 @@ export const createPayment = asyncHandler(async (req, res) => {
          farmer_id, date, particular, amount, by_note, remarks,
          payment_mode, cash_amount, bank_amount, bank_name, bank_account_no,
          bank_reference, bank_ifsc, voucher_url, assigned_admin_id, status,
-         cheque_no, cheque_status, created_by, transaction_time
+         cheque_no, cheque_status, created_by, transaction_time${tdsInsertColumns('farmer_payments')}
        )
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, $17, $18, $25::time
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending', $16, $17, $18, $25::time${tdsInsertValues('farmer_payments')}
        FROM f
        RETURNING *
      ),
@@ -404,7 +405,7 @@ export const listPayments = asyncHandler(async (req, res) => {
   const farmerWithSitePromise = pool.query(
     `SELECT
        f.*,
-       COALESCE(SUM(fp.amount), 0) AS total_paid,
+       COALESCE(SUM(fp.amount + fp.tds_amount), 0) AS total_paid,
        COALESCE(SUM(fp.interest_amount), 0) AS total_interest,
        COUNT(fp.id) AS payment_count,
        -- Same CASE the farmers LIST page uses (Farmer.model.js findBySiteId),
@@ -425,6 +426,8 @@ export const listPayments = asyncHandler(async (req, res) => {
            ELSE fp.amount
          END
        ), 0) AS bank_paid,
+       COALESCE(SUM(fp.tds_amount) FILTER (WHERE ledger_bucket(fp.payment_mode)='cash'),0) AS cash_tds,
+       COALESCE(SUM(fp.tds_amount) FILTER (WHERE ledger_bucket(fp.payment_mode)<>'cash'),0) AS bank_tds,
        s.name  AS site_name,
        s.code  AS site_code,
        s.address AS site_address,
@@ -479,8 +482,9 @@ export const listPayments = asyncHandler(async (req, res) => {
       bank_to_pay: parseFloat(farmer.bank_amount) || 0,
       cash_paid: cashPaid,
       bank_paid: bankPaid,
-      cash_remaining: (parseFloat(farmer.cash_amount) || 0) - cashPaid,
-      bank_remaining: (parseFloat(farmer.bank_amount) || 0) - bankPaid,
+      tds_held: Number(farmer.cash_tds || 0) + Number(farmer.bank_tds || 0),
+      cash_remaining: (parseFloat(farmer.cash_amount) || 0) - cashPaid - Number(farmer.cash_tds || 0),
+      bank_remaining: (parseFloat(farmer.bank_amount) || 0) - bankPaid - Number(farmer.bank_tds || 0),
     },
     entryVisibility,
   });
@@ -580,6 +584,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
       updateData.cheque_status = effectiveMode === 'CHEQUE' ? 'PENDING' : null;
     }
 
+    Object.assign(updateData, withPaymentTds('farmer_payments', {}));
     const keys = Object.keys(updateData);
     const setClause = keys.map((key, index) => `${key} = $${index + 1}`).join(', ');
     const result = await client.query(

@@ -156,7 +156,8 @@ export const getTdsWorkflowSettings = asyncHandler(async (req, res) => {
 export const updateTdsWorkflowSettings = asyncHandler(async (req, res) => {
   const siteId = await getAccessibleSiteId(req, res, req.body.site_id);
   if (!siteId) return;
-  const modules = parseTdsWorkflow(req.body);
+  if (!req.body.modules || typeof req.body.modules !== 'object' || Array.isArray(req.body.modules)) return res.status(400).json({ message: 'modules is required.' });
+  const modules = parseTdsWorkflow({ modules: { ...await getTdsWorkflow(siteId), ...req.body.modules } });
   await applicationSettingModel.setJson(siteId, TDS_WORKFLOW_KEY, modules, req.user.id);
   res.json({ site_id: siteId, modules, message: 'TDS workflow saved for this site' });
 });

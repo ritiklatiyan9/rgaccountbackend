@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import pool from '../config/db.js';
+import { complianceEventInstant } from './complianceEventTime.service.js';
 import { encrypt, decrypt } from '../utils/tokenCrypto.js';
 import { DEFAULT_TIME_ZONE, getEventPreferences, isValidTimeZone } from './eventReminder.service.js';
 
@@ -58,7 +59,9 @@ export const buildEventBody = (eventType, row, attendeeEmails = [], options = {}
   const cfg = SOURCES[eventType];
   const label = EVENT_LABELS[eventType];
   const title = row[cfg.titleField] || label;
-  const dateValue = row[cfg.dateField];
+  const complianceInstant = eventType === 'COMPLIANCE' ? complianceEventInstant(row) : null;
+  const dateValue = complianceInstant || row[cfg.dateField];
+  const timed = cfg.timed || Boolean(complianceInstant);
   const descriptionLines = [
     label,
     row.status ? `Status: ${row.status}` : null,
@@ -68,7 +71,7 @@ export const buildEventBody = (eventType, row, attendeeEmails = [], options = {}
 
   let start;
   let end;
-  if (cfg.timed) {
+  if (timed) {
     const startDate = dateValue instanceof Date ? dateValue : new Date(dateValue);
     const endDate = new Date(startDate.getTime() + 60 * 60 * 1000); // 1h default duration
     const timeZone = isValidTimeZone(options.timeZone) ? options.timeZone : TIME_ZONE;
@@ -88,7 +91,7 @@ export const buildEventBody = (eventType, row, attendeeEmails = [], options = {}
     attendees: attendeeEmails.map((email) => ({ email })),
     reminders: {
       useDefault: false,
-      overrides: cfg.timed && options.nativeReminder !== false
+      overrides: timed && options.nativeReminder !== false
         ? [{ method: 'popup', minutes: 30 }]
         : [],
     },

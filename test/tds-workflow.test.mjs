@@ -32,14 +32,24 @@ test('invalid values cannot create negative, non-finite or excessive TDS', () =>
   }
 });
 test('each supported module has its own validated settings', () => {
-  const modules = defaultTdsWorkflow(); assert.equal(Object.keys(modules).length, 3);
+  const modules = defaultTdsWorkflow(); assert.equal(Object.keys(modules).length, 13);
   assert.equal(commissionTdsModule({ plot_id: 1 }), 'plot_commission');
   assert.equal(commissionTdsModule({ farmer_id: 1 }), 'land_purchase_commission');
   assert.equal(commissionTdsModule({ land_deal_id: 1 }), 'land_sale_commission');
   modules.plot_commission.enabled = true;
   assert.equal(parseTdsWorkflow({ modules }).plot_commission.enabled, true);
   assert.equal(parseTdsWorkflow({ modules }).land_sale_commission.enabled, false);
-  assert.throws(() => parseTdsWorkflow({ modules: { ...modules, expenses: config } }), /Unsupported/);
+  assert.throws(() => parseTdsWorkflow({ modules: { ...modules, unknown_module: config } }), /Unsupported/);
   for (const patch of [{ enabled: 'yes' }, { rate: '' }, { rate: 101 }, { section: 'bad' }])
     assert.throws(() => parseTdsWorkflow({ modules: { ...modules, plot_commission: { ...config, ...patch } } }));
+});
+
+test('farmer, expense and other outgoing sidebar modules have independent flags', () => {
+  const modules = defaultTdsWorkflow();
+  for (const key of ['farmer_payment','expense','daybook','cashflow','firm_transaction','vendor_payment','vendor_inventory_payment','misc_income','partner_profit_payment','imprest_expense']) {
+    assert.equal(modules[key].enabled, false);
+    modules[key] = { enabled: true, section: 'OTHER', rate: 1 };
+  }
+  assert.equal(parseTdsWorkflow({ modules }).expense.enabled, true);
+  assert.equal(parseTdsWorkflow({ modules }).plot_commission.enabled, false);
 });

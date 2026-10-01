@@ -1,3 +1,4 @@
+import { paymentTdsMiddleware } from './paymentTds.service.js';
 import pool from '../config/db.js';
 
 const FEATURE_KEY = 'transaction_date_editable';
@@ -104,7 +105,7 @@ export async function enforceTransactionDate(req, db = pool, now = new Date()) {
 }
 
 export function transactionDateMiddleware(req, res, next) {
-  enforceTransactionDate(req).then(() => next(), next);
+  enforceTransactionDate(req).then(() => paymentTdsMiddleware(req, res, next), next);
 }
 
 const EDIT_DATE_KEYS = {

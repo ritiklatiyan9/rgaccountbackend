@@ -443,7 +443,7 @@ class ExpenseModel extends MasterModel {
           COALESCE(voucher_urls, ARRAY_REMOVE(ARRAY[voucher_url], NULL)) as voucher_urls,
           COALESCE(bill_urls, ARRAY_REMOVE(ARRAY[bill_url], NULL)) as bill_urls,
           display_order, transaction_time, entry_transfer_id, entry_transfer_role,
-          'expenses' as source
+          tds_amount, tds_rate, tds_mode, tds_section, tds_module, tds_deductee_name, tds_pan, 'expenses' as source
         FROM expenses
         WHERE site_id = $1
         
@@ -460,7 +460,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[fp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, fp.transaction_time, fp.entry_transfer_id, fp.entry_transfer_role,
-          'farmer_payment' as source
+          fp.tds_amount, fp.tds_rate, fp.tds_mode, fp.tds_section, fp.tds_module, fp.tds_deductee_name, fp.tds_pan, 'farmer_payment' as source
         FROM farmer_payments fp
         JOIN farmers f ON f.id = fp.farmer_id
         WHERE f.site_id = $1
@@ -478,7 +478,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[pcp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, pcp.transaction_time, pcp.entry_transfer_id, pcp.entry_transfer_role,
-          'commission' as source
+          pcp.tds_amount, pcp.tds_rate, pcp.tds_mode, pcp.tds_section, NULL::text as tds_module, NULL::text as tds_deductee_name, NULL::text as tds_pan, 'commission' as source
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
         LEFT JOIN plots p ON pcm.plot_id = p.id -- land commissions carry no plot (migration 155); the remark COALESCEs it away
@@ -498,7 +498,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[vp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, vp.transaction_time, vp.entry_transfer_id, vp.entry_transfer_role,
-          'vendor_payment' as source
+          vp.tds_amount, vp.tds_rate, vp.tds_mode, vp.tds_section, vp.tds_module, vp.tds_deductee_name, vp.tds_pan, 'vendor_payment' as source
         FROM vendor_payments vp
         JOIN vendor_commitments vc ON vp.commitment_id = vc.id
         WHERE vp.site_id = $1
@@ -516,7 +516,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[cfe.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, cfe.transaction_time, cfe.entry_transfer_id, cfe.entry_transfer_role,
-          'personal_ledger' as source
+          cfe.tds_amount, cfe.tds_rate, cfe.tds_mode, cfe.tds_section, cfe.tds_module, cfe.tds_deductee_name, cfe.tds_pan, 'personal_ledger' as source
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
@@ -535,7 +535,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[d.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, d.transaction_time, d.entry_transfer_id, d.entry_transfer_role,
-          'daybook' as source
+          d.tds_amount, d.tds_rate, d.tds_mode, d.tds_section, d.tds_module, d.tds_deductee_name, d.tds_pan, 'daybook' as source
         FROM day_book d
         WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL

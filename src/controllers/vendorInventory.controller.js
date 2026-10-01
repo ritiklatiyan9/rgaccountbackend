@@ -1,3 +1,4 @@
+import { tdsInsertColumns, tdsInsertValues, tdsUpdateSet } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
@@ -131,7 +132,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        o.item_name, o.item_category, o.unit,
        o.qty_ordered, o.rate, o.discount_pct, o.discount_amount,
        COALESCE((
-         SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
+         SELECT SUM(vip.amount + vip.tds_amount) FROM vendor_inventory_payments vip
          WHERE vip.order_id = o.id
            AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
            AND ($${creatorIdx}::text IS NULL OR vip.created_by = ANY(string_to_array($${creatorIdx}::text, ',')::int[]))
@@ -139,7 +140,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        o.commitment_id, o.project_id, o.location_id, o.material_request_id,
        ${ORDER_VALUE_SQL} AS order_value,
        (${ORDER_VALUE_SQL} - COALESCE((
-         SELECT SUM(vip.amount) FROM vendor_inventory_payments vip
+         SELECT SUM(vip.amount + vip.tds_amount) FROM vendor_inventory_payments vip
          WHERE vip.order_id = o.id
            AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
            AND ($${creatorIdx}::text IS NULL OR vip.created_by = ANY(string_to_array($${creatorIdx}::text, ',')::int[]))
@@ -178,7 +179,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
        COALESCE(SUM(CASE WHEN discount_pct > 0 THEN ROUND(qty_ordered * rate * discount_pct / 100, 2) ELSE discount_amount END), 0)::numeric(14,2) AS total_discount
      FROM vendor_inventory_orders o
      LEFT JOIN LATERAL (
-       SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
+       SELECT COALESCE(SUM(vip.amount + vip.tds_amount), 0) AS total_paid
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
@@ -244,7 +245,7 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
       paymentMode: payment.payment_mode,
       chequeStatus: payment.cheque_status,
     });
-    return sum + (posted ? (Number(payment.amount) || 0) : 0);
+    return sum + (posted ? (Number(payment.amount) || 0) + Number(payment.tds_amount || 0) : 0);
   }, 0);
   order.total_paid = visiblePaid;
   order.outstanding = Math.max((Number(order.order_value) || 0) - visiblePaid, 0);
@@ -445,8 +446,8 @@ export const addInventoryPayment = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `INSERT INTO vendor_inventory_payments
        (order_id, site_id, payment_date, amount, payment_mode, reference_no, cheque_no,
-        cheque_status, note, voucher_url, created_by, assigned_admin_id, status, transaction_time)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13::time)
+        cheque_status, note, voucher_url, created_by, assigned_admin_id, status, transaction_time${tdsInsertColumns('vendor_inventory_payments')})
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13::time${tdsInsertValues('vendor_inventory_payments')})
      RETURNING *`,
     [
       orderId,
@@ -506,7 +507,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
          approved_by = NULL,
          approved_at = NULL,
          cheque_status = CASE WHEN $5 = 'cheque' THEN 'PENDING' ELSE NULL END,
-         updated_at = NOW()
+         updated_at = NOW()${tdsUpdateSet('vendor_inventory_payments')}
      FROM vendor_inventory_orders o
      WHERE p.id = $1
        AND p.order_id = o.id
@@ -606,7 +607,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
        COUNT(*) FILTER (WHERE o.status = 'completed')::int AS completed_count
      FROM vendor_inventory_orders o
      LEFT JOIN LATERAL (
-       SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
+       SELECT COALESCE(SUM(vip.amount + vip.tds_amount), 0) AS total_paid
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
@@ -646,7 +647,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
          END, 0), 2) - vp.total_paid), 0)::numeric(14,2) AS total_outstanding
      FROM vendor_inventory_orders o
      LEFT JOIN LATERAL (
-       SELECT COALESCE(SUM(vip.amount), 0) AS total_paid
+       SELECT COALESCE(SUM(vip.amount + vip.tds_amount), 0) AS total_paid
        FROM vendor_inventory_payments vip
        WHERE vip.order_id = o.id
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}

@@ -34,7 +34,7 @@ export async function paymentPartners(siteId, db = pool) {
 
 export async function partnerPaidByMember(siteId, end, db = pool) {
   const { rows } = await db.query(`SELECT p.member_id, m.full_name, m.phone, m.photo,
-      COALESCE(SUM(le.debit), 0)::float AS paid, COUNT(le.id)::int AS payment_count
+      COALESCE(SUM(le.debit + CASE WHEN le.debit>0 THEN COALESCE(p.tds_amount,0) ELSE 0 END), 0)::float AS paid, COUNT(le.id)::int AS payment_count
     FROM partner_profit_payments p JOIN members m ON m.id = p.member_id
     LEFT JOIN ledger_entries le ON le.source_key = 'partner_profit_payments' AND le.source_id = p.id
       AND le.site_id = p.site_id AND le.entry_date < $2::date
@@ -44,7 +44,8 @@ export async function partnerPaidByMember(siteId, end, db = pool) {
 }
 
 export async function getPartnerProfitPaid(siteId, end, db = pool) {
-  const { rows } = await db.query(`SELECT COALESCE(SUM(debit), 0)::float AS paid FROM ledger_entries
-    WHERE site_id = $1 AND entry_date < $2::date AND source_key = 'partner_profit_payments'`, [siteId, end]);
+  const { rows } = await db.query(`SELECT COALESCE(SUM(le.debit + CASE WHEN le.debit>0 THEN COALESCE(p.tds_amount,0) ELSE 0 END), 0)::float AS paid FROM ledger_entries le
+    JOIN partner_profit_payments p ON p.id=le.source_id AND p.site_id=le.site_id
+    WHERE le.site_id = $1 AND le.entry_date < $2::date AND le.source_key = 'partner_profit_payments'`, [siteId, end]);
   return Number(rows[0].paid);
 }

@@ -59,6 +59,7 @@ import recycleBinRoutes from './recycleBin.routes.js';
 import transactionTransferRoutes from './transactionTransfer.routes.js';
 import transactionPartyRoutes from './transactionParty.routes.js';
 import manualProfitSandboxRoutes from './manualProfitSandbox.routes.js';
+import walletRoutes from './wallet.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -121,4 +122,5 @@ router.use('/recycle-bin', recycleBinRoutes);
 router.use('/transaction-transfers', transactionTransferRoutes);
 router.use('/transaction-parties', transactionPartyRoutes);
 router.use('/manual-profit-sandboxes', manualProfitSandboxRoutes);
+router.use('/wallet', walletRoutes);
 export default router;

@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { normalizeOptionalEventTime } from '../services/complianceEventTime.service.js';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import permissionModel from '../models/Permission.model.js';
@@ -174,7 +175,12 @@ function cleanCompliancePayload(body, { partial = false } = {}) {
   if (body.completion_percentage !== undefined) result.completion_percentage = Math.min(Math.max(Number.parseInt(body.completion_percentage, 10) || 0, 0), 100);
   if (body.tags !== undefined) result.tags = jsonArray(body.tags);
   if (body.related_entities !== undefined) result.related_entities = jsonObject(body.related_entities);
-  if (body.metadata !== undefined) result.metadata = jsonObject(body.metadata);
+  if (body.metadata !== undefined) {
+    result.metadata = { ...jsonObject(body.metadata) };
+    if (result.metadata.event_time !== undefined) {
+      result.metadata.event_time = normalizeOptionalEventTime(result.metadata.event_time);
+    }
+  }
   if (body.approval_required !== undefined) result.approval_required = Boolean(body.approval_required);
   return result;
 }
@@ -924,7 +930,7 @@ export const complianceCalendar = asyncHandler(async (req, res) => {
   }
   const selectedSite = (alias) => siteParam ? `AND ${alias}.site_id=$${siteParam}` : '';
   const [items, cases, notices, inspections, licences] = await Promise.all([
-    pool.query(`SELECT i.id,'COMPLIANCE' AS event_type,i.title,i.current_due_date AS event_date,NULL::text AS event_time,i.status,i.risk_level,i.site_id,s.name AS site_name,
+    pool.query(`SELECT i.id,'COMPLIANCE' AS event_type,i.title,i.current_due_date AS event_date,i.metadata->>'event_time' AS event_time,i.status,i.risk_level,i.site_id,s.name AS site_name,
       (SELECT COUNT(*)::int FROM event_reminders r WHERE r.organization_id=i.organization_id AND r.event_type='COMPLIANCE' AND r.source_id=i.id AND r.status IN ('PENDING','PROCESSING','FAILED')) AS reminder_count,
       COALESCE((SELECT g.sync_status FROM google_calendar_event_links g WHERE g.organization_id=i.organization_id AND g.event_type='COMPLIANCE' AND g.source_id=i.id),'PENDING') AS calendar_sync_status
       FROM compliance_items i LEFT JOIN sites s ON s.id=i.site_id WHERE i.organization_id=$1 AND i.deleted_at IS NULL AND i.current_due_date BETWEEN $2 AND $3 ${itemScope} ${selectedSite('i')}`, params),

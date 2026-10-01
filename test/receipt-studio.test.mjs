@@ -5,6 +5,25 @@ import settings from '../src/models/ApplicationSetting.model.js';
 import pool from '../src/config/db.js';
 
 const canvas = { layout_mode: 'canvas', elements: [{ id: 'letter', type: 'text', text: ' . \nA & B', x: 10, y: 20, width: 30, height: 6 }] };
+test('TDS receipt rows and canvas tokens survive save and reload for shared and commission-specific designs', () => {
+  const keys = ['gross_amount', 'tds_applicable', 'tds_section', 'tds_mode', 'tds_rate', 'tds_amount', 'net_amount'];
+  const legacy = normalizeReceiptDesign({ modules: { commission_payment: { non_cash: { detail_items: [{ key: 'module', label: 'Account', enabled: true }] } } } });
+  for (const mode of ['cash', 'cheque', 'non_cash', 'cheque_reconciliation']) {
+    for (const key of keys) assert.equal(legacy[mode].detail_items.find(item => item.key === key).enabled, false);
+  }
+  for (const key of keys) assert.equal(legacy.modules.commission_payment.non_cash.detail_items.find(item => item.key === key).enabled, false);
+  const customization = { detail_items: [{ key: 'tds_amount', label: 'Tax withheld', sample: '₹2,000', enabled: true }, { key: 'tds_rate', label: 'Rate', enabled: false }],
+    layout_mode: 'canvas', elements: [{ id: 'tax', type: 'field', field: 'tds_amount', prefix: 'Tax: ', x: 10, y: 10, width: 80, height: 8 }, { id: 'net', type: 'text', text: 'Pay {{net_amount}}', x: 10, y: 20, width: 80, height: 8 }] };
+  const saved = normalizeReceiptDesign({ cash: customization, modules: { commission_payment: { non_cash: customization } } });
+  for (const mode of [saved.cash, saved.modules.commission_payment.non_cash]) {
+    assert.equal(mode.detail_items.find(item => item.key === 'tds_amount').label, 'Tax withheld');
+    assert.equal(mode.detail_items.find(item => item.key === 'tds_amount').enabled, true);
+    assert.equal(mode.detail_items.find(item => item.key === 'tds_rate').enabled, false);
+    assert.equal(mode.elements[0].field, 'tds_amount');
+    assert.equal(mode.elements[1].text, 'Pay {{net_amount}}');
+  }
+  assert.deepEqual(normalizeReceiptDesign(saved), saved);
+});
 test('empty content, punctuation, free canvas and module inheritance survive saving', () => {
   const saved = normalizeReceiptDesign({ cash: { ...canvas, content: { title: '', separator: ' . ', footer: '\n.' } }, modules: { expense: { cash: { ...canvas, content: { title: 'Expense' } } } } });
   assert.equal(saved.cash.content.title, ''); assert.equal(saved.cash.content.separator, ' . '); assert.equal(saved.cash.content.footer, '\n.');

@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import { complianceEventInstant } from './complianceEventTime.service.js';
 
 export const EVENT_SOURCES = Object.freeze({
   COMPLIANCE: {
@@ -47,13 +48,14 @@ export async function loadEventSource(organizationId, eventType, sourceId, db = 
   );
   const row = rows[0];
   if (!row) return null;
+  const complianceInstant = type === 'COMPLIANCE' ? complianceEventInstant(row) : null;
   const ownerUserIds = [...new Set(config.ownerIds.map((field) => Number(row[field])).filter(Number.isSafeInteger))];
   return {
     ...row,
     event_type: type,
     title: row[config.title],
-    event_at: row[config.date],
-    timed: config.timed,
+    event_at: complianceInstant || row[config.date],
+    timed: config.timed || Boolean(complianceInstant),
     description: config.description ? row[config.description] : null,
     location: config.location ? row[config.location] : null,
     owner_user_ids: ownerUserIds,

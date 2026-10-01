@@ -16,7 +16,7 @@ class FarmerModel extends MasterModel {
   async findBySiteId(siteId, pool) {
     const query = `
       SELECT f.*,
-        COALESCE(SUM(fp.amount), 0) AS total_paid,
+        COALESCE(SUM(fp.amount + fp.tds_amount), 0) AS total_paid,
         COALESCE(SUM(
           CASE
             WHEN UPPER(COALESCE(fp.payment_mode, '')) = 'SPLIT'
@@ -52,7 +52,7 @@ class FarmerModel extends MasterModel {
   async findByIdWithSummary(id, pool) {
     const query = `
       SELECT f.*,
-        COALESCE(SUM(fp.amount), 0) AS total_paid,
+        COALESCE(SUM(fp.amount + fp.tds_amount), 0) AS total_paid,
         COALESCE(SUM(fp.interest_amount), 0) AS total_interest,
         COUNT(fp.id) AS payment_count
       FROM farmers f
@@ -69,7 +69,7 @@ class FarmerModel extends MasterModel {
   async findByCreator(userId, pool) {
     const query = `
       SELECT f.*,
-        COALESCE(SUM(fp.amount), 0) AS total_paid,
+        COALESCE(SUM(fp.amount + fp.tds_amount), 0) AS total_paid,
         COUNT(fp.id) AS payment_count
       FROM farmers f
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
@@ -106,7 +106,7 @@ class FarmerPaymentModel extends MasterModel {
 
   /** Sum of all payments for a farmer */
   async getTotalPaid(farmerId, pool) {
-    const query = `SELECT COALESCE(SUM(amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)`;
+    const query = `SELECT COALESCE(SUM(amount + tds_amount), 0) AS total FROM farmer_payments WHERE farmer_id = $1 AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)`;
     const result = await pool.query(query, [farmerId]);
     return parseFloat(result.rows[0].total);
   }

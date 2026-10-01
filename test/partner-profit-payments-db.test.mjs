@@ -28,7 +28,7 @@ if (process.env.PGLITE_MODULE) {
 
 const invoke = (handler, req) => new Promise((resolve, reject) => {
   const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { resolve({ status: this.statusCode, body }); } };
-  handler({ user: { id: 1, role: 'admin' }, params: { id: '1' }, body: {}, query: {}, ...req }, res, reject);
+  handler({ user: { id: 1, role: 'admin' }, params: { id: '1' }, body: {}, query: {}, ...req }, res, error => error.statusCode ? resolve({ status: error.statusCode, body: { message: error.message } }) : reject(error));
 });
 
 test('payment, bank, duplicate retry, cutoff and void reconcile without reducing profit', { skip: !process.env.PGLITE_MODULE && process.env.PARTNER_PAYMENTS_DB_TESTS !== '1' }, async () => {
@@ -75,6 +75,7 @@ test('payment, bank, duplicate retry, cutoff and void reconcile without reducing
     pool.connect = async () => adapter;
     await up(pool);
     await up(pool); // Safe to re-run on startup.
+    await db.query('ALTER TABLE partner_profit_payments ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0, ADD COLUMN entry_transfer_id int');
     const input = { member_id: 1, amount: '30.25', date: '2026-01-15', payment_mode: 'CASH', request_id: randomUUID() };
     const first = await invoke(createPartnerPayment, { body: input });
     assert.equal(first.status, 201);

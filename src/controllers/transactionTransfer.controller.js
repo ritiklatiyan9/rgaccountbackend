@@ -157,8 +157,8 @@ const loadSource = async (db, req, type, id, lock = false) => {
   if(type==='vendor_inventory_payment' && row.source_vendor_payment_id) return loadSource(db,req,'vendor_payment',Number(row.source_vendor_payment_id),lock);
   if (row.entry_transfer_role === 'source_offset' || row.money_transfer_id)
     throw new TransferError(409, 'This entry is a protected transfer posting. Select the original transaction to transfer its remaining amount.');
-  if (type === 'plot_commission' && Number(row.tds_amount || 0) > 0)
-    throw new TransferError(409, 'Payments with TDS cannot be transferred. Record an explicit commission correction instead.');
+  if (Number(row.tds_amount || 0) > 0)
+    throw new TransferError(409, 'Payments with TDS cannot be transferred. Record an explicit correction in its source module instead.');
   let siteId = row.site_id;
   let parentName = cfg.label;
   let parentId = cfg.parent ? row[cfg.parent] : null;

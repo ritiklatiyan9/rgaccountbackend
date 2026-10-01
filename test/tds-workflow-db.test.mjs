@@ -1,3 +1,5 @@
+import { up as nativeWorkflow } from '../src/migrations/184_payment_module_tds.js';
+import { TDS_SOURCES } from '../src/services/paymentTds.service.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pool from '../src/config/db.js';
@@ -31,7 +33,8 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
       CREATE FUNCTION test_cash_mirror() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO cash_movements VALUES(NEW.id,NEW.amount) ON CONFLICT(source_id) DO UPDATE SET amount=EXCLUDED.amount; RETURN NEW; END $$;
       CREATE TRIGGER test_mirror AFTER INSERT OR UPDATE ON plot_commission_payments FOR EACH ROW EXECUTE FUNCTION test_cash_mirror();
     `);
-    await register(pool); await workflow(pool); await workflow(pool);
+    for (const table of new Set(Object.values(TDS_SOURCES).map(source => source.table))) await pg.exec(`CREATE TABLE ${table}(id serial PRIMARY KEY,site_id int,amount numeric,debit numeric)`);
+    await register(pool); await workflow(pool); await workflow(pool); await nativeWorkflow(pool);
     let payment;
     const list = async (user) => (await invoke(listDeductions, {}, { query: { site_id: 1, financial_year: 2026 }, ...(user ? { user } : {}) })).body.deductions;
     await t.test('create atomically stores net cash and one pending linked deduction', async () => {

@@ -1,3 +1,4 @@
+import { tdsInsertColumns, tdsInsertValues, tdsUpdateSet } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
@@ -269,8 +270,8 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       vc.created_at,
       COALESCE(NULLIF(TRIM(cu.name), ''), cu.email) AS created_by_name,
       aa.name AS assigned_admin_name,
-      COALESCE(SUM(vp.amount), 0)::numeric(14,2) AS paid_amount,
-      (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
+      COALESCE(SUM(vp.amount + vp.tds_amount), 0)::numeric(14,2) AS paid_amount,
+      (vc.contract_amount - COALESCE(SUM(vp.amount + vp.tds_amount), 0))::numeric(14,2) AS remaining_amount,
       m.full_name AS vendor_member_name,
       COUNT(vp.id)::int AS payment_count,
       COALESCE(inv.item_count, 0)::int AS inventory_item_count,
@@ -324,7 +325,7 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
       COALESCE(MAX(inv.total_inv_outstanding), 0)::numeric(14,2) AS total_inventory_outstanding
      FROM vendor_commitments vc
      LEFT JOIN (
-      SELECT commitment_id, SUM(amount)::numeric(14,2) AS paid_amount
+      SELECT commitment_id, SUM(amount + tds_amount)::numeric(14,2) AS paid_amount
       FROM vendor_payments
       WHERE site_id = $1
         AND financial_transaction_posts('debit', status, payment_mode, cheque_status)
@@ -394,8 +395,8 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
       vc.assigned_admin_id,
       vc.created_at,
       aa.name AS assigned_admin_name,
-      COALESCE(SUM(vp.amount), 0)::numeric(14,2) AS paid_amount,
-      (vc.contract_amount - COALESCE(SUM(vp.amount), 0))::numeric(14,2) AS remaining_amount,
+      COALESCE(SUM(vp.amount + vp.tds_amount), 0)::numeric(14,2) AS paid_amount,
+      (vc.contract_amount - COALESCE(SUM(vp.amount + vp.tds_amount), 0))::numeric(14,2) AS remaining_amount,
       m.full_name AS vendor_member_name,
       cp.name AS project_name,
       cp.project_type,
@@ -802,8 +803,8 @@ export const addVendorPayment = asyncHandler(async (req, res) => {
 
   const vendorPayMode = (payment_mode || 'cash').toLowerCase();
   const paymentResult = await pool.query(
-    `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status, transaction_time)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::time)
+    `INSERT INTO vendor_payments (commitment_id, site_id, payment_date, amount, payment_mode, reference_no, note, voucher_url, status, created_by, assigned_admin_id, cheque_no, cheque_status, transaction_time${tdsInsertColumns('vendor_payments')})
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::time${tdsInsertValues('vendor_payments')})
      RETURNING *`,
     [
       commitmentId,
@@ -881,8 +882,8 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
             approved_by = NULL, approved_at = NULL,
             cheque_no = CASE WHEN $3 = 'cheque' THEN $4 ELSE NULL END,
             cheque_status = CASE WHEN $3 = 'cheque' THEN 'PENDING' ELSE NULL END,
-            updated_at = NOW()
-      WHERE id = $8 AND site_id = $9
+            updated_at = NOW()${tdsUpdateSet('vendor_payments')}
+     WHERE id = $8 AND site_id = $9
      RETURNING *`,
     [
       payment_date,

@@ -1,3 +1,4 @@
+import { tdsInsertColumns, tdsInsertValues, tdsUpdateSet } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 // Miscellaneous Income — maintenance charges, token money, gifts, rent, interest…
 // Entries are CREDIT (money in) or DEBIT (a refund against that income). They mirror into
@@ -214,7 +215,7 @@ export const createEntry = asyncHandler(async (req, res) => {
        site_id, category_id, direction, date, amount, payment_mode, party_name,
        bank_name, bank_account_no, bank_reference, bank_ifsc, cheque_no, cheque_status,
        remarks, voucher_url, status, assigned_admin_id, created_by, transaction_time
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17,$18::time)
+     ${tdsInsertColumns('misc_income_entries')}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17,$18::time${tdsInsertValues('misc_income_entries')})
      RETURNING id`,
     [siteId, data.category_id, data.direction, data.date, data.amount, data.payment_mode, data.party_name,
       data.bank_name, data.bank_account_no, data.bank_reference, data.bank_ifsc, data.cheque_no,
@@ -238,7 +239,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
        category_id=$2, direction=$3, date=$4, amount=$5, payment_mode=$6, party_name=$7,
        bank_name=$8, bank_account_no=$9, bank_reference=$10, bank_ifsc=$11, cheque_no=$12, cheque_status=$13,
        remarks=$14, voucher_url=$15, assigned_admin_id=$16, transaction_time=$17::time,
-       status='pending', approved_by=NULL, approved_at=NULL, updated_at=NOW()
+       status='pending', approved_by=NULL, approved_at=NULL, updated_at=NOW()${tdsUpdateSet('misc_income_entries')}
      WHERE id=$1`,
     [id, data.category_id, data.direction, data.date, data.amount, data.payment_mode, data.party_name,
       data.bank_name, data.bank_account_no, data.bank_reference, data.bank_ifsc, data.cheque_no,

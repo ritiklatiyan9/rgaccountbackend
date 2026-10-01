@@ -1,3 +1,4 @@
+import { tdsInsertColumns, tdsInsertValues, tdsUpdateSet, withPaymentTds } from '../services/paymentTds.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { normalizeTransactionTime, transactionTimeForWrite } from '../services/transactionTime.service.js';
@@ -60,7 +61,9 @@ export const createPartnerPayment = asyncHandler(async (req, res) => {
         await db.query('ROLLBACK');
         return res.status(409).json({ message: 'This payment has been voided. Start a new entry to record another payment.' });
       }
-      if (Number(row.member_id) !== data.memberId || Number(row.amount) !== Number(data.amount) || row.payment_mode !== data.mode || String(row.date).slice(0, 10) !== data.date || row.bank_account_id !== data.bankId) {
+      const tax = withPaymentTds('partner_profit_payments', {});
+      const differentTds = Object.hasOwn(tax, 'tds_amount') && ['tds_amount','tds_rate','tds_mode','tds_section'].some(key => String(row[key] ?? '') !== String(tax[key] ?? ''));
+      if (differentTds || Number(row.member_id) !== data.memberId || Number(row.amount) !== Number(data.amount) || row.payment_mode !== data.mode || String(row.date).slice(0, 10) !== data.date || row.bank_account_id !== data.bankId) {
         await db.query('ROLLBACK');
         return res.status(409).json({ message: 'This request already recorded a different payment. Reopen the entry form.' });
       }
@@ -74,8 +77,8 @@ export const createPartnerPayment = asyncHandler(async (req, res) => {
     }
     await assertActiveSiteBank(data.bankId, siteId, db);
     const { rows } = await db.query(`INSERT INTO partner_profit_payments
-      (site_id, member_id, date, transaction_time, amount, payment_mode, bank_account_id, bank_reference, remarks, voucher_url, request_id, created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      (site_id, member_id, date, transaction_time, amount, payment_mode, bank_account_id, bank_reference, remarks, voucher_url, request_id, created_by${tdsInsertColumns('partner_profit_payments')})
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12${tdsInsertValues('partner_profit_payments')}) RETURNING *`,
     [siteId, data.memberId, data.date, transactionTimeForWrite(), data.amount, data.mode, data.bankId,
       String(req.body.bank_reference || '').trim().slice(0, 200) || null,
       String(req.body.remarks || '').trim().slice(0, 2000) || null,
@@ -111,8 +114,8 @@ export const updatePartnerPayment = asyncHandler(async (req, res) => {
       : current.transaction_time;
     const { rows } = await db.query(`UPDATE partner_profit_payments SET
         date=$3, transaction_time=$4, amount=$5, payment_mode=$6, bank_account_id=$7,
-        bank_reference=$8, remarks=$9
-      WHERE site_id=$1 AND id=$2 RETURNING *, date::text AS date`, [
+        bank_reference=$8, remarks=$9${tdsUpdateSet('partner_profit_payments')}
+     WHERE site_id=$1 AND id=$2 RETURNING *, date::text AS date`, [
       siteId, paymentId, data.date, transactionTime, data.amount, data.mode, data.bankId,
       Object.hasOwn(req.body, 'bank_reference') ? String(req.body.bank_reference || '').trim().slice(0, 200) || null : current.bank_reference,
       Object.hasOwn(req.body, 'remarks') ? String(req.body.remarks || '').trim().slice(0, 2000) || null : current.remarks,

@@ -1,3 +1,4 @@
+import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
 
@@ -37,8 +38,8 @@ const bustProfitPayments = invalidateCacheOnSuccess(['site-profit|', 'daybook|',
 router.get('/:id/profit-payments/summary', requireRole('admin'), getPartnerPaymentSummary);
 router.get('/:id/profit-payments/partners', requireRole('admin'), listPaymentPartners);
 router.get('/:id/profit-payments', requireRole('admin'), listPartnerPayments);
-router.post('/:id/profit-payments', requireRole('admin'), bustProfitPayments, createPartnerPayment);
-router.put('/:id/profit-payments/:paymentId', requireRole('admin'), bustProfitPayments, updatePartnerPayment);
+router.post('/:id/profit-payments', requireRole('admin'), bustProfitPayments, transactionDateMiddleware, createPartnerPayment);
+router.put('/:id/profit-payments/:paymentId', requireRole('admin'), bustProfitPayments, transactionDateMiddleware, updatePartnerPayment);
 router.delete('/:id/profit-payments/:paymentId', requireRole('admin'), bustProfitPayments, deletePartnerPayment);
 router.post('/:id/profit-payments/:paymentId/void', requireRole('admin'), bustProfitPayments, voidPartnerPayment);
 router.get('/:id/profit-shares', requireRole('admin'), profitCache, getSiteProfitShares);
