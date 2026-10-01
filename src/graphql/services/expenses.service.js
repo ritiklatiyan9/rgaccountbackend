@@ -5,6 +5,7 @@
 import pool from '../../config/db.js';
 import { expenseModel } from '../../models/Expense.model.js';
 import { buildVerifyUrl, ReceiptType } from '../../utils/receiptToken.js';
+import { signExpenseDocuments } from '../../utils/expenseDocumentUrls.js';
 
 const DEFAULT_SUMMARY = {
   total_debit: 0,
@@ -102,7 +103,7 @@ export async function getExpensesPageData(siteId, { filters = {}, page = 1, limi
   }));
 
   return {
-    expenses: expensesWithVerify,
+    expenses: await Promise.all(expensesWithVerify.map((expense) => signExpenseDocuments(expense))),
     summary: paginatedData.summary || DEFAULT_SUMMARY,
     pagination: {
       totalItems,

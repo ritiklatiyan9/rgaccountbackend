@@ -4,6 +4,7 @@ import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { expenseDocumentColumns, signExpenseDocuments } from '../utils/expenseDocumentUrls.js';
 import {
   postApprovedImprestDebit,
   reverseApprovedImprestDebit,
@@ -83,12 +84,7 @@ async function reverseImprestOnRejection(
  * filter, GraphQL) keeps working without knowing the list exists. Every writer
  * goes through here so the two columns can never drift apart.
  */
-const fileColumns = (listKey, urlKey, list, single) => {
-  const urls = (Array.isArray(list) ? list : [single])
-    .filter((u) => typeof u === 'string' && u.trim())
-    .map((u) => u.trim());
-  return { [listKey]: urls, [urlKey]: urls[0] || null };
-};
+const fileColumns = expenseDocumentColumns;
 
 const voucherColumns = (voucher_urls, voucher_url) =>
   fileColumns('voucher_urls', 'voucher_url', voucher_urls, voucher_url);
@@ -150,7 +146,7 @@ export const createExpense = asyncHandler(async (req, res) => {
   };
 
   const expense = await expenseModel.create(data, pool);
-  res.status(201).json({ expense });
+  res.status(201).json({ expense: await signExpenseDocuments(expense) });
 });
 
 /**
@@ -204,7 +200,7 @@ export const listExpenses = asyncHandler(async (req, res) => {
   }));
 
   res.json({
-    expenses: expensesWithVerify,
+    expenses: await Promise.all(expensesWithVerify.map((expense) => signExpenseDocuments(expense))),
     summary: paginatedData.summary,
     pagination: {
       totalItems: paginatedData.totalItems,
@@ -238,7 +234,7 @@ export const getExpense = asyncHandler(async (req, res) => {
   if (!(await canUserViewEntry(req.user, 'expenses', expense.created_by))) {
     return res.status(404).json({ message: 'Expense not found' });
   }
-  res.json({ expense });
+  res.json({ expense: await signExpenseDocuments(expense) });
 });
 
 /**
@@ -331,7 +327,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
       siteId: existing.site_id,
     });
   }
-  res.json({ expense: updated });
+  res.json({ expense: await signExpenseDocuments(updated) });
 });
 
 /**
@@ -515,7 +511,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
     return b.id - a.id; // DESC by id
   });
 
-  res.json({ expenses: allExpenses });
+  res.json({ expenses: await Promise.all(allExpenses.map((expense) => signExpenseDocuments(expense))) });
 });
 
 /**
