@@ -156,7 +156,7 @@
     "migrate:om-a01-plot-no": "node src/migrations/182_om_a01_plot_number.js",
     "migrate:commission-tds": "node src/migrations/183_commission_tds_workflow.js",
     "migrate:payment-module-tds": "node src/migrations/184_payment_module_tds.js",
-    "migrate:cash-wallets": "node src/migrations/185_cash_wallets.js",
+    "migrate:cash-wallets": "node src/migrations/185_cash_wallets.js && node src/migrations/186_wallet_receipt_details.js",
     "test:wallets": "node --test test/wallet-*.test.mjs"
   },
   "dependencies": {

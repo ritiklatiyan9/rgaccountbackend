@@ -25,6 +25,8 @@ Creation uses a sender-scoped UUID idempotency key. Repeating a request or accep
 
 Run `npm run migrate:cash-wallets` before serving the feature. Normal `npm start` and the migration aggregate also include it. Re-running it preserves the tracking start and existing wallet records. No source financial entries are changed by this migration. The API returns `WALLET_NOT_READY` until setup completes.
 
+Migration 186 adds immutable receipt-context snapshots separately from financial history. The wallet ledger displays client/party, site, plot, receipt date, recorded time and notes. Existing wallet entries receive context from their available source without changing amounts or balances; future entries capture context atomically. After source removal, correction history retains the most recent saved context. Names and source status reflect the time of each movement. The page includes collected/received/handed-over totals, separate incoming/outgoing queues, search and site/date/type filters, and a full-details view. Automatic refresh preserves visible data; query changes never display rows from a previous filter.
+
 Run `PGLITE_MODULE=/path/to/@electric-sql/pglite/dist/index.js npm run test:wallets` for isolated PostgreSQL integration tests. These tests do not use the configured application database. Run `npm run build` from the frontend directory for the production bundle.
 
 REST endpoints: `GET /wallet`, `/wallet/people`, `/wallet/history`, `/wallet/transfers`; `POST /wallet/transfers`; `POST /wallet/transfers/:id/accept`, `/reject`, `/cancel`. All require existing application authentication. History and transfer lists are paginated; history date boundaries use Asia/Kolkata.
