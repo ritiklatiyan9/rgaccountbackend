@@ -8,6 +8,11 @@ import {
 import pool from '../config/db.js';
 import { clientMessageQueueUrl, isClientMessageQueueConfigured } from '../services/clientMessagingQueue.service.js';
 
+if (process.env.BACKUP_MAINTENANCE_MODE === 'true') {
+  console.log('[client-messaging-worker] Paused for backup maintenance. Restart after maintenance ends.');
+  process.exit(0);
+}
+
 // Let the AWS SDK default credential chain handle workload roles, local
 // profiles, environment credentials and temporary session tokens correctly.
 const awsConfig = (region) => ({ region });

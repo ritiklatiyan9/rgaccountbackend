@@ -29,6 +29,7 @@ export const ALL_MODULES = Object.freeze([
     'excel',
     'reports',
     'settings',
+    'backups',
     // Compliance and legal are split so sensitive legal matters, template
     // administration and module settings can be granted independently.
     'compliance',
@@ -53,6 +54,8 @@ const READ_ONLY_MODULES = new Set(['home', 'dashboard', 'finance_forecast', 'bal
 // existing sub-admins. An administrator must opt users into these sensitive
 // document/payment surfaces from the permission matrix.
 const RESTRICTED_MODULES = new Set([
+    // Database-wide downloads and restoration are granted explicitly.
+    'backups',
     'expense_approval',
     'document_search',
     'document_imprest',

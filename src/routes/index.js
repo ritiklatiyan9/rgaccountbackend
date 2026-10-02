@@ -60,6 +60,7 @@ import transactionTransferRoutes from './transactionTransfer.routes.js';
 import transactionPartyRoutes from './transactionParty.routes.js';
 import manualProfitSandboxRoutes from './manualProfitSandbox.routes.js';
 import walletRoutes from './wallet.routes.js';
+import backupRoutes from './backup.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -123,4 +124,5 @@ router.use('/transaction-transfers', transactionTransferRoutes);
 router.use('/transaction-parties', transactionPartyRoutes);
 router.use('/manual-profit-sandboxes', manualProfitSandboxRoutes);
 router.use('/wallet', walletRoutes);
+router.use('/backups', backupRoutes);
 export default router;

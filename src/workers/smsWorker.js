@@ -3,6 +3,11 @@ import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } from '@aws-sdk
 import pool from '../config/db.js';
 import { SMS_QUEUE_URL, isSmsQueueConfigured } from '../utils/sqs.js';
 
+if (process.env.BACKUP_MAINTENANCE_MODE === 'true') {
+  console.log('[sms-worker] Paused for backup maintenance. Restart after maintenance ends.');
+  process.exit(0);
+}
+
 /**
  * SMS queue consumer — run as its own process: `npm run worker:sms`.
  * Long-polls SQS and delivers each job through MSG91 (already the notification

@@ -1,0 +1,104 @@
+/**
+ * Stable backup group IDs are part of the archive format. Classification is
+ * presentation only: the database catalogue determines which tables are saved.
+ * New or installation-specific tables remain visible in "Other application data"
+ * so adding a module can never silently remove its data from a full backup.
+ */
+export const BACKUP_MODULES = Object.freeze([
+  { id: 'administration', label: 'Users & permissions', description: 'User accounts, access permissions, teams and authentication history.' },
+  { id: 'settings', label: 'Sites & settings', description: 'Organizations, sites, application settings and schema migration history.' },
+  { id: 'clients', label: 'Clients & bookings', description: 'Members, client categories, bookings, draws and KYC records.' },
+  { id: 'farmers', label: 'Farmers & land deals', description: 'Farmer records, land purchases and sale agreements, and their payments.' },
+  { id: 'commissions', label: 'Commissions', description: 'Agent commissions, commission schedules and payments.' },
+  { id: 'plots', label: 'Plots & payments', description: 'Plots, installments, receipts, circle rates and plot money transfers.' },
+  { id: 'registry', label: 'Plot registry & NOC', description: 'Registries, registry payments, NOC history and document handovers.' },
+  { id: 'expenses', label: 'Expenses', description: 'Expenses, expense categories and subcategories.' },
+  { id: 'daybook', label: 'Day book', description: 'Day book entries, balances and saved entry order.' },
+  { id: 'cashflow', label: 'Cash flow', description: 'Cash flow months, accounting entries and ledger data.' },
+  { id: 'firms', label: 'Firm transactions', description: 'Firm records and transactions.' },
+  { id: 'vendors', label: 'Vendors', description: 'Vendor commitments, payments, inventory orders and deliveries.' },
+  { id: 'imprest', label: 'Imprest', description: 'Cash allocations, expense requests, returns, transfers and imprest ledger.' },
+  { id: 'document_imprest', label: 'Document imprest', description: 'Document custody, cheque handovers and related events.' },
+  { id: 'wallet', label: 'Cash wallets', description: 'Wallet settings, accounts, transfers, entries and receipt details.' },
+  { id: 'banking', label: 'Banking & reconciliation', description: 'Bank accounts, statements, reconciliation runs and transaction matching.' },
+  { id: 'documents', label: 'Documents & OCR', description: 'Document metadata, module attachments and extracted document text.' },
+  { id: 'spreadsheets', label: 'Files & spreadsheets', description: 'Uploaded files, folders, workbooks, sheets, sharing and version history.' },
+  { id: 'construction', label: 'Construction', description: 'Projects, locations, tasks and material requests.' },
+  { id: 'inventory', label: 'Inventory', description: 'Materials, stock movements and inventory records.' },
+  { id: 'compliance', label: 'Compliance', description: 'Compliance items, authorities, approvals, licences and related records.' },
+  { id: 'legal', label: 'Legal', description: 'Legal notices, cases and case timelines.' },
+  { id: 'upi', label: 'UPI collection', description: 'UPI accounts and payment QR records.' },
+  { id: 'transfers', label: 'Transfers & approvals', description: 'Cross-module transfers, party links, edit requests and approval records.' },
+  { id: 'tds', label: 'TDS register', description: 'Tax deduction register and related records.' },
+  { id: 'misc_income', label: 'Miscellaneous income', description: 'Income categories and miscellaneous income entries.' },
+  { id: 'partner_finance', label: 'Partner finance', description: 'Site and land partner shares, profit payments and planning workspaces.' },
+  { id: 'chat', label: 'Chat', description: 'Conversations and messages.' },
+  { id: 'communications', label: 'Messaging & reminders', description: 'Campaigns, delivery history, reminders and calendar integration records.' },
+  { id: 'audit', label: 'Audit & recycle bin', description: 'Audit history, activity records, correction history and recycled records.' },
+  { id: 'other', label: 'Other application data', description: 'Additional database tables retained automatically for complete coverage.' },
+].map((module) => Object.freeze(module)));
+
+const EXACT_MODULES = Object.freeze({
+  users: 'administration', admin_accounts: 'administration', user_sites: 'administration',
+  user_permissions: 'administration', user_approval_modules: 'administration',
+  dashboard_component_permissions: 'administration', user_home_layouts: 'administration',
+  user_sessions: 'administration', login_otps: 'administration', teams: 'administration',
+  team_members: 'administration',
+  organizations: 'settings', sites: 'settings', project_settings: 'settings',
+  application_settings: 'settings', app_schema_migrations: 'settings', geocode_cache: 'settings',
+  members: 'clients', member_categories: 'clients', bookings: 'clients', kyc_cases: 'clients',
+  draw_registrations: 'clients', draw_events: 'clients',
+  farmers: 'farmers', farmer_payments: 'farmers', land_deals: 'farmers', land_deal_payments: 'farmers',
+  plots: 'plots', plot_payments: 'plots', plot_installments: 'plots',
+  plot_installment_payments: 'plots', plot_money_transfers: 'plots', plot_circle_rate_history: 'plots',
+  plot_status_approvals: 'plots', transaction_receipts: 'plots', transaction_receipt_prints: 'plots',
+  registry_document_handovers: 'registry',
+  expenses: 'expenses', expense_categories: 'expenses', expense_sub_categories: 'expenses',
+  day_book: 'daybook', day_book_daily_balance: 'daybook',
+  firms: 'firms', firm_transactions: 'firms',
+  ledger_entries: 'cashflow', ledger_quarantine: 'cashflow',
+  bank_accounts: 'banking',
+  documents: 'documents', ocr_results: 'documents',
+  excel_files: 'spreadsheets', file_folders: 'spreadsheets',
+  upi_accounts: 'upi', payment_qrs: 'upi',
+  site_partner_shares: 'partner_finance', land_partner_shares: 'partner_finance',
+  partner_profit_payments: 'partner_finance', manual_profit_sandboxes: 'partner_finance',
+  conversations: 'chat', messages: 'chat',
+  edit_requests: 'transfers', lookout_cases: 'transfers',
+  user_push_tokens: 'communications', reminder_scheduler_health: 'communications',
+  audit_logs: 'audit', agent_activity_log: 'audit', recycle_bin_entries: 'audit',
+  plot_number_correction_audit_182: 'audit', registry_payment_rounding_audit_180: 'audit',
+});
+
+const PREFIX_MODULES = Object.freeze([
+  ['plot_commission', 'commissions'],
+  ['plot_registr', 'registry'],
+  ['registry_', 'registry'],
+  ['daybook_', 'daybook'],
+  ['cash_flow_', 'cashflow'],
+  ['vendor_', 'vendors'],
+  ['document_imprest', 'document_imprest'],
+  ['imprest_', 'imprest'],
+  ['wallet_', 'wallet'],
+  ['bank_', 'banking'],
+  ['spreadsheet_', 'spreadsheets'],
+  ['construction_', 'construction'],
+  ['inventory_', 'inventory'],
+  ['compliance_', 'compliance'],
+  ['legal_', 'legal'],
+  ['transaction_', 'transfers'],
+  ['tds_', 'tds'],
+  ['misc_income_', 'misc_income'],
+  ['partner_profit_', 'partner_finance'],
+  ['client_message_', 'communications'],
+  ['sms_', 'communications'],
+  ['event_reminder', 'communications'],
+  ['google_calendar_', 'communications'],
+  ['balance_sheet_', 'settings'],
+]);
+
+export function moduleForTable(name) {
+  const table = typeof name === 'string' ? name : '';
+  if (Object.prototype.hasOwnProperty.call(EXACT_MODULES, table)) return EXACT_MODULES[table];
+  return PREFIX_MODULES.find(([prefix]) => table.startsWith(prefix))?.[1] || 'other';
+}

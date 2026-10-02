@@ -7,13 +7,14 @@ import { initCache } from './config/cache.js';
 import { startSmsReminderScheduler } from './services/smsReminder.service.js';
 import { startComplianceScheduler, stopComplianceScheduler } from './services/complianceScheduler.service.js';
 import { startEventReminderScheduler, stopEventReminderScheduler } from './services/eventReminderScheduler.service.js';
+import { backupMaintenanceEnabled } from './middlewares/backupMaintenance.middleware.js';
 
 const PORT = process.env.PORT || 3000;
 
 const server = http.createServer(app);
 
 // Initialize Socket.io attached to the native HTTP server
-initSocket(server);
+if (!backupMaintenanceEnabled()) initSocket(server);
 
 initCache();
 
@@ -21,9 +22,11 @@ connectDB().then(async () => {
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
-  startSmsReminderScheduler();
-  startComplianceScheduler();
-  startEventReminderScheduler();
+  if (!backupMaintenanceEnabled()) {
+    startSmsReminderScheduler();
+    startComplianceScheduler();
+    startEventReminderScheduler();
+  } else console.log('Backup maintenance mode: business APIs, sockets and reminder schedulers are paused.');
 }).catch(err => {
   console.error('Failed to connect to DB', err);
   process.exit(1);

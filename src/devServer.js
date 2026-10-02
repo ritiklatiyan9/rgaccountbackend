@@ -4,12 +4,13 @@ import app from './app.js';
 import pool, { connectDB } from './config/db.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
+import { backupMaintenanceEnabled } from './middlewares/backupMaintenance.middleware.js';
 
 // Local previews serve the application without starting production reminder
 // schedulers. They use the same authentication, permissions and database.
 const port = Number(process.env.LOCAL_API_PORT || 3001);
 const server = http.createServer(app);
-initSocket(server);
+if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();
 connectDB().then(() => server.listen(port, '127.0.0.1', () => {
   console.log(`Local API ready at http://127.0.0.1:${port}`);
