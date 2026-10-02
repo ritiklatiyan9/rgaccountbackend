@@ -11,6 +11,7 @@ import { backupMaintenanceEnabled,beginBackupRestore,endBackupRestore } from '..
 import { clearCacheByPrefixes, incrementRateLimit } from '../config/cache.js';
 import { getBackupLimits } from '../services/backupArchive.js';
 import { exportBackup, getBackupCatalog, previewBackup, restoreBackup } from '../services/backup.service.js';
+import { createBackupExportJobs } from '../services/backupExportJobs.js';
 
 const router = express.Router();
 let running = false;
@@ -21,16 +22,27 @@ const upload = multer({
 
 router.use(authMiddleware,createBackupAdminGuard(pool));
 
+const exports = createBackupExportJobs({
+  generate:(input,onProgress)=>exportBackup(pool,input,{onProgress}),
+  onError:(error,job)=>console.error('[backup] Export failed:',{id:job.id,stage:job.progress?.stage,code:error.code || error.name,status:error.statusCode || 500}),
+});
+
+function startOperation(req,res) {
+  const limit = incrementRateLimit(`backups:${req.user.id}`, 10*60*1000);
+  if (limit.count > 30) {
+    res.setHeader('Retry-After',String(limit.ttlSeconds));
+    res.status(429).json({ message:'Too many backup operations. Please wait before trying again.' });
+    return false;
+  }
+  if (running) { res.status(409).json({ message:'Another backup operation is running. Please wait for it to finish.' }); return false; }
+  running=true;
+  return true;
+}
+
 function operation(handler, { file = false, restore = false } = {}) {
   return async (req,res) => {
     if (restore && !backupMaintenanceEnabled()) return res.status(409).json({ message:'Enable BACKUP_MAINTENANCE_MODE=true and restart the API before restoring. Stop all other applications and workers using this database.' });
-    const limit = incrementRateLimit(`backups:${req.user.id}`, 10*60*1000);
-    if (limit.count > 30) {
-      res.setHeader('Retry-After',String(limit.ttlSeconds));
-      return res.status(429).json({ message:'Too many backup operations. Please wait before trying again.' });
-    }
-    if (running) return res.status(409).json({ message:'Another backup operation is running. Please wait for it to finish.' });
-    running = true;
+    if (!startOperation(req,res)) return;
     try {
       if (file) {
         // mkdtemp creates a private 0700 directory BEFORE any sensitive bytes
@@ -58,7 +70,26 @@ function operation(handler, { file = false, restore = false } = {}) {
   };
 }
 
-router.get('/catalog',operation(async (_req,res) => res.json(await getBackupCatalog(pool))));
+router.get('/catalog',operation(async (_req,res) => res.json({...await getBackupCatalog(pool),exportJobs:true})));
+router.post('/exports',async (req,res,next) => {
+  if (!startOperation(req,res)) return;
+  try {
+    const job=await exports.start(req.user.id,req.body,()=>{running=false;});
+    res.status(202).json(job);
+  } catch (error) { running=false; next(error); }
+});
+router.get('/exports/:id',async (req,res) => {
+  try { res.json(exports.status(req.params.id,req.user.id)); } catch (error) { res.status(error.statusCode || 500).json({message:error.message}); }
+});
+router.get('/exports/:id/file',async (req,res,next) => {
+  try {
+    const result=exports.file(req.params.id,req.user.id);
+    res.setHeader('Content-Type','application/gzip');
+    res.setHeader('X-Backup-Checksum',result.checksum);
+    res.setHeader('Access-Control-Expose-Headers','Content-Disposition, X-Backup-Checksum');
+    res.download(result.path,result.filename,error=>{if(error && !res.headersSent) next(error);});
+  } catch (error) { res.status(error.statusCode || 500).json({message:error.message}); }
+});
 router.post('/export',operation(async (req,res) => {
   const result = await exportBackup(pool,req.body);
   res.setHeader('Content-Type','application/gzip');

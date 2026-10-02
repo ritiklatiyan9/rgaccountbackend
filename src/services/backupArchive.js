@@ -1,8 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
-import { gzip, gunzip } from 'node:zlib';
+import { createGzip, gunzip } from 'node:zlib';
+import { Readable, Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
-const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const MIB = 1024 * 1024;
@@ -72,8 +73,52 @@ export function stableStringify(value) {
   return encode(value, 0);
 }
 
+// Traverse canonical JSON without constructing a second full-size archive.
+// Chunking before hashing/compression keeps memory bounded by the source data
+// and compressed output rather than several copies of its expanded JSON.
+function* canonicalTokens(value, ancestors = new Set(), depth = 0) {
+  if (depth > MAX_DEPTH) throw new BackupError('Backup data exceeds the maximum nesting depth.');
+  if (value === null) { yield 'null'; return; }
+  if (typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
+    yield JSON.stringify(value); return;
+  }
+  if (typeof value !== 'object') throw new BackupError('Backup data must contain only valid JSON values.');
+  if (ancestors.has(value)) throw new BackupError('Backup data contains a circular reference.');
+  const array = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (!array && prototype !== Object.prototype && prototype !== null) throw new BackupError('Backup data must contain plain JSON objects.');
+  ancestors.add(value);
+  try {
+    yield array ? '[' : '{';
+    const keys = array ? null : Object.keys(value).sort();
+    const length = array ? value.length : keys.length;
+    for (let i=0;i<length;i++) {
+      if (i) yield ',';
+      if (!array) {
+        const key = keys[i];
+        if (UNSAFE_KEYS.has(key)) throw new BackupError(`Backup data contains a prohibited object key: ${key}.`);
+        yield `${JSON.stringify(key)}:`;
+      }
+      yield* canonicalTokens(value[array ? i : keys[i]], ancestors, depth+1);
+    }
+    yield array ? ']' : '}';
+  } finally { ancestors.delete(value); }
+}
+
+function* canonicalChunks(value) {
+  let chunks = []; let length = 0;
+  for (const token of canonicalTokens(value)) {
+    if (length && length + token.length > 65536) { yield chunks.join(''); chunks=[]; length=0; }
+    if (token.length >= 65536) yield token;
+    else { chunks.push(token); length += token.length; }
+  }
+  if (length) yield chunks.join('');
+}
+
 export function sha256Payload(payload) {
-  return createHash('sha256').update(stableStringify(payload), 'utf8').digest('hex');
+  const hash = createHash('sha256');
+  for (const chunk of canonicalChunks(payload)) hash.update(chunk, 'utf8');
+  return hash.digest('hex');
 }
 
 function identifier(value) {
@@ -129,19 +174,31 @@ function validatePayload(payload) {
 }
 
 export async function encodeBackup(payload) {
+  return (await encodeBackupWithMetadata(payload)).buffer;
+}
+
+export async function encodeBackupWithMetadata(payload) {
   validatePayload(payload);
-  const canonical = stableStringify(payload);
-  const checksum = createHash('sha256').update(canonical, 'utf8').digest('hex');
-  const envelope = `{"format":"${BACKUP_FORMAT}","version":${BACKUP_VERSION},"checksum":"${checksum}","payload":${canonical}}`;
   const limits = getBackupLimits();
-  if (Buffer.byteLength(envelope, 'utf8') > limits.maxExpandedBytes) {
-    throw new BackupError('Backup exceeds the expanded size limit. Download smaller module backups or increase the configured backup limit.', 413);
+  const header = checksum => `{"format":"${BACKUP_FORMAT}","version":${BACKUP_VERSION},"checksum":"${checksum}","payload":`;
+  const hash = createHash('sha256');
+  let expandedBytes = Buffer.byteLength(header('0'.repeat(64))) + 1;
+  for (const chunk of canonicalChunks(payload)) {
+    expandedBytes += Buffer.byteLength(chunk, 'utf8');
+    if (expandedBytes > limits.maxExpandedBytes) throw new BackupError('Backup exceeds the expanded size limit. Download smaller module backups or increase the configured backup limit.', 413);
+    hash.update(chunk, 'utf8');
   }
-  const compressed = await gzipAsync(envelope);
-  if (compressed.length > limits.maxUploadBytes) {
-    throw new BackupError('Backup exceeds the upload size limit. Download smaller module backups or increase the configured backup limit.', 413);
-  }
-  return compressed;
+  const checksum = hash.digest('hex');
+  function* envelope() { yield header(checksum); yield* canonicalChunks(payload); yield '}'; }
+  const compressed = []; let compressedBytes = 0;
+  await pipeline(Readable.from(envelope(), { objectMode:false }), createGzip(), new Writable({
+    write(chunk, _encoding, done) {
+      compressedBytes += chunk.length;
+      if (compressedBytes > limits.maxUploadBytes) return done(new BackupError('Backup exceeds the upload size limit. Download smaller module backups or increase the configured backup limit.', 413));
+      compressed.push(chunk); done();
+    },
+  }));
+  return { buffer:Buffer.concat(compressed,compressedBytes),checksum };
 }
 
 export async function decodeBackup(buffer) {

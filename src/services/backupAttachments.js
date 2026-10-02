@@ -66,7 +66,7 @@ function localUrlKey(value, table, column) {
 }
 
 /** Find references without fetching any URL supplied by a backup or database row. */
-export function attachmentReferences(tables, { env = process.env } = {}) {
+export function attachmentReferences(tables, { env = process.env, referencesOnly=false } = {}) {
   const profiles = storageProfiles(env);
   const files = new Map();
   const external = new Map();
@@ -100,7 +100,10 @@ export function attachmentReferences(tables, { env = process.env } = {}) {
     if (STORAGE_COLUMNS.has(column) && !text.startsWith('data:')) {
       if (!validKey(text)) fail('A stored attachment has an unsafe object key.');
       const profile = profiles.find((candidate) => candidate.name === 'current');
-      if (!profile) fail('Referenced S3 attachments cannot be backed up until the application storage bucket is configured.');
+      if (!profile) {
+        if (referencesOnly) { add({storage:'unconfigured',key:text}); return; }
+        fail('Referenced S3 attachments cannot be backed up until the application storage bucket is configured.');
+      }
       add({ storage: 's3', bucket: profile.bucket, key: text, region: profile.region });
     }
   }
@@ -175,9 +178,14 @@ async function readS3(file, send, limit) {
 }
 
 export async function captureAttachments(tables, options = {}) {
-  const refs = attachmentReferences(tables, options);
+  const refs = attachmentReferences(tables, {...options,referencesOnly:options.includeFiles===false});
+  if (options.includeFiles===false) return {
+    version:1,files:[],external:refs.external,filesIncluded:false,managedReferenceCount:refs.files.length,
+    notice:'This archive includes database records and file links only. Original uploaded files are not included. Keep the original local/S3 storage or back up those files separately before moving databases.',
+  };
   const limit = maximumBytes(options.maxBytes); const send = objectSender(options);
   const files = []; let total = 0;
+  options.onProgress?.({stage:'attachments',files:0,totalFiles:refs.files.length});
   for (const file of refs.files) {
     let bytes; let contentType;
     try {
@@ -186,10 +194,11 @@ export async function captureAttachments(tables, options = {}) {
     } catch (error) {
       if (error.statusCode) throw error;
       const cause = error.code || error.name || 'storage error';
-      fail(`Cannot back up referenced attachment ${file.key} (${cause}). Restore storage access and try again.`);
+      fail(`Cannot back up referenced attachment ${file.key} (${cause}). Restore storage access, or choose records and file links only and preserve the original files separately.`);
     }
     total += bytes.length;
     files.push({ ...file, data: bytes.toString('base64'), sha256: sha256(bytes), ...(contentType ? { contentType } : {}) });
+    options.onProgress?.({stage:'attachments',files:files.length,totalFiles:refs.files.length});
   }
   return {
     version: 1, files, external: refs.external,
@@ -202,6 +211,7 @@ export async function captureAttachments(tables, options = {}) {
 /** Validate fully before database changes or attachment writes. */
 export function validateAttachments(attachments, options = {}) {
   if (!attachments || attachments.version !== 1 || !Array.isArray(attachments.files) || !Array.isArray(attachments.external)) fail('Backup attachment manifest is invalid.');
+  if (attachments.filesIncluded!==undefined && (attachments.filesIncluded!==false || attachments.files.length!==0 || !Number.isSafeInteger(attachments.managedReferenceCount) || attachments.managedReferenceCount<0 || attachments.managedReferenceCount>100000)) fail('Backup file-link manifest is invalid.');
   if (attachments.files.length > 100000 || attachments.external.length > 100000) fail('Backup contains too many attachment records.');
   const limit = maximumBytes(options.maxBytes); const seen = new Set(); let bytes = 0;
   const profiles = storageProfiles(options.env || process.env);

@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
-  BACKUP_FORMAT, BACKUP_VERSION, BackupError, decodeBackup, encodeBackup,
+  BACKUP_FORMAT, BACKUP_VERSION, BackupError, decodeBackup, encodeBackup, encodeBackupWithMetadata,
   getBackupLimits, sha256Payload, stableStringify,
 } from '../src/services/backupArchive.js';
 
@@ -60,6 +60,18 @@ test('canonical checksums ignore object property order and preserve array order'
   assert.equal(stableStringify({ z: { b: 2, a: 1 }, a: [null, '₹'] }), '{"a":[null,"₹"],"z":{"a":1,"b":2}}');
   assert.equal(sha256Payload({ b: 2, a: 1 }), sha256Payload({ a: 1, b: 2 }));
   assert.notEqual(sha256Payload({ rows: ['1', '2'] }), sha256Payload({ rows: ['2', '1'] }));
+});
+
+test('chunked compression preserves version-1 canonical bytes and checksums across chunk boundaries',async()=>{
+  const payload=fixture();
+  payload.tables[0].rows[0][2]='₹ हिन्दी "quotes" \\ slash\n'.repeat(10000);
+  const canonical=stableStringify(payload);
+  const checksum=createHash('sha256').update(canonical,'utf8').digest('hex');
+  const encoded=await encodeBackupWithMetadata(payload);
+  assert.equal(encoded.checksum,checksum);
+  assert.equal(sha256Payload(payload),checksum);
+  assert.equal(gunzipSync(encoded.buffer).toString(),`{"format":"${BACKUP_FORMAT}","version":${BACKUP_VERSION},"checksum":"${checksum}","payload":${canonical}}`);
+  assert.deepEqual((await decodeBackup(encoded.buffer)).payload,payload);
 });
 
 test('valid module and empty-table backups can be decoded', async () => {

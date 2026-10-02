@@ -151,6 +151,54 @@ test('backup database integration (actual PostgreSQL engine)', async t => {
     assert.equal((await target.query('SELECT role FROM users WHERE id=1')).rows[0].role,'admin');
   });
 
+  await t.test('one batched cursor covers wide/quoted/empty tables, multiple batches and true NULL values',async t=>{
+    const source=await createDatabase(t);
+    const wideName=`wide'table`;
+    const columns=Array.from({length:120},(_,i)=>`"column_${i}" TEXT`).join(',');
+    await source.query(`CREATE TABLE "${wideName}" (${columns})`);
+    await source.query(`INSERT INTO "${wideName}" (column_0,column_119) VALUES ('NULL','हिन्दी "quoted"')`);
+    await source.query('CREATE TABLE many_rows (id INTEGER PRIMARY KEY,value TEXT)');
+    await source.query("INSERT INTO many_rows SELECT n,CASE WHEN n%2=0 THEN NULL ELSE 'NULL' END FROM generate_series(1,5001) n");
+    await source.query('CREATE TABLE empty_module (id INTEGER)');
+    let declarations=0,fetches=0;
+    const db={connect:async()=>{
+      const client=await source.db.connect();
+      return {...client,query:async(text,params)=>{
+        if(text.startsWith('DECLARE backup_rows')) declarations++;
+        if(text.startsWith('FETCH FORWARD')) fetches++;
+        return client.query(text,params);
+      }};
+    }};
+    const backup=await snapshot(db);
+    assert.equal(declarations,1);assert.equal(fetches,3);
+    assert.equal(cell(backup,wideName,'column_0'),'NULL');
+    assert.equal(cell(backup,wideName,'column_1'),null);
+    assert.equal(cell(backup,wideName,'column_119'),'हिन्दी "quoted"');
+    const rows=backup.payload.tables.find(table=>table.name==='many_rows').rows;
+    assert.equal(rows.length,5001);
+    assert.equal(rows.filter(row=>row[1]===null).length,2500);
+    assert.equal(rows.filter(row=>row[1]==='NULL').length,2501);
+    assert.equal(backup.payload.tables.find(table=>table.name==='empty_module').rows.length,0);
+    assert.deepEqual((await decodeBackup(backup.buffer)).payload,backup.payload);
+  });
+
+  await t.test('records-only archives preserve every database row, preview file exclusions and restore original modules',async t=>{
+    const source=await createDatabase(t);
+    await source.query('CREATE TABLE documents (id INTEGER PRIMARY KEY, file_path TEXT)');
+    await source.query("INSERT INTO documents VALUES(1,'local::not-present.pdf')");
+    await assert.rejects(snapshot(source.db),/Cannot back up referenced attachment/);
+    const backup=await snapshot(source.db,{includeFiles:false});
+    assert.match(backup.filename,/records-only/);
+    assert.equal(cell(backup,'documents','file_path'),'local::not-present.pdf');
+    const preview=await previewBackup(source.db,backup.buffer);
+    assert.equal(preview.compatible,true);
+    assert.equal(preview.attachments.originalFilesExcluded,true);
+    assert.ok(preview.warnings.some(warning=>warning.includes('Original uploaded files were excluded')));
+    await source.query('DELETE FROM documents');
+    await restore(source.db,backup);
+    assert.equal((await source.query('SELECT file_path FROM documents')).rows[0].file_path,'local::not-present.pdf');
+  });
+
   await t.test('merge into an empty matching schema restores FK cycles and suppresses mirrors, then is idempotent', async t => {
     const source = await createDatabase(t);
     const target = await createDatabase(t, { seeded: false });

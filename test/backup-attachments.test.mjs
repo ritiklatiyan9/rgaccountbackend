@@ -130,6 +130,19 @@ test('S3 capture and restore use configured storage commands, enforce byte limit
   await assert.rejects(captureAttachments(tables, { env, maxBytes: 1, s3Send: async () => ({ Body: Readable.from([data]) }) }), /size limit/);
 });
 
+test('explicit records-only backups retain file links and identify exclusions without accessing storage',async()=>{
+  const tables=[{name:'documents',columns:['file_path','source_url'],rows:[['kyc_documents/proof.pdf','https://example.com/external.pdf']]}];
+  const captured=await captureAttachments(tables,{env:{},includeFiles:false,s3Send:()=>assert.fail('records-only must not read storage')});
+  assert.equal(captured.filesIncluded,false);
+  assert.equal(captured.managedReferenceCount,1);
+  assert.equal(captured.files.length,0);
+  assert.equal(captured.external.length,1);
+  assert.match(captured.notice,/Original uploaded files are not included/);
+  assert.equal(validateAttachments(captured,{env:{}}).bytes,0);
+  assert.throws(()=>validateAttachments({...captured,files:[entry()]}),/file-link manifest/);
+  assert.throws(()=>validateAttachments({...captured,managedReferenceCount:-1}),/file-link manifest/);
+});
+
 test('S3 permission errors never cause a blind overwrite', async () => {
   let puts = 0;
   const files = archive([entry({ storage: 's3', key: 'docs/a.pdf', bucket: env.AWS_S3_BUCKET_NAME, region: env.AWS_REGION })]);

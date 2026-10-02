@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { encodeBackup, decodeBackup, getBackupLimits, stableStringify, sha256Payload } from './backupArchive.js';
+import { encodeBackupWithMetadata, decodeBackup, getBackupLimits, stableStringify } from './backupArchive.js';
 import { captureAttachments, restoreAttachments, validateAttachments } from './backupAttachments.js';
 import { backupFailure, configureBackupConnection, publicTable, quoteIdentifier as qi, readBackupSchema, selectBackupTables, summarizeModules, orderedBackupViews } from './backupCatalog.js';
 import { moduleForTable } from './backupModules.js';
@@ -9,6 +9,7 @@ export const ATTACHMENT_NOTICE = 'Managed local and configured S3 files are incl
 const countRows = tables => tables.reduce((n,t) => n + t.rows.length, 0);
 const persistedColumns = table => table.columns.filter(c => !c.generated);
 const textProjection = columns => columns.map(c => `${qi(c.name)}::text AS ${qi(c.name)}`).join(',');
+const sqlString = value => `'${String(value).replaceAll("'", "''")}'`;
 const validMonth = month => typeof month === 'string' && /^(?:19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(month);
 
 async function readSequences(client, tableNames = null) {
@@ -22,33 +23,49 @@ async function readSequences(client, tableNames = null) {
     LEFT JOIN pg_class t ON t.oid=d.refobjid
     LEFT JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=d.refobjsubid
     WHERE n.nspname='public' ORDER BY c.relname`);
-  const result = [];
-  for (const sequence of rows) {
-    if (tableNames && sequence.ownerTable && !tableNames.has(sequence.ownerTable)) continue;
-    const { rows: [state] } = await client.query(`SELECT last_value::text AS "lastValue",is_called AS "isCalled" FROM ${publicTable(sequence.name)}`);
-    result.push({ ...sequence, ...state });
-  }
-  return result;
+  const included = rows.filter(sequence => !tableNames || !sequence.ownerTable || tableNames.has(sequence.ownerTable));
+  if (!included.length) return [];
+  const { rows: states } = await client.query(included.map(sequence =>
+    `SELECT ${sqlString(sequence.name)} AS name,last_value::text AS "lastValue",is_called AS "isCalled" FROM ${publicTable(sequence.name)}`
+  ).join(' UNION ALL '));
+  const byName = new Map(states.map(state => [state.name,state]));
+  return included.map(sequence => ({ ...sequence,...byName.get(sequence.name) }));
 }
 
-async function readTable(client, table, budget) {
-  const columns = persistedColumns(table);
-  if (!columns.length) throw backupFailure(`Table ${table.name} has no writable columns.`, 409);
-  const rows = [];
-  await client.query(`DECLARE backup_rows NO SCROLL CURSOR FOR SELECT ${textProjection(columns)} FROM ${publicTable(table.name)}`);
+async function readTables(client, selected, budget, onProgress) {
+  const tables = selected.map(table => {
+    const columns = persistedColumns(table).map(column => column.name);
+    if (!columns.length) throw backupFailure(`Table ${table.name} has no writable columns.`, 409);
+    return { name:table.name,module:moduleForTable(table.name),columns,rows:[] };
+  });
+  const byName = new Map(tables.map(table => [table.name,table]));
+  // One cursor avoids three extra database round trips for every (often empty)
+  // table. JSON arrays of PostgreSQL text retain exact text and null values while giving
+  // every table the same cursor shape, regardless of its column types/count.
+  const selects = tables.map(table => {
+    // PostgreSQL functions accept at most 100 arguments. Concatenating small
+    // JSON arrays also supports wide tables without treating a SQL NULL as text.
+    const chunks = [];
+    for (let i=0;i<table.columns.length;i+=64) chunks.push(`jsonb_build_array(${table.columns.slice(i,i+64).map(column => `${qi(column)}::text`).join(',')})`);
+    return `SELECT ${sqlString(table.name)} AS table_name,(${chunks.join(' || ')}) AS values FROM ${publicTable(table.name)}`;
+  });
+  await client.query(`DECLARE backup_rows NO SCROLL CURSOR FOR ${selects.join(' UNION ALL ')}`);
+  let rowCount = 0;
   try {
     while (true) {
-      const result = await client.query('FETCH FORWARD 1000 FROM backup_rows');
+      const result = await client.query('FETCH FORWARD 5000 FROM backup_rows');
       if (!result.rows.length) break;
       for (const row of result.rows) {
-        const values = columns.map(c => row[c.name]);
+        const values = row.values;
         budget.remaining -= Buffer.byteLength(JSON.stringify(values)) + 1;
         if (budget.remaining < 0) throw backupFailure('The backup exceeds the configured expanded-size limit. Ask your database administrator for a native backup or increase the documented backup limits.', 413);
-        rows.push(values);
+        byName.get(row.table_name).rows.push(values);
+        rowCount++;
       }
+      onProgress({stage:'reading',rows:rowCount});
     }
   } finally { await client.query('CLOSE backup_rows'); }
-  return { name: table.name, module: moduleForTable(table.name), columns: columns.map(c => c.name), rows };
+  return tables;
 }
 
 export async function getBackupCatalog(db) {
@@ -57,11 +74,10 @@ export async function getBackupCatalog(db) {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     await configureBackupConnection(client);
     const schema = await readBackupSchema(client);
-    const tables = [];
-    for (const table of schema.tables) {
-      const { rows: [row] } = await client.query(`SELECT count(*)::text AS total FROM ${publicTable(table.name)}`);
-      tables.push({ name: table.name, rowCount: Number(row.total) });
-    }
+    const { rows: counts } = await client.query(schema.tables.map(table =>
+      `SELECT ${sqlString(table.name)} AS name,count(*)::text AS total FROM ${publicTable(table.name)}`
+    ).join(' UNION ALL '));
+    const tables = counts.map(row => ({ name:row.name,rowCount:Number(row.total) }));
     await client.query('COMMIT');
     const modules = summarizeModules(tables).map(module => {
       const included = new Set(selectBackupTables(schema,[module.id]).map(t => t.name));
@@ -74,8 +90,14 @@ export async function getBackupCatalog(db) {
   finally { client.release(); }
 }
 
-export async function exportBackup(db, { modules = [], month } = {}) {
+export async function exportBackup(db, { modules = [], month, includeFiles=true } = {}, { onProgress=()=>{},maxDurationMs=30*60*1000 } = {}) {
   if (!validMonth(month)) throw backupFailure('Use a valid monthly label (YYYY-MM).');
+  if (typeof includeFiles!=='boolean') throw backupFailure('Choose whether to include original uploaded files.');
+  const deadline=Date.now()+maxDurationMs;
+  const progress = value => {
+    if (Date.now()>deadline) throw backupFailure('Backup preparation exceeded 30 minutes. Ask the server administrator for a native database and storage backup.',408);
+    onProgress(value);
+  };
   const client = await db.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -90,16 +112,18 @@ export async function exportBackup(db, { modules = [], month } = {}) {
     // Take relation locks together so DDL cannot change the captured schema.
     await client.query(`LOCK TABLE ${selected.map(t => publicTable(t.name)).join(',')} IN ACCESS SHARE MODE`);
     const budget = { remaining: getBackupLimits().maxExpandedBytes - Buffer.byteLength(JSON.stringify(schema)) - 65536 };
-    const tables = [];
-    for (const table of selected) tables.push(await readTable(client, table, budget));
+    progress({stage:'reading',rows:0});
+    const tables = await readTables(client, selected, budget, progress);
+    progress({stage:'sequences',rows:countRows(tables)});
     const sequences = await readSequences(client, new Set(selected.map(t => t.name)));
-    const attachments = await captureAttachments(tables, { maxBytes: Math.min(200*1024*1024,Math.max(0, Math.floor(budget.remaining * 0.65))) });
+    const attachments = await captureAttachments(tables, { maxBytes: Math.min(200*1024*1024,Math.max(0, Math.floor(budget.remaining * 0.65))),onProgress:progress,includeFiles });
     const payload = { backupId: randomUUID(), createdAt: new Date().toISOString(), month,
       kind: modules.length ? 'modules' : 'full', requestedModules: [...new Set(modules)],
       schema: { ...schema, tables: selected }, tables, sequences, attachments };
-    const buffer = await encodeBackup(payload);
+    progress({stage:'compressing',rows:countRows(tables),files:attachments.files.length});
+    const { buffer,checksum } = await encodeBackupWithMetadata(payload);
     await client.query('COMMIT');
-    return { buffer, payload, checksum: sha256Payload(payload), filename: `accounts-${month}-${payload.kind}-${payload.backupId.slice(0,8)}.accounts-backup.json.gz` };
+    return { buffer, payload, checksum, filename: `accounts-${month}-${payload.kind}${includeFiles ? '' : '-records-only'}-${payload.backupId.slice(0,8)}.accounts-backup.json.gz` };
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
   finally { client.release(); }
 }
@@ -176,12 +200,14 @@ export async function previewBackup(db, buffer) {
   ];
   if (payload.kind === 'modules') warnings.push('Related modules are included automatically to preserve accounting links. Use a full backup for a database move.');
   if (payload.attachments?.external?.length) warnings.push(`${payload.attachments.external.length} external file references need their original storage service to remain available.`);
+  if (payload.attachments?.filesIncluded===false) warnings.push('Original uploaded files were excluded from this archive. Database records and file links will restore; retain or separately restore the original local/S3 files.');
   return { backupId: payload.backupId, createdAt: payload.createdAt, month: payload.month, kind: payload.kind,
     modules: summarizeModules(payload.tables), tables: payload.tables.map(t => ({ name:t.name,rowCount:t.rows.length })),
     totalRows: countRows(payload.tables), compatible: !errors.length, errors, warnings, checksum,
     restoreModes: payload.kind === 'full' ? ['merge','replace'] : ['merge'],
     attachmentNotice: payload.attachments?.notice || ATTACHMENT_NOTICE,
-    attachments:{ includedFiles:attachmentSummary.files, externalReferences:attachmentSummary.external, bytes:attachmentSummary.bytes } };
+    attachments:{ includedFiles:attachmentSummary.files, externalReferences:attachmentSummary.external, bytes:attachmentSummary.bytes,
+      ...(payload.attachments?.filesIncluded===false ? {originalFilesExcluded:true,managedReferences:payload.attachments.managedReferenceCount} : {}) } };
 }
 
 async function insertTable(client, source, table, mode) {
