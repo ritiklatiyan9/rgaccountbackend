@@ -132,7 +132,7 @@ function uniqueStrings(values, label) {
   if (new Set(values).size !== values.length) throw new BackupError(`Backup contains duplicate ${label}.`);
 }
 
-function validatePayload(payload) {
+export function validateBackupPayload(payload) {
   if (!isObject(payload)) throw new BackupError('Backup payload must be an object.');
   if (typeof payload.backupId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.backupId)) {
     throw new BackupError('Backup ID must be a UUID.');
@@ -153,6 +153,10 @@ function validatePayload(payload) {
   if (!Array.isArray(payload.tables)) throw new BackupError('Backup tables must be an array.');
   if (!Array.isArray(payload.sequences)) throw new BackupError('Backup sequences must be an array.');
   if (payload.attachments !== undefined && !isObject(payload.attachments)) throw new BackupError('Backup attachments must be an object.');
+  if(payload.attachmentSet!==undefined) {
+    const set=payload.attachmentSet;
+    if(!isObject(set) || set.backupId!==payload.backupId || set.partIndex!==1 || !Array.isArray(set.requiredFileIds) || set.requiredFileIds.length>100000 || set.requiredFileIds.some(id=>typeof id!=='string' || !/^[a-f0-9]{64}$/.test(id)) || new Set(set.requiredFileIds).size!==set.requiredFileIds.length) throw new BackupError('Backup attachment set metadata is invalid.');
+  }
 
   const names = new Set();
   for (const table of payload.tables) {
@@ -178,9 +182,13 @@ export async function encodeBackup(payload) {
 }
 
 export async function encodeBackupWithMetadata(payload) {
-  validatePayload(payload);
+  return encodeArchiveWithMetadata(payload,{format:BACKUP_FORMAT,validate:validateBackupPayload});
+}
+
+export async function encodeArchiveWithMetadata(payload,{format,validate}) {
+  validate(payload);
   const limits = getBackupLimits();
-  const header = checksum => `{"format":"${BACKUP_FORMAT}","version":${BACKUP_VERSION},"checksum":"${checksum}","payload":`;
+  const header = checksum => `{"format":"${format}","version":${BACKUP_VERSION},"checksum":"${checksum}","payload":`;
   const hash = createHash('sha256');
   let expandedBytes = Buffer.byteLength(header('0'.repeat(64))) + 1;
   for (const chunk of canonicalChunks(payload)) {
@@ -202,6 +210,11 @@ export async function encodeBackupWithMetadata(payload) {
 }
 
 export async function decodeBackup(buffer) {
+  const {payload,checksum}=await decodeArchive(buffer,{formats:[BACKUP_FORMAT],validate:validateBackupPayload});
+  return {payload,checksum};
+}
+
+export async function decodeArchive(buffer,{formats,validate}) {
   const limits = getBackupLimits();
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new BackupError('Select a nonempty backup file.');
   if (buffer.length > limits.maxUploadBytes) throw new BackupError('Backup file exceeds the upload size limit.', 413);
@@ -225,17 +238,17 @@ export async function decodeBackup(buffer) {
   } catch {
     throw new BackupError('Backup does not contain valid UTF-8 JSON data.');
   }
-  if (!isObject(envelope) || envelope.format !== BACKUP_FORMAT) throw new BackupError('This file is not an RG Accounts backup.');
+  if (!isObject(envelope) || !formats.includes(envelope.format)) throw new BackupError('This file is not an RG Accounts backup.');
   if (envelope.version !== BACKUP_VERSION) throw new BackupError('This backup version is not supported. Use a compatible version of the account software.');
   if (typeof envelope.checksum !== 'string' || !/^[0-9a-f]{64}$/.test(envelope.checksum)) throw new BackupError('Backup integrity checksum is missing or invalid.');
   // Inspect envelope keys too, including unused metadata, before trusting it.
   for (const key of Object.keys(envelope)) {
     if (!['format', 'version', 'checksum', 'payload'].includes(key)) throw new BackupError('Backup envelope contains an unexpected field.');
   }
-  validatePayload(envelope.payload);
+  validate(envelope.payload,envelope.format);
   const checksum = sha256Payload(envelope.payload);
   if (!timingSafeEqual(Buffer.from(checksum, 'hex'), Buffer.from(envelope.checksum, 'hex'))) {
     throw new BackupError('Backup integrity check failed. The file has changed or is damaged.');
   }
-  return { payload: envelope.payload, checksum };
+  return { payload: envelope.payload, checksum,format:envelope.format };
 }

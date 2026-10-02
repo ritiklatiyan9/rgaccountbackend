@@ -22,13 +22,13 @@ function storageProfiles(env) {
   ].filter((profile) => profile.bucket);
 }
 
-function validKey(key) {
+export function validKey(key) {
   return typeof key === 'string' && key.length > 0 && Buffer.byteLength(key) <= 1024
     && !/[\\\x00-\x1f\x7f]/.test(key) && !key.startsWith('/')
     && key.split('/').every((segment) => segment !== '.' && segment !== '..' && segment !== '');
 }
 
-function validLocalKey(key) {
+export function validLocalKey(key) {
   return validKey(key) && /^(excel|kyc_documents)\/[^/]+$/.test(key);
 }
 
@@ -117,7 +117,7 @@ export function attachmentReferences(tables, { env = process.env, referencesOnly
   return { files: [...files.values()], external: [...external.values()] };
 }
 
-async function localDirectory(key, cwd, create) {
+export async function localDirectory(key, cwd, create) {
   if (!validLocalKey(key)) fail('Backup contains an unsafe local attachment filename.');
   const root = await fs.realpath(cwd);
   const [folder] = key.split('/');
@@ -156,7 +156,7 @@ async function readBounded(body, limit) {
   } catch (error) { body.destroy?.(); throw error; }
 }
 
-function objectSender(options) {
+export function objectSender(options) {
   if (options.s3Send) return options.s3Send;
   const clients = new Map(); const profiles = storageProfiles(options.env || process.env);
   return async (source, command) => {
@@ -167,7 +167,7 @@ function objectSender(options) {
       region: source.region,
       ...(profile.accessKeyId && profile.secretAccessKey ? { credentials: { accessKeyId: profile.accessKeyId, secretAccessKey: profile.secretAccessKey } } : {}),
     }));
-    return clients.get(id).send(command, { abortSignal: AbortSignal.timeout(30000) });
+    return clients.get(id).send(command, { abortSignal: AbortSignal.timeout(options.timeoutMs || 30000) });
   };
 }
 

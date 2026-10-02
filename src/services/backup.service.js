@@ -4,6 +4,8 @@ import { captureAttachments, restoreAttachments, validateAttachments } from './b
 import { backupFailure, configureBackupConnection, publicTable, quoteIdentifier as qi, readBackupSchema, selectBackupTables, summarizeModules, orderedBackupViews } from './backupCatalog.js';
 import { moduleForTable } from './backupModules.js';
 import { OPERATIONAL_TABLES, neutralizeRestoredJobs } from './backupOperationalState.js';
+import { attachmentFileId } from './backupAttachmentParts.js';
+import { attachmentReferences } from './backupAttachments.js';
 
 export const ATTACHMENT_NOTICE = 'Managed local and configured S3 files are included. External links (including Cloudinary) remain links; retain those storage accounts and their originals. Database backups do not contain server environment secrets or external queues.';
 const countRows = tables => tables.reduce((n,t) => n + t.rows.length, 0);
@@ -90,7 +92,7 @@ export async function getBackupCatalog(db) {
   finally { client.release(); }
 }
 
-export async function exportBackup(db, { modules = [], month, includeFiles=true } = {}, { onProgress=()=>{},maxDurationMs=30*60*1000 } = {}) {
+export async function exportBackup(db, { modules = [], month, includeFiles=true } = {}, { onProgress=()=>{},maxDurationMs=30*60*1000,separateAttachments=false } = {}) {
   if (!validMonth(month)) throw backupFailure('Use a valid monthly label (YYYY-MM).');
   if (typeof includeFiles!=='boolean') throw backupFailure('Choose whether to include original uploaded files.');
   const deadline=Date.now()+maxDurationMs;
@@ -116,14 +118,19 @@ export async function exportBackup(db, { modules = [], month, includeFiles=true 
     const tables = await readTables(client, selected, budget, progress);
     progress({stage:'sequences',rows:countRows(tables)});
     const sequences = await readSequences(client, new Set(selected.map(t => t.name)));
-    const attachments = await captureAttachments(tables, { maxBytes: Math.min(200*1024*1024,Math.max(0, Math.floor(budget.remaining * 0.65))),onProgress:progress,includeFiles });
+    const attachments = await captureAttachments(tables, { maxBytes: Math.max(0, Math.floor(budget.remaining * 0.65)),onProgress:progress,includeFiles:includeFiles && !separateAttachments });
     const payload = { backupId: randomUUID(), createdAt: new Date().toISOString(), month,
       kind: modules.length ? 'modules' : 'full', requestedModules: [...new Set(modules)],
       schema: { ...schema, tables: selected }, tables, sequences, attachments };
+    if(separateAttachments && includeFiles) {
+      const refs=attachmentReferences(tables);
+      payload.attachmentSet={backupId:payload.backupId,requiredFileIds:refs.files.map(attachmentFileId),partIndex:1};
+      attachments.notice='Database records and file links are in this part. Original files are in matching companion attachment parts. Keep and upload every part of this backup set.';
+    }
     progress({stage:'compressing',rows:countRows(tables),files:attachments.files.length});
     const { buffer,checksum } = await encodeBackupWithMetadata(payload);
     await client.query('COMMIT');
-    return { buffer, payload, checksum, filename: `accounts-${month}-${payload.kind}${includeFiles ? '' : '-records-only'}-${payload.backupId.slice(0,8)}.accounts-backup.json.gz` };
+    return { buffer, payload, checksum, filename: `accounts-${month}-${separateAttachments && includeFiles ? 'part-00001-records' : `${payload.kind}${includeFiles ? '' : '-records-only'}`}-${payload.backupId.slice(0,8)}.accounts-backup.json.gz` };
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
   finally { client.release(); }
 }
@@ -176,8 +183,16 @@ function validateSequenceMetadata(archived, current) {
   if (current.some(s => !names.has(s.name))) throw backupFailure('Backup is missing sequence values.', 409);
 }
 
-export async function previewBackup(db, buffer) {
-  const { payload, checksum } = await decodeBackup(buffer);
+function validateCompanionReferences(payload) {
+  if(!payload.attachmentSet) return;
+  const expected=attachmentReferences(payload.tables).files.map(attachmentFileId).sort();
+  const actual=[...payload.attachmentSet.requiredFileIds].sort();
+  if(payload.attachments?.filesIncluded!==false || payload.attachments.files.length || stableStringify(expected)!==stableStringify(actual)) throw backupFailure('Records and companion attachment metadata do not match. Select a complete original backup set.');
+}
+
+export async function previewBackup(db, buffer, { decodedArchive } = {}) {
+  const { payload, checksum } = decodedArchive || await decodeBackup(buffer);
+  validateCompanionReferences(payload);
   const attachmentSummary = await validateAttachments(payload.attachments);
   const client = await db.connect();
   let errors;
@@ -200,12 +215,13 @@ export async function previewBackup(db, buffer) {
   ];
   if (payload.kind === 'modules') warnings.push('Related modules are included automatically to preserve accounting links. Use a full backup for a database move.');
   if (payload.attachments?.external?.length) warnings.push(`${payload.attachments.external.length} external file references need their original storage service to remain available.`);
-  if (payload.attachments?.filesIncluded===false) warnings.push('Original uploaded files were excluded from this archive. Database records and file links will restore; retain or separately restore the original local/S3 files.');
+  if (payload.attachments?.filesIncluded===false) warnings.push(payload.attachmentSet ? 'Upload all matching companion attachment parts with this records part. Originals are restored before database records.' : 'Original uploaded files were excluded from this archive. Database records and file links will restore; retain or separately restore the original local/S3 files.');
   return { backupId: payload.backupId, createdAt: payload.createdAt, month: payload.month, kind: payload.kind,
     modules: summarizeModules(payload.tables), tables: payload.tables.map(t => ({ name:t.name,rowCount:t.rows.length })),
     totalRows: countRows(payload.tables), compatible: !errors.length, errors, warnings, checksum,
     restoreModes: payload.kind === 'full' ? ['merge','replace'] : ['merge'],
     attachmentNotice: payload.attachments?.notice || ATTACHMENT_NOTICE,
+    ...(payload.attachmentSet ? {attachmentSet:payload.attachmentSet} : {}),
     attachments:{ includedFiles:attachmentSummary.files, externalReferences:attachmentSummary.external, bytes:attachmentSummary.bytes,
       ...(payload.attachments?.filesIncluded===false ? {originalFilesExcluded:true,managedReferences:payload.attachments.managedReferenceCount} : {}) } };
 }
@@ -278,12 +294,17 @@ async function restoreSequences(client, sequences, current, mode) {
   }
 }
 
-export async function restoreBackup(db, buffer, { mode, checksum, confirmation } = {}) {
+export async function restoreBackup(db, buffer, { mode, checksum, confirmation } = {}, { verifyAttachmentSet, decodedArchive } = {}) {
   if (!['merge','replace'].includes(mode)) throw backupFailure('Choose merge or replace.');
   if (confirmation !== (mode === 'replace' ? 'REPLACE ALL DATA' : 'RESTORE')) throw backupFailure('The restore confirmation does not match.');
-  const decoded = await decodeBackup(buffer);
+  const decoded = decodedArchive || await decodeBackup(buffer);
   if (checksum !== decoded.checksum) throw backupFailure('The selected backup changed. Validate it again before restoring.',409);
   const { payload } = decoded;
+  validateCompanionReferences(payload);
+  if (payload.attachmentSet) {
+    if (!verifyAttachmentSet) throw backupFailure('Restore all matching attachment parts before restoring these database records.',409);
+    await verifyAttachmentSet(payload.attachmentSet,decoded.checksum);
+  }
   if (mode === 'replace' && payload.kind !== 'full') throw backupFailure('Only a full backup can replace the database.');
   await validateAttachments(payload.attachments);
   const client = await db.connect();

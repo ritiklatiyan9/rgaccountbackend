@@ -94,7 +94,7 @@ test('startup removes abandoned private exports while preserving fresh directori
   const fresh=path.join(root,'accounts-backup-export-fresh');
   const unrelated=path.join(root,'other-backup');
   for(const directory of [stale,fresh,unrelated]) {await fs.mkdir(directory,{mode:0o700});await fs.writeFile(path.join(directory,'archive.gz'),'fixture',{mode:0o600});}
-  const old=new Date(Date.now()-2*60*60*1000);
+  const old=new Date(Date.now()-4*60*60*1000);
   await fs.utimes(stale,old,old);await fs.utimes(unrelated,old,old);
   const jobs=createBackupExportJobs({temporaryRoot:root,generate:async()=>archive});
   t.after(async()=>{await jobs.close();await fs.rm(root,{recursive:true,force:true});});
@@ -102,6 +102,30 @@ test('startup removes abandoned private exports while preserving fresh directori
   await assert.rejects(fs.stat(stale),error=>error.code==='ENOENT');
   assert.ok((await fs.stat(fresh)).isDirectory());
   assert.ok((await fs.stat(unrelated)).isDirectory());
+});
+
+test('multipart jobs expose every part only after completion and keep ownership on retries',async t=>{
+  const jobs=createBackupExportJobs({generate:async(_input,_progress,publish)=>{
+    await publish({...archive,kind:'records'});
+    await publish({...archive,filename:'part-2.gz',kind:'attachments'});
+    return {multipart:true,backupId:'fixture-id'};
+  }});t.after(()=>jobs.close());
+  const job=await jobs.start(7,{});const ready=await finished(jobs,job.id);
+  assert.equal(ready.multipart,true);assert.equal(ready.parts.length,2);
+  assert.ok(new Date(ready.expiresAt).getTime()-Date.now()>119*60*1000);
+  assert.equal(jobs.file(job.id,7,2).filename,'part-2.gz');
+  assert.throws(()=>jobs.file(job.id,8,2),error=>error.statusCode===404);
+  assert.throws(()=>jobs.file(job.id,7,3),error=>error.statusCode===404);
+});
+
+test('failure after writing some parts removes the incomplete set and offers no downloads',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'backup-job-failure-test-'));
+  const jobs=createBackupExportJobs({temporaryRoot:root,generate:async(_input,_progress,publish)=>{
+    await publish(archive);throw Object.assign(new Error('Original missing'),{statusCode:400});
+  }});t.after(async()=>{await jobs.close();await fs.rm(root,{recursive:true,force:true});});
+  const job=await jobs.start(7,{});assert.equal((await finished(jobs,job.id)).status,'failed');
+  assert.throws(()=>jobs.file(job.id,7,1),/Original missing/);
+  assert.deepEqual(await fs.readdir(root),[]);
 });
 
 test('concurrent starts reserve preparation before asynchronous filesystem work',async t=>{

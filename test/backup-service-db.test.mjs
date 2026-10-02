@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { exportBackup, previewBackup, restoreBackup, getBackupCatalog } from '../src/services/backup.service.js';
 import { decodeBackup, encodeBackup, sha256Payload } from '../src/services/backupArchive.js';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { exportBackupSet } from '../src/services/backupSet.service.js';
+import { createAttachmentPartRestores, decodeBackupPart } from '../src/services/backupAttachmentParts.js';
 
 // PGlite is a development dependency. BACKUP_DB_TEST_MODULE can optionally point
 // at another dist/index.js. No application pool, .env file or network is used.
@@ -197,6 +202,41 @@ test('backup database integration (actual PostgreSQL engine)', async t => {
     await source.query('DELETE FROM documents');
     await restore(source.db,backup);
     assert.equal((await source.query('SELECT file_path FROM documents')).rows[0].file_path,'local::not-present.pdf');
+  });
+
+  await t.test('a complete multipart set restores originals before records and rejects incomplete or mismatched sets without writes',async t=>{
+    const source=await createDatabase(t),target=await createDatabase(t,{seeded:false});
+    const root=await fs.mkdtemp(path.join(os.tmpdir(),'backup-set-db-test-'));
+    t.after(()=>fs.rm(root,{recursive:true,force:true}));
+    const from=path.join(root,'source'),to=path.join(root,'target');
+    await fs.mkdir(to,{recursive:true});
+    await fs.mkdir(path.join(from,'uploads','kyc_documents'),{recursive:true});
+    const bytes=Buffer.from('original invoice हिंदी');
+    await fs.writeFile(path.join(from,'uploads','kyc_documents','invoice.pdf'),bytes);
+    for(const database of [source,target]) await database.query('CREATE TABLE documents (id INTEGER PRIMARY KEY,file_path TEXT)');
+    await source.query("INSERT INTO documents VALUES(1,'local::invoice.pdf')");
+    const parts=[];
+    const exported=await exportBackupSet(source.db,{month:'2026-10'},{attachmentOptions:{cwd:from,env:{}},publish:async part=>parts.push(part)});
+    assert.equal(exported.multipart,true);assert.equal(parts.length,2);
+    const primary=await decodeBackup(parts[0].buffer);
+    const preview=await previewBackup(target.db,parts[0].buffer);
+    assert.equal(preview.compatible,true);assert.equal(preview.attachmentSet.requiredFileIds.length,1);
+    assert.equal((await source.query('SELECT count(*)::text AS total FROM documents')).rows[0].total,'1');
+    const manager=createAttachmentPartRestores({cwd:to,env:{}});t.after(()=>manager.close());
+    const input={mode:'merge',confirmation:'RESTORE',checksum:primary.checksum};
+    const options={verifyAttachmentSet:(set,checksum)=>manager.assertComplete(7,set.backupId,checksum,set.requiredFileIds)};
+    await assert.rejects(restoreBackup(target.db,parts[0].buffer,input),/all matching attachment parts/);
+    await assert.rejects(restoreBackup(target.db,parts[0].buffer,input,options),/all matching attachment parts/);
+    assert.equal((await target.query('SELECT count(*)::text AS total FROM users')).rows[0].total,'0');
+    const incomplete=structuredClone(primary.payload);incomplete.attachmentSet.requiredFileIds=[];
+    const altered=await encodeBackup(incomplete);
+    await assert.rejects(restoreBackup(target.db,altered,{...input,checksum:sha256Payload(incomplete)},options),/metadata do not match/);
+    await manager.restore(7,await decodeBackupPart(parts[1].buffer,{env:{}}));
+    const result=await restoreBackup(target.db,parts[0].buffer,input,options);
+    assert.equal(result.inserted,8);
+    assert.equal((await target.query('SELECT file_path FROM documents')).rows[0].file_path,'local::invoice.pdf');
+    assert.deepEqual(await fs.readFile(path.join(to,'uploads','kyc_documents','invoice.pdf')),bytes);
+    assert.equal((await target.query('SELECT count(*)::text AS total FROM day_book')).rows[0].total,'1');
   });
 
   await t.test('merge into an empty matching schema restores FK cycles and suppresses mirrors, then is idempotent', async t => {
