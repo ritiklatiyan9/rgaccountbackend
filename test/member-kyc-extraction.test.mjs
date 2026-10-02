@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normaliseResult, extractMemberKycFromText } from '../src/services/memberKycOcr.service.js';
+import { normaliseResult, extractMemberKycFromText, extractMemberKyc, resolveOpenRouterKycModel, DEFAULT_OPENROUTER_KYC_MODEL } from '../src/services/memberKycOcr.service.js';
 import { reviewDocument, combineReviewedDocuments } from '../src/services/memberKycReview.service.js';
 
 const payload = (field, value, quote = value, score = 0.99) => ({
@@ -84,4 +84,34 @@ test('model integration drops unsupported fields and requests evidence', async (
     }) } }] }) };
   });
   assert.deepEqual((await extractMemberKycFromText('Name: Raj Kumar', 'AADHAAR')).fields, { full_name: 'Raj Kumar' });
+});
+
+test('normalization keeps printed date formats, Hindi gender and line-wrapped identifiers without accepting issuer headings',()=>{
+  assert.deepEqual(result('full_name','Unique Identification Authority of India','Unique Identification Authority of India','Unique Identification Authority of India','AADHAAR'),{});
+  assert.deepEqual(result('full_name','भारतीय विधिक पहचान प्राधिकरण','भारतीय विधिक पहचान प्राधिकरण','भारतीय विधिक पहचान प्राधिकरण','AADHAAR'),{});
+  assert.deepEqual(result('state','आधार','आधार','आधार','AADHAAR'),{});
+  assert.deepEqual(result('gender','MALE','पुरुष','पुरुष','AADHAAR'),{gender:'MALE'});
+  assert.deepEqual(result('aadhar_no','234567891234','2345\n6789\n1234'),{aadhar_no:'234567891234'});
+  for(const quote of ['DOB: 23-04-1990','DOB: 23.04.1990']) assert.deepEqual(result('date_of_birth','1990-04-23',quote),{date_of_birth:'1990-04-23'});
+});
+
+test('KYC reads original images and PDFs with the upgraded OpenRouter model before structuring evidence',async t=>{
+  const keys=['KYC_AI_ENGINE','OPENROUTER_API_KEY','OPENROUTER_KYC_MODEL','OPENROUTER_KYC_PDF_ENGINE'];
+  const original=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
+  process.env.KYC_AI_ENGINE='openrouter';process.env.OPENROUTER_API_KEY='test-key';
+  process.env.OPENROUTER_KYC_MODEL='qwen/qwen3-vl-30b-a3b-instruct';delete process.env.OPENROUTER_KYC_PDF_ENGINE;
+  t.after(()=>{for(const key of keys) {if(original[key]===undefined) delete process.env[key];else process.env[key]=original[key];}});
+  assert.equal(resolveOpenRouterKycModel(),DEFAULT_OPENROUTER_KYC_MODEL);
+  const requests=[];
+  t.mock.method(globalThis,'fetch',async(_url,options)=>{
+    const body=JSON.parse(options.body);requests.push(body);
+    const content=Array.isArray(body.messages[0].content) ? 'Name: Raj Kumar' : JSON.stringify(payload('full_name','Raj Kumar','Name: Raj Kumar'));
+    return new Response(JSON.stringify({choices:[{message:{content}}]}),{status:200,headers:{'Content-Type':'application/json'}});
+  });
+  assert.deepEqual((await extractMemberKyc(Buffer.from('fixture image'),'image/jpeg','AADHAAR')).fields,{full_name:'Raj Kumar'});
+  assert.equal(requests[0].model,DEFAULT_OPENROUTER_KYC_MODEL);assert.equal(requests[1].model,DEFAULT_OPENROUTER_KYC_MODEL);
+  assert.equal(requests[0].messages[0].content[1].image_url.detail,'high');assert.equal(requests[1].response_format.type,'json_object');
+  assert.deepEqual((await extractMemberKyc(Buffer.from('%PDF-fixture'),'application/pdf','AADHAAR')).fields,{full_name:'Raj Kumar'});
+  assert.deepEqual(requests[2].plugins,[{id:'file-parser',pdf:{engine:'native'}}]);
+  process.env.OPENROUTER_KYC_MODEL='custom/vision-model';assert.equal(resolveOpenRouterKycModel(),'custom/vision-model');
 });

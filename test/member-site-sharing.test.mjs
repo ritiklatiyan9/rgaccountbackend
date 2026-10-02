@@ -233,3 +233,76 @@ test('members without phone/identity still share safely by explicit group, not b
   assert.equal(added.status,201);assert.equal((await query('SELECT count(*)::int AS n FROM members')).rows[0].n,4);
   assert.equal((await query('SELECT count(*)::int AS n FROM members WHERE shared_profile_id IS NOT NULL')).rows[0].n,3);
 });
+
+test('verified KYC is authoritative for linked copies even when unrelated clients reuse its identity numbers',async t=>{
+  const {db,query}=await fixture(t);
+  const unrelated=await memberModel.create(data({site_id:2,full_name:'OTHER CLIENT',phone:'9000000001',aadhar_no:'123456789123',pan_no:'ABCDE1234F'}),db);
+  const otherOrg=await memberModel.create(data({site_id:4,full_name:'Test Client',phone:'9876543210',aadhar_no:'123456789123'}),db);
+  const source=(await invoke(createMember,{site_id:1,full_name:'Test Client',phone:'9876543210'})).data.member;
+  const kyc=await verifiedCase(db,source,{status:'OPEN'});
+  const result=await invoke(verifyCase,{member_update:{full_name:'VERIFIED CLIENT',phone:'9876543210',aadhar_no:'123456789123',pan_no:'ABCDE1234F',address:'REVIEWED ADDRESS'}},{id:kyc.id});
+  assert.equal(result.status,200);assert.equal(result.data.sharing.site_count,3);assert.deepEqual(result.data.sharing.warnings,[]);
+  const linked=(await query('SELECT * FROM members WHERE shared_profile_id=$1',[source.shared_profile_id])).rows;
+  assert.equal(linked.length,3);assert.ok(linked.every(row=>row.full_name==='VERIFIED CLIENT' && row.aadhar_no==='123456789123' && row.address==='REVIEWED ADDRESS'));
+  assert.deepEqual((await query('SELECT full_name,shared_profile_id FROM members WHERE id=ANY($1::int[]) ORDER BY id',[[unrelated.id,otherOrg.id]])).rows,
+    [{full_name:'OTHER CLIENT',shared_profile_id:null},{full_name:'Test Client',shared_profile_id:null}]);
+  assert.equal((await query('SELECT count(*)::int AS n FROM documents WHERE client_member_id=$1',[unrelated.id])).rows[0].n,0);
+});
+
+test('verifying a legacy registration links the same name/mobile copies and replaces stale KYC with the reviewed corrections',async t=>{
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data({full_name:'ANKIT TYAGI',phone:'9639559955',alt_phone:'9000000001'}),db);
+  const existing=await memberModel.create(data({site_id:2,full_name:'ANKIT TYAGI',phone:'9639559955',member_type:'FARMER',member_types:['FARMER'],aadhar_no:'1234567890123',address:'OLD ADDRESS',alt_phone:'9000000002',notes:'SITE NOTE'}),db);
+  await verifiedCase(db,existing);
+  const kyc=await verifiedCase(db,source,{status:'OPEN'});
+  const result=await invoke(verifyCase,{member_update:{full_name:'ANKIT KUMAR TYAGI',phone:'9639559956',aadhar_no:'234567891234',address:'NEW REVIEWED ADDRESS',alt_phone:''}},{id:kyc.id});
+  assert.equal(result.status,200);assert.equal(result.data.sharing.site_count,3);
+  assert.equal(result.data.sharing.created_count,1);
+  const linked=(await query('SELECT * FROM members ORDER BY site_id')).rows;
+  assert.equal(linked.length,3);assert.equal(new Set(linked.map(row=>row.shared_profile_id)).size,1);
+  assert.ok(linked.every(row=>row.full_name==='ANKIT KUMAR TYAGI' && row.phone==='9639559956' && row.aadhar_no==='234567891234' && row.address==='NEW REVIEWED ADDRESS' && row.alt_phone===null));
+  assert.deepEqual(linked[1].member_types,['FARMER']);assert.equal(linked[1].notes,'SITE NOTE');
+  assert.equal((await query("SELECT count(*)::int AS n FROM kyc_cases WHERE status='VERIFIED'")).rows[0].n,4);
+});
+
+test('an unchanged mobile on a legacy duplicate does not block the selected member KYC',async t=>{
+  const {db,query}=await fixture(t);
+  const source=(await invoke(createMember,{site_id:1,full_name:'Test Client',phone:'9876543210'})).data.member;
+  const duplicate=await memberModel.create(data({full_name:'OLD UNLINKED COPY'}),db);
+  const kyc=await verifiedCase(db,source,{status:'OPEN'});
+  assert.equal((await invoke(verifyCase,{member_update:{phone:'9876543210',address:'VERIFIED ADDRESS'}},{id:kyc.id})).status,200);
+  assert.equal((await query('SELECT address FROM members WHERE id=$1',[duplicate.id])).rows[0].address,null);
+});
+
+test('another person using the mobile in a target site produces a sharing warning after successful local verification',async t=>{
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data(),db);
+  const other=await memberModel.create(data({site_id:2,full_name:'ANOTHER PERSON'}),db);
+  const kyc=await verifiedCase(db,source,{status:'OPEN'});
+  const result=await invoke(verifyCase,{member_update:{address:'VERIFIED ADDRESS'}},{id:kyc.id});
+  assert.equal(result.status,200);assert.equal(result.data.sharing.site_count,2);
+  assert.deepEqual(result.data.sharing.warnings.map(w=>[w.site_id,w.code]),[[2,'SITE_MOBILE_CONFLICT']]);
+  assert.equal((await query('SELECT status FROM kyc_cases WHERE id=$1',[kyc.id])).rows[0].status,'VERIFIED');
+  assert.equal((await query('SELECT full_name,address,shared_profile_id FROM members WHERE id=$1',[other.id])).rows[0].shared_profile_id,null);
+  assert.equal((await query('SELECT count(*)::int AS n FROM members WHERE site_id=2')).rows[0].n,1);
+});
+
+test('duplicate legacy matches are not guessed or merged while the source verification saves',async t=>{
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data(),db);
+  await memberModel.create(data({site_id:2}),db);await memberModel.create(data({site_id:2}),db);
+  const kyc=await verifiedCase(db,source,{status:'OPEN'});
+  const result=await invoke(verifyCase,{member_update:{address:'VERIFIED ADDRESS'}},{id:kyc.id});
+  assert.equal(result.status,200);assert.equal(result.data.sharing.warnings[0].code,'REGISTRATION_REVIEW_REQUIRED');
+  assert.equal((await query('SELECT count(*)::int AS n FROM members WHERE site_id=2 AND shared_profile_id IS NULL')).rows[0].n,2);
+});
+
+test('a document-copy failure rolls back the reviewed profile and verification together',async t=>{
+  const {db,query}=await fixture(t);
+  const source=(await invoke(createMember,{site_id:1,full_name:'Test Client',phone:'9876543210'})).data.member;
+  const kyc=await verifiedCase(db,source,{status:'OPEN'});
+  await query('ALTER TABLE documents ADD CONSTRAINT reject_target_documents CHECK(site_id<>3)');
+  await assert.rejects(invoke(verifyCase,{member_update:{address:'VERIFIED ADDRESS'}},{id:kyc.id}),/reject_target_documents/);
+  assert.equal((await query('SELECT status FROM kyc_cases WHERE id=$1',[kyc.id])).rows[0].status,'OPEN');
+  assert.ok((await query('SELECT address FROM members')).rows.every(row=>row.address===null));
+});

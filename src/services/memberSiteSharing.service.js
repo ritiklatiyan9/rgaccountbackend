@@ -90,7 +90,8 @@ async function shareVerifiedCase(db,{source,target,user,refresh=false}) {
       caseId=rows[0].id;
     }
   } else {
-    const result=await reuseVerifiedKycForMember(db,{source,targetMember:{...target,full_name:source.full_name},siteId:target.site_id,userId:user.id});
+    const reviewedProfile=refresh ? Object.fromEntries(SHARED_FIELDS.map(field=>[field,source[field]]).filter(([,value])=>value!==undefined)) : {};
+    const result=await reuseVerifiedKycForMember(db,{source,targetMember:{...target,...reviewedProfile,full_name:source.full_name},siteId:target.site_id,userId:user.id});
     if(!result.kycReused) return false;
     caseId=result.kycCaseId;
   }
@@ -140,23 +141,76 @@ export async function registerMemberAcrossSites(db,{memberId,user}) {
   return {shared_profile_id:group,site_count:sites.length,created_count:created.length,existing_count:matches.length,kyc_shared_count:kycShared};
 }
 
+/** A reviewed verification is the authoritative profile. Shared IDs on other
+ * people are not a registration conflict and never link their records. Legacy
+ * registrations are adopted only by the same name/mobile pair (before or after
+ * the review); their old identity values do not override the verified details. */
+async function publishVerifiedMemberProfile(db,{memberId,user,previousProfile}) {
+  const source=await loadSource(db,memberId,user);
+  if(!source.verified_kyc_case_id) fail('Complete KYC verification before publishing this profile.',400);
+  const group=source.shared_profile_id || randomUUID();
+  const identities=[source,previousProfile].filter(Boolean);
+  const phones=[...new Set(identities.map(profile=>normalizeMemberPhone(profile.phone)).filter(Boolean))];
+  const {rows:candidates}=await db.query(`SELECT m.* FROM members m JOIN sites s ON s.id=m.site_id
+    WHERE s.organization_id=$1 AND m.id<>$2 AND (m.shared_profile_id=$3::uuid
+      OR RIGHT(REGEXP_REPLACE(COALESCE(m.phone,''),'[^0-9]','','g'),10)=ANY($4::text[]))
+    ORDER BY m.site_id,m.id FOR UPDATE OF m`,[user.organization_id,source.id,group,phones]);
+  const samePerson=target=>identities.some(profile=>normalizeMemberPhone(profile.phone)
+    && normalizeMemberPhone(profile.phone)===normalizeMemberPhone(target.phone)
+    && normalizeMemberName(profile.full_name)
+    && normalizeMemberName(profile.full_name)===normalizeMemberName(target.full_name));
+  const {rows:sites}=await db.query('SELECT id FROM sites WHERE organization_id=$1 ORDER BY id',[user.organization_id]);
+  await db.query('UPDATE members SET shared_profile_id=$1 WHERE id=$2',[group,source.id]);
+  source.shared_profile_id=group;
+  let created=0,updated=0,kycShared=0;
+  const warnings=[];
+  for(const site of sites) {
+    if(Number(site.id)===Number(source.site_id)) continue;
+    const registrations=candidates.filter(target=>Number(target.site_id)===Number(site.id));
+    let target=registrations.find(member=>member.shared_profile_id===group);
+    if(!target) {
+      const matches=registrations.filter(samePerson);
+      // Do not merge two established groups or guess between duplicate legacy
+      // rows. The local KYC still saves, with a specific sharing warning.
+      if(matches.length>1 || matches.some(member=>member.shared_profile_id)) {
+        warnings.push({site_id:site.id,code:'REGISTRATION_REVIEW_REQUIRED',message:'KYC saved. Sharing to this site needs a review of its existing registrations.'});
+        continue;
+      }
+      target=matches[0];
+      if(!target && registrations.some(member=>normalizeMemberPhone(member.phone)===normalizeMemberPhone(source.phone))) {
+        warnings.push({site_id:site.id,code:'SITE_MOBILE_CONFLICT',message:'KYC saved. Sharing to this site needs a review because another profile uses this mobile number.'});
+        continue;
+      }
+    }
+    if(!target) {
+      const data={site_id:site.id,created_by:user.id,shared_profile_id:group};
+      for(const field of copyFields) if(source[field]!==undefined) data[field]=source[field];
+      target=await memberModel.create(data,db);created++;
+    } else {
+      await db.query('UPDATE members SET shared_profile_id=$1 WHERE id=$2',[group,target.id]);
+      await copyProfile(db,source,[target],SHARED_FIELDS);updated++;
+    }
+    if(await shareVerifiedCase(db,{source,target,user,refresh:true})) kycShared++;
+  }
+  return {shared_profile_id:group,site_count:sites.length-warnings.length,
+    organization_site_count:sites.length,created_count:created,updated_count:updated,
+    kyc_shared_count:kycShared,warnings};
+}
+
 /** Apply identity/KYC changes only to registrations explicitly linked at add
  * time. Historical unlinked clients are not guessed from a changed mobile. */
-export async function syncSharedMemberProfile(db,{memberId,user,changedFields=[],verified=false}) {
+export async function syncSharedMemberProfile(db,{memberId,user,changedFields=[],verified=false,previousProfile}) {
+  if(verified) return publishVerifiedMemberProfile(db,{memberId,user,previousProfile});
   const source=await loadSource(db,memberId,user);
   if(!source.shared_profile_id) return {updated_count:0,kyc_shared_count:0};
   const {rows:targets}=await db.query(`SELECT m.* FROM members m JOIN sites s ON s.id=m.site_id
     WHERE s.organization_id=$1 AND m.shared_profile_id=$2 AND m.id<>$3 ORDER BY m.id FOR UPDATE OF m`,
     [user.organization_id,source.shared_profile_id,source.id]);
-  const fields=verified ? SHARED_FIELDS : SHARED_FIELDS.filter(field=>changedFields.includes(field));
+  const fields=SHARED_FIELDS.filter(field=>changedFields.includes(field));
   if(fields.some(field=>['phone','aadhar_no','pan_no'].includes(field))) {
     const matches=await identityMatches(db,source,user.organization_id);
     if(matches.some(target=>target.shared_profile_id!==source.shared_profile_id)) fail('These identity details belong to another client in a site. No shared profile changes were saved.');
   }
   await copyProfile(db,source,targets,fields);
-  let kycShared=0;
-  if(verified) for(const target of targets) {
-    if(await shareVerifiedCase(db,{source,target:{...target,full_name:source.full_name},user,refresh:true})) kycShared++;
-  }
-  return {updated_count:targets.length,kyc_shared_count:kycShared};
+  return {updated_count:targets.length,kyc_shared_count:0};
 }

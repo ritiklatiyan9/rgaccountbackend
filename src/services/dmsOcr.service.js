@@ -107,11 +107,11 @@ const runGroq = async (buffer, mime) => {
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 export const DEFAULT_OPENROUTER_VISION_MODEL = 'qwen/qwen3-vl-30b-a3b-instruct';
 
-const runOpenRouter = async (buffer, mime) => {
+const runOpenRouter = async (buffer, mime, options = {}) => {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) throw new Error('OPENROUTER_API_KEY is not set');
 
-  const model = process.env.OPENROUTER_VISION_MODEL || DEFAULT_OPENROUTER_VISION_MODEL;
+  const model = options.model || process.env.OPENROUTER_VISION_MODEL || DEFAULT_OPENROUTER_VISION_MODEL;
   const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
   const fileContent = isPdf(mime)
     ? {
@@ -121,14 +121,14 @@ const runOpenRouter = async (buffer, mime) => {
           file_data: dataUrl,
         },
       }
-    : { type: 'image_url', image_url: { url: dataUrl } };
+    : { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } };
   // Scanned KYC PDFs need OCR rather than plain text extraction. Selecting the
   // parser in the OpenRouter request ensures that its cost is charged to the
   // configured OpenRouter account instead of calling Mistral directly.
   const pdfPlugins = isPdf(mime)
     ? [{
         id: 'file-parser',
-        pdf: { engine: process.env.OPENROUTER_PDF_ENGINE || 'mistral-ocr' },
+        pdf: { engine: options.pdfEngine || process.env.OPENROUTER_PDF_ENGINE || 'mistral-ocr' },
       }]
     : undefined;
   const res = await withTimeout((signal) =>
@@ -145,7 +145,8 @@ const runOpenRouter = async (buffer, mime) => {
       body: JSON.stringify({
         model,
         temperature: 0,
-        max_tokens: 4000,
+        max_tokens: model.startsWith('google/gemini-3') ? 8192 : 4000,
+        ...(model.startsWith('google/gemini-3') ? {reasoning:{effort:'low',exclude:true}} : {}),
         ...(pdfPlugins ? { plugins: pdfPlugins } : {}),
         messages: [{
           role: 'user',
@@ -167,13 +168,14 @@ const runOpenRouter = async (buffer, mime) => {
 };
 
 /**
- * runDmsOcr(buffer, mime, filename) → { text, engine }
+ * runDmsOcr(buffer, mime, { engine, model, pdfEngine }) → { text, engine }
  * Only images + PDFs are OCR'd; anything else returns empty text (caller marks it archival).
  */
-export const runDmsOcr = async (buffer, mime) => {
+export const runDmsOcr = async (buffer, mime, options = {}) => {
   if (!isImage(mime) && !isPdf(mime)) return { text: '', engine: 'none' };
-  if (ENGINE === 'openrouter') return runOpenRouter(buffer, mime);
-  if (ENGINE === 'groq') return runGroq(buffer, mime);
+  const engine=options.engine || ENGINE;
+  if (engine === 'openrouter') return runOpenRouter(buffer, mime, options);
+  if (engine === 'groq') return runGroq(buffer, mime);
   return runMistral(buffer, mime);
 };
 

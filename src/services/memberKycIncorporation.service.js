@@ -254,7 +254,7 @@ export const incorporateMemberKyc = async (pool, { user, memberId, sourceMemberI
     } else if (result.reason !== 'ALREADY_VERIFIED') {
       fail(409, 'KYC could not be incorporated. Review the registrations and try again.');
     }
-    if(result.kycReused && target.shared_profile_id) await syncSharedMemberProfile(db,{memberId:target.id,user,verified:true});
+    if(result.kycReused && target.shared_profile_id) await syncSharedMemberProfile(db,{memberId:target.id,user,verified:true,previousProfile:target});
     await db.query('COMMIT');
     return {
       kyc_reused: result.kycReused, kyc_case_id: result.kycCaseId,

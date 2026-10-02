@@ -857,6 +857,7 @@ export const verifyCase = asyncHandler(async (req, res) => {
     if (data.phone.length < 6) return res.status(400).json({ message: 'A valid mobile number is required' });
   }
 
+  let sharing;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -901,7 +902,7 @@ export const verifyCase = asyncHandler(async (req, res) => {
     }
 
     const { rows: memberRows } = await client.query(
-      'SELECT updated_at FROM members WHERE id = $1 FOR UPDATE',
+      'SELECT * FROM members WHERE id = $1 FOR UPDATE',
       [lockedCase.client_member_id]
     );
     if (!memberRows[0]) {
@@ -918,7 +919,7 @@ export const verifyCase = asyncHandler(async (req, res) => {
       });
     }
 
-    if (data.phone) {
+    if (data.phone && data.phone !== normalisePhone(memberRows[0].phone)) {
       await client.query(
         'SELECT pg_advisory_xact_lock(hashtext($1))',
         [`accounts-member-kyc:${lockedCase.site_id}:${data.phone}`]
@@ -965,7 +966,8 @@ export const verifyCase = asyncHandler(async (req, res) => {
         [lockedCase.booking_id]
       );
     }
-    await syncSharedMemberProfile(client,{memberId:lockedCase.client_member_id,user:req.user,verified:true});
+    sharing=await syncSharedMemberProfile(client,{memberId:lockedCase.client_member_id,user:req.user,
+      verified:true,previousProfile:memberRows[0]});
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -973,8 +975,8 @@ export const verifyCase = asyncHandler(async (req, res) => {
   } finally {
     client.release();
   }
-  await clearCacheByPrefixes(['members|']);
-  res.json({ message: 'KYC verified and member updated', caseId: access.kycCase.id });
+  await clearCacheByPrefixes(['members|','member-kyc-pending|','plots|','plots:pageData:']);
+  res.json({ message: 'KYC verified and reviewed profile shared', caseId: access.kycCase.id,sharing });
 });
 
 export const rejectCase = asyncHandler(async (req, res) => {

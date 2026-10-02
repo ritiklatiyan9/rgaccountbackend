@@ -5,7 +5,14 @@ const TIMEOUT_MS = Number(process.env.DMS_OCR_TIMEOUT_MS || 120_000);
 // Models Groq has withdrawn. Keep in step with chequeMatching.service.js.
 const RETIRED_GROQ_MODELS = new Set(['llama-3.3-70b-versatile']);
 const DEFAULT_GROQ_KYC_MODEL = 'openai/gpt-oss-120b';
-const DEFAULT_OPENROUTER_KYC_MODEL = 'qwen/qwen3-vl-30b-a3b-instruct';
+export const DEFAULT_OPENROUTER_KYC_MODEL = 'google/gemini-3.1-pro-preview';
+// Upgrade the previous shipped default even when it is still pinned in the
+// host's environment. Explicit alternatives continue to be supported.
+export const resolveOpenRouterKycModel = () => {
+  const configured=String(process.env.OPENROUTER_KYC_MODEL || '').trim();
+  return !configured || configured==='qwen/qwen3-vl-30b-a3b-instruct'
+    ? DEFAULT_OPENROUTER_KYC_MODEL : configured;
+};
 
 const FIELD_NAMES = [
   'full_name', 'father_name', 'mother_name', 'spouse_name', 'date_of_birth',
@@ -62,6 +69,7 @@ Rules:
 - Do not infer nationality from Aadhaar or a government heading, religion from names, marital status from relatives, or city/state from PIN codes. Do not look up or complete addresses, banks or IFSC codes.
 - C/O does not establish father/spouse relationship. Use father_name only for explicit Father/S/O/D/O labels, and spouse_name only for explicit Spouse/Husband/Wife/W/O labels. Never put a husband into father_name.
 - Never copy phone into WhatsApp, applicant into nominee, payee into account holder, or document issuer into company_name. Ignore helplines and sample form values.
+- Government/UIDAI headings, slogans and document issuer names are never the applicant's full_name. An Aadhaar back side does not supply an applicant name unless explicitly printed as that person's name. Never use the Aadhaar logo as state or city.
 - A birth year or age is not a complete date. Omit masked, partially legible and ambiguous values; never repair missing digits or letters.
 - Keep names and addresses in the printed script; do not translate or transliterate. Preserve numeric strings exactly apart from formatting.
 - Confidence is a number from 0 to 1 for every returned field.
@@ -119,7 +127,7 @@ const callStructuredModel = async (prompt) => {
   // (openrouter/free) rejects identity documents outright with
   // "User Safety: unsafe — PII/Privacy", so KYC gets its own model setting.
   const model = engine === 'openrouter'
-    ? (process.env.OPENROUTER_KYC_MODEL || DEFAULT_OPENROUTER_KYC_MODEL)
+    ? resolveOpenRouterKycModel()
     : useGroq
       ? groqModel
       : (process.env.MISTRAL_KYC_MODEL || 'mistral-small-latest');
@@ -127,6 +135,8 @@ const callStructuredModel = async (prompt) => {
     model,
     temperature: 0,
     response_format: { type: 'json_object' },
+    ...(engine==='openrouter' && model.startsWith('google/gemini-3')
+      ? {max_tokens:8192,reasoning:{effort:'low',exclude:true}} : {}),
     messages: [
       { role: 'system', content: 'You are a precise KYC data extraction engine. Output valid JSON only.' },
       { role: 'user', content: prompt },
@@ -195,7 +205,7 @@ export const normaliseResult = (payload, text = '', documentType = 'OTHER') => {
     if (LABELS[key] && !LABELS[key].test(quote)) continue;
     let supported = containsValue(quote, raw);
     if (['aadhar_no', 'pan_no', 'ifsc_code', 'account_no', 'phone', 'alt_phone', 'whatsapp', 'nominee_phone', 'pincode', 'voter_id', 'passport_no', 'driving_license_no', 'gst_no'].includes(key)) {
-      const compact = (value) => String(value).toLowerCase().replace(/[ \t-]+/g, '');
+      const compact = (value) => String(value).toLowerCase().replace(/[\s-]+/g, '');
       supported = containsValue(compact(quote), compact(raw));
       if (['phone', 'alt_phone', 'whatsapp', 'nominee_phone'].includes(key) && /^\d{10}$/.test(raw)) {
         supported ||= containsValue(compact(quote), `91${raw}`) || containsValue(compact(quote), `0${raw}`);
@@ -204,10 +214,17 @@ export const normaliseResult = (payload, text = '', documentType = 'OTHER') => {
     if (key === 'date_of_birth') {
       const [year, month, day] = raw.split('-');
       supported = containsValue(quote, raw) || (year?.length === 4 &&
-        [ `${day}/${month}/${year}`, `${Number(day)}/${Number(month)}/${year}` ].some((date) => containsValue(quote, date)));
+        ['/', '-', '.'].some(separator=>[`${day}${separator}${month}${separator}${year}`,
+          `${Number(day)}${separator}${Number(month)}${separator}${year}`].some(date=>containsValue(quote,date))));
+    }
+    if(key==='gender') {
+      const printed={MALE:['male','पुरुष'],FEMALE:['female','महिला','स्त्री'],OTHER:['other','अन्य']}[raw.toUpperCase()] || [];
+      supported=printed.some(value=>containsValue(quote,value));
     }
     if (!supported) continue;
     let value = String(raw).trim();
+    if(key==='full_name' && /government of india|unique identification|authority of india|भारत सरकार|पहचान प्राधिकरण|विधिक पहचान/i.test(value)) continue;
+    if(['city','state'].includes(key) && /^(aadhaar|aadhar|आधार)$/i.test(value)) continue;
     if (['pan_no', 'ifsc_code', 'aadhar_no', 'voter_id', 'passport_no', 'driving_license_no'].includes(key)) {
       value = value.replace(/\s+/g, '').toUpperCase();
     }
@@ -248,8 +265,8 @@ export const normaliseResult = (payload, text = '', documentType = 'OTHER') => {
 
 /**
  * OCR a KYC document and turn its text into the member form's canonical fields.
- * The underlying OCR provider remains selected by DMS_OCR_ENGINE, keeping this
- * flow compatible with both Mistral (PDF + images) and Groq (images).
+ * OpenRouter KYC uses its dedicated model for original-file reading and field
+ * extraction. Other engines retain the configured DMS OCR provider.
  */
 export const extractMemberKycFromText = async (text, documentType = 'OTHER', documentSide = null) => {
   if (!text) throw new Error('No readable text was found in this document');
@@ -258,11 +275,20 @@ export const extractMemberKycFromText = async (text, documentType = 'OTHER', doc
 };
 
 export const extractMemberKyc = async (buffer, mime, documentType = 'OTHER', { documentSide = null } = {}) => {
-  const { text, engine } = await runDmsOcr(buffer, mime);
+  const aiEngine=resolveEngine();
+  const model=aiEngine==='openrouter' ? resolveOpenRouterKycModel() : null;
+  // Read the original image/PDF with the same stronger KYC model. A global
+  // document-OCR setting must not silently keep KYC on the old vision model.
+  const { text, engine } = await runDmsOcr(buffer, mime, model ? {
+    engine:'openrouter',model,
+    pdfEngine:process.env.OPENROUTER_KYC_PDF_ENGINE || (model.startsWith('google/gemini-') ? 'native' : undefined),
+  } : {});
   if (!text) throw new Error('No readable text was found in this document');
   const result = await extractMemberKycFromText(text, documentType, documentSide);
   // One provider doing both stages reads as "or:model", not "or:model+or:model".
-  const combined = engine.split(':')[0] === result.aiEngine.split(':')[0]
+  const combined = engine.startsWith('or-vision:') && result.aiEngine.startsWith('or:')
+    ? result.aiEngine
+    : engine.split(':')[0] === result.aiEngine.split(':')[0]
     ? result.aiEngine
     : `${engine}+${result.aiEngine}`;
   return {
