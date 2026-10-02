@@ -6,6 +6,13 @@ export async function up(db) {
   try {
     await client.query('BEGIN');
     await client.query("SELECT pg_advisory_xact_lock(hashtext('187_member_site_sharing'))");
+    const { rows: applied } = await client.query(
+      "SELECT 1 FROM app_schema_migrations WHERE version = '187_member_site_sharing'",
+    );
+    if (applied.length) {
+      await client.query('COMMIT');
+      return;
+    }
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query('ALTER TABLE members ADD COLUMN IF NOT EXISTS shared_profile_id UUID');
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_members_shared_profile_site

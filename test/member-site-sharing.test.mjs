@@ -12,7 +12,7 @@ import { createCase,verifyCase } from '../src/controllers/memberKyc.controller.j
 // All operations use an isolated PostgreSQL engine. The configured application
 // pool is replaced before invoking controllers; no live database is contacted.
 const user={id:7,role:'admin',organization_id:1};
-async function fixture(t) {
+async function fixture(t,{migrate=true}={}) {
   const sql=new PGlite();t.after(()=>sql.close());
   const fields=[...new Set([...MEMBER_FIELDS,...DOC_FIELDS,'geocode_source','geocode_precision','geocoded_at'])];
   const fieldSql=fields.map(field=>`${field} ${['latitude','longitude'].includes(field) ? 'NUMERIC' : field==='geocoded_at' ? 'TIMESTAMPTZ' : 'TEXT'}`).join(',');
@@ -39,11 +39,11 @@ async function fixture(t) {
     INSERT INTO financial_entries VALUES(1,1,12345.67),(2,2,987.65);`);
   const query=async(text,values)=>{const result=await sql.query(text,values);return {...result,rowCount:result.affectedRows};};
   const db={query,release(){}};const fixturePool={query,connect:async()=>db};
-  await up(fixturePool);await up(fixturePool); // additive and restart-safe
+  if(migrate) {await up(fixturePool);await up(fixturePool);} // additive and restart-safe
   const oldQuery=pool.query,oldConnect=pool.connect;
   pool.query=query;pool.connect=async()=>db;
   t.after(()=>{pool.query=oldQuery;pool.connect=oldConnect;});
-  return {sql,db,query};
+  return {sql,db,query,fixturePool};
 }
 function invoke(handler,body={},params={},actor=user) {
   return new Promise((resolve,reject)=>{
@@ -69,6 +69,21 @@ async function verifiedCase(db,member,changes={}) {
   }
   return saved;
 }
+
+test('startup migration repairs the missing sharing column before client registration and preserves existing profiles',async t=>{
+  const {query,fixturePool}=await fixture(t,{migrate:false});
+  await query("INSERT INTO members(site_id,full_name,phone,member_type) VALUES(4,'Existing profile','9000000000','CLIENT')");
+  const before=(await query('SELECT * FROM members')).rows[0];
+  await assert.rejects(query('SELECT shared_profile_id FROM members LIMIT 1'),{code:'42703'});
+  await up(fixturePool);
+  await up(fixturePool);
+  const {shared_profile_id,...after}=(await query('SELECT * FROM members WHERE id=$1',[before.id])).rows[0];
+  assert.equal(shared_profile_id,null);assert.deepEqual(after,before);
+  const result=await invoke(createMember,{site_id:1,full_name:'New client',phone:'9876543210'});
+  assert.equal(result.status,201);assert.equal(result.data.registration.site_count,3);
+  assert.deepEqual((await query('SELECT site_id FROM members WHERE shared_profile_id=$1 ORDER BY site_id',[result.data.registration.shared_profile_id])).rows.map(row=>row.site_id),[1,2,3]);
+  assert.equal((await query("SELECT count(*)::int AS n FROM app_schema_migrations WHERE version='187_member_site_sharing'")).rows[0].n,1);
+});
 
 test('adding from Clients automatically registers all organisation sites, preserves roles and links only the selected plot',async t=>{
   const {query}=await fixture(t);

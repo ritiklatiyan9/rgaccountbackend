@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
-import { connectDB } from './config/db.js';
+import pool, { connectDB } from './config/db.js';
+import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
 import { startSmsReminderScheduler } from './services/smsReminder.service.js';
@@ -19,6 +20,8 @@ if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();
 
 connectDB().then(async () => {
+  // Direct node/nodemon starts must have the same required client schema as npm start.
+  await migrateMemberSiteSharing(pool);
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
