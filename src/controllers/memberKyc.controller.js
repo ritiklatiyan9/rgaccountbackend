@@ -1,3 +1,5 @@
+import { assertMemberSiteAccess } from '../services/memberPhoneReuse.service.js';
+import { lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
 import crypto from 'crypto';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
@@ -47,14 +49,7 @@ const normalisePhone = (value) => {
   return digits.length > 10 ? digits.slice(-10) : digits;
 };
 
-const canAccessSite = async (user, siteId) => {
-  if (['admin', 'super_admin'].includes(user?.role)) return true;
-  const { rows } = await pool.query(
-    'SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1',
-    [user?.id, siteId]
-  );
-  return Boolean(rows[0]);
-};
+const canAccessSite = async (user, siteId) => Boolean(await assertMemberSiteAccess(pool,user,siteId));
 
 const getAccessibleCase = async (caseId, user) => {
   const { rows } = await pool.query(
@@ -460,7 +455,9 @@ export const createCase = asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMemberDirectory(client,req.user);
     let member;
+    let createdMember=false;
     let matchedExistingMember = false;
     const requestedMemberId = Number.parseInt(req.body.client_member_id, 10);
     if (Number.isInteger(requestedMemberId)) {
@@ -510,6 +507,7 @@ export const createCase = asyncHandler(async (req, res) => {
           [siteId, fullName, phone, req.user.id]
         );
         member = rows[0];
+        createdMember=true;
       }
     }
 
@@ -552,6 +550,7 @@ export const createCase = asyncHandler(async (req, res) => {
       );
       kycCase = rows[0];
     }
+    if(createdMember) await registerMemberAcrossSites(client,{memberId:member.id,user:req.user});
     await client.query('COMMIT');
     res.status(201).json({
       ...kycCase,
@@ -589,6 +588,7 @@ export const updateCaseCustomer = asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMemberDirectory(client,req.user);
     const { rows: lockedCases } = await client.query(
       'SELECT status FROM kyc_cases WHERE id = $1 FOR UPDATE',
       [access.kycCase.id]
@@ -616,6 +616,7 @@ export const updateCaseCustomer = asyncHandler(async (req, res) => {
       'UPDATE members SET full_name = $1, phone = $2, updated_at = now() WHERE id = $3',
       [fullName, phone, access.kycCase.client_member_id]
     );
+    await syncSharedMemberProfile(client,{memberId:access.kycCase.client_member_id,user:req.user,changedFields:['full_name','phone']});
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -859,6 +860,7 @@ export const verifyCase = asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMemberDirectory(client,req.user);
     const { rows: lockedCases } = await client.query(
       'SELECT * FROM kyc_cases WHERE id = $1 FOR UPDATE',
       [access.kycCase.id]
@@ -963,6 +965,7 @@ export const verifyCase = asyncHandler(async (req, res) => {
         [lockedCase.booking_id]
       );
     }
+    await syncSharedMemberProfile(client,{memberId:lockedCase.client_member_id,user:req.user,verified:true});
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');

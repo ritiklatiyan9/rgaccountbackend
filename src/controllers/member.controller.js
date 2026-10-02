@@ -1,3 +1,7 @@
+import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
+import { lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
+import { copyIncorporatedKycDocuments } from '../services/memberKycDocuments.service.js';
+export { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { linkSelectedMemberPlot } from '../services/memberPlotSelection.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { memberModel } from '../models/Member.model.js';
@@ -29,39 +33,7 @@ export const searchMembersByPlot = asyncHandler(async (req, res) => {
 });
 
 // ── MEMBER FIELDS (whitelist) ──
-export const MEMBER_FIELDS = [
-  'member_type', 'full_name', 'father_name', 'gender', 'date_of_birth', 'blood_group',
-  'phone', 'alt_phone', 'email', 'whatsapp',
-  'address', 'city', 'state', 'pincode',
-  'aadhar_no', 'pan_no', 'voter_id',
-  'bank_name', 'account_no', 'ifsc_code', 'branch',
-  'occupation', 'company_name', 'reference', 'notes', 'status',
-  // New personal fields
-  'mother_name', 'spouse_name', 'nationality', 'religion', 'caste',
-  'marital_status', 'anniversary_date', 'qualification',
-  // Additional identity
-  'passport_no', 'driving_license_no', 'gst_no', 'tin_no',
-  // Emergency contact
-  'emergency_contact_name', 'emergency_contact_phone', 'emergency_contact_relation',
-  // Co-applicant (joint applicant)
-  'co_applicant_name', 'co_applicant_relation', 'co_applicant_dob', 'co_applicant_gender',
-  'co_applicant_phone', 'co_applicant_email', 'co_applicant_aadhar', 'co_applicant_pan',
-  'co_applicant_address', 'permanent_address',
-  // Nominee
-  'nominee_name', 'nominee_relation', 'nominee_phone',
-  // Employee-specific
-  'employee_id', 'designation', 'department', 'date_of_joining', 'salary', 'employment_type',
-  // Farmer-specific
-  'land_area', 'crop_type', 'farm_location', 'irrigation_type', 'farming_experience',
-  // Broker-specific
-  'license_number', 'commission_rate', 'operating_areas',
-  // Vendor-specific
-  'business_name', 'service_type', 'payment_terms',
-  // Team (for broker/member/employee/partner)
-  'team',
-  // Location (migration 108) — geocode_source/precision/geocoded_at are set server-side, never from the client
-  'latitude', 'longitude', 'village', 'district',
-];
+
 
 // A member can hold several roles at once (CLIENT + FARMER, an EMPLOYEE who is
 // also a PARTNER, …). `member_types` is the full set; `member_type` stays the
@@ -148,13 +120,7 @@ const sanitize = (body) => {
 };
 
 // Document field names that map to file upload keys
-export const DOC_FIELDS = [
-  'photo', 'aadhar_front_url', 'aadhar_back_url', 'pan_card_url',
-  'voter_id_url', 'passport_url', 'driving_license_url', 'cheque_url', 'other_kyc_url',
-  'resume_url', 'marksheet_10th_url', 'marksheet_12th_url',
-  'degree_certificate_url', 'experience_certificate_url',
-  'offer_letter_url', 'other_certificate_url',
-];
+
 
 /** Upload all document files from req.files in PARALLEL and return a map of field→url */
 const uploadDocuments = async (files) => {
@@ -288,6 +254,7 @@ export const createMember = asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMemberDirectory(client,req.user);
     if (data.phone) {
       // This lock makes the application-level uniqueness check race-safe even
       // while legacy duplicates prevent a database UNIQUE index.
@@ -346,13 +313,13 @@ export const createMember = asyncHandler(async (req, res) => {
     const member = await memberModel.create(data, client);
     await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId: member.id, siteId });
     if (reuseSource) {
-      await client.query(
+      const {rows:cases}=await client.query(
         `INSERT INTO kyc_cases
            (booking_id, client_member_id, site_id, mode, status, created_by,
             verified_by, verified_at, created_at, updated_at, reused_from_case_id)
          VALUES
            (NULL, $1, $2, 'MANUAL_OCR', 'VERIFIED', $3,
-            $4, COALESCE($5, now()), now(), now(), $6)`,
+            $4, COALESCE($5, now()), now(), now(), $6) RETURNING id`,
         [
           member.id, siteId, req.user.id,
           reuseSource.kyc_verified_by || req.user.id,
@@ -360,12 +327,17 @@ export const createMember = asyncHandler(async (req, res) => {
           reuseSource.verified_kyc_case_id,
         ]
       );
+      await copyIncorporatedKycDocuments(client,{sourceCaseId:reuseSource.verified_kyc_case_id,targetCaseId:cases[0].id,
+        memberId:member.id,siteId,userId:req.user.id,organizationId:req.user.organization_id});
     }
+    const registration=await registerMemberAcrossSites(client,{memberId:member.id,user:req.user});
+    member.shared_profile_id=registration.shared_profile_id;
     await client.query('COMMIT');
     return res.status(201).json({
       member,
       kyc_reused: Boolean(reuseSource),
       kyc_source_site: reuseSource?.source_site_name || null,
+      registration,
     });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -406,6 +378,7 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMemberDirectory(client,user);
     const { rows: sources } = await client.query(
       `SELECT m.*,
               verified.id AS verified_kyc_case_id,
@@ -431,13 +404,16 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
 
     const isAdmin = user.role === 'admin' || user.role === 'super_admin';
     const sourceSiteIds = [...new Set(sources.map((member) => member.site_id))];
+    for(const sourceSiteId of sourceSiteIds) {
+      if(!await assertMemberSiteAccess(client,user,sourceSiteId)) throw Object.assign(new Error('One or more selected members are unavailable to your account'),{statusCode:403});
+    }
     const siteResult = isAdmin
-      ? await client.query('SELECT id, name FROM sites WHERE id = ANY($1::int[])', [siteIds])
+      ? await client.query('SELECT id, name FROM sites WHERE id = ANY($1::int[]) AND organization_id=$2', [siteIds,user.organization_id])
       : await client.query(
           `SELECT s.id, s.name FROM sites s
              JOIN user_sites us ON us.site_id = s.id
-            WHERE us.user_id = $1 AND s.id = ANY($2::int[])`,
-          [user.id, [...new Set([...sourceSiteIds, ...siteIds])]]
+            WHERE us.user_id = $1 AND s.id = ANY($2::int[]) AND s.organization_id=$3`,
+          [user.id, [...new Set([...sourceSiteIds, ...siteIds])],user.organization_id]
         );
     const accessibleSiteIds = new Set(siteResult.rows.map((site) => site.id));
     if (
@@ -510,7 +486,7 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
           continue;
         }
 
-        const copy = { site_id: targetSiteId, created_by: user.id };
+        const copy = { site_id: targetSiteId, created_by: user.id,member_types:source.member_types || [source.member_type],shared_profile_id:source.shared_profile_id || null };
         [...MEMBER_FIELDS, ...DOC_FIELDS].forEach((field) => {
           if (source[field] !== undefined) copy[field] = source[field];
         });
@@ -740,23 +716,26 @@ export const updateMember = asyncHandler(async (req, res) => {
 
   if (Object.keys(data).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
-  if (req.body.plot_id != null && req.body.plot_id !== '') {
-    const site = await assertMemberSiteAccess(pool, req.user, existing.site_id);
-    if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const updated = await memberModel.update(memberId, data, client);
+  const site = await assertMemberSiteAccess(pool, req.user, existing.site_id);
+  if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockMemberDirectory(client,req.user);
+    if(data.phone && !samePhone(data.phone,existing.phone)) {
+      const {rows}=await client.query(`SELECT id FROM members WHERE site_id=$1 AND id<>$2
+        AND RIGHT(REGEXP_REPLACE(COALESCE(phone,''),'[^0-9]','','g'),10)=$3 LIMIT 1`,[existing.site_id,memberId,data.phone]);
+      if(rows.length) throw Object.assign(new Error('This mobile number is already registered in this site.'),{statusCode:409});
+    }
+    const updated = await memberModel.update(memberId, data, client);
+    if (req.body.plot_id != null && req.body.plot_id !== '') {
       await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId, siteId: existing.site_id });
-      await client.query('COMMIT');
-      return res.json({ member: updated });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally { client.release(); }
-  }
-  const updated = await memberModel.update(memberId, data, pool);
-  res.json({ member: updated });
+    }
+    const sharing=await syncSharedMemberProfile(client,{memberId,user:req.user,changedFields:Object.keys(data)});
+    await client.query('COMMIT');
+    return res.json({member:updated,sharing});
+  } catch (error) {await client.query('ROLLBACK');throw error;}
+  finally {client.release();}
 });
 
 /** DELETE /members/:id */
