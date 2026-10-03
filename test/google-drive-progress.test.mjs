@@ -77,3 +77,14 @@ test('prepared data is one-use, bounded, fresh and discarded after a permission 
   assert.equal(cache.take(5, visibility), bundle);
   assert.equal(cache.take(6, visibility), bundle);
 });
+
+test('prepared data accepts equivalent permission values and rejects invalid snapshots', () => {
+  const cache = createPreparedBundleCache();
+  const bundle = { label: 'Plot A1' };
+  cache.put(1, bundle, { canViewAll: false, creatorId: 8 });
+  assert.equal(cache.take(1, { creatorId: '8', canViewAll: false }), bundle);
+  cache.put(2, bundle, { canViewAll: true, creatorId: '8,12' });
+  assert.equal(cache.take(2, { creatorId: [12, '008', 8], canViewAll: true }), bundle);
+  cache.put(3, bundle, { canViewAll: true });
+  assert.equal(cache.take(3, { canViewAll: true }), null);
+});

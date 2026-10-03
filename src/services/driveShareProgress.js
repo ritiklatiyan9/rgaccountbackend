@@ -1,3 +1,5 @@
+import { entryVisibilityKey } from './driveShareVisibility.js';
+
 /** Live events never wait for a database round trip. Persist only the latest
  * snapshot, in order, so an older concurrent update cannot overwrite progress
  * or resurrect progress after a job has finished. */
@@ -75,12 +77,12 @@ export const createPreparedBundleCache = ({ max = 4, ttlMs = 15000, now = Date.n
     put(id, bundle, visibility) {
       for (const [key, entry] of entries) if (now() - entry.at > ttlMs) entries.delete(key);
       if (entries.size >= max) entries.delete(entries.keys().next().value);
-      entries.set(String(id), { bundle, visibility: JSON.stringify(visibility), at: now() });
+      entries.set(String(id), { bundle, visibility: entryVisibilityKey(visibility), at: now() });
     },
     take(id, visibility) {
       const entry = entries.get(String(id));
       entries.delete(String(id));
-      return entry && now() - entry.at <= ttlMs && entry.visibility === JSON.stringify(visibility)
+      return entry && now() - entry.at <= ttlMs && entry.visibility !== null && entry.visibility === entryVisibilityKey(visibility)
         ? entry.bundle : null;
     },
   };

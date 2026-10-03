@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { PGlite } from '@electric-sql/pglite';
 import { createShareProgress, createPreparedBundleCache, uploadPercent } from '../src/services/driveShareProgress.js';
 import { generatedContentHash, logicalFileKey, shareSyncSummary } from '../src/services/driveShareSync.js';
+import { sameEntryVisibility } from '../src/services/driveShareVisibility.js';
 
 // Execute the real runner with explicit dependencies. Only ES module wiring is
 // removed: no runner logic is rewritten, and no DB/Google client is imported.
@@ -63,7 +65,7 @@ const makeRunner = ({ share = shareFixture(), plan = [statement], visibility = {
       calls.siteChecks.push(args);
       if (authorize) await authorize(...args);
     },
-    createShareProgress, createPreparedBundleCache, uploadPercent,
+    createShareProgress, createPreparedBundleCache, uploadPercent, sameEntryVisibility,
     generatedContentHash, logicalFileKey, shareSyncSummary,
     existingShareFolderSegments: async (_ctx, fallback) => fallback,
     existingModuleShareFolderSegments: async (_ctx, fallback) => fallback,
@@ -188,14 +190,41 @@ test('module jobs share one Excel with module permission, stable identity and no
   assert.equal(h.calls.releases, 1);
 });
 
+test('module jobs accept unchanged permissions after the queue request round-trips through JSONB', async (t) => {
+  const db = new PGlite();
+  t.after(() => db.close());
+  for (const visibility of [{ canViewAll: true, creatorId: null }, { canViewAll: false, creatorId: 8 }]) {
+    const request = { formats: ['xlsx'], record_id: 1, visibility };
+    const { rows: [{ stored }] } = await db.query('SELECT $1::jsonb AS stored', [JSON.stringify(request)]);
+    assert.notEqual(JSON.stringify(stored.visibility), JSON.stringify(visibility), 'JSONB changes object key order');
+    const h = makeRunner({
+      share: shareFixture({ module: 'plot_payments', request: stored }), visibility,
+      plan: [{ folder: 'Excel Reports', name: 'Plot A1', kind: 'module_report', formats: ['xlsx'] }],
+    });
+    const result = await h.runShareJob(h.share);
+    assert.equal(result.status, 'completed', result.error);
+    assert.equal(h.calls.builds[0].entityId, 1);
+    assert.equal(h.calls.uploads.length, 1);
+  }
+});
+
 test('queued module jobs fail before exporting when entry visibility changed', async (t) => {
   t.mock.method(console, 'error', () => {});
-  const h = makeRunner({ share: shareFixture({ module: 'plot_payments', request: { visibility: { canViewAll: true, creatorId: null } } }), visibility: { canViewAll: false, creatorId: 8 } });
-  const result = await h.runShareJob(h.share);
-  assert.equal(result.status, 'failed');
-  assert.equal(h.calls.builds.length, 0);
-  assert.equal(h.calls.uploads.length, 0);
-  assert.match(result.error, /Permission/);
+  for (const [requested, visibility] of [
+    [{ canViewAll: true, creatorId: null }, { canViewAll: false, creatorId: 8 }],
+    [{ canViewAll: false, creatorId: 8 }, { canViewAll: false, creatorId: 9 }],
+    [{ canViewAll: true, creatorId: null }, { canViewAll: true, creatorId: 8 }],
+    [{ canViewAll: true, creatorId: '8,12' }, { canViewAll: true, creatorId: '8,13' }],
+    [{ canViewAll: 'true', creatorId: null }, { canViewAll: true, creatorId: null }],
+  ]) {
+    const h = makeRunner({ share: shareFixture({ module: 'plot_payments', request: { visibility: requested } }), visibility });
+    const result = await h.runShareJob(h.share);
+    assert.equal(result.status, 'failed');
+    assert.equal(h.calls.builds.length, 0);
+    assert.equal(h.calls.uploads.length, 0);
+    assert.equal(h.calls.folders, 0);
+    assert.match(result.error, /Permission/);
+  }
 });
 
 test('document links are reissued against final folder grants before rendering and hashing Excel', async () => {

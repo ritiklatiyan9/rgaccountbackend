@@ -5,6 +5,7 @@ import { resolveEntryVisibility } from './entryVisibility.service.js';
 import permissionModel from '../models/Permission.model.js';
 import { assertCommissionSite } from '../controllers/plotCommissionV2.controller.js';
 import { createShareProgress, createPreparedBundleCache, uploadPercent } from './driveShareProgress.js';
+import { sameEntryVisibility } from './driveShareVisibility.js';
 import { generatedContentHash, logicalFileKey, shareSyncSummary } from './driveShareSync.js';
 import { existingShareFolderSegments, existingModuleShareFolderSegments } from './driveShareDestination.service.js';
 import { getModuleDriveDefinition, assertModuleDriveAccess, buildModuleDriveShareBundle, planModuleDriveShareFiles } from './moduleDriveShare.service.js';
@@ -258,7 +259,7 @@ export const runShareJob = async (share) => {
     }
     const entryVisibility = generic ? await assertModuleDriveAccess({ moduleKey: share.module, siteId, user }) : await resolveEntryVisibility(user, 'commissions');
     if ((!generic && !entryVisibility.canViewAll && share.scope !== 'transaction') || (generic && req.visibility
-      && JSON.stringify(req.visibility) !== JSON.stringify(entryVisibility))) {
+      && !sameEntryVisibility(req.visibility, entryVisibility))) {
       return await finishJob({ status: 'failed', files: [], error: 'Permission to share the full statement is no longer available' });
     }
     const includeDocuments = req.include_documents === true;
