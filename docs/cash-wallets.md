@@ -2,6 +2,10 @@
 
 Every active Super Admin, Admin and Sub-Admin has a personal wallet at `/wallet`. The wallet records custody of newly collected cash and handovers between staff. It is independent of site permissions: users see only their own balance, receipt history and transfers. Recipients must be active management users in the same organization.
 
+The page's primary cash overview follows the selected site and reads the same current `/imprest/site-balance` endpoint as Dashboard, with its existing site and imprest permissions. Current site cash includes posted cash receipts less cash spending through today. Cash in final Admin hand is that cash less staff imprest; pending site-funded handovers further reduce cash available for imprest. Bank balances are excluded. Refreshes, site changes and financial mutations reload these figures. Missing balances display as unavailable instead of falling back to cumulative collections.
+
+Personal collection totals and wallet handovers remain below the site overview, labelled as the collection and handover record across all sites. Their record balance excludes ordinary site expenses and is not presented as the current site cash. The overview does not change wallet ledger entries or transfer limits.
+
 ## Receipt capture
 
 Migration 185 saves a permanent `tracking_started_at`. Only source records created after that point contribute cash. The user explicitly chose to start with new entries; the migration does not backfill historical receipts. A newly entered, backdated receipt still counts, while an old source whose cash-flow mirror is recreated does not.
