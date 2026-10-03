@@ -29,7 +29,7 @@ test('decided plot commission remains listed and opens after removing the unpaid
     CREATE TABLE members(id int PRIMARY KEY, full_name text, phone text);
     CREATE TABLE plots(id int PRIMARY KEY, site_id int, plot_no text, plot_size numeric,
       plot_rate numeric, buyer_name text, commission_rate numeric, plot_tag text,
-      plot_commission numeric, status text, created_at timestamptz DEFAULT NOW());
+      plot_commission numeric, status text, booking_date date, created_at timestamptz DEFAULT NOW());
     CREATE TABLE plot_commissions_v2(id int PRIMARY KEY, site_id int, plot_id int, agent_id int,
       total_commission numeric, remarks text, status text, created_at timestamptz DEFAULT NOW());
     CREATE TABLE plot_commission_payments(id int PRIMARY KEY, plot_commission_id int, amount numeric,

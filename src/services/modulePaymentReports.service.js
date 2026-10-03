@@ -9,6 +9,10 @@ import { readLandSalesReport, readLandProfitReport } from '../controllers/landDe
 const scope = alias => `($2::text IS NULL OR ${alias}.created_by = ANY(string_to_array($2::text, ',')::int[]))`;
 const posted = alias => `financial_transaction_posts(CASE WHEN ${alias}.amount < 0 THEN 'credit' ELSE 'debit' END, ${alias}.status, ${alias}.payment_mode, ${alias}.cheque_status)`;
 const queryRows = async (db, sql, siteId, creatorId) => (await db.query(sql, [siteId, creatorId])).rows;
+const mappedBank = (source, sourceId, site) => `(SELECT b.name FROM cash_flow_entries c
+  JOIN bank_accounts b ON b.id = c.bank_account_id AND b.site_id = c.site_id
+  WHERE c.source_module = '${source}' AND c.source_id = ${sourceId} AND c.site_id = ${site}
+  ORDER BY c.id LIMIT 1)`;
 
 // Only these server-owned datasets can be requested; no client SQL or permission names.
 export const MODULE_REPORTS = Object.freeze({
@@ -22,13 +26,23 @@ export async function loadModuleReport(key, siteId, creatorId, db = pool) {
   switch (key) {
     case 'commission': return commissionModel.findBySiteIdGroupedByPlot(siteId, db, null, null, creatorId);
     case 'registry': return plotRegistryModel.findBySiteId(siteId, db, creatorId);
-    case 'expenses': return (await expenseModel.findPaginatedUnified(siteId, { created_by: creatorId }, 1, 0, db)).items;
+    case 'expenses': {
+      const { items } = await expenseModel.findPaginatedUnified(siteId, { created_by: creatorId }, 1, 0, db);
+      const splitIds = items.filter(r => r.source === 'farmer_payment' && String(r.payment_mode).toUpperCase() === 'SPLIT').map(r => r.original_id);
+      if (!splitIds.length) return items;
+      const { rows: legs } = await db.query(`SELECT p.id, p.cash_amount, p.bank_amount FROM farmer_payments p
+        JOIN farmers f ON f.id = p.farmer_id AND f.site_id = $1
+        WHERE ${scope('p')} AND p.id = ANY($3::int[])`, [siteId, creatorId, splitIds]);
+      const byId = new Map(legs.map(r => [Number(r.id), r]));
+      return items.map(r => r.source === 'farmer_payment' ? { ...r, ...byId.get(Number(r.original_id)), id: r.id } : r);
+    }
     case 'land_purchase': return farmerModel.findBySiteId(siteId, db, creatorId);
     case 'land_sale': return readLandSalesReport(siteId, creatorId, db);
     case 'land_profit': return readLandProfitReport(siteId, creatorId, db);
-    case 'personal_ledgers': return cashFlowMonthModel.findBySiteId(siteId, db, creatorId);
+    case 'personal_ledgers': return cashFlowMonthModel.findBySiteId(siteId, db, creatorId, true);
     case 'commission_payments': return queryRows(db, `
-      SELECT p.*, pc.total_commission, pc.remarks AS commission_remarks,
+      SELECT p.*, ${mappedBank('plot_commission_payments', 'p.id', 'pc.site_id')} AS bank_account_name,
+             pc.total_commission, pc.remarks AS commission_remarks,
              pl.plot_no, pl.buyer_name, m.full_name AS agent_name, m.team, u.name AS created_by_name
       FROM plot_commission_payments p
       JOIN plot_commissions_v2 pc ON pc.id = p.plot_commission_id AND pc.site_id = $1
@@ -52,29 +66,30 @@ export async function loadModuleReport(key, siteId, creatorId, db = pool) {
       ) a ON TRUE
       WHERE pc.site_id = $1 AND pc.plot_id IS NULL ORDER BY pc.created_at DESC`, siteId, creatorId);
     case 'land_payments': return queryRows(db, `
-      SELECT p.*, f.name AS farmer_name, f.phone, u.name AS created_by_name
+      SELECT p.*, ${mappedBank('farmer_payments', 'p.id', 'f.site_id')} AS bank_account_name,
+             f.name AS farmer_name, f.phone, u.name AS created_by_name
       FROM farmer_payments p JOIN farmers f ON f.id = p.farmer_id AND f.site_id = $1
       LEFT JOIN users u ON u.id = p.created_by
       WHERE ${scope('p')} ORDER BY p.date DESC, p.id DESC`, siteId, creatorId);
     case 'vendor_payments': return queryRows(db, `
-      SELECT p.*, p.payment_date AS date, c.vendor_name, c.work_title, c.head_name,
+      SELECT p.*, ${mappedBank('vendor_payments', 'p.id', 'p.site_id')} AS bank_account_name,
+             p.payment_date AS date, c.vendor_name, c.work_title, c.head_name,
              c.contract_amount, u.name AS created_by_name
       FROM vendor_payments p JOIN vendor_commitments c ON c.id = p.commitment_id AND c.site_id = p.site_id
       LEFT JOIN users u ON u.id = p.created_by
       WHERE p.site_id = $1 AND ${scope('p')} ORDER BY p.payment_date DESC, p.id DESC`, siteId, creatorId);
     case 'misc_income': return queryRows(db, `
-      SELECT e.*, c.name AS category_name, u.name AS created_by_name, a.name AS assigned_admin_name
+      SELECT e.*, ${mappedBank('misc_income_entries', 'e.id', 'e.site_id')} AS bank_account_name,
+             c.name AS category_name, u.name AS created_by_name, a.name AS assigned_admin_name
       FROM misc_income_entries e JOIN misc_income_categories c ON c.id = e.category_id
       LEFT JOIN users u ON u.id = e.created_by LEFT JOIN users a ON a.id = e.assigned_admin_id
       WHERE e.site_id = $1 AND ${scope('e')} ORDER BY e.date DESC, e.id DESC`, siteId, creatorId);
     case 'daybook': return queryRows(db, `
-      SELECT e.*, e.cash_type AS payment_mode, m.ledger_name, u.name AS created_by_name, b.name AS bank_account_name
-      FROM cash_flow_entries e LEFT JOIN cash_flow_months m ON m.id = e.cash_flow_month_id
-      LEFT JOIN users u ON u.id = e.created_by
-      LEFT JOIN bank_accounts b ON b.id = e.bank_account_id AND b.site_id = e.site_id
-      WHERE e.site_id = $1 AND COALESCE(m.ledger_type, 'site') = 'site'
-        AND (e.source_module IS NULL OR e.source_module !~ '_person$') AND ${scope('e')}
-      ORDER BY e.date DESC, e.id DESC`, siteId, creatorId);
+      SELECT l.*, l.entry_date AS date, l.raw_mode AS payment_mode, l.source_key AS source,
+             l.entity_name AS party, l.linked_detail AS category
+      FROM ledger_entries l JOIN cash_flow_entries e ON e.id::text = split_part(l.id, ':', 1) AND e.site_id = l.site_id
+      WHERE l.site_id = $1 AND COALESCE(l.ledger_type, '') <> 'person' AND ${scope('e')}
+      ORDER BY l.entry_date DESC, l.id DESC`, siteId, creatorId);
     default: throw new Error('Unknown module report.');
   }
 }
