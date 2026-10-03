@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 
 // Bump when the generated statement/profile layout or included columns change
 // so already-shared files receive that new rendering on their next sync.
-const CONTENT_VERSION = 1;
+const CONTENT_VERSION = 2;
 const IDENTITY_VERSION = 1;
 const FORMATS = new Set(['doc', 'pdf', 'xlsx']);
-const GENERATED_KINDS = new Set(['statement', 'profile']);
+const GENERATED_KINDS = new Set(['statement', 'profile', 'module_report']);
 const ATTACHMENT_KINDS = new Set(['document', 'voucher', 'signature']);
 
 const canonical = (value) => {
@@ -71,6 +71,12 @@ const PROFILE_AGENT_FIELDS = [...XLSX_AGENT_FIELDS, 'alt_phone', 'address', 'tea
  * Attachment bytes need their own content digest; do not use this for them. */
 export const generatedContentHash = (bundle, item, format) => {
   assertGenerated(item, format);
+  const documents = (bundle.documentLinks || [...(bundle.documents || []), ...(bundle.vouchers || []), ...(bundle.signatures || [])]).map((doc) => ({
+    id: doc.id ?? null, name: doc.name ?? doc.file_name ?? null, sourceFingerprint: doc.sourceFingerprint ?? null,
+    linkVersion: doc.linkVersion ?? null, unavailable: doc.unavailable ?? null,
+  }));
+  if (bundle.scope === 'documents') return digest({ version: CONTENT_VERSION, kind: item.kind, format, scope: 'documents',
+    site: pick(bundle.site, ['name']), plot: pick(bundle.plot, ['plot_no']), documents });
   const profile = item.kind === 'profile';
   const xlsx = format === 'xlsx';
   const plot = pick(bundle.plot, profile ? ['plot_no'] : xlsx ? ['plot_no', 'buyer_name'] : PLOT_FIELDS);
@@ -90,6 +96,7 @@ export const generatedContentHash = (bundle, item, format) => {
       ...pick(payment, xlsx ? XLSX_PAYMENT_FIELDS : PAYMENT_FIELDS),
       id: identifier(payment.id), date: dateOnly(payment.date),
     }));
+    content.documents = documents;
   }
   return digest(content);
 };

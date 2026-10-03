@@ -45,6 +45,7 @@ const controllers = (overrides = {}) => {
     pool: { query: async (sql, args) => { queries.push({ sql, args }); return { rows: [] }; } },
     asyncHandler: (fn) => fn,
     MODULE_KEY: 'plot_commission',
+    permissionModel: { getPermission: async () => ({ can_read: true }) },
     assertCommissionSite: async () => {},
     resolveEntryVisibility: async () => ({ canViewAll: false, creatorId: 8 }),
     sendDriveError: (_res, err) => { throw err; },

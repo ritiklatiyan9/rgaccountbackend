@@ -14,7 +14,8 @@ import backupMaintenanceMiddleware from './middlewares/backupMaintenance.middlew
 const app = express();
 
 app.use(helmet());
-app.use(morgan('combined'));
+// Document URLs are bearer capabilities. Keep their tokens out of access logs.
+app.use(morgan('combined', { skip: (req) => req.path.startsWith('/public/drive-documents/') }));
 app.use(cors());
 app.use(backupMaintenanceMiddleware);
 app.use(express.json({ limit: '25mb' }));

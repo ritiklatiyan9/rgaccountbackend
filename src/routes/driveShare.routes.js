@@ -9,18 +9,21 @@ import {
   listPlotCommissionShares,
   getShare,
 } from '../controllers/driveShare.controller.js';
+import { listDriveShareModules, previewModuleShare, createModuleShare, listModuleShares } from '../controllers/moduleDriveShare.controller.js';
 
 const router = express.Router();
 
-// Sharing is a read of commission data into the org's own Drive, so the
-// 'commissions' read permission gates every route; the controller further
-// limits sub-admins without can_view_all to single-transaction shares.
+// Each module resolves its own read permission and site/entry visibility.
 router.use(authMiddleware, attachOrgContext, requireRole('admin', 'sub_admin'));
 
+router.get('/modules/catalog', listDriveShareModules);
+router.get('/modules/:moduleKey/preview', previewModuleShare);
+router.get('/modules/:moduleKey/history', listModuleShares);
+router.post('/modules/:moduleKey', createModuleShare);
 router.get('/plot-commission/preview', requirePermission('commissions', 'read'), previewPlotCommissionShare);
 router.post('/plot-commission', requirePermission('commissions', 'read'), createPlotCommissionShare);
 router.get('/plot-commission/:plotId', requirePermission('commissions', 'read'), listPlotCommissionShares);
 // Progress of one queued/running share; the controller re-checks the share's site.
-router.get('/:id', requirePermission('commissions', 'read'), getShare);
+router.get('/:id', getShare);
 
 export default router;

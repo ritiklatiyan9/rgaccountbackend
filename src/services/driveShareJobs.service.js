@@ -2,16 +2,20 @@ import pool from '../config/db.js';
 import { createHash } from 'node:crypto';
 import { emitToUser } from '../config/socket.js';
 import { resolveEntryVisibility } from './entryVisibility.service.js';
+import permissionModel from '../models/Permission.model.js';
 import { assertCommissionSite } from '../controllers/plotCommissionV2.controller.js';
 import { createShareProgress, createPreparedBundleCache, uploadPercent } from './driveShareProgress.js';
 import { generatedContentHash, logicalFileKey, shareSyncSummary } from './driveShareSync.js';
-import { existingShareFolderSegments } from './driveShareDestination.service.js';
+import { existingShareFolderSegments, existingModuleShareFolderSegments } from './driveShareDestination.service.js';
+import { getModuleDriveDefinition, assertModuleDriveAccess, buildModuleDriveShareBundle, planModuleDriveShareFiles } from './moduleDriveShare.service.js';
+import { buildModuleShareXlsx, renderModuleShareHtml, moduleShareProjection } from './driveShareWorkbook.service.js';
+import { prepareDriveDocumentLinks } from './driveDocumentLinks.service.js';
 import {
   driveClientFor, ensureSiteFolder, ensureFolderPath, ensureSubfolders, listChildren, upsertFile, exportPdf,
   folderPathKey, folderUrl, tryPlotShareLock, translateDriveError, markReauthorizationRequired, MODULE_ROOT_NAME,
 } from './googleDrive.service.js';
 import {
-  buildPlotCommissionShareBundle, renderStatementHtml, renderProfileHtml, buildStatementXlsx, planShareFiles, readStoredFileBytes,
+  buildPlotCommissionShareBundle, renderStatementHtml, renderProfileHtml, buildStatementXlsx, planShareFiles, readStoredFileBytes, plotShareDocumentSources,
 } from './plotCommissionShare.service.js';
 
 /**
@@ -84,7 +88,9 @@ const uploadTasks = ({ ctx, bundle, share, visibility, item, parentId, existing,
   const put = async (name, mimeType, body, convertTo, format = 'binary') => {
     const bytes = Buffer.byteLength(body);
     spend(bytes);
-    const contentHash = format === 'binary' ? createHash('sha256').update(body).digest('hex') : generatedContentHash(bundle, item, format);
+    const contentHash = format === 'binary' ? createHash('sha256').update(body).digest('hex')
+      : item.kind === 'module_report' ? createHash('sha256').update(JSON.stringify({ version: 1, format, content: moduleShareProjection(bundle) })).digest('hex')
+        : generatedContentHash(bundle, item, format);
     const syncKey = logicalFileKey({ share, item, format, visibility });
     const named = existing.get(name);
     const candidate = existing.bySyncKey?.get(syncKey) || (
@@ -125,7 +131,7 @@ const uploadTasks = ({ ctx, bundle, share, visibility, item, parentId, existing,
       let doc = null;
       try {
         activity(item.name, { stage: 'preparing' });
-        const html = item.kind === 'profile' ? renderProfileHtml(bundle) : renderStatementHtml(bundle);
+        const html = item.kind === 'module_report' ? renderModuleShareHtml(bundle, { preview: false }) : item.kind === 'profile' ? renderProfileHtml(bundle) : renderStatementHtml(bundle);
         doc = await put(item.name, 'text/html', html, GOOGLE_DOC, 'doc');
         if (wantDoc) report(doc.record);
         else activity(item.name, null);
@@ -147,11 +153,11 @@ const uploadTasks = ({ ctx, bundle, share, visibility, item, parentId, existing,
       if (!wantDoc && doc.created) await ctx.drive.files.delete({ fileId: doc.record.drive_file_id }).catch(() => {});
     });
   }
-  if (item.kind === 'statement' && item.formats.includes('xlsx')) {
+  if (['statement', 'module_report'].includes(item.kind) && item.formats.includes('xlsx')) {
     tasks.unshift(async () => {
       try {
         activity(`${item.name}.xlsx`, { stage: 'preparing' });
-        report((await put(`${item.name}.xlsx`, XLSX_MIME, buildStatementXlsx(bundle), undefined, 'xlsx')).record);
+        report((await put(`${item.name}.xlsx`, XLSX_MIME, item.kind === 'module_report' ? buildModuleShareXlsx(bundle) : buildStatementXlsx(bundle), undefined, 'xlsx')).record);
       } catch (err) {
         report(failed(`${item.name}.xlsx`, err));
       }
@@ -218,11 +224,14 @@ export const runShareJob = async (share) => {
   const req = share.request || {};
   const siteId = Number(share.site_id);
   const plotId = Number(share.entity_id);
+  const generic = Boolean(share.module && share.module !== 'plot_commission');
+  const definition = generic ? getModuleDriveDefinition(share.module) : null;
   const reporter = progressFor(share);
   const finishJob = (result) => finish(share, reporter, result);
   let lock = null;
   try {
-    lock = await tryPlotShareLock(orgId, plotId);
+    if (generic && !definition) throw Object.assign(new Error('This sharing module is no longer available'), { statusCode: 400 });
+    lock = generic ? await tryPlotShareLock(orgId, plotId, { module: share.module, entityType: share.entity_type, siteId }) : await tryPlotShareLock(orgId, plotId);
     if (!lock) {
       // A different process is sharing this plot; the periodic sweep retries.
       await pool.query("UPDATE google_drive_shares SET status='queued', started_at=NULL WHERE id=$1", [share.id]);
@@ -231,20 +240,33 @@ export const runShareJob = async (share) => {
     reporter.update({ phase: 'preparing', percent: 3, label: 'Checking Drive connection and reading records' });
     const [ctx, { rows: [user] }] = await Promise.all([
       driveClientFor(orgId),
-      pool.query('SELECT id, role, email FROM users WHERE id=$1', [share.shared_by]),
+      pool.query('SELECT id, role, email, organization_id, is_active FROM users WHERE id=$1', [share.shared_by]),
     ]);
     if (!ctx) return await finishJob({ status: 'failed', files: [], error: 'Google Drive is not connected' });
     if (!user) return await finishJob({ status: 'failed', files: [], error: 'The user who requested this share no longer exists' });
-    await assertCommissionSite(user, siteId);
-    const entryVisibility = await resolveEntryVisibility(user, 'commissions');
-    if (!entryVisibility.canViewAll && share.scope !== 'transaction') {
+    if (user.is_active === false || !['admin', 'super_admin', 'sub_admin'].includes(user.role)) {
+      return await finishJob({ status: 'failed', files: [], error: 'The user no longer has access to share records' });
+    }
+    if (user.organization_id != null && Number(user.organization_id) !== Number(orgId)) {
+      return await finishJob({ status: 'failed', files: [], error: 'Organization access is no longer available' });
+    }
+    if (!generic) {
+      if (user.role === 'sub_admin' && (await permissionModel.getPermission(user.id, 'commissions'))?.can_read !== true) {
+        return await finishJob({ status: 'failed', files: [], error: 'Read permission for commissions is no longer available' });
+      }
+      await assertCommissionSite(user, siteId);
+    }
+    const entryVisibility = generic ? await assertModuleDriveAccess({ moduleKey: share.module, siteId, user }) : await resolveEntryVisibility(user, 'commissions');
+    if ((!generic && !entryVisibility.canViewAll && share.scope !== 'transaction') || (generic && req.visibility
+      && JSON.stringify(req.visibility) !== JSON.stringify(entryVisibility))) {
       return await finishJob({ status: 'failed', files: [], error: 'Permission to share the full statement is no longer available' });
     }
-    const includeDocuments = share.scope === 'documents' || req.include_documents === true;
-    const bundle = preparedBundles.take(share.id, entryVisibility) || await buildPlotCommissionShareBundle({
-      plotId, siteId, user, entryVisibility, scope: share.scope, paymentId: share.payment_id ? Number(share.payment_id) : null, includeDocuments,
-    });
-    const plan = planShareFiles(bundle, { scope: share.scope, formats: req.formats, includeDocuments });
+    const includeDocuments = req.include_documents === true;
+    const bundle = preparedBundles.take(share.id, entryVisibility) || await (generic ? buildModuleDriveShareBundle({
+      moduleKey: share.module, entityId: req.record_id || null, siteId, user, entryVisibility, scope: share.scope,
+    }) : buildPlotCommissionShareBundle({ plotId, siteId, user, entryVisibility, scope: share.scope,
+      paymentId: share.payment_id ? Number(share.payment_id) : null, includeDocuments, includeDocumentLinks: true }));
+    const plan = generic ? planModuleDriveShareFiles(bundle, { formats: req.formats }) : planShareFiles(bundle, { scope: share.scope, formats: req.formats, includeDocuments, documentMode: includeDocuments ? 'copies' : 'links' });
     const active = plan.filter((f) => !f.skipped_reason);
     const total = active.reduce((n, f) => n + unitsOf(f), 0);
     let done = 0;
@@ -258,7 +280,9 @@ export const runShareJob = async (share) => {
       // The site folder carries the CA's grant; everything below inherits it.
       const siteFolder = await ensureSiteFolder(ctx, { id: siteId, name: bundle.site.name });
       reporter.update({ percent: 18, label: 'Preparing record folder' });
-      bundle.folderSegments = await existingShareFolderSegments({ orgId, siteId, plotId, rootFolderId: ctx.connection?.root_folder_id }, bundle.folderSegments);
+      bundle.folderSegments = await (generic ? existingModuleShareFolderSegments({ orgId, siteId, moduleKey: share.module,
+        entityType: share.entity_type, entityId: plotId, moduleLabel: bundle.moduleLabel, rootFolderId: ctx.connection?.root_folder_id }, bundle.folderSegments)
+        : existingShareFolderSegments({ orgId, siteId, plotId, rootFolderId: ctx.connection?.root_folder_id }, bundle.folderSegments));
       baseId = await ensureFolderPath(ctx, bundle.folderSegments, { base: siteFolder });
       share.folder_id = baseId;
       share.folder_url = folderUrl(baseId);
@@ -269,6 +293,15 @@ export const runShareJob = async (share) => {
       reporter.update({ percent: 30, label: 'Checking existing files' });
       // One listing per subfolder replaces a lookup per file.
       children = new Map(await Promise.all(groups.map(async (g) => [g, await withDriveRetry(() => listChildren(ctx, subfolders.get(g)))])));
+      // Folder repair can change both the root and inherited CA permission IDs.
+      // Mint capabilities against those final grants, including cached POST bundles.
+      const sources = generic ? bundle.documentSources || [] : plotShareDocumentSources(bundle);
+      if (sources.length) {
+        reporter.update({ percent: 32, label: 'Checking access to linked documents' });
+        const links = await prepareDriveDocumentLinks({ orgId, siteId, documents: sources });
+        if (generic) bundle.documents = links;
+        else bundle.documentLinks = links;
+      }
     } catch (err) {
       console.error(`[gdrive] share ${share.id}: folder setup failed:`, err?.response?.data?.error || err);
       if (/invalid_grant/.test(String(err?.message))) await markReauthorizationRequired(orgId).catch(() => {});
@@ -382,13 +415,13 @@ export const startDriveShareRunner = () => {
 export const stopDriveShareRunner = () => { if (timer) clearInterval(timer); timer = null; };
 
 /** Inserts a queued share and nudges the runner. Returns the row. */
-export const enqueueShare = async ({ orgId, siteId, plotId, paymentId, scope, label, folderPath, request, userId, prepared }) => {
+export const enqueueShare = async ({ orgId, siteId, plotId, moduleKey = 'plot_commission', entityType = 'plot', entityId = plotId, paymentId, scope, label, folderPath, request, userId, prepared }) => {
   const { rows } = await pool.query(
     `INSERT INTO google_drive_shares
        (organization_id, site_id, module, entity_type, entity_id, payment_id, scope, label, folder_path, files, status, request, shared_by)
-     VALUES ($1, $2, 'plot_commission', 'plot', $3, $4, $5, $6, $7, '[]'::jsonb, 'queued', $8::jsonb, $9)
+     VALUES ($1, $2, $10, $11, $3, $4, $5, $6, $7, '[]'::jsonb, 'queued', $8::jsonb, $9)
      RETURNING ${SHARE_FIELDS}`,
-    [orgId, siteId, plotId, paymentId, scope, label, folderPath, JSON.stringify(request), userId],
+    [orgId, siteId, entityId, paymentId || null, scope, label, folderPath, JSON.stringify(request), userId, moduleKey, entityType],
   );
   if (prepared) preparedBundles.put(rows[0].id, prepared.bundle, prepared.entryVisibility);
   setImmediate(() => { kickShareRunner().catch(() => {}); });

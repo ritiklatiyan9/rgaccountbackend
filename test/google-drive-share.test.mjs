@@ -108,11 +108,12 @@ test('documents-only preview lists planned files and skipped reasons', () => {
   assert.match(html, /Voucher CMN-1\.png/);
 });
 
-test('xlsx workbook has Summary, Transactions and Agents sheets', () => {
+test('xlsx workbook has Summary, Transactions, Agents and Documents sheets', () => {
   const buf = buildStatementXlsx(bundle());
   assert.ok(Buffer.isBuffer(buf));
   const wb = XLSX.read(buf, { type: 'buffer' });
-  assert.deepEqual(wb.SheetNames, ['Summary', 'Transactions', 'Agents']);
+  assert.deepEqual(wb.SheetNames, ['Summary', 'Transactions', 'Agents', 'Documents']);
+  assert.deepEqual(XLSX.utils.sheet_to_json(wb.Sheets.Documents, { header: 1 })[0], ['Document', 'Source', 'Record', 'Open document', 'Availability']);
   const tx = XLSX.utils.sheet_to_json(wb.Sheets.Transactions, { header: 1 });
   assert.equal(tx.length, 4);
   assert.equal(tx[1][1], 'CMN-1');
@@ -267,8 +268,10 @@ test('security contract: routes and controller', async () => {
     source('src/controllers/driveShare.controller.js'),
   ]);
   assert.match(routes, /router\.use\(authMiddleware,\s*attachOrgContext,\s*requireRole\('admin',\s*'sub_admin'\)\)/);
-  // preview, create, list-by-plot and the per-share progress route
-  assert.equal((routes.match(/requirePermission\('commissions',\s*'read'\)/g) || []).length, 4);
+  // Commission endpoints retain their gate; progress resolves the owning module dynamically.
+  assert.equal((routes.match(/requirePermission\('commissions',\s*'read'\)/g) || []).length, 3);
+  assert.match(controller, /assertModuleShareVisible\(req\.user, row\)/);
+  assert.match(controller, /permission\?\.can_read !== true/);
   assert.match(controller, /resolveEntryVisibility\(req\.user,\s*'commissions'\)/);
   assert.doesNotMatch(controller, /created_by/);
   assert.match(controller, /SHARE_FULL_FORBIDDEN/);

@@ -7,6 +7,8 @@ import { memberDocumentStorage } from '../utils/memberDocumentUrls.js';
 import { transactionMovesMoney } from '../utils/transactionPosting.js';
 import { safeFilePart } from './yearEndDocuments.service.js';
 import { istDateFolder, siteFolderName } from './googleDrive.service.js';
+import { appendDriveDocumentsSheet, writeDriveWorkbook, durableDocumentUrl } from './driveShareWorkbook.service.js';
+import { prepareDriveDocumentLinks } from './driveDocumentLinks.service.js';
 
 /**
  * Share domain for Project Commission → Google Drive: builds the data bundle for one
@@ -94,7 +96,7 @@ const computeTotals = (payments, decided) => {
   return { total_commission: decided, total_paid: paid, tds_total: tds, balance: decided - paid, payment_count: payments.length };
 };
 
-export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, entryVisibility, scope = 'overall', paymentId, includeDocuments = true }) => {
+export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, entryVisibility, scope = 'overall', paymentId, includeDocuments = true, includeDocumentLinks = false }) => {
   const detail = await plotDetail(plotId, siteId, entryVisibility);
   if (!detail) throw Object.assign(new Error('Plot not found'), { statusCode: 404 });
 
@@ -108,7 +110,7 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
   const agentIds = detail.agents.map((a) => Number(a.agent_id)).filter((id) => Number.isInteger(id) && id > 0);
   // Excel already carries the statement and agent details. Avoid attachment
   // metadata reads entirely unless the requested share/preview needs them.
-  const loadDocuments = includeDocuments || scope === 'documents';
+  const loadDocuments = includeDocuments || includeDocumentLinks || scope === 'documents';
 
   const [plotRes, siteRes, memberRes, docRes, receiptRes, userRes] = await Promise.all([
     pool.query(
@@ -197,7 +199,7 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
   const agentNames = agents.map((a) => a.agent_name).filter(Boolean);
   const label = safeFilePart(agentNames.length ? `Agent ${agentNames.join(', ')} - Plot ${plot.plot_no}` : `Plot ${plot.plot_no}`);
 
-  return {
+  const bundle = {
     scope,
     plot,
     site,
@@ -215,6 +217,10 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
     generatedAt: new Date(),
     generatedBy: userRes.rows[0]?.name || user?.email || 'User',
   };
+  if (includeDocumentLinks) bundle.documentLinks = await prepareDriveDocumentLinks({
+    orgId: user?.organization_id, siteId, documents: plotShareDocumentSources(bundle),
+  });
+  return bundle;
 };
 
 /* ───────────────────────── HTML (Google Docs import-safe: inline styles only) ───────────────────────── */
@@ -424,6 +430,17 @@ export const renderProfileHtml = (bundle) => {
 
 /** Preview body for the documents-only scope: just what will land in the Documents folder. */
 export const renderDocumentsHtml = (bundle, plan) => {
+  if (bundle.documentLinks) {
+    const body = headerBand({ eyebrow: bundle.site.name || 'Defence Garden Accounts', title: 'Documents',
+      subtitle: `Plot ${bundle.plot.plot_no} · ${bundle.label}`, rightLabel: 'Linked documents', rightValue: String(bundle.documentLinks.length) })
+      + dataTable([
+        { label: 'Document', width: '45%', key: (document) => document.name },
+        { label: 'Source', width: '20%', key: (document) => titleCase(document.sourceModule) },
+        { label: 'Open original', width: '35%', key: (document) => ({ raw: durableDocumentUrl(document)
+          ? `<a href="${esc(durableDocumentUrl(document))}">Open document</a>` : esc(document.unavailable || 'Link unavailable') }) },
+      ], bundle.documentLinks, { emptyText: 'No documents, vouchers or signatures recorded for this plot' });
+    return page(`Documents - Plot ${bundle.plot.plot_no}`, body);
+  }
   const files = plan.filter((f) => f.folder === DOCUMENTS_FOLDER);
   const body = headerBand({
     eyebrow: [bundle.site.name, bundle.site.city].filter(Boolean).join(' · ') || 'Defence Garden Accounts',
@@ -449,6 +466,16 @@ export const buildStatementXlsx = (bundle) => {
   const { plot, site, agents, totals } = bundle;
   const rows = bundle.payment ? [bundle.payment] : bundle.allPayments;
   const wb = XLSX.utils.book_new();
+  if (bundle.scope === 'documents') {
+    const summary = XLSX.utils.aoa_to_sheet([
+      ['Project Commission Documents'], ['Site', site.name], ['Plot no', plot.plot_no],
+      ['Generated', fmtDateTimeIST(bundle.generatedAt)], ['Linked documents', (bundle.documentLinks || []).length],
+    ]);
+    summary['!cols'] = [{ wch: 32 }, { wch: 72 }];
+    XLSX.utils.book_append_sheet(wb, summary, 'Summary');
+    appendDriveDocumentsSheet(wb, bundle.documentLinks || []);
+    return writeDriveWorkbook(wb, { sheetOptions: { Summary: { headerRow: -1, titleRows: [0], freezeRows: 1 } } });
+  }
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
     ['Project Commission Statement'],
     ['Site', [site.name, site.city, site.state].filter(Boolean).join(', ')],
@@ -480,9 +507,28 @@ export const buildStatementXlsx = (bundle) => {
     ['Name', 'Phone', 'Email', 'PAN', 'Aadhaar (masked)', 'Bank', 'Account no', 'IFSC', 'Branch', 'Decided', 'Paid incl. TDS', 'Balance', 'Status'],
     ...agents.map((a) => [a.agent_name, a.phone, a.email, a.pan_no, a.aadhaar_masked, a.bank_name, a.account_no, a.ifsc_code, a.branch, a.total_commission, a.total_paid, a.balance, a.status]),
   ]), 'Agents');
+  appendDriveDocumentsSheet(wb, bundle.documentLinks || []);
+  const moneyFormat = '"₹" #,##0.00;[Red]("₹" #,##0.00);"–"';
+  for (const row of [10, 11, 12, 13]) if (wb.Sheets.Summary[`B${row}`]) wb.Sheets.Summary[`B${row}`].z = moneyFormat;
+  const formatColumns = (sheet, columns, count) => {
+    for (const col of columns) for (let row = 2; row <= count + 1; row += 1) {
+      const cell = sheet[`${col}${row}`];
+      if (cell?.t === 'n') cell.z = moneyFormat;
+    }
+  };
+  formatColumns(wb.Sheets.Transactions, ['H', 'I', 'J', 'K'], rows.length);
+  formatColumns(wb.Sheets.Agents, ['J', 'K', 'L'], agents.length);
+  wb.Sheets.Summary['!cols'] = [{ wch: 30 }, { wch: 78 }];
+  wb.Sheets.Summary['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 1 } }];
+  wb.Sheets.Transactions['!cols'] = [16, 17, 28, 16, 24, 18, 22, 20, 18, 20, 18, 16, 20, 20, 12, 48, 24, 24].map((wch) => ({ wch }));
+  wb.Sheets.Agents['!cols'] = [28, 19, 32, 19, 24, 28, 24, 19, 28, 22, 22, 22, 20].map((wch) => ({ wch }));
+  wb.Sheets.Transactions['!autofilter'] = { ref: `A1:R${rows.length + 1}` };
+  wb.Sheets.Agents['!autofilter'] = { ref: `A1:M${agents.length + 1}` };
+  wb.Sheets.Transactions['!rows'] = [{ hpt: 32 }];
+  wb.Sheets.Agents['!rows'] = [{ hpt: 32 }];
   // ZIP compression reduces the bytes sent to Drive with a few milliseconds
   // of work locally; no Google Docs conversion is needed for this workbook.
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', compression: true });
+  return writeDriveWorkbook(wb, { sheetOptions: { Summary: { headerRow: -1, titleRows: [0], freezeRows: 1 } } });
 };
 
 /* ───────────────────────── Upload plan ───────────────────────── */
@@ -493,11 +539,27 @@ const documentFileName = (d) => {
   return `${safeFilePart(base)}${ext ? `.${ext}` : ''}`;
 };
 
-export const planShareFiles = (bundle, { scope = bundle.scope || 'overall', formats = ['xlsx'], includeDocuments = false } = {}) => {
+/** Metadata-only document inventory. The runner converts these authorized
+ * sources into durable CA links; no S3 bytes are read during workbook creation. */
+export const plotShareDocumentSources = (bundle) => [
+  ...(bundle.scope === 'transaction' ? [] : (bundle.documents || []).map((document) => ({
+    id: `document:${document.id}`, name: documentFileName(document), url: document.file_path,
+    sourceModule: 'plot_commission', sourceId: document.id,
+  }))),
+  ...(bundle.vouchers || []).map((document) => ({ id: `voucher:${document.payment_id}`, name: document.name, url: document.url,
+    sourceModule: 'commission_payment', sourceId: document.payment_id })),
+  ...(bundle.signatures || []).map((document, index) => ({ id: `signature:${document.payment_id}:${index}`, name: document.name, url: document.url,
+    sourceModule: 'commission_payment', sourceId: document.payment_id })),
+];
+
+export const planShareFiles = (bundle, { scope = bundle.scope || 'overall', formats = ['xlsx'], includeDocuments = false, documentMode = 'copies' } = {}) => {
   const plan = [];
   const plot = bundle.plot.plot_no;
   const onlyPayment = scope === 'transaction' ? bundle.payment : null;
   const forPayment = (item) => !onlyPayment || Number(item.payment_id) === Number(onlyPayment.id);
+  if (scope === 'documents' && documentMode === 'links') {
+    return [{ folder: DOCUMENTS_FOLDER, name: safeFilePart(`Document index - Plot ${plot}`), kind: 'statement', formats: ['xlsx'] }];
+  }
 
   if (scope !== 'documents') {
     const docFormats = formats.filter((f) => f === 'doc' || f === 'pdf');
@@ -511,7 +573,7 @@ export const planShareFiles = (bundle, { scope = bundle.scope || 'overall', form
     }
   }
 
-  if (includeDocuments || scope === 'documents') {
+  if (documentMode === 'copies' && (includeDocuments || scope === 'documents')) {
     const docs = onlyPayment ? [] : bundle.documents;
     const names = new Map();
     for (const d of docs) names.set(documentFileName(d), (names.get(documentFileName(d)) || 0) + 1);

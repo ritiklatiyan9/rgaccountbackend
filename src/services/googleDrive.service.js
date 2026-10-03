@@ -166,9 +166,13 @@ export const withOrgFolderLock = async (orgId, fn) => {
 
 /** Non-blocking per-plot lock: `{ release }` when acquired, null when a share
  * for that plot is already running. */
-export const tryPlotShareLock = async (orgId, plotId) => {
+export const tryPlotShareLock = async (orgId, plotId, context = {}) => {
   const client = await pool.connect();
-  const key = `gdrive-share:${orgId}:${plotId}`;
+  // Keep the original namespace for commission workers already in production.
+  // Other modules also include site/type so unrelated records do not block one another.
+  const key = !context.module || context.module === 'plot_commission'
+    ? `gdrive-share:${orgId}:${plotId}`
+    : `gdrive-share:${orgId}:${context.siteId}:${context.module}:${context.entityType}:${plotId}`;
   let handedOff = false;
   let discard;
   try {

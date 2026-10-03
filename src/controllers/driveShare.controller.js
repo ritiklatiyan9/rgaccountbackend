@@ -6,6 +6,8 @@ import { driveClientFor, getDriveConnection, folderPathKey, sendDriveError, MODU
 import { MODULE_KEY, buildPlotCommissionShareBundle, renderStatementHtml, renderDocumentsHtml, planShareFiles } from '../services/plotCommissionShare.service.js';
 import { enqueueShare, getShareRow } from '../services/driveShareJobs.service.js';
 import { existingShareFolderSegments } from '../services/driveShareDestination.service.js';
+import { assertModuleShareVisible } from './moduleDriveShare.controller.js';
+import permissionModel from '../models/Permission.model.js';
 
 const SCOPES = new Set(['overall', 'transaction', 'documents']);
 const FORMATS = ['doc', 'pdf', 'xlsx'];
@@ -34,7 +36,7 @@ const resolveRequest = async (req, { mutation = false } = {}) => {
   const rawFormats = src.formats === undefined ? ['xlsx'] : (Array.isArray(src.formats) ? src.formats : String(src.formats).split(','));
   const formats = FORMATS.filter((f) => rawFormats.map((v) => String(v).trim().toLowerCase()).includes(f));
   if (!formats.length && scope !== 'documents') throw bad('Pick at least one format (pdf, xlsx or doc)');
-  const includeDocuments = scope === 'documents' || parseBool(src.include_documents, false);
+  const includeDocuments = parseBool(src.include_documents, false);
 
   await assertCommissionSite(req.user, siteId);
   const entryVisibility = await resolveEntryVisibility(req.user, 'commissions');
@@ -81,8 +83,8 @@ const groupPlan = (plan) => {
 export const previewPlotCommissionShare = asyncHandler(async (req, res) => {
   const orgId = req.user.organization_id;
   const { plotId, siteId, scope, paymentId, formats, includeDocuments, entryVisibility } = await resolveRequest(req);
-  const bundle = await buildPlotCommissionShareBundle({ plotId, siteId, user: req.user, entryVisibility, scope, paymentId });
-  const plan = planShareFiles(bundle, { scope, formats, includeDocuments });
+  const bundle = await buildPlotCommissionShareBundle({ plotId, siteId, user: req.user, entryVisibility, scope, paymentId, includeDocuments, includeDocumentLinks: true });
+  const plan = planShareFiles(bundle, { scope, formats, includeDocuments, documentMode: includeDocuments ? 'copies' : 'links' });
 
   let connection;
   let lastShare;
@@ -99,6 +101,7 @@ export const previewPlotCommissionShare = asyncHandler(async (req, res) => {
     connected: connection?.status === 'active',
     connection_status: connection?.status || 'disconnected',
     can_share_full: entryVisibility.canViewAll,
+    document_links: true,
     // Full location as the CA sees it in Drive: root / site / date / module / record.
     folder_path: [connection?.root_folder_name || MODULE_ROOT_NAME, bundle.siteFolderName, ...bundle.folderSegments],
     recipients: recipients.map((r) => ({ email: r.email, role: r.role, all_sites: r.site_id == null })),
@@ -149,8 +152,8 @@ export const createPlotCommissionShare = asyncHandler(async (req, res) => {
   }
 
   // Validate the plan now so an empty selection answers 400 instead of a failed job.
-  const bundle = await buildPlotCommissionShareBundle({ plotId, siteId, user: req.user, entryVisibility, scope, paymentId, includeDocuments });
-  const plan = planShareFiles(bundle, { scope, formats, includeDocuments });
+  const bundle = await buildPlotCommissionShareBundle({ plotId, siteId, user: req.user, entryVisibility, scope, paymentId, includeDocuments, includeDocumentLinks: true });
+  const plan = planShareFiles(bundle, { scope, formats, includeDocuments, documentMode: includeDocuments ? 'copies' : 'links' });
   if (!plan.some((f) => !f.skipped_reason)) throw bad('Nothing to share: no files match the selected scope and options');
 
   try {
@@ -180,10 +183,18 @@ export const getShare = asyncHandler(async (req, res) => {
   try {
     const row = await getShareRow(id);
     if (!row || Number(row.organization_id) !== Number(req.user.organization_id)) return res.status(404).json({ message: 'Share not found' });
-    if (row.site_id) await assertCommissionSite(req.user, Number(row.site_id));
-    const visibility = await resolveEntryVisibility(req.user, 'commissions');
-    if (!visibility.canViewAll && (row.scope !== 'transaction' || Number(row.shared_by) !== Number(req.user.id))) {
-      return res.status(404).json({ message: 'Share not found' });
+    if (row.module && row.module !== MODULE_KEY) {
+      await assertModuleShareVisible(req.user, row);
+    } else {
+      if (req.user.role === 'sub_admin') {
+        const permission = await permissionModel.getPermission(req.user.id, 'commissions');
+        if (permission?.can_read !== true) return res.status(404).json({ message: 'Share not found' });
+      }
+      if (row.site_id) await assertCommissionSite(req.user, Number(row.site_id));
+      const visibility = await resolveEntryVisibility(req.user, 'commissions');
+      if (!visibility.canViewAll && (row.scope !== 'transaction' || Number(row.shared_by) !== Number(req.user.id))) {
+        return res.status(404).json({ message: 'Share not found' });
+      }
     }
     const { rows: [names] } = await pool.query(
       'SELECT (SELECT name FROM users WHERE id=$1) AS shared_by_name, (SELECT name FROM sites WHERE id=$2) AS site_name',

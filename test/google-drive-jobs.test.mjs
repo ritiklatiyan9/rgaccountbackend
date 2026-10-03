@@ -26,7 +26,7 @@ const statement = { folder: 'Transaction Details', name: 'Commission Statement -
 const attachment = { folder: 'Documents', name: 'Proof.png', kind: 'voucher', source: 'proof.png', size: 10 };
 
 const makeRunner = ({ share = shareFixture(), plan = [statement], visibility = { canViewAll: true, creatorId: null }, upload, build, authorize, finishGate, lock = true, claim } = {}) => {
-  const calls = { events: [], queries: [], uploads: [], builds: [], plans: [], siteChecks: [], releases: 0, html: 0, pdf: 0, reads: 0, folders: 0 };
+  const calls = { events: [], queries: [], uploads: [], builds: [], plans: [], siteChecks: [], workbookBundles: [], linkChecks: [], releases: 0, html: 0, pdf: 0, reads: 0, folders: 0 };
   let committed = null;
   const user = { id: 8, role: 'admin', email: 'admin@example.test' };
   const bundle = { site: { name: 'Defence Garden' }, folderSegments: ['03-10-2026', 'Project Commission', 'Plot A1'] };
@@ -36,7 +36,7 @@ const makeRunner = ({ share = shareFixture(), plan = [statement], visibility = {
     pool: {
       query: async (sql, values) => {
         calls.queries.push({ sql, values });
-        if (sql.includes('SELECT id, role, email FROM users')) return { rows: [user] };
+        if (sql.includes('SELECT id, role, email, organization_id, is_active FROM users')) return { rows: [user] };
         if (sql.includes('finished_at=NOW()')) {
           finishGate?.entered.resolve();
           if (finishGate) await finishGate.release.promise;
@@ -66,6 +66,26 @@ const makeRunner = ({ share = shareFixture(), plan = [statement], visibility = {
     createShareProgress, createPreparedBundleCache, uploadPercent,
     generatedContentHash, logicalFileKey, shareSyncSummary,
     existingShareFolderSegments: async (_ctx, fallback) => fallback,
+    existingModuleShareFolderSegments: async (_ctx, fallback) => fallback,
+    getModuleDriveDefinition: (key) => key === 'plot_payments' ? { key, permission: 'plot_payments', label: 'Plot Payments' } : null,
+    assertModuleDriveAccess: async (args) => {
+      calls.siteChecks.push(args);
+      if (authorize) await authorize(args);
+      return visibility;
+    },
+    buildModuleDriveShareBundle: async (args) => {
+      calls.builds.push(args);
+      return build ? build(args) : { ...bundle, moduleKey: args.moduleKey, moduleLabel: 'Plot Payments', sheets: [] };
+    },
+    planModuleDriveShareFiles: (actualBundle, options) => { calls.plans.push({ bundle: actualBundle, options }); return plan; },
+    buildModuleShareXlsx: (actualBundle) => { calls.workbookBundles.push(structuredClone(actualBundle)); return Buffer.alloc(100); },
+    renderModuleShareHtml: () => { calls.html += 1; return '<html>module</html>'; },
+    moduleShareProjection: (actualBundle) => ({ module: actualBundle.moduleKey, sheets: actualBundle.sheets, documents: actualBundle.documents?.map(({ linkVersion }) => ({ linkVersion })) }),
+    plotShareDocumentSources: (actualBundle) => actualBundle.documentSources || [],
+    prepareDriveDocumentLinks: async ({ documents }) => {
+      calls.linkChecks.push({ foldersPrepared: calls.folders, documents });
+      return documents.map((document) => ({ ...document, linkVersion: 'repaired-access' }));
+    },
     driveClientFor: async (orgId) => {
       assert.equal(orgId, 3);
       return { connection: { root_folder_id: 'root-folder' }, drive: { files: { delete: async () => {} } } };
@@ -147,6 +167,53 @@ test('Excel-only job streams phases/bytes, then reports 100% only after the resu
   assert.equal(h.calls.releases, 1);
   assert.ok(h.calls.queries.filter(({ sql }) => sql.includes('SET progress=')).every(({ sql }) => sql.includes("status='running'")));
   assert.ok(h.calls.queries.at(-1).sql.includes('finished_at=NOW()'));
+});
+
+test('module jobs share one Excel with module permission, stable identity and no attachment downloads', async () => {
+  const h = makeRunner({
+    share: shareFixture({ module: 'plot_payments', entity_type: 'module', request: { formats: ['xlsx'], record_id: null, visibility: { canViewAll: true, creatorId: null } } }),
+    plan: [{ folder: 'Excel Reports', name: 'Plot Payments', kind: 'module_report', formats: ['xlsx'] }],
+  });
+  const result = await h.runShareJob(h.share);
+  assert.equal(result.status, 'completed');
+  assert.equal(h.calls.uploads.length, 1);
+  assert.equal(h.calls.reads, 0);
+  assert.equal(h.calls.pdf, 0);
+  assert.equal(h.calls.html, 0);
+  assert.equal(h.calls.builds[0].moduleKey, 'plot_payments');
+  assert.equal(h.calls.builds[0].entityId, null);
+  assert.equal(h.calls.siteChecks[0].moduleKey, 'plot_payments');
+  assert.match(h.calls.uploads[0].contentHash, /^[a-f\d]{64}$/);
+  assert.equal(h.calls.uploads[0].syncKey, logicalFileKey({ share: h.share, item: { kind: 'module_report' }, format: 'xlsx', visibility: h.visibility }));
+  assert.equal(h.calls.releases, 1);
+});
+
+test('queued module jobs fail before exporting when entry visibility changed', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const h = makeRunner({ share: shareFixture({ module: 'plot_payments', request: { visibility: { canViewAll: true, creatorId: null } } }), visibility: { canViewAll: false, creatorId: 8 } });
+  const result = await h.runShareJob(h.share);
+  assert.equal(result.status, 'failed');
+  assert.equal(h.calls.builds.length, 0);
+  assert.equal(h.calls.uploads.length, 0);
+  assert.match(result.error, /Permission/);
+});
+
+test('document links are reissued against final folder grants before rendering and hashing Excel', async () => {
+  const source = { id: 5, name: 'Original bill', url: 'private-s3-key' };
+  const h = makeRunner({
+    share: shareFixture({ module: 'plot_payments', entity_type: 'module' }),
+    plan: [{ folder: 'Excel Reports', name: 'Plot Payments', kind: 'module_report', formats: ['xlsx'] }],
+    build: () => ({ site: { name: 'Defence Garden' }, moduleKey: 'plot_payments', moduleLabel: 'Plot Payments',
+      folderSegments: ['03-10-2026', 'Plot Payments', 'Site export'], documentSources: [source], documents: [{ ...source, linkVersion: 'former-grants' }], sheets: [] }),
+  });
+  const result = await h.runShareJob(h.share);
+  assert.equal(result.status, 'completed');
+  assert.equal(h.calls.linkChecks.length, 1);
+  assert.equal(h.calls.linkChecks[0].foldersPrepared, 1);
+  assert.equal(h.calls.workbookBundles[0].documents[0].linkVersion, 'repaired-access');
+  const expected = { version: 1, format: 'xlsx', content: { module: 'plot_payments', sheets: [], documents: [{ linkVersion: 'repaired-access' }] } };
+  assert.equal(h.calls.uploads[0].contentHash, createHash('sha256').update(JSON.stringify(expected)).digest('hex'));
+  assert.equal(h.calls.reads, 0);
 });
 
 test('an ambiguous upload failure rechecks Drive on retry, publishes retrying and completes one unit', async (t) => {
