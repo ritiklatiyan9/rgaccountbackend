@@ -30,10 +30,10 @@ const resolveRequest = async (req, { mutation = false } = {}) => {
   if (!SCOPES.has(scope)) throw bad('scope must be overall, transaction or documents');
   const paymentId = scope === 'transaction' ? positiveInt(src.payment_id) : null;
   if (scope === 'transaction' && !paymentId) throw bad('payment_id is required for a transaction share');
-  const rawFormats = src.formats === undefined ? FORMATS : (Array.isArray(src.formats) ? src.formats : String(src.formats).split(','));
+  const rawFormats = src.formats === undefined ? ['xlsx'] : (Array.isArray(src.formats) ? src.formats : String(src.formats).split(','));
   const formats = FORMATS.filter((f) => rawFormats.map((v) => String(v).trim().toLowerCase()).includes(f));
   if (!formats.length && scope !== 'documents') throw bad('Pick at least one format (pdf, xlsx or doc)');
-  const includeDocuments = parseBool(src.include_documents, true);
+  const includeDocuments = scope === 'documents' || parseBool(src.include_documents, false);
 
   await assertCommissionSite(req.user, siteId);
   const entryVisibility = await resolveEntryVisibility(req.user, 'commissions');
@@ -146,7 +146,7 @@ export const createPlotCommissionShare = asyncHandler(async (req, res) => {
   }
 
   // Validate the plan now so an empty selection answers 400 instead of a failed job.
-  const bundle = await buildPlotCommissionShareBundle({ plotId, siteId, user: req.user, entryVisibility, scope, paymentId });
+  const bundle = await buildPlotCommissionShareBundle({ plotId, siteId, user: req.user, entryVisibility, scope, paymentId, includeDocuments });
   const plan = planShareFiles(bundle, { scope, formats, includeDocuments });
   if (!plan.some((f) => !f.skipped_reason)) throw bad('Nothing to share: no files match the selected scope and options');
 
@@ -161,6 +161,7 @@ export const createPlotCommissionShare = asyncHandler(async (req, res) => {
       folderPath: folderPathKey([ctx.connection.root_folder_name || MODULE_ROOT_NAME, bundle.siteFolderName, ...bundle.folderSegments]),
       request: { formats, include_documents: includeDocuments },
       userId: req.user.id,
+      prepared: { bundle, entryVisibility },
     });
     res.status(202).json({ share: shareRowOut(share) });
   } catch (err) {

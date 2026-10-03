@@ -1,6 +1,8 @@
 import pool from '../config/db.js';
 import { emitToUser } from '../config/socket.js';
 import { resolveEntryVisibility } from './entryVisibility.service.js';
+import { assertCommissionSite } from '../controllers/plotCommissionV2.controller.js';
+import { createShareProgress, createPreparedBundleCache, uploadPercent } from './driveShareProgress.js';
 import {
   driveClientFor, ensureSiteFolder, ensureFolderPath, ensureSubfolders, listChildren, upsertFile, exportPdf,
   folderPathKey, folderUrl, tryPlotShareLock, translateDriveError, markReauthorizationRequired,
@@ -28,6 +30,7 @@ const MAX_SHARE_BYTES = 150 * 1024 * 1024;
 const UPLOAD_CONCURRENCY = 4;
 const JOB_CONCURRENCY = 2;
 const SWEEP_MS = 15000;
+const preparedBundles = createPreparedBundleCache();
 const SHARE_FIELDS = `id, organization_id, site_id, module, entity_type, entity_id, payment_id, scope, label, folder_path, folder_id, folder_url,
   files, status, error, progress, request, shared_by, created_at, started_at, finished_at`;
 
@@ -49,13 +52,14 @@ const shortReason = (err) => (err?.code === 'UNSUPPORTED_STORAGE' ? 'Stored outs
 
 /** Drive is eventually consistent for just-created folders: a 404 on a parent
  * created seconds ago usually clears itself. Retry briefly before giving up. */
-const withDriveRetry = async (fn, { attempts = 3, delayMs = 1500 } = {}) => {
+const withDriveRetry = async (fn, { attempts = 3, delayMs = 750, onRetry } = {}) => {
   let lastErr;
   for (let i = 0; i < attempts; i += 1) {
     try { return await fn(); } catch (err) {
       lastErr = err;
-      const status = err?.status ?? err?.response?.status;
+      const status = Number(err?.status ?? err?.response?.status ?? err?.code);
       if (![404, 429, 500, 502, 503].includes(status) || i === attempts - 1) throw err;
+      onRetry?.(i + 1);
       await sleep(delayMs * (i + 1));
     }
   }
@@ -64,7 +68,7 @@ const withDriveRetry = async (fn, { attempts = 3, delayMs = 1500 } = {}) => {
 
 /** Builds the upload tasks for one planned item; every finished unit (a Doc,
  * a PDF, a sheet, a document) is handed to `report`. */
-const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report }) => {
+const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report, activity }) => {
   const base = { folder: item.folder, name: item.name, kind: item.kind, mime_type: null, drive_file_id: null, url: null, error: null };
   const spend = (bytes) => {
     if (budget.used + bytes > MAX_SHARE_BYTES) throw Object.assign(new Error('Share size limit reached'), { code: 'FILE_TOO_LARGE' });
@@ -75,14 +79,25 @@ const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report }) 
     return { ...base, name, error: shortReason(err) };
   };
   const put = async (name, mimeType, body, convertTo) => {
-    spend(Buffer.byteLength(body));
-    const file = await withDriveRetry(() => upsertFile(ctx, { parentId, name, mimeType, body, convertTo, existing: existing.get(name) || null }));
+    const bytes = Buffer.byteLength(body);
+    spend(bytes);
+    let attempt = 0;
+    const file = await withDriveRetry(() => {
+      activity(name, { stage: 'uploading', bytes_sent: 0, bytes_total: bytes });
+      return upsertFile(ctx, {
+        // A timeout/5xx can arrive after Drive saved the file. Re-list on
+        // retries so replay updates that file instead of creating a duplicate.
+        parentId, name, mimeType, body, convertTo, existing: attempt++ === 0 ? existing.get(name) || null : undefined,
+        onUploadProgress: (progress) => activity(name, { stage: 'uploading', ...progress }, true),
+      });
+    }, { onRetry: () => activity(name, { stage: 'retrying', bytes_sent: 0, bytes_total: bytes }) });
     return { record: { ...base, name, mime_type: file.mime_type || convertTo || mimeType, drive_file_id: file.id, url: file.url }, created: file.created };
   };
 
   if (item.kind === 'document' || item.kind === 'voucher' || item.kind === 'signature') {
     return [async () => {
       try {
+        activity(item.name, { stage: 'downloading', bytes_sent: 0, bytes_total: item.size || 0 });
         const { bytes, mime_type } = await readStoredFileBytes(item.source);
         report((await put(item.name, item.mime_type || mime_type, bytes)).record);
       } catch (err) {
@@ -96,18 +111,22 @@ const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report }) 
   const wantPdf = item.formats.includes('pdf');
   if (wantDoc || wantPdf) {
     tasks.push(async () => {
-      const html = item.kind === 'profile' ? renderProfileHtml(bundle) : renderStatementHtml(bundle);
       let doc = null;
       try {
+        activity(item.name, { stage: 'preparing' });
+        const html = item.kind === 'profile' ? renderProfileHtml(bundle) : renderStatementHtml(bundle);
         doc = await put(item.name, 'text/html', html, GOOGLE_DOC);
         if (wantDoc) report(doc.record);
+        else activity(item.name, null);
       } catch (err) {
+        activity(item.name, null);
         if (wantDoc) report(failed(item.name, err));
         if (wantPdf) report(failed(`${item.name}.pdf`, err));
         return;
       }
       if (!wantPdf) return;
       try {
+        activity(`${item.name}.pdf`, { stage: 'converting' });
         report((await put(`${item.name}.pdf`, 'application/pdf', await withDriveRetry(() => exportPdf(ctx, doc.record.drive_file_id)))).record);
       } catch (err) {
         report(failed(`${item.name}.pdf`, err));
@@ -118,8 +137,9 @@ const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report }) 
     });
   }
   if (item.kind === 'statement' && item.formats.includes('xlsx')) {
-    tasks.push(async () => {
+    tasks.unshift(async () => {
       try {
+        activity(`${item.name}.xlsx`, { stage: 'preparing' });
         report((await put(`${item.name}.xlsx`, XLSX_MIME, buildStatementXlsx(bundle))).record);
       } catch (err) {
         report(failed(`${item.name}.xlsx`, err));
@@ -147,20 +167,34 @@ const publish = (share, event) => {
   if (share.shared_by) emitToUser(share.shared_by, event, share);
 };
 
-const setProgress = async (share, progress) => {
-  share.progress = progress;
-  await pool.query('UPDATE google_drive_shares SET progress=$1::jsonb WHERE id=$2', [JSON.stringify(progress), share.id])
-    .catch((err) => console.error('[gdrive] progress update failed:', err.message));
-  publish(share, 'drive_share:progress');
-};
+const progressFor = (share) => createShareProgress({
+  initial: share.progress,
+  publish: (progress) => {
+    share.progress = progress;
+    publish(share, 'drive_share:progress');
+  },
+  persist: (progress) => pool.query(
+    "UPDATE google_drive_shares SET progress=$1::jsonb WHERE id=$2 AND status='running'",
+    [JSON.stringify(progress), share.id],
+  ),
+  onError: (err) => console.error('[gdrive] progress update failed:', err.message),
+});
 
-const finish = async (share, { status, files, error, folderId }) => {
+const finish = async (share, reporter, { status, files, error, folderId }) => {
+  // Drain in-flight progress writes before persisting the terminal state.
+  const last = await reporter.stop();
+  const progress = {
+    ...last, sequence: last.sequence + 1, phase: status,
+    label: status === 'completed' ? 'Shared to Google Drive' : status === 'partial' ? 'Shared with some files skipped' : 'Sharing failed',
+    percent: status === 'failed' ? last.percent : 100,
+    active_files: [], updated_at: new Date().toISOString(),
+  };
   const { rows } = await pool.query(
     `UPDATE google_drive_shares
         SET status=$2, files=$3::jsonb, error=$4, folder_id=COALESCE($5, folder_id), folder_url=COALESCE($6, folder_url),
-            progress=NULL, finished_at=NOW()
+            progress=$7::jsonb, finished_at=NOW()
       WHERE id=$1 RETURNING ${SHARE_FIELDS}`,
-    [share.id, status, JSON.stringify(files), error, folderId || null, folderId ? folderUrl(folderId) : null],
+    [share.id, status, JSON.stringify(files), error, folderId || null, folderId ? folderUrl(folderId) : null, JSON.stringify(progress)],
   );
   publish(rows[0], 'drive_share:done');
   return rows[0];
@@ -172,29 +206,38 @@ export const runShareJob = async (share) => {
   const req = share.request || {};
   const siteId = Number(share.site_id);
   const plotId = Number(share.entity_id);
+  const reporter = progressFor(share);
+  const finishJob = (result) => finish(share, reporter, result);
   let lock = null;
   try {
     lock = await tryPlotShareLock(orgId, plotId);
     if (!lock) {
-      // Another share for this plot is mid-flight; leave the row queued for the next sweep.
+      // A different process is sharing this plot; the periodic sweep retries.
       await pool.query("UPDATE google_drive_shares SET status='queued', started_at=NULL WHERE id=$1", [share.id]);
-      return;
+      return { deferred: true };
     }
-    const ctx = await driveClientFor(orgId);
-    if (!ctx) {
-      return await finish(share, { status: 'failed', files: [], error: 'Google Drive is not connected' });
-    }
-    const { rows: [user] } = await pool.query('SELECT id, role, email FROM users WHERE id=$1', [share.shared_by]);
-    if (!user) return await finish(share, { status: 'failed', files: [], error: 'The user who requested this share no longer exists' });
+    reporter.update({ phase: 'preparing', percent: 3, label: 'Checking Drive connection and reading records' });
+    const [ctx, { rows: [user] }] = await Promise.all([
+      driveClientFor(orgId),
+      pool.query('SELECT id, role, email FROM users WHERE id=$1', [share.shared_by]),
+    ]);
+    if (!ctx) return await finishJob({ status: 'failed', files: [], error: 'Google Drive is not connected' });
+    if (!user) return await finishJob({ status: 'failed', files: [], error: 'The user who requested this share no longer exists' });
+    await assertCommissionSite(user, siteId);
     const entryVisibility = await resolveEntryVisibility(user, 'commissions');
-    const bundle = await buildPlotCommissionShareBundle({
-      plotId, siteId, user, entryVisibility, scope: share.scope, paymentId: share.payment_id ? Number(share.payment_id) : null,
+    if (!entryVisibility.canViewAll && share.scope !== 'transaction') {
+      return await finishJob({ status: 'failed', files: [], error: 'Permission to share the full statement is no longer available' });
+    }
+    const includeDocuments = share.scope === 'documents' || req.include_documents === true;
+    const bundle = preparedBundles.take(share.id, entryVisibility) || await buildPlotCommissionShareBundle({
+      plotId, siteId, user, entryVisibility, scope: share.scope, paymentId: share.payment_id ? Number(share.payment_id) : null, includeDocuments,
     });
-    const plan = planShareFiles(bundle, { scope: share.scope, formats: req.formats, includeDocuments: req.include_documents !== false });
+    const plan = planShareFiles(bundle, { scope: share.scope, formats: req.formats, includeDocuments });
     const active = plan.filter((f) => !f.skipped_reason);
-    const total = 1 + active.reduce((n, f) => n + unitsOf(f), 0);
+    const total = active.reduce((n, f) => n + unitsOf(f), 0);
     let done = 0;
-    await setProgress(share, { done, total, label: 'Preparing Drive folders' });
+    reporter.update({ phase: 'folders', percent: 10, done, total, files_done: done, files_total: total, label: 'Preparing site folder' });
+    if (!total) return await finishJob({ status: 'failed', files: [], error: 'No files are available for this selection' });
 
     let baseId = null;
     let subfolders;
@@ -202,45 +245,68 @@ export const runShareJob = async (share) => {
     try {
       // The site folder carries the CA's grant; everything below inherits it.
       const siteFolder = await ensureSiteFolder(ctx, { id: siteId, name: bundle.site.name });
+      reporter.update({ percent: 18, label: 'Preparing record folder' });
       baseId = await ensureFolderPath(ctx, bundle.folderSegments, { base: siteFolder });
+      share.folder_id = baseId;
+      share.folder_url = folderUrl(baseId);
+      reporter.update({ percent: 25, label: 'Preparing destination folders' });
       const groups = [...new Set(active.map((f) => f.folder))];
       subfolders = await ensureSubfolders(ctx, { id: baseId, key: folderPathKey([siteFolder.key, ...bundle.folderSegments]) }, groups);
+      reporter.update({ percent: 30, label: 'Checking existing files' });
       // One listing per subfolder replaces a lookup per file.
       children = new Map(await Promise.all(groups.map(async (g) => [g, await withDriveRetry(() => listChildren(ctx, subfolders.get(g)))])));
     } catch (err) {
       console.error(`[gdrive] share ${share.id}: folder setup failed:`, err?.response?.data?.error || err);
       if (/invalid_grant/.test(String(err?.message))) await markReauthorizationRequired(orgId).catch(() => {});
-      return await finish(share, { status: 'failed', files: [], error: shortReason(err), folderId: baseId });
+      return await finishJob({ status: 'failed', files: [], error: shortReason(err), folderId: baseId });
     }
-    done = 1;
-    await setProgress(share, { done, total, label: 'Folders ready, uploading files' });
+    reporter.update({ phase: 'uploading', percent: 35, label: 'Folders ready' });
 
     // Results land in plan order whatever the completion order.
     const slots = plan.map(() => []);
     const budget = { used: 0 };
     const tasks = [];
+    const activeFiles = new Map();
+    const labels = { preparing: 'Creating', downloading: 'Reading attachment', uploading: 'Uploading', converting: 'Converting PDF', retrying: 'Retrying upload' };
     plan.forEach((item, i) => {
       if (item.skipped_reason) {
         slots[i].push({ folder: item.folder, name: item.name, kind: item.kind, mime_type: item.mime_type || null, drive_file_id: null, url: null, error: item.skipped_reason });
         return;
       }
+      const activity = (name, detail, throttle = false) => {
+        const key = `${item.folder}/${name}`;
+        if (detail) activeFiles.set(key, { name, ...detail });
+        else activeFiles.delete(key);
+        const current = [...activeFiles.values()];
+        reporter.update({
+          active_files: current, percent: uploadPercent(done, total, current),
+          ...(detail ? { label: `${labels[detail.stage] || 'Processing'} ${name}` } : {}),
+        }, { throttle });
+      };
       const report = (record) => {
         slots[i].push(record);
+        activeFiles.delete(`${item.folder}/${record.name}`);
         done += 1;
-        setProgress(share, { done, total, label: record.error ? `Skipped ${record.name}` : `Uploaded ${record.name}` });
+        const current = [...activeFiles.values()];
+        reporter.update({
+          done, total, files_done: done, files_total: total, active_files: current,
+          percent: uploadPercent(done, total, current), label: record.error ? `Skipped ${record.name}` : `Uploaded ${record.name}`,
+        });
       };
-      tasks.push(...uploadTasks({ ctx, bundle, item, parentId: subfolders.get(item.folder), existing: children.get(item.folder), budget, report }));
+      tasks.push(...uploadTasks({ ctx, bundle, item, parentId: subfolders.get(item.folder), existing: children.get(item.folder), budget, report, activity }));
     });
     await runLimited(tasks, UPLOAD_CONCURRENCY);
+    reporter.update({ phase: 'finalizing', percent: 98, active_files: [], label: 'Saving share result' });
     const files = slots.flat();
     const uploaded = files.filter((f) => !f.error).length;
     const status = uploaded === 0 ? 'failed' : uploaded === files.length ? 'completed' : 'partial';
-    return await finish(share, { status, files, error: summarizeFailures(files), folderId: baseId });
+    return await finishJob({ status, files, error: summarizeFailures(files), folderId: baseId });
   } catch (err) {
     console.error(`[gdrive] share ${share.id} crashed:`, err);
-    return await finish(share, { status: 'failed', files: [], error: err?.statusCode ? err.message : translateDriveError(err).message })
+    return await finishJob({ status: 'failed', files: [], error: err?.statusCode ? err.message : translateDriveError(err).message })
       .catch((dbErr) => console.error('[gdrive] could not record share failure:', dbErr.message));
   } finally {
+    await reporter.stop();
     if (lock) await lock.release().catch(() => {});
   }
 };
@@ -268,12 +334,18 @@ export const kickShareRunner = async () => {
   if (sweeping) return;
   sweeping = true;
   try {
-    while (running < JOB_CONCURRENCY) {
+    // Claim at most one batch per kick. A busy plot can be requeued before
+    // this sweep finishes; looping here would reclaim it in a tight loop.
+    if (running < JOB_CONCURRENCY) {
       const claimed = await claimNext(JOB_CONCURRENCY - running);
-      if (!claimed.length) break;
       for (const share of claimed) {
         running += 1;
-        runShareJob(share).finally(() => { running -= 1; setImmediate(() => { kickShareRunner().catch(() => {}); }); });
+        let deferred = false;
+        runShareJob(share).then((result) => { deferred = result?.deferred === true; })
+          .catch((err) => console.error('[gdrive] share job failed:', err.message)).finally(() => {
+          running -= 1;
+          if (!deferred) setImmediate(() => { kickShareRunner().catch(() => {}); });
+        });
       }
     }
   } catch (err) {
@@ -296,7 +368,7 @@ export const startDriveShareRunner = () => {
 export const stopDriveShareRunner = () => { if (timer) clearInterval(timer); timer = null; };
 
 /** Inserts a queued share and nudges the runner. Returns the row. */
-export const enqueueShare = async ({ orgId, siteId, plotId, paymentId, scope, label, folderPath, request, userId }) => {
+export const enqueueShare = async ({ orgId, siteId, plotId, paymentId, scope, label, folderPath, request, userId, prepared }) => {
   const { rows } = await pool.query(
     `INSERT INTO google_drive_shares
        (organization_id, site_id, module, entity_type, entity_id, payment_id, scope, label, folder_path, files, status, request, shared_by)
@@ -304,6 +376,7 @@ export const enqueueShare = async ({ orgId, siteId, plotId, paymentId, scope, la
      RETURNING ${SHARE_FIELDS}`,
     [orgId, siteId, plotId, paymentId, scope, label, folderPath, JSON.stringify(request), userId],
   );
+  if (prepared) preparedBundles.put(rows[0].id, prepared.bundle, prepared.entryVisibility);
   setImmediate(() => { kickShareRunner().catch(() => {}); });
   return rows[0];
 };

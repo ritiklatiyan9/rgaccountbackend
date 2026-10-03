@@ -22,6 +22,45 @@ const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const FILE_FIELDS = 'id,name,webViewLink,mimeType';
 // Multipart bodies are capped at 5 MB by Drive; anything bigger goes resumable.
 const MULTIPART_MAX_BYTES = 4.5 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES = 64 * 1024;
+
+// A context belongs to one request/job. Never retain Drive liveness across
+// jobs: folders may be moved or deleted by the account owner between shares.
+const folderStates = new WeakMap();
+const folderState = (ctx) => {
+  if (!folderStates.has(ctx)) folderStates.set(ctx, { alive: new Set(), parents: new Map(), repairs: new Map(), redirects: new Map(), recovering: new Map() });
+  return folderStates.get(ctx);
+};
+const currentFolderId = (ctx, id) => {
+  const { redirects } = folderState(ctx);
+  while (redirects.has(id)) id = redirects.get(id);
+  return id;
+};
+const rememberFolder = (ctx, id, repair) => {
+  const state = folderState(ctx);
+  state.alive.add(id);
+  if (repair) state.repairs.set(id, repair);
+  return id;
+};
+const repairFolder = async (ctx, staleId) => {
+  const state = folderState(ctx);
+  const id = currentFolderId(ctx, staleId);
+  const repair = state.repairs.get(id);
+  if (!repair) return id;
+  if (state.recovering.has(id)) return state.recovering.get(id);
+  // A missing descendant may mean its entire site/root was trashed.
+  state.alive.clear();
+  const pending = Promise.resolve().then(repair).then((freshId) => {
+    if (freshId !== id) {
+      // A user may have restored an older folder since the last repair.
+      state.redirects.delete(freshId);
+      state.redirects.set(id, freshId);
+    }
+    return freshId;
+  }).finally(() => state.recovering.delete(id));
+  state.recovering.set(id, pending);
+  return pending;
+};
 
 export const isDriveConfigured = () =>
   Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
@@ -95,20 +134,32 @@ export const driveClientFor = async (orgId) => {
 // Locks
 
 /** Serialises folder creation per org so concurrent shares never race two
- * folders with the same name. Session-level lock on a dedicated client, which
- * is handed to `fn` so the holder's own SQL never waits on a second pool slot. */
+ * folders with the same name. An explicit transaction pins one server session
+ * through PgBouncer/Neon transaction pooling. Session-level advisory locks
+ * would leak when the following unlock query lands on a different backend.
+ * `fn` receives this client so its SQL does not need a second pool slot. */
 export const withOrgFolderLock = async (orgId, fn) => {
   const client = await pool.connect();
   const key = `gdrive-folders:${orgId}`;
+  let discard;
   try {
-    await client.query('SELECT pg_advisory_lock(hashtext($1))', [key]);
-    try {
-      return await fn(client);
-    } finally {
-      await client.query('SELECT pg_advisory_unlock(hashtext($1))', [key]);
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '10s'");
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (cleanupError) { discard = cleanupError; }
+    if (err?.code === '55P03') {
+      throw Object.assign(new Error('Google Drive folder preparation is busy. Retry the share in a few seconds.'), {
+        code: 'GOOGLE_DRIVE_BUSY', cause: err,
+      });
     }
+    throw err;
   } finally {
-    client.release();
+    // If rollback failed, destroy this client instead of pooling an open tx.
+    client.release(discard);
   }
 };
 
@@ -117,25 +168,40 @@ export const withOrgFolderLock = async (orgId, fn) => {
 export const tryPlotShareLock = async (orgId, plotId) => {
   const client = await pool.connect();
   const key = `gdrive-share:${orgId}:${plotId}`;
+  let handedOff = false;
+  let discard;
   try {
-    const { rows } = await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [key]);
+    await client.query('BEGIN');
+    const { rows } = await client.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok', [key]);
     if (!rows[0]?.ok) {
-      client.release();
+      await client.query('ROLLBACK');
       return null;
     }
+    handedOff = true;
+    let releasePromise;
+    return {
+      release: () => {
+        // Release is idempotent, even when cleanup is requested concurrently.
+        if (!releasePromise) releasePromise = (async () => {
+          let releaseError;
+          try {
+            await client.query('COMMIT');
+          } catch (err) {
+            try { await client.query('ROLLBACK'); } catch (cleanupError) { releaseError = cleanupError; }
+            throw err;
+          } finally {
+            client.release(releaseError);
+          }
+        })();
+        return releasePromise;
+      },
+    };
   } catch (err) {
-    client.release();
+    try { await client.query('ROLLBACK'); } catch (cleanupError) { discard = cleanupError; }
     throw err;
+  } finally {
+    if (!handedOff) client.release(discard);
   }
-  return {
-    release: async () => {
-      try {
-        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [key]);
-      } finally {
-        client.release();
-      }
-    },
-  };
 };
 
 // ---------------------------------------------------------------------------
@@ -149,11 +215,16 @@ const isNotFound = (err) => httpStatus(err) === 404;
 // Drive marks every descendant of a trashed folder as trashed, so checking the
 // deepest folder of a path covers its ancestors too.
 const folderAlive = async (ctx, folderId) => {
+  const { alive } = folderState(ctx);
+  if (alive.has(folderId)) return true;
   try {
-    const { data } = await ctx.drive.files.get({ fileId: folderId, fields: 'id,trashed' });
-    return !data.trashed;
+    const { data } = await ctx.drive.files.get({ fileId: folderId, fields: 'id,trashed,parents' });
+    folderState(ctx).parents.set(folderId, data.parents || []);
+    if (!data.trashed) { alive.add(folderId); return true; }
+    alive.delete(folderId);
+    return false;
   } catch (err) {
-    if (isNotFound(err)) return false;
+    if (isNotFound(err)) { alive.delete(folderId); return false; }
     throw err;
   }
 };
@@ -166,18 +237,18 @@ const findOrCreateFolder = async (ctx, parentId, name) => {
     pageSize: 1,
     spaces: 'drive',
   });
-  if (data.files?.[0]) return data.files[0].id;
+  if (data.files?.[0]) return rememberFolder(ctx, data.files[0].id);
   const created = await ctx.drive.files.create({
     requestBody: { name, parents: [parentId], mimeType: FOLDER_MIME },
     fields: 'id',
   });
-  return created.data.id;
+  return rememberFolder(ctx, created.data.id);
 };
 
 const ensureRootFolderUnlocked = async (ctx, db) => {
   const { connection } = ctx;
   if (connection.root_folder_id && await folderAlive(ctx, connection.root_folder_id)) {
-    return connection.root_folder_id;
+    return rememberFolder(ctx, connection.root_folder_id, () => ensureRootFolder(ctx));
   }
   const rootId = await findOrCreateFolder(ctx, 'root', connection.root_folder_name || MODULE_ROOT_NAME);
   await db.query(
@@ -185,7 +256,7 @@ const ensureRootFolderUnlocked = async (ctx, db) => {
     [rootId, connection.id],
   );
   connection.root_folder_id = rootId;
-  return rootId;
+  return rememberFolder(ctx, rootId, () => ensureRootFolder(ctx));
 };
 
 /** Root folder id, creating it in My Drive when missing or trashed. */
@@ -196,7 +267,8 @@ export const ensureRootFolder = (ctx) => withOrgFolderLock(ctx.orgId, (db) => en
  * children are filed under, e.g. a site folder `{ id, key: 'site:10' }`. */
 export const ensureFolderPath = (ctx, segments, { base } = {}) => withOrgFolderLock(ctx.orgId, async (db) => {
   const rootId = await ensureRootFolderUnlocked(ctx, db);
-  const start = base || { id: rootId, key: '' };
+  const start = base ? { ...base, id: currentFolderId(ctx, base.id) } : { id: rootId, key: '' };
+  if (!segments.length) return start.id;
   const prefixes = segments.map((_, i) => folderPathKey([start.key, ...segments.slice(0, i + 1)]));
   const { rows } = await db.query(
     `SELECT path, folder_id FROM google_drive_folders
@@ -228,7 +300,10 @@ export const ensureFolderPath = (ctx, segments, { base } = {}) => withOrgFolderL
       [ctx.orgId, rootId, prefixes[i], parentId],
     );
   }
-  return parentId;
+  return rememberFolder(ctx, parentId, async () => {
+    const freshBase = base ? { ...base, id: await repairFolder(ctx, base.id) } : undefined;
+    return ensureFolderPath(ctx, segments, { base: freshBase });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -243,12 +318,16 @@ const regrantSiteAccess = async (ctx, db, siteId, folderId) => {
     [ctx.orgId, siteId],
   );
   for (const row of rows) {
+    let permissionId;
     try {
-      const permissionId = await grantAccess(ctx, { fileId: folderId, email: row.email, role: row.role });
-      await db.query('UPDATE google_drive_access_emails SET drive_permission_id=$1 WHERE id=$2', [permissionId, row.id]);
+      permissionId = await grantAccess(ctx, { fileId: folderId, email: row.email, role: row.role });
     } catch (err) {
       console.error(`[gdrive] could not re-grant ${row.email} on site ${siteId}:`, err.message);
+      continue;
     }
+    // SQL errors must abort the surrounding folder transaction. Swallowing
+    // one here would make PostgreSQL silently roll back the later COMMIT.
+    await db.query('UPDATE google_drive_access_emails SET drive_permission_id=$1 WHERE id=$2', [permissionId, row.id]);
   }
 };
 
@@ -258,22 +337,31 @@ const regrantSiteAccess = async (ctx, db, siteId, folderId) => {
  * (which is attached to this folder id) keeps covering every later share.
  */
 export const ensureSiteFolder = (ctx, site) => withOrgFolderLock(ctx.orgId, async (db) => {
-  const rootId = await ensureRootFolderUnlocked(ctx, db);
   const name = siteFolderName(site);
   const key = siteKey(site.id);
-  const { rows } = await db.query(
+  let rootId = ctx.connection.root_folder_id;
+  const { rows } = rootId ? await db.query(
     `SELECT id, folder_id, folder_name FROM google_drive_site_folders
       WHERE organization_id=$1 AND root_folder_id=$2 AND site_id=$3`,
     [ctx.orgId, rootId, site.id],
-  );
+  ) : { rows: [] };
   const row = rows[0];
-  if (row && await folderAlive(ctx, row.folder_id)) {
+  let liveSite = row && await folderAlive(ctx, row.folder_id);
+  if (liveSite) {
+    // A live descendant also proves its root is not trashed; skip the
+    // separate root request on the common repeat-share path. A site moved by
+    // its owner cannot prove anything about its former root.
+    if (folderState(ctx).parents.get(row.folder_id)?.includes(rootId)) rememberFolder(ctx, rootId, () => ensureRootFolder(ctx));
+    else liveSite = await ensureRootFolderUnlocked(ctx, db) === rootId;
+  }
+  if (liveSite) {
     if (row.folder_name !== name) {
       await ctx.drive.files.update({ fileId: row.folder_id, requestBody: { name }, fields: 'id' });
       await db.query('UPDATE google_drive_site_folders SET folder_name=$1, updated_at=NOW() WHERE id=$2', [name, row.id]);
     }
-    return { id: row.folder_id, name, key };
+    return { id: rememberFolder(ctx, row.folder_id, async () => (await ensureSiteFolder(ctx, site)).id), name, key };
   }
+  rootId = await ensureRootFolderUnlocked(ctx, db);
   const folderId = await findOrCreateFolder(ctx, rootId, name);
   await db.query(
     `INSERT INTO google_drive_site_folders (organization_id, site_id, root_folder_id, folder_id, folder_name)
@@ -288,14 +376,17 @@ export const ensureSiteFolder = (ctx, site) => withOrgFolderLock(ctx.orgId, asyn
       WHERE organization_id=$1 AND root_folder_id=$2 AND (path = $3 OR starts_with(path, $3 || '/'))`,
     [ctx.orgId, rootId, key],
   );
-  if (row) await regrantSiteAccess(ctx, db, site.id, folderId);
-  return { id: folderId, name, key };
+  // Grants are keyed by site, even if the old root/site registry is gone.
+  await regrantSiteAccess(ctx, db, site.id, folderId);
+  return { id: rememberFolder(ctx, folderId, async () => (await ensureSiteFolder(ctx, site)).id), name, key };
 });
 
 /** Sibling folders under `parent` in one go: one listing, then only the
  * missing ones are created. Returns name → folder id. */
 export const ensureSubfolders = (ctx, parent, names) => withOrgFolderLock(ctx.orgId, async (db) => {
   const rootId = await ensureRootFolderUnlocked(ctx, db);
+  parent = { ...parent, id: currentFolderId(ctx, parent.id) };
+  names = [...new Set(names)];
   const keys = names.map((name) => folderPathKey([parent.key, name]));
   const { rows } = await db.query(
     `SELECT path, folder_id FROM google_drive_folders
@@ -304,11 +395,34 @@ export const ensureSubfolders = (ctx, parent, names) => withOrgFolderLock(ctx.or
   );
   const cached = new Map(rows.map((r) => [r.path, r.folder_id]));
   const result = new Map();
+  // DB cache entries are hints until validated in this job. Checking siblings
+  // concurrently avoids both serial network waits and writes to trashed IDs.
+  const validated = await Promise.allSettled(names.map(async (name, i) => {
+    const id = cached.get(keys[i]);
+    if (id && !await folderAlive(ctx, id)) {
+      cached.delete(keys[i]);
+      await db.query(
+        `DELETE FROM google_drive_folders
+          WHERE organization_id=$1 AND root_folder_id=$2 AND (path = $3 OR starts_with(path, $3 || '/'))`,
+        [ctx.orgId, rootId, keys[i]],
+      );
+    }
+  }));
+  const invalid = validated.find((entry) => entry.status === 'rejected');
+  if (invalid) throw invalid.reason;
   const missing = names.filter((name, i) => !cached.has(keys[i]));
-  names.forEach((name, i) => { if (cached.has(keys[i])) result.set(name, cached.get(keys[i])); });
+  const rememberChild = (name, id) => {
+    result.set(name, rememberFolder(ctx, id, async () => {
+      const freshParent = { ...parent, id: await repairFolder(ctx, parent.id) };
+      return (await ensureSubfolders(ctx, freshParent, [name])).get(name);
+    }));
+  };
+  names.forEach((name, i) => { if (cached.has(keys[i])) rememberChild(name, cached.get(keys[i])); });
   if (!missing.length) return result;
-  const children = await listChildren(ctx, parent.id);
-  for (const name of missing) {
+  const children = await listChildrenRaw(ctx, parent.id);
+  // All names are distinct and the org lock is still held until every create
+  // settles, including when one fails. Do not release the lock mid-flight.
+  const created = await Promise.allSettled(missing.map(async (name) => {
     const existing = children.get(name);
     const id = existing?.mimeType === FOLDER_MIME
       ? existing.id
@@ -319,8 +433,10 @@ export const ensureSubfolders = (ctx, parent, names) => withOrgFolderLock(ctx.or
        ON CONFLICT (organization_id, root_folder_id, path) DO UPDATE SET folder_id=EXCLUDED.folder_id`,
       [ctx.orgId, rootId, folderPathKey([parent.key, name]), id],
     );
-    result.set(name, id);
-  }
+    rememberChild(name, id);
+  }));
+  const failed = created.find((entry) => entry.status === 'rejected');
+  if (failed) throw failed.reason;
   return result;
 });
 
@@ -339,7 +455,7 @@ export const getSiteFolder = async (ctx, siteId) => {
 // Files
 
 /** Everything directly inside a folder, keyed by name (app-created files only, as drive.file allows). */
-export const listChildren = async (ctx, parentId) => {
+const listChildrenRaw = async (ctx, parentId) => {
   const byName = new Map();
   let pageToken;
   do {
@@ -356,11 +472,44 @@ export const listChildren = async (ctx, parentId) => {
   return byName;
 };
 
+export const listChildren = async (ctx, parentId) => {
+  const id = currentFolderId(ctx, parentId);
+  try { return await listChildrenRaw(ctx, id); } catch (err) {
+    if (!isNotFound(err)) throw err;
+    const freshId = await repairFolder(ctx, id);
+    return listChildrenRaw(ctx, freshId);
+  }
+};
+
 const toFileResult = (file, created) => ({ id: file.id, name: file.name, url: fileUrl(file), mime_type: file.mimeType, created });
+
+// googleapis-common reports bytesRead for multipart creates, but media-only
+// updates and gaxios resumable PUTs do not implement Node upload progress.
+// Count the same payload bytes as the HTTP client consumes them for every
+// transport. These are streamed bytes, not an acknowledgement from Drive.
+const uploadStream = (body, onUploadProgress, size) => {
+  const buf = Buffer.isBuffer(body) ? body : typeof body === 'string' ? Buffer.from(body) : null;
+  if (!onUploadProgress) return buf ? Readable.from([buf]) : body;
+  return Readable.from((async function* () {
+    let bytesSent = 0;
+    const chunks = buf ? (function* () {
+      for (let offset = 0; offset < buf.length; offset += UPLOAD_CHUNK_BYTES) yield buf.subarray(offset, offset + UPLOAD_CHUNK_BYTES);
+    }()) : body;
+    for await (const chunk of chunks) {
+      bytesSent += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+      // UI observers must not abort an otherwise valid accounting upload.
+      try {
+        const pending = onUploadProgress({ bytes_sent: bytesSent, bytes_total: size });
+        if (pending?.catch) pending.catch(() => {});
+      } catch { /* progress delivery is best effort */ }
+      yield chunk;
+    }
+  }()));
+};
 
 // Resumable sessions go through the OAuth client directly: googleapis' typed
 // client only does multipart/media uploads.
-const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertTo, buf }) => {
+const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertTo, buf, onUploadProgress }) => {
   const base = 'https://www.googleapis.com/upload/drive/v3/files';
   const init = await ctx.auth.request({
     url: `${base}${fileId ? `/${fileId}` : ''}?uploadType=resumable&fields=${FILE_FIELDS}`,
@@ -378,9 +527,11 @@ const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertT
   const { data } = await ctx.auth.request({
     url: location,
     method: 'PUT',
-    headers: { 'Content-Type': mimeType },
-    data: buf,
+    headers: { 'Content-Type': mimeType, 'Content-Length': String(buf.length) },
+    data: onUploadProgress ? uploadStream(buf, onUploadProgress, buf.length) : buf,
     responseType: 'json',
+    // The job retries with a fresh body; an exhausted stream is not replayable.
+    retry: false,
   });
   return data;
 };
@@ -392,38 +543,53 @@ const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertT
  * The result's `created` tells callers whether the file existed before.
  * Pass `existing` (a file, or null for "known absent", from listChildren) to
  * skip the per-file lookup.
+ * `onUploadProgress({ bytes_sent, bytes_total })` reports consumed payload
+ * bytes. Only the resolved result confirms that Drive has saved the file.
  */
-export const upsertFile = async (ctx, { parentId, name, mimeType, body, convertTo, existing: known }) => {
+export const upsertFile = async (ctx, { parentId, name, mimeType, body, convertTo, existing: known, onUploadProgress }) => {
   const { drive } = ctx;
-  let existing = known;
-  if (known === undefined) {
+  const resolvedParent = currentFolderId(ctx, parentId);
+  // A listing from the previous folder must never update files in that old
+  // location after another upload has repaired the parent.
+  if (resolvedParent !== parentId) known = undefined;
+  parentId = resolvedParent;
+  const lookup = async () => {
     const { data } = await drive.files.list({
       q: `name = '${escapeDriveQuery(name)}' and '${escapeDriveQuery(parentId)}' in parents and trashed = false`,
       fields: 'files(id,name,mimeType)',
       pageSize: 1,
       spaces: 'drive',
     });
-    existing = data.files?.[0] || null;
-  }
+    return data.files?.[0] || null;
+  };
+  let existing = known === undefined ? await lookup() : known;
   const size = Buffer.isBuffer(body) ? body.length : typeof body === 'string' ? Buffer.byteLength(body) : null;
-
-  if (size != null && size > MULTIPART_MAX_BYTES) {
-    const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
-    return toFileResult(await resumableUpload(ctx, {
-      fileId: existing?.id, name, parentId, mimeType, convertTo, buf,
-    }), !existing);
+  const upload = async () => {
+    if (size != null && size > MULTIPART_MAX_BYTES) {
+      const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+      return toFileResult(await resumableUpload(ctx, {
+        fileId: existing?.id, name, parentId, mimeType, convertTo, buf, onUploadProgress,
+      }), !existing);
+    }
+    // googleapis accepts a string or Readable, never a Buffer.
+    const stream = uploadStream(body, onUploadProgress, size);
+    const res = existing
+      ? await drive.files.update({ fileId: existing.id, media: { mimeType, body: stream }, fields: FILE_FIELDS }, { retry: false })
+      : await drive.files.create({
+        requestBody: { name, parents: [parentId], ...(convertTo ? { mimeType: convertTo } : {}) },
+        media: { mimeType, body: stream },
+        fields: FILE_FIELDS,
+      }, { retry: false });
+    return toFileResult(res.data, !existing);
+  };
+  try { return await upload(); } catch (err) {
+    // A file/folder can disappear after our listing. Replay only bodies we
+    // own; arbitrary caller streams cannot be rewound safely.
+    if (!isNotFound(err) || size === null) throw err;
+    parentId = await repairFolder(ctx, parentId);
+    existing = await lookup();
+    return upload();
   }
-
-  // googleapis multipart accepts a string or a Readable, never a Buffer.
-  const stream = Buffer.isBuffer(body) || typeof body === 'string' ? Readable.from([body]) : body;
-  const res = existing
-    ? await drive.files.update({ fileId: existing.id, media: { mimeType, body: stream }, fields: FILE_FIELDS })
-    : await drive.files.create({
-      requestBody: { name, parents: [parentId], ...(convertTo ? { mimeType: convertTo } : {}) },
-      media: { mimeType, body: stream },
-      fields: FILE_FIELDS,
-    });
-  return toFileResult(res.data, !existing);
 };
 
 export const exportPdf = async (ctx, fileId) => {
@@ -475,6 +641,9 @@ const REAUTH = {
 /** Maps Google / pg failures to the `{ statusCode, message, code }` the UI expects. */
 export const translateDriveError = (err) => {
   const reason = err?.errors?.[0]?.reason || err?.response?.data?.error?.errors?.[0]?.reason;
+  if (err?.code === 'GOOGLE_DRIVE_BUSY') {
+    return { statusCode: 409, code: err.code, message: 'Google Drive folder preparation is busy. Retry the share in a few seconds.' };
+  }
   if (isGrantExpired(err)) return REAUTH;
   if (reason === 'accessNotConfigured') {
     return { statusCode: 503, code: 'GOOGLE_DRIVE_API_DISABLED', message: 'Enable the Google Drive API for this Google Cloud project' };
@@ -487,7 +656,7 @@ export const translateDriveError = (err) => {
     return { statusCode: 507, code: 'GOOGLE_DRIVE_QUOTA', message: 'The connected Google Drive is out of storage space' };
   }
   if (isNotFound(err)) return { statusCode: 404, code: 'GOOGLE_DRIVE_NOT_FOUND', message: 'The Google Drive file or folder no longer exists' };
-  if (err?.code === '42P01') {
+  if (['42P01', '42703'].includes(err?.code)) {
     return { statusCode: 503, code: 'GOOGLE_DRIVE_NOT_READY', message: 'Google Drive sharing database update is required' };
   }
   return { statusCode: 502, code: 'GOOGLE_DRIVE_FAILED', message: 'Google Drive request failed' };

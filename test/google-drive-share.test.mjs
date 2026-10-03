@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import * as XLSX from '@e965/xlsx';
+import pool from '../src/config/db.js';
+import { plotCommissionV2Model } from '../src/models/PlotCommissionV2.model.js';
 import {
   MODULE_FOLDER, MODULE_KEY, esc, moneyINR, fmtDate, maskAadhaar, shareFolderSegments,
-  renderStatementHtml, renderProfileHtml, renderDocumentsHtml, buildStatementXlsx, planShareFiles, readStoredFileBytes,
+  renderStatementHtml, renderProfileHtml, renderDocumentsHtml, buildStatementXlsx, planShareFiles, readStoredFileBytes, buildPlotCommissionShareBundle,
 } from '../src/services/plotCommissionShare.service.js';
 
 const source = async (file) => readFile(new URL(`../${file}`, import.meta.url), 'utf8');
@@ -117,6 +119,92 @@ test('xlsx workbook has Summary, Transactions and Agents sheets', () => {
   assert.equal(tx[1][7], 52500); // gross = amount + tds
   assert.equal(tx[2][10], 5000); // credit column for the negative row
   assert.equal(tx[3][14], 'No'); // pending cheque is not posted
+  const summary = Object.fromEntries(XLSX.utils.sheet_to_json(wb.Sheets.Summary, { header: 1 }).filter((row) => row.length === 2));
+  assert.equal(summary['Paid incl. TDS'], 47500);
+  assert.equal(summary.Balance, 12500);
+  const agents = XLSX.utils.sheet_to_json(wb.Sheets.Agents);
+  assert.equal(agents[0]['Account no'], '001122334455'); // account identifiers keep leading zeroes
+  assert.equal(agents[0]['Aadhaar (masked)'], 'XXXX XXXX 9012');
+});
+
+test('transaction workbook includes only the selected entry while preserving plot-wide summary', () => {
+  const b = bundle();
+  const wb = XLSX.read(buildStatementXlsx({ ...b, scope: 'transaction', payment: b.allPayments[1] }), { type: 'buffer' });
+  const tx = XLSX.utils.sheet_to_json(wb.Sheets.Transactions);
+  assert.equal(tx.length, 1);
+  assert.equal(tx[0].Receipt, 'CMN-2');
+  assert.equal(tx[0].Credit, 5000);
+  assert.equal(tx[0].Posted, 'Yes');
+  const summary = Object.fromEntries(XLSX.utils.sheet_to_json(wb.Sheets.Summary, { header: 1 }).filter((row) => row.length === 2));
+  assert.equal(summary['Decided commission'], 60000);
+  assert.equal(summary['Paid incl. TDS'], 47500);
+});
+
+test('bundle can omit attachments without changing visible financial records or historical payments', async (t) => {
+  const fixture = bundle();
+  const calls = [];
+  t.mock.method(plotCommissionV2Model, 'findAllCommissionsByPlotId', async (plotId, siteId) => {
+    assert.equal(plotId, 20);
+    assert.equal(siteId, 2);
+    return [{ id: 7, agent_id: 3, agent_name: 'Sandeep Malik', plot_id: 20, site_id: 2, total_commission: 60000, plot_commission: 60000, ...fixture.plot }];
+  });
+  t.mock.method(pool, 'query', async (sql, values) => {
+    calls.push({ sql, values });
+    if (sql.includes('SELECT pcp.*')) {
+      assert.deepEqual(values, ['A1', 2, '8,9']);
+      return { rows: [
+        ...fixture.allPayments.map((p) => ({ ...p, plot_commission_id: 7 })),
+        payment({ id: 4, date: '2026-08-01', amount: 1000, tds_amount: 0, plot_commission_id: 9 }),
+      ] };
+    }
+    if (sql.includes('JSON_AGG')) {
+      assert.deepEqual(values, ['A1', 2, '8,9']);
+      return { rows: [
+        { plot_id: 19, total_commission: 60000, total_paid_all: 1000, agents_detail: [{ commission_id: 9, agent_id: 4, agent_name: 'Previous Agent' }] },
+        { plot_id: 20, total_commission: 60000, total_paid_all: 47500, agents_detail: [{ commission_id: 7, agent_id: 3, agent_name: 'Sandeep Malik' }] },
+      ] };
+    }
+    if (sql.includes('FROM plots WHERE')) return { rows: [fixture.plot] };
+    if (sql.includes('FROM sites WHERE')) return { rows: [fixture.site] };
+    if (sql.includes('FROM members WHERE')) return { rows: [{ id: 3, ...fixture.agents[0], aadhar_no: '123456789012' }] };
+    if (sql.includes('FROM users WHERE')) return { rows: [{ name: 'Ritik' }] };
+    if (sql.includes('FROM documents')) return { rows: fixture.documents };
+    if (sql.includes('FROM transaction_receipts')) return { rows: [{ record_id: '3', customer_signature_url: fixture.signatures[0].url }] };
+    assert.fail(`Unexpected query: ${sql}`);
+  });
+  const args = { plotId: 20, siteId: 2, user: { id: 8 }, entryVisibility: { creatorId: '8,9' } };
+  const fast = await buildPlotCommissionShareBundle({ ...args, includeDocuments: false });
+  assert.ok(calls.every(({ sql }) => !/FROM (documents|transaction_receipts)\b/.test(sql)));
+  assert.deepEqual([fast.documents, fast.vouchers, fast.signatures], [[], [], []]);
+  assert.deepEqual(fast.allPayments.map((p) => [p.id, p.agent_name]), [[4, 'Previous Agent'], [1, 'Sandeep Malik'], [2, 'Sandeep Malik'], [3, 'Sandeep Malik']]);
+  assert.deepEqual(fast.totals, { total_commission: 60000, total_paid: 48500, tds_total: 2500, balance: 11500, payment_count: 4 });
+
+  const full = await buildPlotCommissionShareBundle(args);
+  assert.deepEqual(full.allPayments, fast.allPayments);
+  assert.deepEqual(full.agents, fast.agents);
+  assert.deepEqual(full.totals, fast.totals);
+  assert.equal(full.documents.length, 3);
+  assert.equal(full.vouchers.length, 2);
+  assert.equal(full.signatures.length, 1);
+
+  const docsOnly = await buildPlotCommissionShareBundle({ ...args, scope: 'documents', includeDocuments: false });
+  assert.equal(docsOnly.documents.length, 3);
+  assert.equal(docsOnly.vouchers.length, 2);
+  assert.equal(docsOnly.signatures.length, 1);
+
+  const one = await buildPlotCommissionShareBundle({ ...args, scope: 'transaction', paymentId: 1, includeDocuments: false });
+  assert.equal(one.payment.id, 1);
+  assert.deepEqual(one.totals, full.totals);
+  await assert.rejects(buildPlotCommissionShareBundle({ ...args, scope: 'transaction', paymentId: 999, includeDocuments: false }), { statusCode: 404 });
+});
+
+test('default share creates one Excel workbook without PDFs, Docs or attachments', () => {
+  assert.deepEqual(planShareFiles(bundle()), [{
+    folder: 'Transaction Details', name: 'Commission Statement - Plot A1', kind: 'statement', formats: ['xlsx'],
+  }]);
+  const docsOnly = planShareFiles(bundle({ scope: 'documents' }));
+  assert.equal(docsOnly.length, 6);
+  assert.ok(docsOnly.every((file) => file.folder === 'Documents'));
 });
 
 test('planShareFiles: overall scope with all formats', () => {

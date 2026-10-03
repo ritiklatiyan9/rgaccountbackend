@@ -94,7 +94,7 @@ const computeTotals = (payments, decided) => {
   return { total_commission: decided, total_paid: paid, tds_total: tds, balance: decided - paid, payment_count: payments.length };
 };
 
-export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, entryVisibility, scope = 'overall', paymentId }) => {
+export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, entryVisibility, scope = 'overall', paymentId, includeDocuments = true }) => {
   const detail = await plotDetail(plotId, siteId, entryVisibility);
   if (!detail) throw Object.assign(new Error('Plot not found'), { statusCode: 404 });
 
@@ -106,6 +106,9 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
   }
   const scopedPayments = payment ? [payment] : allPayments;
   const agentIds = detail.agents.map((a) => Number(a.agent_id)).filter((id) => Number.isInteger(id) && id > 0);
+  // Excel already carries the statement and agent details. Avoid attachment
+  // metadata reads entirely unless the requested share/preview needs them.
+  const loadDocuments = includeDocuments || scope === 'documents';
 
   const [plotRes, siteRes, memberRes, docRes, receiptRes, userRes] = await Promise.all([
     pool.query(
@@ -121,7 +124,7 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
          FROM members WHERE id = ANY($1::int[])`,
       [agentIds],
     ),
-    scope === 'transaction'
+    !loadDocuments || scope === 'transaction'
       ? { rows: [] }
       : pool.query(
         `SELECT id, title, original_name, file_path, mime_type, file_size, category, payment_mode, created_at
@@ -130,12 +133,12 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
           ORDER BY created_at`,
         [plotId],
       ),
-    pool.query(
+    loadDocuments ? pool.query(
       `SELECT record_id, customer_signature_url, authority_signature_url, evidence_photo_url
          FROM transaction_receipts
         WHERE module = 'commission_payment' AND record_id = ANY($1::text[])`,
       [scopedPayments.map((p) => String(p.id))],
-    ),
+    ) : { rows: [] },
     pool.query('SELECT name FROM users WHERE id = $1', [Number(user?.id) || 0]),
   ]);
 
@@ -169,7 +172,7 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
     };
   });
 
-  const vouchers = scopedPayments
+  const vouchers = (loadDocuments ? scopedPayments : [])
     .filter((p) => p.voucher_url)
     .map((p) => ({ payment_id: p.id, url: p.voucher_url, name: `Voucher ${receiptNo(p.id)}.${extOf(p.voucher_url, 'png')}` }));
 
@@ -180,7 +183,7 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
     seenUrls.add(url);
     signatures.push({ payment_id: paymentId, url, name });
   };
-  for (const p of scopedPayments) {
+  for (const p of loadDocuments ? scopedPayments : []) {
     addSignature(p.id, p.customer_signature_url, `Signature - ${receiptNo(p.id)} - Customer.png`);
     addSignature(p.id, p.authority_signature_url, `Signature - ${receiptNo(p.id)} - Authority.png`);
   }
@@ -477,7 +480,9 @@ export const buildStatementXlsx = (bundle) => {
     ['Name', 'Phone', 'Email', 'PAN', 'Aadhaar (masked)', 'Bank', 'Account no', 'IFSC', 'Branch', 'Decided', 'Paid incl. TDS', 'Balance', 'Status'],
     ...agents.map((a) => [a.agent_name, a.phone, a.email, a.pan_no, a.aadhaar_masked, a.bank_name, a.account_no, a.ifsc_code, a.branch, a.total_commission, a.total_paid, a.balance, a.status]),
   ]), 'Agents');
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  // ZIP compression reduces the bytes sent to Drive with a few milliseconds
+  // of work locally; no Google Docs conversion is needed for this workbook.
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', compression: true });
 };
 
 /* ───────────────────────── Upload plan ───────────────────────── */
@@ -488,7 +493,7 @@ const documentFileName = (d) => {
   return `${safeFilePart(base)}${ext ? `.${ext}` : ''}`;
 };
 
-export const planShareFiles = (bundle, { scope = bundle.scope || 'overall', formats = ['doc', 'pdf', 'xlsx'], includeDocuments = true } = {}) => {
+export const planShareFiles = (bundle, { scope = bundle.scope || 'overall', formats = ['xlsx'], includeDocuments = false } = {}) => {
   const plan = [];
   const plot = bundle.plot.plot_no;
   const onlyPayment = scope === 'transaction' ? bundle.payment : null;
@@ -506,7 +511,7 @@ export const planShareFiles = (bundle, { scope = bundle.scope || 'overall', form
     }
   }
 
-  if (includeDocuments) {
+  if (includeDocuments || scope === 'documents') {
     const docs = onlyPayment ? [] : bundle.documents;
     const names = new Map();
     for (const d of docs) names.set(documentFileName(d), (names.get(documentFileName(d)) || 0) + 1);

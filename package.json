@@ -161,7 +161,7 @@
     "test:backup": "node --test test/backup-*.test.mjs",
     "migrate:member-site-sharing": "node src/migrations/187_member_site_sharing.js",
     "migrate:google-drive": "node src/migrations/188_google_drive_sharing.js",
-    "test:google-drive": "node --test test/google-drive-infra.test.mjs test/google-drive-share.test.mjs",
+    "test:google-drive": "node --test test/google-drive-*.test.mjs",
     "test:member-site-sharing": "node --test test/member-site-sharing.test.mjs test/member-phone-reuse.test.mjs test/member-site-registration-kyc.test.mjs test/member-kyc-incorporation.test.mjs test/member-multi-type.test.mjs",
     "migrate:google-drive-site-access": "node src/migrations/189_google_drive_site_access.js",
     "migrate:google-drive-share-jobs": "node src/migrations/190_google_drive_share_jobs.js"

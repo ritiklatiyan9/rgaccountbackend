@@ -3,6 +3,9 @@ import http from 'http';
 import app from './app.js';
 import pool, { connectDB } from './config/db.js';
 import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
+import { up as migrateGoogleDrive } from './migrations/188_google_drive_sharing.js';
+import { up as migrateGoogleDriveSiteAccess } from './migrations/189_google_drive_site_access.js';
+import { up as migrateGoogleDriveJobs } from './migrations/190_google_drive_share_jobs.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
 import { startSmsReminderScheduler } from './services/smsReminder.service.js';
@@ -23,6 +26,9 @@ initCache();
 connectDB().then(async () => {
   // Direct node/nodemon starts must have the same required client schema as npm start.
   await migrateMemberSiteSharing(pool);
+  await migrateGoogleDrive(pool);
+  await migrateGoogleDriveSiteAccess(pool);
+  await migrateGoogleDriveJobs(pool);
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
