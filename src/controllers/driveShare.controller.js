@@ -3,7 +3,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { assertCommissionSite } from './plotCommissionV2.controller.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import {
-  driveClientFor, getDriveConnection, ensureRootFolder, ensureFolderPath, upsertFile, exportPdf,
+  driveClientFor, getDriveConnection, ensureSiteFolder, ensureFolderPath, upsertFile, exportPdf,
   folderPathKey, folderUrl, sendDriveError, tryPlotShareLock, translateDriveError, MODULE_ROOT_NAME,
 } from '../services/googleDrive.service.js';
 import {
@@ -64,6 +64,13 @@ const plotShareRows = (orgId, plotId, limit) => pool.query(
   [orgId, MODULE_KEY, plotId, limit],
 );
 
+// Who can open this site's folder — shown before sharing so nobody uploads into a folder no CA reads.
+const siteRecipients = (orgId, siteId) => pool.query(
+  `SELECT email, role, site_id FROM google_drive_access_emails
+    WHERE organization_id=$1 AND (site_id=$2 OR site_id IS NULL) ORDER BY email`,
+  [orgId, siteId],
+);
+
 const previewHtml = (bundle, plan) => {
   if (bundle.scope === 'documents') return renderDocumentsHtml(bundle, plan);
   return renderStatementHtml(bundle);
@@ -87,8 +94,11 @@ export const previewPlotCommissionShare = asyncHandler(async (req, res) => {
 
   let connection;
   let lastShare;
+  let recipients;
   try {
-    [connection, { rows: [lastShare] }] = await Promise.all([getDriveConnection(orgId), plotShareRows(orgId, plotId, 1)]);
+    [connection, { rows: [lastShare] }, { rows: recipients }] = await Promise.all([
+      getDriveConnection(orgId), plotShareRows(orgId, plotId, 1), siteRecipients(orgId, siteId),
+    ]);
   } catch (err) {
     return sendDriveError(res, err);
   }
@@ -96,8 +106,9 @@ export const previewPlotCommissionShare = asyncHandler(async (req, res) => {
     connected: connection?.status === 'active',
     connection_status: connection?.status || 'disconnected',
     can_share_full: entryVisibility.canViewAll,
-    // Full location as the CA sees it in Drive, root folder included.
-    folder_path: [connection?.root_folder_name || MODULE_ROOT_NAME, ...bundle.folderSegments],
+    // Full location as the CA sees it in Drive: root / site / date / module / record.
+    folder_path: [connection?.root_folder_name || MODULE_ROOT_NAME, bundle.siteFolderName, ...bundle.folderSegments],
+    recipients: recipients.map((r) => ({ email: r.email, role: r.role, all_sites: r.site_id == null })),
     label: bundle.label,
     groups: groupPlan(plan),
     preview_html: previewHtml(bundle, plan),
@@ -210,7 +221,7 @@ export const createPlotCommissionShare = asyncHandler(async (req, res) => {
     const bundle = await buildPlotCommissionShareBundle({ plotId, siteId, user: req.user, entryVisibility, scope, paymentId });
     const plan = planShareFiles(bundle, { scope, formats, includeDocuments });
     if (!plan.some((f) => !f.skipped_reason)) throw bad('Nothing to share: no files match the selected scope and options');
-    const folderPath = folderPathKey([ctx.connection.root_folder_name || MODULE_ROOT_NAME, ...bundle.folderSegments]);
+    const folderPath = folderPathKey([ctx.connection.root_folder_name || MODULE_ROOT_NAME, bundle.siteFolderName, ...bundle.folderSegments]);
     const files = [];
     const insertShare = async (folderId, status, error) => {
       const { rows } = await pool.query(
@@ -225,9 +236,11 @@ export const createPlotCommissionShare = asyncHandler(async (req, res) => {
     };
 
     let baseId;
+    let siteFolder;
     try {
-      await ensureRootFolder(ctx);
-      baseId = await ensureFolderPath(ctx, bundle.folderSegments);
+      // The site folder carries the CA's grant; everything below inherits it.
+      siteFolder = await ensureSiteFolder(ctx, { id: siteId, name: bundle.site.name });
+      baseId = await ensureFolderPath(ctx, bundle.folderSegments, { base: siteFolder });
     } catch (err) {
       await insertShare(null, 'failed', translateDriveError(err).message).catch((dbErr) => console.error('[gdrive] share row insert failed', dbErr));
       return sendDriveError(res, err);
@@ -242,7 +255,7 @@ export const createPlotCommissionShare = asyncHandler(async (req, res) => {
       }
       let parentId;
       try {
-        if (!subfolders.has(item.folder)) subfolders.set(item.folder, await ensureFolderPath(ctx, [...bundle.folderSegments, item.folder]));
+        if (!subfolders.has(item.folder)) subfolders.set(item.folder, await ensureFolderPath(ctx, [...bundle.folderSegments, item.folder], { base: siteFolder }));
         parentId = subfolders.get(item.folder);
       } catch (err) {
         files.push({ folder: item.folder, name: item.name, kind: item.kind, mime_type: null, drive_file_id: null, url: null, error: shortReason(err) });

@@ -6,7 +6,7 @@ import { getPlotDocBytes } from '../utils/plotDocStorage.js';
 import { memberDocumentStorage } from '../utils/memberDocumentUrls.js';
 import { transactionMovesMoney } from '../utils/transactionPosting.js';
 import { safeFilePart } from './yearEndDocuments.service.js';
-import { istDateFolder } from './googleDrive.service.js';
+import { istDateFolder, siteFolderName } from './googleDrive.service.js';
 
 /**
  * Share domain for Project Commission → Google Drive: builds the data bundle for one
@@ -65,14 +65,11 @@ const receiptNo = (id) => `CMN-${id}`;
 const titleCase = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
 /**
- * Drive folders below the root, site first so every project's records stay
- * apart: <Site> / <DD-MM-YYYY> / Project Commission / Agent X - Plot A1.
- * Plot numbers repeat across sites, so without the site level two projects'
- * same-day shares would land in one folder and overwrite each other.
+ * Folders below the site's own Drive folder: <DD-MM-YYYY> / Project Commission /
+ * Agent X - Plot A1. The site folder itself is resolved by id (googleDrive
+ * ensureSiteFolder) because the site's CA is granted on exactly that folder.
  */
-export const shareFolderSegments = ({ siteName, siteId, label, date = new Date() }) => [
-  safeFilePart(siteName || `Site ${siteId}`), istDateFolder(date), MODULE_FOLDER, label,
-];
+export const shareFolderSegments = ({ label, date = new Date() }) => [istDateFolder(date), MODULE_FOLDER, label];
 
 /** Every payment of every booking of this plot, once each, oldest first, with its agent. */
 const collectPayments = (detail) => {
@@ -208,7 +205,8 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
     vouchers,
     signatures,
     label,
-    folderSegments: shareFolderSegments({ siteName: site.name, siteId, label }),
+    siteFolderName: siteFolderName({ id: siteId, name: site.name }),
+    folderSegments: shareFolderSegments({ label }),
     // The decided commission is plot-wide (never summed across agents/bookings), matching the app header.
     totals: computeTotals(allPayments, toNum(detail.grand?.total_commission)),
     generatedAt: new Date(),

@@ -74,7 +74,7 @@ class PlotCommissionV2Model extends MasterModel {
    * A plot's decided amount survives removal of its unpaid agent record.
    * Used for the list page (no OLD/NEW logic — one entry per plot).
    */
-  async findBySiteIdGroupedByPlot(siteId, pool, dateFrom = null, dateTo = null) {
+  async findBySiteIdGroupedByPlot(siteId, pool, dateFrom = null, dateTo = null, creatorId = null) {
     const query = `
       WITH commission_agg AS (
         SELECT
@@ -87,6 +87,8 @@ class PlotCommissionV2Model extends MasterModel {
           pc.status,
           pc.created_at,
           p.plot_no,
+          p.booking_date,
+          p.created_at AS plot_created_at,
           p.plot_size,
           p.plot_rate,
           p.buyer_name,
@@ -116,6 +118,7 @@ class PlotCommissionV2Model extends MasterModel {
           -- used to be counted here but nowhere else, which is what made this
           -- page read ₹89,05,458 while the Day Book read ₹88,49,858.
           AND pcp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
+          AND ($4::text IS NULL OR pcp.created_by = ANY(string_to_array($4::text, ',')::int[]))
         WHERE p.site_id = $1
           AND (COALESCE(p.plot_commission, 0) > 0 OR pc.id IS NOT NULL)
         GROUP BY pc.id, p.id, m.id
@@ -131,6 +134,8 @@ class PlotCommissionV2Model extends MasterModel {
           ca.plot_tag,
           ca.plot_status,
           ca.site_id,
+          MAX(ca.booking_date) AS booking_date,
+          MAX(ca.plot_created_at) AS plot_created_at,
           -- latest agent info (rn=1)
           MAX(CASE WHEN ca.rn = 1 THEN ca.id END) AS latest_commission_id,
           MAX(CASE WHEN ca.rn = 1 THEN ca.agent_name END) AS latest_agent_name,
@@ -154,7 +159,7 @@ class PlotCommissionV2Model extends MasterModel {
       SELECT * FROM plot_summary
       ORDER BY plot_no ASC
     `;
-    const result = await pool.query(query, [siteId, dateFrom, dateTo]);
+    const result = await pool.query(query, [siteId, dateFrom, dateTo, creatorId]);
     return result.rows;
   }
 

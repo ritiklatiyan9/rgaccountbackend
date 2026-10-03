@@ -13,7 +13,7 @@ class FarmerModel extends MasterModel {
    *  SPLIT rows are broken into their cash_amount / bank_amount legs, exactly
    *  as `ledger_entries` does, so Cash + Bank always equals Total Paid.
    */
-  async findBySiteId(siteId, pool) {
+  async findBySiteId(siteId, pool, creatorId = null) {
     const query = `
       SELECT f.*,
         COALESCE(SUM(fp.amount + fp.tds_amount), 0) AS total_paid,
@@ -40,11 +40,12 @@ class FarmerModel extends MasterModel {
         -- Same sanity window the ledger applies, so a typo'd year cannot make
         -- this page disagree with the Day Book.
         AND fp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
+        AND ($2::text IS NULL OR fp.created_by = ANY(string_to_array($2::text, ',')::int[]))
       WHERE f.site_id = $1
       GROUP BY f.id
       ORDER BY f.created_at DESC
     `;
-    const result = await pool.query(query, [siteId]);
+    const result = await pool.query(query, [siteId, creatorId]);
     return result.rows;
   }
 

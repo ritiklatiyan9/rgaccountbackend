@@ -3,6 +3,7 @@ import { google } from 'googleapis';
 import pool from '../config/db.js';
 import { encrypt, decrypt } from '../utils/tokenCrypto.js';
 import { buildOAuthClient } from './googleCalendarSync.service.js';
+import { safeFilePart } from './yearEndDocuments.service.js';
 
 /**
  * Google Drive plumbing shared by the settings page and every module that
@@ -34,7 +35,11 @@ export const istDateFolder = (date = new Date()) => IST_DATE.format(date).replac
 // Drive query strings are single-quoted; backslash first so the quote escape
 // is not itself re-escaped.
 export const escapeDriveQuery = (s) => String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-export const folderPathKey = (segments) => segments.join('/');
+export const folderPathKey = (segments) => segments.filter(Boolean).join('/');
+/** Drive name of a site's folder; a slash in the site name must not become a
+ * level, and a nameless site gets its own folder rather than safeFilePart's
+ * shared 'Unassigned'. */
+export const siteFolderName = (site) => (String(site?.name || '').trim() ? safeFilePart(site.name) : `Site ${site?.id}`);
 export const folderUrl = (id) => `https://drive.google.com/drive/folders/${id}`;
 export const fileUrl = (file) => file?.webViewLink || `https://drive.google.com/file/d/${file?.id}/view`;
 
@@ -186,10 +191,13 @@ const ensureRootFolderUnlocked = async (ctx, db) => {
 /** Root folder id, creating it in My Drive when missing or trashed. */
 export const ensureRootFolder = (ctx) => withOrgFolderLock(ctx.orgId, (db) => ensureRootFolderUnlocked(ctx, db));
 
-/** Folder id of the deepest segment under the root, creating levels as needed. */
-export const ensureFolderPath = (ctx, segments) => withOrgFolderLock(ctx.orgId, async (db) => {
+/** Folder id of the deepest segment, creating levels as needed. `base` is the
+ * folder to start from (default: the root) with the cache-key prefix its
+ * children are filed under, e.g. a site folder `{ id, key: 'site:10' }`. */
+export const ensureFolderPath = (ctx, segments, { base } = {}) => withOrgFolderLock(ctx.orgId, async (db) => {
   const rootId = await ensureRootFolderUnlocked(ctx, db);
-  const prefixes = segments.map((_, i) => folderPathKey(segments.slice(0, i + 1)));
+  const start = base || { id: rootId, key: '' };
+  const prefixes = segments.map((_, i) => folderPathKey([start.key, ...segments.slice(0, i + 1)]));
   const { rows } = await db.query(
     `SELECT path, folder_id FROM google_drive_folders
       WHERE organization_id=$1 AND root_folder_id=$2 AND path = ANY($3::text[])`,
@@ -210,7 +218,7 @@ export const ensureFolderPath = (ctx, segments) => withOrgFolderLock(ctx.orgId, 
     depth = 0;
   }
 
-  let parentId = depth > 0 ? cached.get(prefixes[depth - 1]) : rootId;
+  let parentId = depth > 0 ? cached.get(prefixes[depth - 1]) : start.id;
   for (let i = depth; i < segments.length; i += 1) {
     parentId = await findOrCreateFolder(ctx, parentId, segments[i]);
     await db.query(
@@ -222,6 +230,78 @@ export const ensureFolderPath = (ctx, segments) => withOrgFolderLock(ctx.orgId, 
   }
   return parentId;
 });
+
+// ---------------------------------------------------------------------------
+// Site folders — one per site under the root; the site's CA is granted here.
+
+const siteKey = (siteId) => `site:${siteId}`;
+
+/** Grants on a recreated site folder: the old folder's permissions died with it. */
+const regrantSiteAccess = async (ctx, db, siteId, folderId) => {
+  const { rows } = await db.query(
+    'SELECT id, email, role FROM google_drive_access_emails WHERE organization_id=$1 AND site_id=$2',
+    [ctx.orgId, siteId],
+  );
+  for (const row of rows) {
+    try {
+      const permissionId = await grantAccess(ctx, { fileId: folderId, email: row.email, role: row.role });
+      await db.query('UPDATE google_drive_access_emails SET drive_permission_id=$1 WHERE id=$2', [permissionId, row.id]);
+    } catch (err) {
+      console.error(`[gdrive] could not re-grant ${row.email} on site ${siteId}:`, err.message);
+    }
+  }
+};
+
+/**
+ * The site's folder `{ id, name, key }`, created under the root when missing or
+ * trashed. A site renamed in the app is renamed in Drive too, so the CA's grant
+ * (which is attached to this folder id) keeps covering every later share.
+ */
+export const ensureSiteFolder = (ctx, site) => withOrgFolderLock(ctx.orgId, async (db) => {
+  const rootId = await ensureRootFolderUnlocked(ctx, db);
+  const name = siteFolderName(site);
+  const key = siteKey(site.id);
+  const { rows } = await db.query(
+    `SELECT id, folder_id, folder_name FROM google_drive_site_folders
+      WHERE organization_id=$1 AND root_folder_id=$2 AND site_id=$3`,
+    [ctx.orgId, rootId, site.id],
+  );
+  const row = rows[0];
+  if (row && await folderAlive(ctx, row.folder_id)) {
+    if (row.folder_name !== name) {
+      await ctx.drive.files.update({ fileId: row.folder_id, requestBody: { name }, fields: 'id' });
+      await db.query('UPDATE google_drive_site_folders SET folder_name=$1, updated_at=NOW() WHERE id=$2', [name, row.id]);
+    }
+    return { id: row.folder_id, name, key };
+  }
+  const folderId = await findOrCreateFolder(ctx, rootId, name);
+  await db.query(
+    `INSERT INTO google_drive_site_folders (organization_id, site_id, root_folder_id, folder_id, folder_name)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (organization_id, root_folder_id, site_id)
+     DO UPDATE SET folder_id=EXCLUDED.folder_id, folder_name=EXCLUDED.folder_name, updated_at=NOW()`,
+    [ctx.orgId, site.id, rootId, folderId, name],
+  );
+  // Children cached under the old folder went to the trash with it.
+  await db.query(
+    `DELETE FROM google_drive_folders
+      WHERE organization_id=$1 AND root_folder_id=$2 AND (path = $3 OR starts_with(path, $3 || '/'))`,
+    [ctx.orgId, rootId, key],
+  );
+  if (row) await regrantSiteAccess(ctx, db, site.id, folderId);
+  return { id: folderId, name, key };
+});
+
+/** Site folder id/name from the registry only (no Drive calls); null when never created. */
+export const getSiteFolder = async (ctx, siteId) => {
+  if (!ctx.connection.root_folder_id) return null;
+  const { rows } = await pool.query(
+    `SELECT folder_id AS id, folder_name AS name FROM google_drive_site_folders
+      WHERE organization_id=$1 AND root_folder_id=$2 AND site_id=$3`,
+    [ctx.orgId, ctx.connection.root_folder_id, siteId],
+  );
+  return rows[0] ? { ...rows[0], key: siteKey(siteId) } : null;
+};
 
 // ---------------------------------------------------------------------------
 // Files
@@ -297,11 +377,12 @@ export const exportPdf = async (ctx, fileId) => {
 };
 
 // ---------------------------------------------------------------------------
-// Root folder permissions (children inherit them)
+// Folder permissions (children inherit them) — granted per site folder, or on
+// the root for org-wide access.
 
-export const grantAccess = async (ctx, { email, role }) => {
+export const grantAccess = async (ctx, { fileId, email, role }) => {
   const { data } = await ctx.drive.permissions.create({
-    fileId: ctx.connection.root_folder_id,
+    fileId,
     requestBody: { type: 'user', role, emailAddress: email },
     sendNotificationEmail: true,
     emailMessage: 'Defence Garden Accounts shares accounting records with you in this folder.',
@@ -310,15 +391,15 @@ export const grantAccess = async (ctx, { email, role }) => {
   return data.id;
 };
 
-export const updateAccess = (ctx, { permissionId, role }) => ctx.drive.permissions.update({
-  fileId: ctx.connection.root_folder_id,
+export const updateAccess = (ctx, { fileId, permissionId, role }) => ctx.drive.permissions.update({
+  fileId,
   permissionId,
   requestBody: { role },
 });
 
-export const revokeAccess = async (ctx, { permissionId }) => {
+export const revokeAccess = async (ctx, { fileId, permissionId }) => {
   try {
-    await ctx.drive.permissions.delete({ fileId: ctx.connection.root_folder_id, permissionId });
+    await ctx.drive.permissions.delete({ fileId, permissionId });
   } catch (err) {
     if (!isNotFound(err)) throw err;
   }

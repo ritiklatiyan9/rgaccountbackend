@@ -10,6 +10,8 @@ import {
   getDriveConnection,
   driveClientFor,
   ensureRootFolder,
+  ensureSiteFolder,
+  getSiteFolder,
   folderUrl,
   grantAccess,
   updateAccess,
@@ -55,16 +57,23 @@ const publicConnection = (c) => ({
   updated_at: c.updated_at,
 });
 
-const EMAIL_LIST_SQL = `SELECT e.id, e.email, e.role, e.created_at, u.name AS added_by_name
+// Access is per site; a NULL site means "granted on the root, every site".
+const EMAIL_LIST_SQL = `SELECT e.id, e.email, e.role, e.site_id, s.name AS site_name, e.created_at, u.name AS added_by_name
     FROM google_drive_access_emails e
     LEFT JOIN users u ON u.id = e.added_by
-   WHERE e.organization_id=$1 ORDER BY e.email`;
+    LEFT JOIN sites s ON s.id = e.site_id
+   WHERE e.organization_id=$1 AND ($2::int IS NULL OR e.site_id=$2 OR e.site_id IS NULL)
+   ORDER BY e.site_id NULLS FIRST, e.email`;
+const siteIdOf = (value) => Number.parseInt(value, 10) > 0 ? Number.parseInt(value, 10) : null;
+const listEmails = (orgId, siteId) => pool.query(EMAIL_LIST_SQL, [orgId, siteId]);
+const findSite = async (siteId) => (await pool.query('SELECT id, name FROM sites WHERE id=$1', [siteId])).rows[0] || null;
 
 export const getStatus = driveHandler(async (req, res) => {
   const orgId = req.user.organization_id;
+  const siteId = siteIdOf(req.query.site_id);
   const [connection, emails] = await Promise.all([
     getDriveConnection(orgId),
-    pool.query(EMAIL_LIST_SQL, [orgId]),
+    listEmails(orgId, siteId),
   ]);
   const active = connection?.status === 'active' ? connection : null;
   let rootFolderError = null;
@@ -79,11 +88,18 @@ export const getStatus = driveHandler(async (req, res) => {
       rootFolderError = translateDriveError(err).message;
     }
   }
+  let siteFolder = null;
+  if (active && siteId) {
+    const folder = await getSiteFolder({ orgId, connection: active }, siteId);
+    if (folder) siteFolder = { id: folder.id, name: folder.name, url: folderUrl(folder.id) };
+  }
   res.json({
     configured: isDriveConfigured(),
     connection: active ? publicConnection(active) : null,
     connection_status: connection?.status || 'disconnected',
     root_folder_error: rootFolderError,
+    site_id: siteId,
+    site_folder: siteFolder,
     emails: emails.rows,
   });
 });
@@ -192,11 +208,12 @@ export const disconnect = driveHandler(async (req, res) => {
   // Access grants and cached folder ids belong to the old account's Drive.
   await pool.query('DELETE FROM google_drive_access_emails WHERE organization_id=$1', [orgId]);
   await pool.query('DELETE FROM google_drive_folders WHERE organization_id=$1', [orgId]);
+  await pool.query('DELETE FROM google_drive_site_folders WHERE organization_id=$1', [orgId]);
   res.json({ success: true });
 });
 
 export const listAccessEmails = driveHandler(async (req, res) => {
-  const { rows } = await pool.query(EMAIL_LIST_SQL, [req.user.organization_id]);
+  const { rows } = await listEmails(req.user.organization_id, siteIdOf(req.query.site_id));
   res.json({ emails: rows });
 });
 
@@ -204,38 +221,49 @@ export const addAccessEmail = driveHandler(async (req, res) => {
   const orgId = req.user.organization_id;
   const email = String(req.body.email || '').trim().toLowerCase();
   const role = req.body.role || 'writer';
+  const siteId = siteIdOf(req.body.site_id);
   if (!/^\S+@\S+\.\S+$/.test(email) || email.length > 255) {
     return res.status(400).json({ message: 'A valid email address is required' });
   }
   if (!ROLES.includes(role)) return res.status(400).json({ message: 'Role must be writer or reader' });
+  if (!siteId) return res.status(400).json({ message: 'Pick the site this person may access' });
+  const site = await findSite(siteId);
+  if (!site) return res.status(404).json({ message: 'Site not found' });
 
   const ctx = await driveClientFor(orgId);
   if (!ctx) return notConnected(res);
   const dup = await pool.query(
-    'SELECT 1 FROM google_drive_access_emails WHERE organization_id=$1 AND email=$2',
-    [orgId, email],
+    'SELECT 1 FROM google_drive_access_emails WHERE organization_id=$1 AND site_id=$2 AND email=$3',
+    [orgId, siteId, email],
   );
-  if (dup.rowCount) return res.status(409).json({ message: 'This email already has access' });
+  if (dup.rowCount) return res.status(409).json({ message: `This email already has access to ${site.name}` });
 
   // Drive first: a row without a permission would claim access that was
-  // never granted.
-  await ensureRootFolder(ctx);
-  const permissionId = await grantAccess(ctx, { email, role });
+  // never granted. The grant sits on the site folder, so only this site's
+  // records are visible to the person.
+  const siteFolder = await ensureSiteFolder(ctx, site);
+  const permissionId = await grantAccess(ctx, { fileId: siteFolder.id, email, role });
   const { rows } = await pool.query(
-    `INSERT INTO google_drive_access_emails (organization_id, email, role, drive_permission_id, added_by)
-     VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization_id, email) DO NOTHING RETURNING id, email, role`,
-    [orgId, email, role, permissionId, req.user.id],
+    `INSERT INTO google_drive_access_emails (organization_id, site_id, email, role, drive_permission_id, added_by)
+     VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING id, email, role, site_id`,
+    [orgId, siteId, email, role, permissionId, req.user.id],
   );
-  if (!rows[0]) return res.status(409).json({ message: 'This email already has access' });
-  res.status(201).json({ email: rows[0] });
+  if (!rows[0]) return res.status(409).json({ message: `This email already has access to ${site.name}` });
+  res.status(201).json({ email: { ...rows[0], site_name: site.name } });
 });
 
 const findAccessEmail = async (req) => {
   const { rows } = await pool.query(
-    'SELECT id, email, role, drive_permission_id FROM google_drive_access_emails WHERE id=$1 AND organization_id=$2',
+    'SELECT id, email, role, site_id, drive_permission_id FROM google_drive_access_emails WHERE id=$1 AND organization_id=$2',
     [Number(req.params.id) || 0, req.user.organization_id],
   );
   return rows[0] || null;
+};
+
+/** The Drive folder a row's permission lives on: its site folder, or the root for org-wide rows. */
+const grantedFolderId = async (ctx, row) => {
+  if (row.site_id == null) return ctx.connection.root_folder_id;
+  return (await getSiteFolder(ctx, row.site_id))?.id || null;
 };
 
 export const updateAccessEmail = driveHandler(async (req, res) => {
@@ -245,12 +273,10 @@ export const updateAccessEmail = driveHandler(async (req, res) => {
   if (!row) return res.status(404).json({ message: 'Email not found' });
   const ctx = await driveClientFor(req.user.organization_id);
   if (!ctx) return notConnected(res);
-  if (row.drive_permission_id) {
-    await ensureRootFolder(ctx);
-    await updateAccess(ctx, { permissionId: row.drive_permission_id, role });
-  }
+  const fileId = row.drive_permission_id ? await grantedFolderId(ctx, row) : null;
+  if (fileId) await updateAccess(ctx, { fileId, permissionId: row.drive_permission_id, role });
   await pool.query('UPDATE google_drive_access_emails SET role=$1 WHERE id=$2', [role, row.id]);
-  res.json({ email: { id: row.id, email: row.email, role } });
+  res.json({ email: { id: row.id, email: row.email, role, site_id: row.site_id } });
 });
 
 export const removeAccessEmail = driveHandler(async (req, res) => {
@@ -260,8 +286,8 @@ export const removeAccessEmail = driveHandler(async (req, res) => {
   // Drive first; a non-404 failure answers via sendDriveError and keeps the
   // row so the grant is never silently left behind in Drive.
   if (ctx && row.drive_permission_id) {
-    await ensureRootFolder(ctx);
-    await revokeAccess(ctx, { permissionId: row.drive_permission_id });
+    const fileId = await grantedFolderId(ctx, row);
+    if (fileId) await revokeAccess(ctx, { fileId, permissionId: row.drive_permission_id });
   }
   await pool.query('DELETE FROM google_drive_access_emails WHERE id=$1', [row.id]);
   res.json({ success: true });

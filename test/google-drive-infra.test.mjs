@@ -9,7 +9,7 @@ process.env.CALENDAR_TOKEN_ENC_KEY = 'a'.repeat(64);
 
 const { signOAuthState, verifyOAuthState } = await import('../src/utils/googleOAuthState.js');
 const {
-  istDateFolder, escapeDriveQuery, translateDriveError, upsertFile, folderPathKey,
+  istDateFolder, escapeDriveQuery, translateDriveError, upsertFile, folderPathKey, siteFolderName,
 } = await import('../src/services/googleDrive.service.js');
 
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
@@ -130,4 +130,12 @@ test('calendar callback dispatches drive states and guards token revocation', as
   const drive = await read('../src/controllers/googleDrive.controller.js');
   assert.match(drive, /FROM google_calendar_connections[\s\S]*status='active' AND google_account_email=\$2/);
   assert.doesNotMatch(drive, /googleCalendar\.controller/);
+});
+
+test('site folder names come from the site, never create extra levels, and cache keys nest under the site', () => {
+  assert.equal(siteFolderName({ id: 10, name: 'SHRI GANESH ASSOCIATES' }), 'SHRI GANESH ASSOCIATES');
+  assert.equal(siteFolderName({ id: 1, name: 'Phase 1/2' }), 'Phase 1_2');
+  assert.equal(siteFolderName({ id: 7, name: '' }), 'Site 7');
+  assert.equal(folderPathKey(['site:10', '03-10-2026', 'Project Commission']), 'site:10/03-10-2026/Project Commission');
+  assert.equal(folderPathKey(['', '03-10-2026']), '03-10-2026');
 });

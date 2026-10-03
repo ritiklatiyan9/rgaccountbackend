@@ -441,3 +441,15 @@ export const deletePayment = asyncHandler(async (req, res) => {
   await pool.query('DELETE FROM land_deal_payments WHERE id = $1', [paymentId]);
   res.json({ message: 'Receipt deleted' });
 });
+
+// Report readers reuse the sale and profit projections used by the land workspace.
+export async function readLandSalesReport(siteId, creatorId, db = pool) {
+  const { rows } = await db.query(saleSql('d.site_id = $1', '$2'), [siteId, creatorId]);
+  return rows.map(withProfit);
+}
+export async function readLandProfitReport(siteId, creatorId, db = pool) {
+  const [farmers, sales] = await Promise.all([
+    farmerModel.findBySiteId(siteId, db, creatorId), readLandSalesReport(siteId, creatorId, db),
+  ]);
+  return farmers.map(f => ({ ...landOf(f, sales.filter(s => s.farmer_id === f.id)), created_at: f.created_at }));
+}
