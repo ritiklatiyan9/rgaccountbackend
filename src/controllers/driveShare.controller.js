@@ -4,7 +4,7 @@ import { assertCommissionSite } from './plotCommissionV2.controller.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import {
   driveClientFor, getDriveConnection, ensureRootFolder, ensureFolderPath, upsertFile, exportPdf,
-  folderPathKey, folderUrl, sendDriveError, tryPlotShareLock, translateDriveError,
+  folderPathKey, folderUrl, sendDriveError, tryPlotShareLock, translateDriveError, MODULE_ROOT_NAME,
 } from '../services/googleDrive.service.js';
 import {
   MODULE_KEY, buildPlotCommissionShareBundle, renderStatementHtml, renderProfileHtml, renderDocumentsHtml,
@@ -96,7 +96,8 @@ export const previewPlotCommissionShare = asyncHandler(async (req, res) => {
     connected: connection?.status === 'active',
     connection_status: connection?.status || 'disconnected',
     can_share_full: entryVisibility.canViewAll,
-    folder_path: bundle.folderSegments,
+    // Full location as the CA sees it in Drive, root folder included.
+    folder_path: [connection?.root_folder_name || MODULE_ROOT_NAME, ...bundle.folderSegments],
     label: bundle.label,
     groups: groupPlan(plan),
     preview_html: previewHtml(bundle, plan),
@@ -209,7 +210,7 @@ export const createPlotCommissionShare = asyncHandler(async (req, res) => {
     const bundle = await buildPlotCommissionShareBundle({ plotId, siteId, user: req.user, entryVisibility, scope, paymentId });
     const plan = planShareFiles(bundle, { scope, formats, includeDocuments });
     if (!plan.some((f) => !f.skipped_reason)) throw bad('Nothing to share: no files match the selected scope and options');
-    const folderPath = folderPathKey(bundle.folderSegments);
+    const folderPath = folderPathKey([ctx.connection.root_folder_name || MODULE_ROOT_NAME, ...bundle.folderSegments]);
     const files = [];
     const insertShare = async (folderId, status, error) => {
       const { rows } = await pool.query(

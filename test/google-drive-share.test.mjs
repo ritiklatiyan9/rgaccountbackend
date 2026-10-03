@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import * as XLSX from '@e965/xlsx';
 import {
-  MODULE_FOLDER, MODULE_KEY, esc, moneyINR, fmtDate, maskAadhaar,
+  MODULE_FOLDER, MODULE_KEY, esc, moneyINR, fmtDate, maskAadhaar, shareFolderSegments,
   renderStatementHtml, renderProfileHtml, renderDocumentsHtml, buildStatementXlsx, planShareFiles, readStoredFileBytes,
 } from '../src/services/plotCommissionShare.service.js';
 
@@ -41,7 +41,7 @@ const bundle = (overrides = {}) => ({
   ],
   signatures: [{ payment_id: 3, url: 'https://aierpbytematrix.s3.ap-south-1.amazonaws.com/signatures/s3.png', name: 'Signature - CMN-3 - Customer.png' }],
   label: 'Agent Sandeep Malik - Plot A1',
-  folderSegments: ['03-10-2026', MODULE_FOLDER, 'Agent Sandeep Malik - Plot A1'],
+  folderSegments: ['SHRI GANESH ASSOCIATES', '03-10-2026', MODULE_FOLDER, 'Agent Sandeep Malik - Plot A1'],
   totals: { total_commission: 60000, total_paid: 47500, tds_total: 2500, balance: 12500, payment_count: 3 },
   generatedAt: new Date('2026-10-03T08:35:00Z'),
   generatedBy: 'Ritik',
@@ -170,4 +170,17 @@ test('security contract: routes and controller', async () => {
   assert.match(controller, /assertCommissionSite\(req\.user,\s*siteId\)/);
   assert.match(controller, /tryPlotShareLock\(orgId,\s*plotId\)/);
   assert.match(controller, /lock\.release\(\)/);
+});
+
+test('Drive folders are site first, then IST date, module and record', () => {
+  const label = 'Agent Sandeep Malik - Plot A1';
+  assert.deepEqual(
+    shareFolderSegments({ siteName: 'SHRI GANESH ASSOCIATES', siteId: 10, label, date: new Date('2026-10-03T06:00:00Z') }),
+    ['SHRI GANESH ASSOCIATES', '03-10-2026', 'Project Commission', label],
+  );
+  // 20:30 UTC is already the next day in India.
+  assert.equal(shareFolderSegments({ siteName: 'X', siteId: 1, label, date: new Date('2026-10-03T20:30:00Z') })[1], '04-10-2026');
+  // A slash in a site name must not create an extra folder level.
+  assert.equal(shareFolderSegments({ siteName: 'Phase 1/2', siteId: 1, label })[0], 'Phase 1_2');
+  assert.equal(shareFolderSegments({ siteName: '', siteId: 7, label })[0], 'Site 7');
 });

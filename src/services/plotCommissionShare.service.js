@@ -64,6 +64,16 @@ const EXT_BY_MIME = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png'
 const receiptNo = (id) => `CMN-${id}`;
 const titleCase = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
+/**
+ * Drive folders below the root, site first so every project's records stay
+ * apart: <Site> / <DD-MM-YYYY> / Project Commission / Agent X - Plot A1.
+ * Plot numbers repeat across sites, so without the site level two projects'
+ * same-day shares would land in one folder and overwrite each other.
+ */
+export const shareFolderSegments = ({ siteName, siteId, label, date = new Date() }) => [
+  safeFilePart(siteName || `Site ${siteId}`), istDateFolder(date), MODULE_FOLDER, label,
+];
+
 /** Every payment of every booking of this plot, once each, oldest first, with its agent. */
 const collectPayments = (detail) => {
   const byId = new Map();
@@ -198,7 +208,7 @@ export const buildPlotCommissionShareBundle = async ({ plotId, siteId, user, ent
     vouchers,
     signatures,
     label,
-    folderSegments: [istDateFolder(), MODULE_FOLDER, label],
+    folderSegments: shareFolderSegments({ siteName: site.name, siteId, label }),
     // The decided commission is plot-wide (never summed across agents/bookings), matching the app header.
     totals: computeTotals(allPayments, toNum(detail.grand?.total_commission)),
     generatedAt: new Date(),
