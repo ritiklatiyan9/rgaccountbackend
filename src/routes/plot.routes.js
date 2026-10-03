@@ -16,6 +16,7 @@ import {
 } from '../controllers/installment.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import { pendingPlotPayments, createPercentagePaymentPlan } from '../controllers/pendingPlotPayments.controller.js';
+import { projectPaymentReport } from '../controllers/projectPaymentReport.controller.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import requirePlotSiteAccess from '../middlewares/plotSiteAccess.middleware.js';
@@ -30,7 +31,7 @@ const plotReadCache = cacheResponse({ ttlSeconds: 45, namespace: 'plots' });
 // rarely changes; long-TTL meta cache that survives plot/payment writes.
 const plotMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'plots-meta' });
 // Anchored prefix so 'plots-meta|...' isn't busted by writes.
-const bustPlotCache = invalidateCacheOnSuccess(['approvals|', '/approvals', 'plots|', 'plots:pageData:', 'members|', '/daybook', 'registries|', 'registries-meta|']);
+const bustPlotCache = invalidateCacheOnSuccess(['approvals|', '/approvals', 'plots|', 'plots:pageData:', 'plot-commissions|', 'plot-commissions-plots|', 'members|', '/daybook', 'registries|', 'registries-meta|']);
 
 const accessByQuerySite = requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' });
 const accessByBodySite = requirePlotSiteAccess({ entity: 'site', source: 'body', key: 'site_id' });
@@ -51,6 +52,7 @@ router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('plot
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotMetaCache, getAutocomplete);                      // ?site_id=X
 router.get('/payment-management', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentManagementList);           // ?site_id=X
 router.get('/pending-payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, pendingPlotPayments);
+router.get('/reports', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, projectPaymentReport);
 router.get('/payment-reminders', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentReminders);                  // ?site_id=X&page=1&limit=10
 router.get('/payment-analytics', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentAnalytics);                   // ?site_id=X&mode=...
 // SMS reminders — must stay above '/:id' so they aren't swallowed by the param route.

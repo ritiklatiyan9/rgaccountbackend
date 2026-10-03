@@ -1,8 +1,9 @@
-import crypto from 'crypto';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { encrypt, decrypt } from '../utils/tokenCrypto.js';
+import { signOAuthState, verifyOAuthState } from '../utils/googleOAuthState.js';
 import { buildOAuthClient, backfillOrgEvents } from '../services/googleCalendarSync.service.js';
+import { handleDriveOAuthCallback } from './googleDrive.controller.js';
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
 const settingsPage = (origin) => `${origin}/settings?tab=google-calendar`;
@@ -13,35 +14,10 @@ const originFor = () => FRONTEND_URL;
 // openid+email are only used to learn which Google account was connected;
 // calendar.events is the least-privilege calendar scope (no calendar list/settings access).
 const SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/calendar.events'];
-const STATE_TTL_MS = 10 * 60 * 1000;
 
 const isConfigured = () =>
   Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
     && process.env.GOOGLE_REDIRECT_URI && process.env.CALENDAR_TOKEN_ENC_KEY);
-
-// The OAuth callback arrives as a bare browser redirect from Google (no auth
-// header), so the state param is the whole proof of who initiated the flow:
-// an HMAC-signed orgId+userId+expiry minted by the authenticated /connect call.
-const stateSecret = () => String(process.env.CALENDAR_TOKEN_ENC_KEY || '');
-const signState = (orgId, userId, origin) => {
-  const payload = Buffer.from(JSON.stringify({ o: orgId, u: userId, r: origin, e: Date.now() + STATE_TTL_MS })).toString('base64url');
-  const sig = crypto.createHmac('sha256', stateSecret()).update(payload).digest('base64url');
-  return `${payload}.${sig}`;
-};
-const verifyState = (state) => {
-  const [payload, sig] = String(state || '').split('.');
-  if (!payload || !sig) return null;
-  const expected = crypto.createHmac('sha256', stateSecret()).update(payload).digest('base64url');
-  const a = Buffer.from(sig); const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-  try {
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!data.o || !data.e || Date.now() > data.e) return null;
-    return { orgId: data.o, userId: data.u, origin: data.r || FRONTEND_URL };
-  } catch {
-    return null;
-  }
-};
 
 // Google's id_token is received directly from Google over the TLS token
 // exchange, so decoding its payload without signature verification is safe here.
@@ -61,7 +37,7 @@ export const getConnectUrl = asyncHandler(async (req, res) => {
     access_type: 'offline',
     prompt: 'consent', // guarantees a refresh_token even on reconnect
     scope: SCOPES,
-    state: signState(req.user.organization_id, req.user.id, originFor(req)),
+    state: signOAuthState({ orgId: req.user.organization_id, userId: req.user.id, origin: originFor(req), kind: 'calendar' }),
   });
   res.json({ url });
 });
@@ -71,9 +47,14 @@ export const oauthCallback = asyncHandler(async (req, res) => {
   // land on the configured front end rather than a caller-supplied one.
   let origin = FRONTEND_URL;
   const fail = (reason) => res.redirect(`${settingsPage(origin)}&google=error&reason=${encodeURIComponent(reason)}`);
+  // Google Drive shares this OAuth client and redirect URI; the signed state's
+  // kind says which integration started the flow. Verify it first because
+  // Google echoes the state on error redirects too.
+  const state = verifyOAuthState(req.query.state);
+  if (state?.kind === 'drive') return handleDriveOAuthCallback(req, res, state);
+  if (state && state.kind !== 'calendar') return fail('invalid_state');
   if (!isConfigured()) return fail('not_configured');
   if (req.query.error) return fail(String(req.query.error));
-  const state = verifyState(req.query.state);
   if (!state) return fail('invalid_state');
   origin = state.origin;
   if (!req.query.code) return fail('missing_code');
@@ -123,15 +104,31 @@ export const oauthCallback = asyncHandler(async (req, res) => {
 export const disconnect = asyncHandler(async (req, res) => {
   const orgId = req.user.organization_id;
   const { rows } = await pool.query(
-    `SELECT id, refresh_token_enc FROM google_calendar_connections
+    `SELECT id, google_account_email, refresh_token_enc FROM google_calendar_connections
       WHERE organization_id=$1 AND status='active' LIMIT 1`,
     [orgId],
   );
   if (!rows[0]) return res.status(404).json({ message: 'No Google Calendar connection to disconnect' });
+  // Google revokes the whole (account × OAuth client) grant, which would also
+  // kill a Drive connection on the same account — only revoke when Drive is
+  // not using it. 42P01 = Drive migration not run yet = no sibling.
+  let driveActive = false;
   try {
-    await buildOAuthClient().revokeToken(decrypt(rows[0].refresh_token_enc));
+    const sibling = await pool.query(
+      `SELECT 1 FROM google_drive_connections
+        WHERE organization_id=$1 AND status='active' AND google_account_email=$2 LIMIT 1`,
+      [orgId, rows[0].google_account_email],
+    );
+    driveActive = sibling.rowCount > 0;
   } catch (err) {
-    console.error('[gcal] token revoke failed (continuing):', err.message);
+    if (err.code !== '42P01') throw err;
+  }
+  if (!driveActive) {
+    try {
+      await buildOAuthClient().revokeToken(decrypt(rows[0].refresh_token_enc));
+    } catch (err) {
+      console.error('[gcal] token revoke failed (continuing):', err.message);
+    }
   }
   await pool.query(
     `UPDATE google_calendar_connections SET status='revoked', updated_at=NOW() WHERE id=$1`,

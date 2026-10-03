@@ -51,7 +51,7 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
       WHERE pr.site_id = p.site_id AND (pr.plot_id = p.id
         OR (pr.plot_id IS NULL AND UPPER(pr.plot_no) = UPPER(p.plot_no)
           AND UPPER(COALESCE(p.plot_tag, '')) <> 'OLD'))
-        AND ($2::int IS NULL OR prp.created_by = $2::int)
+        AND ($2::text IS NULL OR prp.created_by = ANY(string_to_array($2::text, ',')::int[]))
         AND ((prp.source_plot_payment_id IS NULL
           AND ledger_bucket(prp.payment_mode) = 'bank'
           AND financial_transaction_posts('credit', prp.status, prp.payment_mode, prp.cheque_status))
@@ -74,7 +74,7 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
           AS payment_booked_bys
       FROM plot_payments pp
       WHERE pp.plot_id = p.id
-        AND ($2::int IS NULL OR pp.created_by = $2::int)
+        AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
     ) pp_agg ON true
     LEFT JOIN LATERAL (
       SELECT
@@ -87,7 +87,7 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
         COUNT(*) FILTER (WHERE ${PIP_POSTS})::int AS payment_count
       FROM plot_installment_payments pip
       WHERE pip.plot_id = p.id
-        AND ($2::int IS NULL OR pip.created_by = $2::int)
+        AND ($2::text IS NULL OR pip.created_by = ANY(string_to_array($2::text, ',')::int[]))
     ) ip_agg ON true
     ${PLOT_BUYER_MEMBER_JOIN}
     ${PLOT_BUYER_KYC_JOIN}

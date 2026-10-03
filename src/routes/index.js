@@ -51,6 +51,9 @@ import dashboardAssistantRoutes from './dashboardAssistant.routes.js';
 import complianceRoutes from './compliance.routes.js';
 import complianceDocumentRoutes from './complianceDocument.routes.js';
 import googleCalendarRoutes from './googleCalendar.routes.js';
+import googleDriveRoutes from './googleDrive.routes.js';
+import driveShareRoutes from './driveShare.routes.js';
+import { oauthCallback } from '../controllers/googleCalendar.controller.js';
 import auditLogRoutes from './auditLog.routes.js';
 import bankReconciliationRoutes from './bankReconciliation.routes.js';
 import managementAnalyticsRoutes from './managementAnalytics.routes.js';
@@ -106,7 +109,14 @@ router.use('/balance-sheet', balanceSheetRoutes);
 // auth middleware to the whole prefix — the OAuth callback is unauthenticated
 // (the HMAC-signed state param is the proof of who initiated the flow).
 router.use('/settings', googleCalendarRoutes);
+router.use('/settings', googleDriveRoutes);
+// The Google Cloud project's registered redirect is
+// https://<host>/google-calendar/callback (no /settings prefix — see
+// GOOGLE_REDIRECT_URI in .env), so the same unauthenticated callback also
+// answers at the root. It serves both Calendar and Drive (dispatch by state).
+router.get('/google-calendar/callback', oauthCallback);
 router.use('/settings', applicationSettingRoutes);
+router.use('/drive-shares', driveShareRoutes);
 router.use('/compliance', complianceRoutes);
 router.use('/compliance-documents', complianceDocumentRoutes);
 router.use('/construction', constructionRoutes);

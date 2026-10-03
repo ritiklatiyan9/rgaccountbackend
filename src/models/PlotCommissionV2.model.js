@@ -70,7 +70,8 @@ class PlotCommissionV2Model extends MasterModel {
   }
 
   /**
-   * Get one row per plot with latest agent info, all agent names, and aggregated financials.
+   * Get one row per plot with a decided commission or an agent commission record.
+   * A plot's decided amount survives removal of its unpaid agent record.
    * Used for the list page (no OLD/NEW logic — one entry per plot).
    */
   async findBySiteIdGroupedByPlot(siteId, pool, dateFrom = null, dateTo = null) {
@@ -78,8 +79,8 @@ class PlotCommissionV2Model extends MasterModel {
       WITH commission_agg AS (
         SELECT
           pc.id,
-          pc.site_id,
-          pc.plot_id,
+          p.site_id,
+          p.id AS plot_id,
           pc.agent_id,
           pc.total_commission,
           pc.remarks,
@@ -104,10 +105,10 @@ class PlotCommissionV2Model extends MasterModel {
           COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) = 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS cash_paid,
           COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) <> 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS bank_paid,
           (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount), 0)) AS balance,
-          ROW_NUMBER() OVER (PARTITION BY pc.plot_id ORDER BY pc.created_at DESC) AS rn
-        FROM plot_commissions_v2 pc
-        JOIN plots p ON pc.plot_id = p.id
-        JOIN members m ON pc.agent_id = m.id
+          ROW_NUMBER() OVER (PARTITION BY p.id ORDER BY pc.created_at DESC, pc.id DESC) AS rn
+        FROM plots p
+        LEFT JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = p.site_id
+        LEFT JOIN members m ON pc.agent_id = m.id
         LEFT JOIN plot_commission_payments pcp
           ON pc.id = pcp.plot_commission_id
           AND ${PCP_POSTED}
@@ -115,7 +116,8 @@ class PlotCommissionV2Model extends MasterModel {
           -- used to be counted here but nowhere else, which is what made this
           -- page read ₹89,05,458 while the Day Book read ₹88,49,858.
           AND pcp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
-        WHERE pc.site_id = $1
+        WHERE p.site_id = $1
+          AND (COALESCE(p.plot_commission, 0) > 0 OR pc.id IS NOT NULL)
         GROUP BY pc.id, p.id, m.id
       ),
       plot_summary AS (
@@ -139,13 +141,13 @@ class PlotCommissionV2Model extends MasterModel {
           STRING_AGG(DISTINCT ca.agent_name, ', ' ORDER BY ca.agent_name) AS all_agent_names,
           COUNT(DISTINCT ca.id) AS commission_count,
           -- Use fixed plot commission instead of summing per-agent commissions
-          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) AS total_commission,
+          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission), 0) AS total_commission,
           SUM(ca.total_paid) AS total_paid,
           SUM(ca.lifetime_paid) AS lifetime_paid,
           SUM(ca.payment_count)::int AS payment_count,
           SUM(ca.cash_paid) AS cash_paid,
           SUM(ca.bank_paid) AS bank_paid,
-          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission)) - SUM(ca.lifetime_paid) AS balance
+          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission), 0) - SUM(ca.lifetime_paid) AS balance
         FROM commission_agg ca
         GROUP BY ca.plot_id, ca.plot_no, ca.plot_size, ca.plot_rate, ca.buyer_name, ca.commission_rate, ca.plot_tag, ca.plot_status, ca.site_id
       )

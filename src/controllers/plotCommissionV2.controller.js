@@ -35,7 +35,7 @@ const subjectOf = (body) => {
   return given.length === 1 ? { column: given[0][0], id: given[0][1] } : null;
 };
 const num = (v) => parseFloat(v) || 0;
-const assertCommissionSite = async (user, siteId) => {
+export const assertCommissionSite = async (user, siteId) => {
   if (['admin', 'super_admin'].includes(user.role)) return;
   const { rows } = await pool.query('SELECT 1 FROM user_sites WHERE user_id=$1 AND site_id=$2', [user.id, siteId]);
   if (!rows.length) throw Object.assign(new Error('Access denied to this site'), { statusCode: 403 });
@@ -329,7 +329,7 @@ export const getPlotCommissionDetail = asyncHandler(async (req, res) => {
  * Get all commissions for a plot (agent history) with all their payments.
  * Used by the new detail page that groups by plot.
  */
-const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
+export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
   // Step 1: load commissions for the VIEWED booking (we need the IDs to fetch payments).
   const commissions = await plotCommissionV2Model.findAllCommissionsByPlotId(numPlotId, numSiteId, pool);
 
@@ -539,10 +539,9 @@ const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
   });
 
   // Plot-level totals for the CURRENT booking. Commission = the single DECIDED
-  // plot commission (NEVER summed across agents). Use MAX so it always agrees
-  // with `grand` below, falling back to the largest agent commission only when
-  // plot_commission is unset.
-  const fixedCommission = Math.max(0, ...commissions.map(c => parseFloat(c.plot_commission) || 0));
+  // plot commission (NEVER summed across agents), including when no agent is
+  // assigned. Fall back to the largest agent commission when it is unset.
+  const fixedCommission = parseFloat(plotMeta.plot_commission) || 0;
   const totalCommission = fixedCommission > 0
     ? fixedCommission
     : Math.max(0, ...agents.map(a => parseFloat(a.total_commission) || 0));
