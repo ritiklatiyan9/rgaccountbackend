@@ -7,6 +7,7 @@ import {
   previewPlotCommissionShare,
   createPlotCommissionShare,
   listPlotCommissionShares,
+  getShare,
 } from '../controllers/driveShare.controller.js';
 
 const router = express.Router();
@@ -19,5 +20,7 @@ router.use(authMiddleware, attachOrgContext, requireRole('admin', 'sub_admin'));
 router.get('/plot-commission/preview', requirePermission('commissions', 'read'), previewPlotCommissionShare);
 router.post('/plot-commission', requirePermission('commissions', 'read'), createPlotCommissionShare);
 router.get('/plot-commission/:plotId', requirePermission('commissions', 'read'), listPlotCommissionShares);
+// Progress of one queued/running share; the controller re-checks the share's site.
+router.get('/:id', requirePermission('commissions', 'read'), getShare);
 
 export default router;

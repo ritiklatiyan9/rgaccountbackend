@@ -9,6 +9,7 @@ import { startSmsReminderScheduler } from './services/smsReminder.service.js';
 import { startComplianceScheduler, stopComplianceScheduler } from './services/complianceScheduler.service.js';
 import { startEventReminderScheduler, stopEventReminderScheduler } from './services/eventReminderScheduler.service.js';
 import { backupMaintenanceEnabled } from './middlewares/backupMaintenance.middleware.js';
+import { startDriveShareRunner, stopDriveShareRunner } from './services/driveShareJobs.service.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -29,6 +30,7 @@ connectDB().then(async () => {
     startSmsReminderScheduler();
     startComplianceScheduler();
     startEventReminderScheduler();
+    startDriveShareRunner();
   } else console.log('Backup maintenance mode: business APIs, sockets and reminder schedulers are paused.');
 }).catch(err => {
   console.error('Failed to connect to DB', err);
@@ -39,6 +41,7 @@ const shutdown = (signal) => {
   console.log(`${signal} received — shutting down`);
   stopComplianceScheduler();
   stopEventReminderScheduler();
+  stopDriveShareRunner();
   server.close(() => process.exit(0));
   // Fallback if open sockets keep the server from closing promptly.
   setTimeout(() => process.exit(0), 5000).unref();

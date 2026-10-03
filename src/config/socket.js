@@ -13,6 +13,7 @@ const positiveId = (value) => {
 };
 
 const siteRoom = (siteId) => `site_${siteId}`;
+const userRoom = (userId) => `user_${userId}`;
 const conversationRoom = (siteId, conversationId) =>
     `site_${siteId}:conversation_${conversationId}`;
 
@@ -88,6 +89,8 @@ export const initSocket = (server) => {
     io.on('connection', (socket) => {
         const userId = positiveId(socket.user.id);
         const joinedSites = new Set();
+        // Personal room: background work (Drive shares) reports back here.
+        if (userId) socket.join(userRoom(userId));
 
         const leaveSite = (siteId) => {
             if (!joinedSites.has(siteId)) return;
@@ -201,4 +204,10 @@ export const emitNewMessage = (siteId, conversationId, message) => {
     if (io) {
         io.to(conversationRoom(siteId, conversationId)).emit('new_message', message);
     }
+};
+
+/** Fire-and-forget to every open tab of one user; a no-op before init or in maintenance mode. */
+export const emitToUser = (userId, event, payload) => {
+    const id = positiveId(userId);
+    if (io && id) io.to(userRoom(id)).emit(event, payload);
 };

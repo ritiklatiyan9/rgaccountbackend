@@ -164,13 +164,22 @@ test('security contract: routes and controller', async () => {
     source('src/controllers/driveShare.controller.js'),
   ]);
   assert.match(routes, /router\.use\(authMiddleware,\s*attachOrgContext,\s*requireRole\('admin',\s*'sub_admin'\)\)/);
-  assert.equal((routes.match(/requirePermission\('commissions',\s*'read'\)/g) || []).length, 3);
+  // preview, create, list-by-plot and the per-share progress route
+  assert.equal((routes.match(/requirePermission\('commissions',\s*'read'\)/g) || []).length, 4);
   assert.match(controller, /resolveEntryVisibility\(req\.user,\s*'commissions'\)/);
   assert.doesNotMatch(controller, /created_by/);
   assert.match(controller, /SHARE_FULL_FORBIDDEN/);
   assert.match(controller, /assertCommissionSite\(req\.user,\s*siteId\)/);
-  assert.match(controller, /tryPlotShareLock\(orgId,\s*plotId\)/);
-  assert.match(controller, /lock\.release\(\)/);
+  // The upload itself runs in the background job, which re-derives visibility
+  // for the requesting user and serialises shares per plot.
+  const jobs = await source('src/services/driveShareJobs.service.js');
+  assert.match(jobs, /tryPlotShareLock\(orgId,\s*plotId\)/);
+  assert.match(jobs, /resolveEntryVisibility\(user,\s*'commissions'\)/);
+  assert.doesNotMatch(jobs, /created_by/);
+  assert.match(jobs, /lock\.release\(\)/);
+  // The request handler only queues: no Drive upload code may live in it.
+  assert.doesNotMatch(controller, /upsertFile|exportPdf/);
+  assert.match(controller, /status IN \('queued','running'\)/);
 });
 
 test('folders below the site folder are IST date, module and record', () => {

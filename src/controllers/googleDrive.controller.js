@@ -297,8 +297,8 @@ export const listRecentShares = driveHandler(async (req, res) => {
   const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 20, 1), 50);
   const siteId = Number.parseInt(req.query.site_id, 10) || null;
   const { rows } = await pool.query(
-    `SELECT s.id, s.module, s.scope, s.label, s.folder_path, s.folder_url, s.files, s.status, s.error,
-            s.site_id, st.name AS site_name, u.name AS shared_by_name, s.created_at, s.entity_id, s.payment_id
+    `SELECT s.id, s.module, s.scope, s.label, s.folder_path, s.folder_url, s.files, s.status, s.error, s.progress,
+            s.site_id, st.name AS site_name, u.name AS shared_by_name, s.created_at, s.finished_at, s.entity_id, s.payment_id
        FROM google_drive_shares s
        LEFT JOIN users u ON u.id = s.shared_by
        LEFT JOIN sites st ON st.id = s.site_id
