@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
-import { driveClientFor, getDriveConnection, folderPathKey, sendDriveError, MODULE_ROOT_NAME, istDateFolder, safeFilePart, siteFolderName } from '../services/googleDrive.service.js';
+import { driveClientFor, getDriveConnection, folderPathKey, sendDriveError, MODULE_ROOT_NAME, istDateFolder, siteFolderName } from '../services/googleDrive.service.js';
+import { safeFilePart } from '../services/yearEndDocuments.service.js';
 import { getModuleDriveDefinition, listModuleDriveDefinitions, assertModuleDriveAccess, buildModuleDriveShareBundle, planModuleDriveShareFiles } from '../services/moduleDriveShare.service.js';
 import { renderModuleShareHtml } from '../services/driveShareWorkbook.service.js';
 import { enqueueShare } from '../services/driveShareJobs.service.js';
