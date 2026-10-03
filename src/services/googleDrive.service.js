@@ -292,6 +292,38 @@ export const ensureSiteFolder = (ctx, site) => withOrgFolderLock(ctx.orgId, asyn
   return { id: folderId, name, key };
 });
 
+/** Sibling folders under `parent` in one go: one listing, then only the
+ * missing ones are created. Returns name → folder id. */
+export const ensureSubfolders = (ctx, parent, names) => withOrgFolderLock(ctx.orgId, async (db) => {
+  const rootId = await ensureRootFolderUnlocked(ctx, db);
+  const keys = names.map((name) => folderPathKey([parent.key, name]));
+  const { rows } = await db.query(
+    `SELECT path, folder_id FROM google_drive_folders
+      WHERE organization_id=$1 AND root_folder_id=$2 AND path = ANY($3::text[])`,
+    [ctx.orgId, rootId, keys],
+  );
+  const cached = new Map(rows.map((r) => [r.path, r.folder_id]));
+  const result = new Map();
+  const missing = names.filter((name, i) => !cached.has(keys[i]));
+  names.forEach((name, i) => { if (cached.has(keys[i])) result.set(name, cached.get(keys[i])); });
+  if (!missing.length) return result;
+  const children = await listChildren(ctx, parent.id);
+  for (const name of missing) {
+    const existing = children.get(name);
+    const id = existing?.mimeType === FOLDER_MIME
+      ? existing.id
+      : (await ctx.drive.files.create({ requestBody: { name, parents: [parent.id], mimeType: FOLDER_MIME }, fields: 'id' })).data.id;
+    await db.query(
+      `INSERT INTO google_drive_folders (organization_id, root_folder_id, path, folder_id)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (organization_id, root_folder_id, path) DO UPDATE SET folder_id=EXCLUDED.folder_id`,
+      [ctx.orgId, rootId, folderPathKey([parent.key, name]), id],
+    );
+    result.set(name, id);
+  }
+  return result;
+});
+
 /** Site folder id/name from the registry only (no Drive calls); null when never created. */
 export const getSiteFolder = async (ctx, siteId) => {
   if (!ctx.connection.root_folder_id) return null;
@@ -305,6 +337,24 @@ export const getSiteFolder = async (ctx, siteId) => {
 
 // ---------------------------------------------------------------------------
 // Files
+
+/** Everything directly inside a folder, keyed by name (app-created files only, as drive.file allows). */
+export const listChildren = async (ctx, parentId) => {
+  const byName = new Map();
+  let pageToken;
+  do {
+    const { data } = await ctx.drive.files.list({
+      q: `'${escapeDriveQuery(parentId)}' in parents and trashed = false`,
+      fields: 'nextPageToken,files(id,name,mimeType)',
+      pageSize: 200,
+      spaces: 'drive',
+      pageToken,
+    });
+    for (const file of data.files || []) if (!byName.has(file.name)) byName.set(file.name, file);
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return byName;
+};
 
 const toFileResult = (file, created) => ({ id: file.id, name: file.name, url: fileUrl(file), mime_type: file.mimeType, created });
 
@@ -340,16 +390,21 @@ const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertT
  * therefore refreshes the files in place instead of piling up copies.
  * `convertTo` is the Google mime type to import into (e.g. a Google Doc).
  * The result's `created` tells callers whether the file existed before.
+ * Pass `existing` (a file, or null for "known absent", from listChildren) to
+ * skip the per-file lookup.
  */
-export const upsertFile = async (ctx, { parentId, name, mimeType, body, convertTo }) => {
+export const upsertFile = async (ctx, { parentId, name, mimeType, body, convertTo, existing: known }) => {
   const { drive } = ctx;
-  const { data } = await drive.files.list({
-    q: `name = '${escapeDriveQuery(name)}' and '${escapeDriveQuery(parentId)}' in parents and trashed = false`,
-    fields: 'files(id,name,mimeType)',
-    pageSize: 1,
-    spaces: 'drive',
-  });
-  const existing = data.files?.[0] || null;
+  let existing = known;
+  if (known === undefined) {
+    const { data } = await drive.files.list({
+      q: `name = '${escapeDriveQuery(name)}' and '${escapeDriveQuery(parentId)}' in parents and trashed = false`,
+      fields: 'files(id,name,mimeType)',
+      pageSize: 1,
+      spaces: 'drive',
+    });
+    existing = data.files?.[0] || null;
+  }
   const size = Buffer.isBuffer(body) ? body.length : typeof body === 'string' ? Buffer.byteLength(body) : null;
 
   if (size != null && size > MULTIPART_MAX_BYTES) {
