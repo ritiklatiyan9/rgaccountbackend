@@ -1,4 +1,5 @@
 import { Readable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { google } from 'googleapis';
 import pool from '../config/db.js';
 import { encrypt, decrypt } from '../utils/tokenCrypto.js';
@@ -19,7 +20,7 @@ export const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 export const DRIVE_SCOPES = ['openid', 'email', DRIVE_FILE_SCOPE];
 export const MODULE_ROOT_NAME = 'Defence Garden Accounts';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
-const FILE_FIELDS = 'id,name,webViewLink,mimeType';
+const FILE_FIELDS = 'id,name,webViewLink,mimeType,appProperties,md5Checksum';
 // Multipart bodies are capped at 5 MB by Drive; anything bigger goes resumable.
 const MULTIPART_MAX_BYTES = 4.5 * 1024 * 1024;
 const UPLOAD_CHUNK_BYTES = 64 * 1024;
@@ -457,16 +458,23 @@ export const getSiteFolder = async (ctx, siteId) => {
 /** Everything directly inside a folder, keyed by name (app-created files only, as drive.file allows). */
 const listChildrenRaw = async (ctx, parentId) => {
   const byName = new Map();
+  // Preserve the existing name-map API while indexing logical exports even
+  // after someone renames a file in Drive or its app-generated label changes.
+  byName.bySyncKey = new Map();
   let pageToken;
   do {
     const { data } = await ctx.drive.files.list({
       q: `'${escapeDriveQuery(parentId)}' in parents and trashed = false`,
-      fields: 'nextPageToken,files(id,name,mimeType)',
+      fields: `nextPageToken,files(${FILE_FIELDS})`,
       pageSize: 200,
       spaces: 'drive',
       pageToken,
     });
-    for (const file of data.files || []) if (!byName.has(file.name)) byName.set(file.name, file);
+    for (const file of data.files || []) {
+      if (!byName.has(file.name)) byName.set(file.name, file);
+      const key = file.appProperties?.dg_sync_key;
+      if (key && !byName.bySyncKey.has(key)) byName.bySyncKey.set(key, file);
+    }
     pageToken = data.nextPageToken;
   } while (pageToken);
   return byName;
@@ -481,7 +489,9 @@ export const listChildren = async (ctx, parentId) => {
   }
 };
 
-const toFileResult = (file, created) => ({ id: file.id, name: file.name, url: fileUrl(file), mime_type: file.mimeType, created });
+const toFileResult = (file, created, action = created ? 'created' : 'updated') => ({
+  id: file.id, name: file.name, url: fileUrl(file), mime_type: file.mimeType, created, action,
+});
 
 // googleapis-common reports bytesRead for multipart creates, but media-only
 // updates and gaxios resumable PUTs do not implement Node upload progress.
@@ -509,7 +519,7 @@ const uploadStream = (body, onUploadProgress, size) => {
 
 // Resumable sessions go through the OAuth client directly: googleapis' typed
 // client only does multipart/media uploads.
-const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertTo, buf, onUploadProgress }) => {
+const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertTo, buf, onUploadProgress, metadata }) => {
   const base = 'https://www.googleapis.com/upload/drive/v3/files';
   const init = await ctx.auth.request({
     url: `${base}${fileId ? `/${fileId}` : ''}?uploadType=resumable&fields=${FILE_FIELDS}`,
@@ -519,7 +529,7 @@ const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertT
       'X-Upload-Content-Type': mimeType,
       'X-Upload-Content-Length': String(buf.length),
     },
-    data: fileId ? {} : { name, parents: [parentId], ...(convertTo ? { mimeType: convertTo } : {}) },
+    data: fileId ? (metadata || {}) : { name, parents: [parentId], ...(convertTo ? { mimeType: convertTo } : {}), ...metadata },
   });
   // google-auth-library 10 ships gaxios 7 (fetch Headers); the top-level
   // gaxios 6 used by googleapis exposes a plain object.
@@ -545,38 +555,94 @@ const resumableUpload = async (ctx, { fileId, name, parentId, mimeType, convertT
  * skip the per-file lookup.
  * `onUploadProgress({ bytes_sent, bytes_total })` reports consumed payload
  * bytes. Only the resolved result confirms that Drive has saved the file.
+ * Optional SHA-256 `contentHash` identifies semantic source data. Binary
+ * uploads are skipped only if this hash matches AND Drive's current MD5 still
+ * matches the uploaded payload's stamp (so outside edits are not overlooked).
+ * `syncKey` is an opaque export identity, preferably SHA-256, scoped to the
+ * parent folder. It wins over names and never matches a different sync key.
+ * Set `allowLegacyMatch=false` for restricted exports so they cannot adopt an
+ * unkeyed legacy file that may contain a broader accounting view.
+ * Google Docs have no binary MD5 and are conservatively refreshed.
  */
-export const upsertFile = async (ctx, { parentId, name, mimeType, body, convertTo, existing: known, onUploadProgress }) => {
+export const upsertFile = async (ctx, { parentId, name, mimeType, body, convertTo, existing: known, onUploadProgress, contentHash, syncKey, allowLegacyMatch = true }) => {
   const { drive } = ctx;
+  if (contentHash != null && !/^[a-f\d]{64}$/i.test(contentHash)) throw new TypeError('contentHash must be a SHA-256 hex digest');
+  if (syncKey != null && (typeof syncKey !== 'string' || !syncKey.length || Buffer.byteLength(syncKey) > 100)) throw new TypeError('syncKey must be a nonempty opaque key of at most 100 bytes');
+  contentHash = contentHash?.toLowerCase();
   const resolvedParent = currentFolderId(ctx, parentId);
   // A listing from the previous folder must never update files in that old
   // location after another upload has repaired the parent.
   if (resolvedParent !== parentId) known = undefined;
+  if (syncKey && known?.appProperties?.dg_sync_key && known.appProperties.dg_sync_key !== syncKey) known = undefined;
+  if (!allowLegacyMatch && known && (!syncKey || known.appProperties?.dg_sync_key !== syncKey)) known = undefined;
   parentId = resolvedParent;
   const lookup = async () => {
-    const { data } = await drive.files.list({
-      q: `name = '${escapeDriveQuery(name)}' and '${escapeDriveQuery(parentId)}' in parents and trashed = false`,
-      fields: 'files(id,name,mimeType)',
-      pageSize: 1,
-      spaces: 'drive',
-    });
-    return data.files?.[0] || null;
+    const location = `'${escapeDriveQuery(parentId)}' in parents and trashed = false`;
+    if (syncKey) {
+      const { data } = await drive.files.list({
+        q: `appProperties has { key='dg_sync_key' and value='${escapeDriveQuery(syncKey)}' } and ${location}`,
+        fields: `files(${FILE_FIELDS})`, pageSize: 1, spaces: 'drive',
+      });
+      if (data.files?.[0]) return data.files[0];
+    }
+    if (!allowLegacyMatch) return null;
+    let pageToken;
+    do {
+      const { data } = await drive.files.list({
+        q: `name = '${escapeDriveQuery(name)}' and ${location}`,
+        fields: `nextPageToken,files(${FILE_FIELDS})`,
+        pageSize: syncKey ? 100 : 1, spaces: 'drive', pageToken,
+      });
+      const file = data.files?.find((candidate) => !syncKey || !candidate.appProperties?.dg_sync_key || candidate.appProperties.dg_sync_key === syncKey);
+      if (file) return file;
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+    return null;
   };
   let existing = known === undefined ? await lookup() : known;
   const size = Buffer.isBuffer(body) ? body.length : typeof body === 'string' ? Buffer.byteLength(body) : null;
+  let payloadMd5;
   const upload = async () => {
+    const binary = !convertTo && !existing?.mimeType?.startsWith('application/vnd.google-apps.');
+    const props = existing?.appProperties;
+    const unchanged = binary && contentHash && props?.dg_content_sha256 === contentHash
+      && props.dg_uploaded_md5 && props.dg_uploaded_md5 === existing.md5Checksum;
+    const rename = syncKey && existing && existing.name !== name;
+    const bindSyncKey = syncKey && existing && props?.dg_sync_key !== syncKey;
+    if (unchanged) {
+      if (!rename && !bindSyncKey) return toFileResult(existing, false, 'unchanged');
+      // Refresh identity/name without transmitting unchanged workbook bytes.
+      const { data } = await drive.files.update({
+        fileId: existing.id,
+        requestBody: { ...(rename ? { name } : {}), ...(bindSyncKey ? { appProperties: { ...props, dg_sync_key: syncKey } } : {}) },
+        fields: FILE_FIELDS,
+      }, { retry: false });
+      return toFileResult({ ...existing, ...data }, false);
+    }
+    let metadata;
+    if (contentHash || syncKey) {
+      const appProperties = { ...props, ...(syncKey ? { dg_sync_key: syncKey } : {}) };
+      if (contentHash) {
+        appProperties.dg_content_sha256 = contentHash;
+        // Stamp source bytes atomically with media, so a subsequent listing
+        // can detect external binary edits without an extra metadata write.
+        const uploadedMd5 = binary && size != null ? (payloadMd5 ||= createHash('md5').update(body).digest('hex')) : null;
+        if (uploadedMd5 || props?.dg_uploaded_md5) appProperties.dg_uploaded_md5 = uploadedMd5;
+      }
+      metadata = { appProperties, ...(rename ? { name } : {}) };
+    }
     if (size != null && size > MULTIPART_MAX_BYTES) {
       const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
       return toFileResult(await resumableUpload(ctx, {
-        fileId: existing?.id, name, parentId, mimeType, convertTo, buf, onUploadProgress,
+        fileId: existing?.id, name, parentId, mimeType, convertTo, buf, onUploadProgress, metadata,
       }), !existing);
     }
     // googleapis accepts a string or Readable, never a Buffer.
     const stream = uploadStream(body, onUploadProgress, size);
     const res = existing
-      ? await drive.files.update({ fileId: existing.id, media: { mimeType, body: stream }, fields: FILE_FIELDS }, { retry: false })
+      ? await drive.files.update({ fileId: existing.id, ...(metadata ? { requestBody: metadata } : {}), media: { mimeType, body: stream }, fields: FILE_FIELDS }, { retry: false })
       : await drive.files.create({
-        requestBody: { name, parents: [parentId], ...(convertTo ? { mimeType: convertTo } : {}) },
+        requestBody: { name, parents: [parentId], ...(convertTo ? { mimeType: convertTo } : {}), ...metadata },
         media: { mimeType, body: stream },
         fields: FILE_FIELDS,
       }, { retry: false });

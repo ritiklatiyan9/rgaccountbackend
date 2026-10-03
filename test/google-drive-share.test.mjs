@@ -127,6 +127,21 @@ test('xlsx workbook has Summary, Transactions and Agents sheets', () => {
   assert.equal(agents[0]['Aadhaar (masked)'], 'XXXX XXXX 9012');
 });
 
+test('updating a plot workbook retains earlier transaction rows exactly once and includes the new payment', () => {
+  const first = bundle();
+  const next = bundle({
+    allPayments: [...first.allPayments, payment({ id: 4, date: '2026-10-04', amount: 2000, tds_amount: 100 })],
+    totals: { ...first.totals, total_paid: 49600, tds_total: 2600, balance: 10400, payment_count: 4 },
+    generatedAt: new Date('2026-10-04T08:35:00Z'),
+  });
+  const rows = (data) => XLSX.utils.sheet_to_json(XLSX.read(buildStatementXlsx(data), { type: 'buffer' }).Sheets.Transactions, { header: 1 });
+  const previous = rows(first);
+  const updated = rows(next);
+  assert.deepEqual(updated.slice(0, previous.length), previous);
+  assert.deepEqual(updated.slice(1).map((row) => row[1]), ['CMN-1', 'CMN-2', 'CMN-3', 'CMN-4']);
+  assert.equal(updated.at(-1)[7], 2100);
+});
+
 test('transaction workbook includes only the selected entry while preserving plot-wide summary', () => {
   const b = bundle();
   const wb = XLSX.read(buildStatementXlsx({ ...b, scope: 'transaction', payment: b.allPayments[1] }), { type: 'buffer' });

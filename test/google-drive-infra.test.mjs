@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pool from '../src/config/db.js';
 
@@ -12,7 +13,7 @@ const { signOAuthState, verifyOAuthState } = await import('../src/utils/googleOA
 const {
   istDateFolder, escapeDriveQuery, translateDriveError, upsertFile, folderPathKey, siteFolderName,
   ensureSiteFolder, ensureFolderPath, ensureSubfolders,
-  withOrgFolderLock, tryPlotShareLock,
+  withOrgFolderLock, tryPlotShareLock, listChildren,
 } = await import('../src/services/googleDrive.service.js');
 
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
@@ -85,7 +86,7 @@ test('upsertFile streams Buffers and sends conversion mime on create', async () 
   const [args] = calls.create;
   assert.ok(args.media.body instanceof Readable, 'media body must be a Readable, never a Buffer');
   assert.deepEqual(args.requestBody, { name: 'Doc', parents: ['p1'], mimeType: 'application/vnd.google-apps.document' });
-  assert.deepEqual(result, { id: 'f1', name: 'Doc', url: 'https://docs.google.com/d/f1', mime_type: 'application/vnd.google-apps.document', created: true });
+  assert.deepEqual(result, { id: 'f1', name: 'Doc', url: 'https://docs.google.com/d/f1', mime_type: 'application/vnd.google-apps.document', created: true, action: 'created' });
 });
 
 test('upsertFile updates an existing file without parents or mime conversion', async () => {
@@ -470,4 +471,217 @@ test('plot lock release rolls back after a failed COMMIT and discards broken cle
     assert.deepEqual(calls.slice(-2).map(({ sql }) => sql), ['COMMIT', 'ROLLBACK']);
     assert.deepEqual(released, [cleanupError]);
   });
+});
+
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+const md5 = (value) => createHash('md5').update(value).digest('hex');
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const syncedSheet = (overrides = {}) => ({
+  id: 'ledger-1', name: 'Ledger.xlsx', mimeType: XLSX, webViewLink: 'https://drive.test/ledger-1',
+  md5Checksum: md5('previous ZIP bytes'),
+  appProperties: {
+    dg_sync_key: sha256('record:1:statement:full'),
+    dg_content_sha256: sha256('same accounting data'),
+    dg_uploaded_md5: md5('previous ZIP bytes'),
+  },
+  ...overrides,
+});
+
+test('semantic hash plus intact Drive payload skips unchanged Excel without any media or progress calls', async () => {
+  const existing = syncedSheet();
+  const fail = async () => assert.fail('an unchanged file needs no additional Drive requests');
+  const ctx = { drive: { files: { create: fail, update: fail, list: fail } } };
+  const result = await upsertFile(ctx, {
+    parentId: 'folder', name: existing.name, mimeType: XLSX,
+    // Spreadsheet ZIP timestamps may change without changing accounting data.
+    body: Buffer.from('new ZIP bytes with same accounting data'), existing,
+    contentHash: existing.appProperties.dg_content_sha256,
+    syncKey: existing.appProperties.dg_sync_key,
+    onUploadProgress: () => assert.fail('skipped data must not claim upload progress'),
+  });
+  assert.deepEqual(result, { id: existing.id, name: existing.name, url: existing.webViewLink, mime_type: XLSX, created: false, action: 'unchanged' });
+});
+
+test('external Drive edits and changed source data both upload fresh bytes with atomic fingerprints', async () => {
+  for (const reason of ['external-edit', 'source-change', 'legacy-file']) {
+    const existing = syncedSheet();
+    if (reason === 'external-edit') existing.md5Checksum = md5('edited in Excel by CA');
+    if (reason === 'legacy-file') delete existing.appProperties;
+    const contentHash = sha256(reason === 'source-change' ? 'new accounting data' : 'same accounting data');
+    const body = Buffer.from('new workbook bytes');
+    let request;
+    const ctx = { drive: { files: { update: async (args) => {
+      request = args;
+      const chunks = [];
+      for await (const chunk of args.media.body) chunks.push(chunk);
+      assert.deepEqual(Buffer.concat(chunks), body);
+      return { data: { ...existing, ...args.requestBody, md5Checksum: md5(body) } };
+    } } } };
+    const result = await upsertFile(ctx, {
+      parentId: 'folder', name: existing.name, mimeType: XLSX, body, existing, contentHash,
+      syncKey: sha256('record:1:statement:full'),
+    });
+    assert.equal(result.action, 'updated');
+    assert.equal(result.id, existing.id);
+    assert.equal(request.requestBody.appProperties.dg_content_sha256, contentHash);
+    assert.equal(request.requestBody.appProperties.dg_uploaded_md5, md5(body));
+    assert.equal(request.requestBody.appProperties.dg_sync_key, sha256('record:1:statement:full'));
+  }
+});
+
+test('create and resumable update attach only fingerprint metadata in the same media operation', async () => {
+  const contentHash = sha256('records');
+  const syncKey = sha256('record:1:statement:full');
+  const smallBody = Buffer.from('workbook');
+  let created;
+  const createCtx = { drive: { files: { create: async (args) => {
+    created = args;
+    return { data: { id: 'new-file', ...args.requestBody, mimeType: XLSX } };
+  } } } };
+  const result = await upsertFile(createCtx, {
+    parentId: 'folder', name: 'Ledger.xlsx', mimeType: XLSX, body: smallBody, existing: null, contentHash, syncKey,
+  });
+  assert.equal(result.action, 'created');
+  assert.deepEqual(created.requestBody.appProperties, { dg_content_sha256: contentHash, dg_uploaded_md5: md5(smallBody), dg_sync_key: syncKey });
+
+  const largeBody = Buffer.alloc(5 * 1024 * 1024, 4);
+  const requests = [];
+  const updateCtx = { drive: { files: {} }, auth: { request: async (request) => {
+    requests.push(request);
+    return request.method === 'PATCH' ? { headers: { location: 'https://upload.test/session' } }
+      : { data: { id: 'old-file', name: 'Ledger.xlsx', mimeType: XLSX } };
+  } } };
+  const updated = await upsertFile(updateCtx, {
+    parentId: 'folder', name: 'Ledger.xlsx', mimeType: XLSX, body: largeBody, existing: { id: 'old-file', name: 'Ledger.xlsx', mimeType: XLSX }, contentHash, syncKey,
+  });
+  assert.equal(updated.action, 'updated');
+  assert.equal(requests.length, 2, 'no separate metadata write after upload');
+  assert.deepEqual(requests[0].data.appProperties, { dg_content_sha256: contentHash, dg_uploaded_md5: md5(largeBody), dg_sync_key: syncKey });
+});
+
+test('listChildren indexes sync identities across pages and retains renamed file metadata', async () => {
+  const first = syncedSheet({ name: 'CA renamed workbook.xlsx' });
+  const second = syncedSheet({ id: 'ledger-2', name: 'Ledger.xlsx', appProperties: { dg_sync_key: sha256('record:2') } });
+  const ctx = { drive: { files: { list: async ({ fields, pageToken }) => {
+    assert.match(fields, /appProperties/);
+    assert.match(fields, /md5Checksum/);
+    return { data: pageToken ? { files: [second] } : { files: [first], nextPageToken: 'page-2' } };
+  } } } };
+  const children = await listChildren(ctx, 'folder');
+  assert.equal(children.size, 2);
+  assert.equal(children.get(first.name), first);
+  assert.equal(children.bySyncKey.get(first.appProperties.dg_sync_key), first);
+  assert.equal(children.bySyncKey.get(second.appProperties.dg_sync_key), second);
+});
+
+test('renamed exports keep their Drive ID and unchanged content receives only a metadata rename', async () => {
+  const existing = syncedSheet({ name: 'Previous buyer name.xlsx' });
+  const queries = [];
+  let update;
+  const ctx = { drive: { files: {
+    list: async ({ q }) => { queries.push(q); return { data: { files: [existing] } }; },
+    update: async (args) => { update = args; return { data: { ...existing, ...args.requestBody } }; },
+    create: async () => assert.fail('logical export identity must preserve file ID'),
+  } } };
+  const result = await upsertFile(ctx, {
+    parentId: 'folder', name: 'Current buyer name.xlsx', mimeType: XLSX, body: 'same data',
+    syncKey: existing.appProperties.dg_sync_key, contentHash: existing.appProperties.dg_content_sha256,
+  });
+  assert.match(queries[0], /appProperties has/);
+  assert.equal(queries.length, 1);
+  assert.equal(update.fileId, existing.id);
+  assert.equal(update.media, undefined, 'rename does not re-upload unchanged content');
+  assert.deepEqual(update.requestBody, { name: 'Current buyer name.xlsx' });
+  assert.equal(result.id, existing.id);
+  assert.equal(result.name, 'Current buyer name.xlsx');
+  assert.equal(result.action, 'updated');
+});
+
+test('sync key isolation never overwrites a different visibility export with the same name', async () => {
+  const full = syncedSheet();
+  const restrictedKey = sha256('record:1:statement:restricted');
+  let created;
+  let queries = 0;
+  const ctx = { drive: { files: {
+    list: async ({ q }) => {
+      queries += 1;
+      return { data: { files: q.includes('appProperties has') ? [] : [full] } };
+    },
+    update: async () => assert.fail('must not overwrite full export with restricted export'),
+    create: async (args) => { created = args; return { data: { id: 'restricted-file', ...args.requestBody, mimeType: XLSX } }; },
+  } } };
+  const result = await upsertFile(ctx, {
+    parentId: 'folder', name: full.name, mimeType: XLSX, body: 'restricted data', existing: full,
+    contentHash: sha256('restricted data'), syncKey: restrictedKey,
+  });
+  assert.equal(queries, 2);
+  assert.equal(result.id, 'restricted-file');
+  assert.equal(created.requestBody.appProperties.dg_sync_key, restrictedKey);
+});
+
+test('Google Docs are refreshed conservatively because binary checksum integrity is unavailable', async () => {
+  const existing = syncedSheet({ mimeType: 'application/vnd.google-apps.document' });
+  delete existing.md5Checksum;
+  let request;
+  const ctx = { drive: { files: { update: async (args) => {
+    request = args;
+    return { data: existing };
+  } } } };
+  const result = await upsertFile(ctx, {
+    parentId: 'folder', name: existing.name, mimeType: 'text/html', convertTo: existing.mimeType,
+    body: '<p>accounting statement</p>', existing, contentHash: existing.appProperties.dg_content_sha256,
+  });
+  assert.equal(result.action, 'updated');
+  assert.ok(request.media.body instanceof Readable);
+  assert.equal(request.requestBody.appProperties.dg_uploaded_md5, null, 'clear an obsolete binary stamp on a converted document');
+});
+
+test('restricted exports never adopt unkeyed legacy files, including stale-file retries', async () => {
+  const legacy = { id: 'legacy-full-view', name: 'Profile.html', mimeType: 'text/html' };
+  const syncKey = sha256('restricted-profile');
+  const queries = [];
+  let creates = 0;
+  const ctx = { drive: { files: {
+    list: async ({ q }) => {
+      queries.push(q);
+      assert.match(q, /appProperties has/, 'restricted lookup must never fall back to the legacy name');
+      return { data: { files: [] } };
+    },
+    update: async () => assert.fail('restricted data cannot overwrite unkeyed full-view exports'),
+    create: async ({ requestBody }) => {
+      creates += 1;
+      if (creates === 1) throw { status: 404 };
+      return { data: { id: 'restricted-new', ...requestBody, mimeType: 'text/html' } };
+    },
+  } } };
+  const result = await upsertFile(ctx, {
+    parentId: 'folder', name: legacy.name, mimeType: legacy.mimeType, body: '<p>restricted</p>',
+    existing: legacy, syncKey, contentHash: sha256('restricted profile'), allowLegacyMatch: false,
+  });
+  assert.equal(queries.length, 2, 'both initial lookup and recovery stay isolated');
+  assert.equal(result.id, 'restricted-new');
+  assert.equal(result.action, 'created');
+});
+
+test('default legacy matching adopts an existing unkeyed export under its original file ID', async () => {
+  const legacy = { id: 'legacy-excel', name: 'Ledger.xlsx', mimeType: XLSX };
+  const queries = [];
+  let request;
+  const ctx = { drive: { files: {
+    list: async ({ q }) => {
+      queries.push(q);
+      return { data: { files: q.includes('appProperties has') ? [] : [legacy] } };
+    },
+    update: async (args) => { request = args; return { data: { ...legacy, ...args.requestBody } }; },
+    create: async () => assert.fail('the admin upgrade should keep the legacy file ID'),
+  } } };
+  const result = await upsertFile(ctx, {
+    parentId: 'folder', name: legacy.name, mimeType: XLSX, body: 'updated workbook',
+    syncKey: sha256('full-statement'), contentHash: sha256('full accounting data'),
+  });
+  assert.equal(queries.length, 2);
+  assert.equal(request.fileId, legacy.id);
+  assert.equal(result.id, legacy.id);
+  assert.equal(result.action, 'updated');
+  assert.equal(request.requestBody.appProperties.dg_sync_key, sha256('full-statement'));
 });

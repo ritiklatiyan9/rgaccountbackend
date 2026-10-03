@@ -1,11 +1,14 @@
 import pool from '../config/db.js';
+import { createHash } from 'node:crypto';
 import { emitToUser } from '../config/socket.js';
 import { resolveEntryVisibility } from './entryVisibility.service.js';
 import { assertCommissionSite } from '../controllers/plotCommissionV2.controller.js';
 import { createShareProgress, createPreparedBundleCache, uploadPercent } from './driveShareProgress.js';
+import { generatedContentHash, logicalFileKey, shareSyncSummary } from './driveShareSync.js';
+import { existingShareFolderSegments } from './driveShareDestination.service.js';
 import {
   driveClientFor, ensureSiteFolder, ensureFolderPath, ensureSubfolders, listChildren, upsertFile, exportPdf,
-  folderPathKey, folderUrl, tryPlotShareLock, translateDriveError, markReauthorizationRequired,
+  folderPathKey, folderUrl, tryPlotShareLock, translateDriveError, markReauthorizationRequired, MODULE_ROOT_NAME,
 } from './googleDrive.service.js';
 import {
   buildPlotCommissionShareBundle, renderStatementHtml, renderProfileHtml, buildStatementXlsx, planShareFiles, readStoredFileBytes,
@@ -68,7 +71,7 @@ const withDriveRetry = async (fn, { attempts = 3, delayMs = 750, onRetry } = {})
 
 /** Builds the upload tasks for one planned item; every finished unit (a Doc,
  * a PDF, a sheet, a document) is handed to `report`. */
-const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report, activity }) => {
+const uploadTasks = ({ ctx, bundle, share, visibility, item, parentId, existing, budget, report, activity }) => {
   const base = { folder: item.folder, name: item.name, kind: item.kind, mime_type: null, drive_file_id: null, url: null, error: null };
   const spend = (bytes) => {
     if (budget.used + bytes > MAX_SHARE_BYTES) throw Object.assign(new Error('Share size limit reached'), { code: 'FILE_TOO_LARGE' });
@@ -76,22 +79,30 @@ const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report, ac
   };
   const failed = (name, err) => {
     console.error(`[gdrive] upload of "${name}" failed:`, err?.response?.data?.error || err?.message || err);
-    return { ...base, name, error: shortReason(err) };
+    return { ...base, name, action: 'failed', error: shortReason(err) };
   };
-  const put = async (name, mimeType, body, convertTo) => {
+  const put = async (name, mimeType, body, convertTo, format = 'binary') => {
     const bytes = Buffer.byteLength(body);
     spend(bytes);
+    const contentHash = format === 'binary' ? createHash('sha256').update(body).digest('hex') : generatedContentHash(bundle, item, format);
+    const syncKey = logicalFileKey({ share, item, format, visibility });
+    const named = existing.get(name);
+    const candidate = existing.bySyncKey?.get(syncKey) || (
+      named?.appProperties?.dg_sync_key === syncKey || (visibility.canViewAll && !named?.appProperties?.dg_sync_key) ? named : null
+    );
     let attempt = 0;
     const file = await withDriveRetry(() => {
-      activity(name, { stage: 'uploading', bytes_sent: 0, bytes_total: bytes });
+      activity(name, { stage: 'checking', bytes_sent: 0, bytes_total: bytes });
       return upsertFile(ctx, {
         // A timeout/5xx can arrive after Drive saved the file. Re-list on
         // retries so replay updates that file instead of creating a duplicate.
-        parentId, name, mimeType, body, convertTo, existing: attempt++ === 0 ? existing.get(name) || null : undefined,
+        parentId, name, mimeType, body, convertTo, contentHash, syncKey, allowLegacyMatch: visibility.canViewAll,
+        existing: attempt++ === 0 ? candidate || null : undefined,
         onUploadProgress: (progress) => activity(name, { stage: 'uploading', ...progress }, true),
       });
     }, { onRetry: () => activity(name, { stage: 'retrying', bytes_sent: 0, bytes_total: bytes }) });
-    return { record: { ...base, name, mime_type: file.mime_type || convertTo || mimeType, drive_file_id: file.id, url: file.url }, created: file.created };
+    return { record: { ...base, name, mime_type: file.mime_type || convertTo || mimeType, drive_file_id: file.id, url: file.url,
+      action: file.action || (file.created ? 'created' : 'updated') }, created: file.created };
   };
 
   if (item.kind === 'document' || item.kind === 'voucher' || item.kind === 'signature') {
@@ -115,7 +126,7 @@ const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report, ac
       try {
         activity(item.name, { stage: 'preparing' });
         const html = item.kind === 'profile' ? renderProfileHtml(bundle) : renderStatementHtml(bundle);
-        doc = await put(item.name, 'text/html', html, GOOGLE_DOC);
+        doc = await put(item.name, 'text/html', html, GOOGLE_DOC, 'doc');
         if (wantDoc) report(doc.record);
         else activity(item.name, null);
       } catch (err) {
@@ -127,7 +138,7 @@ const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report, ac
       if (!wantPdf) return;
       try {
         activity(`${item.name}.pdf`, { stage: 'converting' });
-        report((await put(`${item.name}.pdf`, 'application/pdf', await withDriveRetry(() => exportPdf(ctx, doc.record.drive_file_id)))).record);
+        report((await put(`${item.name}.pdf`, 'application/pdf', await withDriveRetry(() => exportPdf(ctx, doc.record.drive_file_id)), undefined, 'pdf')).record);
       } catch (err) {
         report(failed(`${item.name}.pdf`, err));
       }
@@ -140,7 +151,7 @@ const uploadTasks = ({ ctx, bundle, item, parentId, existing, budget, report, ac
     tasks.unshift(async () => {
       try {
         activity(`${item.name}.xlsx`, { stage: 'preparing' });
-        report((await put(`${item.name}.xlsx`, XLSX_MIME, buildStatementXlsx(bundle))).record);
+        report((await put(`${item.name}.xlsx`, XLSX_MIME, buildStatementXlsx(bundle), undefined, 'xlsx')).record);
       } catch (err) {
         report(failed(`${item.name}.xlsx`, err));
       }
@@ -183,18 +194,19 @@ const progressFor = (share) => createShareProgress({
 const finish = async (share, reporter, { status, files, error, folderId }) => {
   // Drain in-flight progress writes before persisting the terminal state.
   const last = await reporter.stop();
+  const sync = shareSyncSummary(files);
   const progress = {
     ...last, sequence: last.sequence + 1, phase: status,
-    label: status === 'completed' ? 'Shared to Google Drive' : status === 'partial' ? 'Shared with some files skipped' : 'Sharing failed',
+    label: status === 'completed' ? (sync.unchanged === files.length ? 'Already up to date' : 'Shared to Google Drive') : status === 'partial' ? 'Shared with some files skipped' : 'Sharing failed',
     percent: status === 'failed' ? last.percent : 100,
-    active_files: [], updated_at: new Date().toISOString(),
+    sync, active_files: [], updated_at: new Date().toISOString(),
   };
   const { rows } = await pool.query(
     `UPDATE google_drive_shares
         SET status=$2, files=$3::jsonb, error=$4, folder_id=COALESCE($5, folder_id), folder_url=COALESCE($6, folder_url),
-            progress=$7::jsonb, finished_at=NOW()
+            progress=$7::jsonb, folder_path=$8, finished_at=NOW()
       WHERE id=$1 RETURNING ${SHARE_FIELDS}`,
-    [share.id, status, JSON.stringify(files), error, folderId || null, folderId ? folderUrl(folderId) : null, JSON.stringify(progress)],
+    [share.id, status, JSON.stringify(files), error, folderId || null, folderId ? folderUrl(folderId) : null, JSON.stringify(progress), share.folder_path],
   );
   publish(rows[0], 'drive_share:done');
   return rows[0];
@@ -246,9 +258,11 @@ export const runShareJob = async (share) => {
       // The site folder carries the CA's grant; everything below inherits it.
       const siteFolder = await ensureSiteFolder(ctx, { id: siteId, name: bundle.site.name });
       reporter.update({ percent: 18, label: 'Preparing record folder' });
+      bundle.folderSegments = await existingShareFolderSegments({ orgId, siteId, plotId, rootFolderId: ctx.connection?.root_folder_id }, bundle.folderSegments);
       baseId = await ensureFolderPath(ctx, bundle.folderSegments, { base: siteFolder });
       share.folder_id = baseId;
       share.folder_url = folderUrl(baseId);
+      share.folder_path = folderPathKey([ctx.connection?.root_folder_name || MODULE_ROOT_NAME, bundle.siteFolderName || bundle.site.name, ...bundle.folderSegments]);
       reporter.update({ percent: 25, label: 'Preparing destination folders' });
       const groups = [...new Set(active.map((f) => f.folder))];
       subfolders = await ensureSubfolders(ctx, { id: baseId, key: folderPathKey([siteFolder.key, ...bundle.folderSegments]) }, groups);
@@ -267,10 +281,10 @@ export const runShareJob = async (share) => {
     const budget = { used: 0 };
     const tasks = [];
     const activeFiles = new Map();
-    const labels = { preparing: 'Creating', downloading: 'Reading attachment', uploading: 'Uploading', converting: 'Converting PDF', retrying: 'Retrying upload' };
+    const labels = { preparing: 'Creating', checking: 'Checking for changes', downloading: 'Reading attachment', uploading: 'Uploading', converting: 'Converting PDF', retrying: 'Retrying upload' };
     plan.forEach((item, i) => {
       if (item.skipped_reason) {
-        slots[i].push({ folder: item.folder, name: item.name, kind: item.kind, mime_type: item.mime_type || null, drive_file_id: null, url: null, error: item.skipped_reason });
+        slots[i].push({ folder: item.folder, name: item.name, kind: item.kind, mime_type: item.mime_type || null, drive_file_id: null, url: null, action: 'failed', error: item.skipped_reason });
         return;
       }
       const activity = (name, detail, throttle = false) => {
@@ -290,10 +304,10 @@ export const runShareJob = async (share) => {
         const current = [...activeFiles.values()];
         reporter.update({
           done, total, files_done: done, files_total: total, active_files: current,
-          percent: uploadPercent(done, total, current), label: record.error ? `Skipped ${record.name}` : `Uploaded ${record.name}`,
+          percent: uploadPercent(done, total, current), label: record.error ? `Skipped ${record.name}` : record.action === 'unchanged' ? `Unchanged ${record.name}` : `${record.action === 'updated' ? 'Updated' : 'Uploaded'} ${record.name}`,
         });
       };
-      tasks.push(...uploadTasks({ ctx, bundle, item, parentId: subfolders.get(item.folder), existing: children.get(item.folder), budget, report, activity }));
+      tasks.push(...uploadTasks({ ctx, bundle, share, visibility: entryVisibility, item, parentId: subfolders.get(item.folder), existing: children.get(item.folder), budget, report, activity }));
     });
     await runLimited(tasks, UPLOAD_CONCURRENCY);
     reporter.update({ phase: 'finalizing', percent: 98, active_files: [], label: 'Saving share result' });

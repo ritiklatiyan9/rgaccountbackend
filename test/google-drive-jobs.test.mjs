@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createShareProgress, createPreparedBundleCache, uploadPercent } from '../src/services/driveShareProgress.js';
+import { generatedContentHash, logicalFileKey, shareSyncSummary } from '../src/services/driveShareSync.js';
 
 // Execute the real runner with explicit dependencies. Only ES module wiring is
 // removed: no runner logic is rewritten, and no DB/Google client is imported.
@@ -29,6 +31,8 @@ const makeRunner = ({ share = shareFixture(), plan = [statement], visibility = {
   const user = { id: 8, role: 'admin', email: 'admin@example.test' };
   const bundle = { site: { name: 'Defence Garden' }, folderSegments: ['03-10-2026', 'Project Commission', 'Plot A1'] };
   const deps = {
+    createHash,
+    MODULE_ROOT_NAME: 'Defence Garden Accounts',
     pool: {
       query: async (sql, values) => {
         calls.queries.push({ sql, values });
@@ -60,9 +64,11 @@ const makeRunner = ({ share = shareFixture(), plan = [statement], visibility = {
       if (authorize) await authorize(...args);
     },
     createShareProgress, createPreparedBundleCache, uploadPercent,
+    generatedContentHash, logicalFileKey, shareSyncSummary,
+    existingShareFolderSegments: async (_ctx, fallback) => fallback,
     driveClientFor: async (orgId) => {
       assert.equal(orgId, 3);
-      return { drive: { files: { delete: async () => {} } } };
+      return { connection: { root_folder_id: 'root-folder' }, drive: { files: { delete: async () => {} } } };
     },
     ensureSiteFolder: async () => { calls.folders += 1; return { id: 'site-folder', key: 'Site' }; },
     ensureFolderPath: async () => 'record-folder',
@@ -71,7 +77,7 @@ const makeRunner = ({ share = shareFixture(), plan = [statement], visibility = {
     upsertFile: async (_ctx, options) => {
       calls.uploads.push(options);
       if (upload) return upload(options, calls.uploads.length);
-      return { id: `file-${calls.uploads.length}`, url: 'https://drive.example/file', created: true };
+      return { id: `file-${calls.uploads.length}`, url: 'https://drive.example/file', created: true, action: 'created' };
     },
     exportPdf: async () => { calls.pdf += 1; return Buffer.from('pdf'); },
     folderPathKey: (segments) => segments.join('/'),
@@ -230,6 +236,7 @@ test('transaction job retains payment ID and creator visibility; an inaccessible
     const result = await h.runShareJob(h.share);
     assert.equal(result.status, inaccessible ? 'failed' : 'completed');
     assert.equal(h.calls.uploads.length, inaccessible ? 0 : 1);
+    if (!inaccessible) assert.equal(h.calls.uploads[0].allowLegacyMatch, false, 'restricted exports must never adopt unkeyed legacy files');
     if (inaccessible) assert.match(result.error, /Payment not found/);
   }
 });
@@ -275,4 +282,60 @@ test('a refused plot lock waits for the next sweep instead of immediately reclai
   assert.equal(claims, 1);
   assert.equal(h.calls.queries.filter(({ sql }) => sql.includes("SET status='queued', started_at=NULL")).length, 1);
   assert.equal(h.calls.uploads.length, 0);
+});
+
+test('repeated workbook is unchanged without media progress; a new payment updates the same logical file', async () => {
+  const stored = new Map();
+  let mediaUploads = 0;
+  const h = makeRunner({ upload: async ({ syncKey, contentHash, onUploadProgress }) => {
+    assert.match(syncKey, /^[a-f0-9]{64}$/);
+    assert.match(contentHash, /^[a-f0-9]{64}$/);
+    const previous = stored.get(syncKey);
+    if (previous?.contentHash === contentHash) {
+      // The real transport returns unchanged before consuming media or
+      // delivering upload callbacks when saved content still matches.
+      return { id: previous.id, url: 'https://drive.example/synced', created: false, action: 'unchanged' };
+    }
+    mediaUploads += 1;
+    onUploadProgress({ bytes_sent: 100, bytes_total: 100 });
+    const id = previous?.id || 'stable-excel-file';
+    stored.set(syncKey, { id, contentHash });
+    return { id, url: 'https://drive.example/synced', created: !previous, action: previous ? 'updated' : 'created' };
+  } });
+  h.bundle.allPayments = [{ id: 1, date: '2026-10-03', amount: 1000, tds_amount: 0, status: 'approved', payment_mode: 'BANK' }];
+  h.bundle.totals = { total_commission: 10000, total_paid: 1000, balance: 9000, tds_total: 0, payment_count: 1 };
+  const first = await h.runShareJob(shareFixture());
+  assert.equal(first.status, 'completed');
+  assert.equal(first.files[0].action, 'created');
+  assert.equal(mediaUploads, 1);
+
+  const beforeRepeat = h.calls.events.length;
+  h.bundle.generatedAt = new Date('2026-10-04T05:00:00Z');
+  h.bundle.generatedBy = 'Another Admin';
+  const repeat = await h.runShareJob(shareFixture({ id: 43 }));
+  assert.equal(repeat.status, 'completed');
+  assert.equal(repeat.files[0].action, 'unchanged');
+  assert.equal(repeat.files[0].drive_file_id, first.files[0].drive_file_id);
+  assert.equal(repeat.progress.percent, 100);
+  assert.equal(mediaUploads, 1);
+  assert.ok(h.calls.events.slice(beforeRepeat).some((event) => /unchanged/i.test(event.row.progress.label)));
+
+  h.bundle.allPayments.push({ id: 2, date: '2026-10-04', amount: 2000, tds_amount: 0, status: 'approved', payment_mode: 'BANK' });
+  h.bundle.totals = { ...h.bundle.totals, total_paid: 3000, balance: 7000, payment_count: 2 };
+  const updated = await h.runShareJob(shareFixture({ id: 44 }));
+  assert.equal(updated.status, 'completed');
+  assert.equal(updated.files[0].action, 'updated');
+  assert.equal(updated.files[0].drive_file_id, first.files[0].drive_file_id);
+  assert.equal(mediaUploads, 2);
+  assert.equal(stored.size, 1);
+  assert.equal(h.calls.uploads[0].syncKey, h.calls.uploads[2].syncKey);
+  assert.equal(h.calls.uploads[0].contentHash, h.calls.uploads[1].contentHash);
+  assert.notEqual(h.calls.uploads[0].contentHash, h.calls.uploads[2].contentHash);
+  assert.deepEqual(shareSyncSummary(first.files), { created: 1, updated: 0, unchanged: 0, failed: 0 });
+  assert.deepEqual(shareSyncSummary(repeat.files), { created: 0, updated: 0, unchanged: 1, failed: 0 });
+  assert.deepEqual(shareSyncSummary(updated.files), { created: 0, updated: 1, unchanged: 0, failed: 0 });
+  assert.deepEqual(first.progress.sync, { created: 1, updated: 0, unchanged: 0, failed: 0 });
+  assert.deepEqual(repeat.progress.sync, { created: 0, updated: 0, unchanged: 1, failed: 0 });
+  assert.deepEqual(updated.progress.sync, { created: 0, updated: 1, unchanged: 0, failed: 0 });
+  assert.equal(repeat.progress.label, 'Already up to date');
 });

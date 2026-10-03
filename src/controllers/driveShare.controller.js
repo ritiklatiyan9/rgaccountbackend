@@ -5,6 +5,7 @@ import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { driveClientFor, getDriveConnection, folderPathKey, sendDriveError, MODULE_ROOT_NAME } from '../services/googleDrive.service.js';
 import { MODULE_KEY, buildPlotCommissionShareBundle, renderStatementHtml, renderDocumentsHtml, planShareFiles } from '../services/plotCommissionShare.service.js';
 import { enqueueShare, getShareRow } from '../services/driveShareJobs.service.js';
+import { existingShareFolderSegments } from '../services/driveShareDestination.service.js';
 
 const SCOPES = new Set(['overall', 'transaction', 'documents']);
 const FORMATS = ['doc', 'pdf', 'xlsx'];
@@ -48,10 +49,11 @@ const shareRowSql = `SELECT s.id, s.module, s.scope, s.label, s.folder_path, s.f
                        FROM google_drive_shares s
                        LEFT JOIN users u ON u.id = s.shared_by
                        LEFT JOIN sites st ON st.id = s.site_id`;
-const plotShareRows = (orgId, plotId, limit) => pool.query(
+const plotShareRows = (orgId, plotId, limit, siteId, visibility, userId) => pool.query(
   `${shareRowSql} WHERE s.organization_id = $1 AND s.module = $2 AND s.entity_type = 'plot' AND s.entity_id = $3
+    AND s.site_id=$5 AND ($6::boolean OR (s.scope='transaction' AND s.shared_by=$7))
     ORDER BY s.created_at DESC, s.id DESC LIMIT $4`,
-  [orgId, MODULE_KEY, plotId, limit],
+  [orgId, MODULE_KEY, plotId, limit, siteId, visibility.canViewAll, userId],
 );
 
 // Who can open this site's folder — shown before sharing so nobody uploads into a folder no CA reads.
@@ -87,11 +89,12 @@ export const previewPlotCommissionShare = asyncHandler(async (req, res) => {
   let recipients;
   try {
     [connection, { rows: [lastShare] }, { rows: recipients }] = await Promise.all([
-      getDriveConnection(orgId), plotShareRows(orgId, plotId, 1), siteRecipients(orgId, siteId),
+      getDriveConnection(orgId), plotShareRows(orgId, plotId, 1, siteId, entryVisibility, req.user.id), siteRecipients(orgId, siteId),
     ]);
   } catch (err) {
     return sendDriveError(res, err);
   }
+  bundle.folderSegments = await existingShareFolderSegments({ orgId, siteId, plotId, rootFolderId: connection?.root_folder_id }, bundle.folderSegments);
   res.json({
     connected: connection?.status === 'active',
     connection_status: connection?.status || 'disconnected',
@@ -151,6 +154,7 @@ export const createPlotCommissionShare = asyncHandler(async (req, res) => {
   if (!plan.some((f) => !f.skipped_reason)) throw bad('Nothing to share: no files match the selected scope and options');
 
   try {
+    bundle.folderSegments = await existingShareFolderSegments({ orgId, siteId, plotId, rootFolderId: ctx.connection.root_folder_id }, bundle.folderSegments);
     const { rows } = await pool.query(
       `SELECT 1 FROM google_drive_shares WHERE organization_id=$1 AND module=$2 AND entity_type='plot' AND entity_id=$3 AND status IN ('queued','running') LIMIT 1`,
       [orgId, MODULE_KEY, plotId],
@@ -177,6 +181,10 @@ export const getShare = asyncHandler(async (req, res) => {
     const row = await getShareRow(id);
     if (!row || Number(row.organization_id) !== Number(req.user.organization_id)) return res.status(404).json({ message: 'Share not found' });
     if (row.site_id) await assertCommissionSite(req.user, Number(row.site_id));
+    const visibility = await resolveEntryVisibility(req.user, 'commissions');
+    if (!visibility.canViewAll && (row.scope !== 'transaction' || Number(row.shared_by) !== Number(req.user.id))) {
+      return res.status(404).json({ message: 'Share not found' });
+    }
     const { rows: [names] } = await pool.query(
       'SELECT (SELECT name FROM users WHERE id=$1) AS shared_by_name, (SELECT name FROM sites WHERE id=$2) AS site_name',
       [row.shared_by, row.site_id],
@@ -196,7 +204,8 @@ export const listPlotCommissionShares = asyncHandler(async (req, res) => {
   if (!siteId) throw bad('site_id is required');
   await assertCommissionSite(req.user, siteId);
   try {
-    const { rows } = await plotShareRows(req.user.organization_id, plotId, 50);
+    const visibility = await resolveEntryVisibility(req.user, 'commissions');
+    const { rows } = await plotShareRows(req.user.organization_id, plotId, 50, siteId, visibility, req.user.id);
     res.json({ shares: rows });
   } catch (err) {
     sendDriveError(res, err);
