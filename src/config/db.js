@@ -32,6 +32,13 @@ const pool = new Pool({
   connectionTimeoutMillis: 10000,
 });
 
+// PostgreSQL can close an idle connection during a restart or network outage.
+// pg removes that client from the pool; handling its error keeps the API alive
+// so later requests can obtain a fresh connection.
+pool.on('error', (err) => {
+  console.error('Idle PostgreSQL connection error:', err.message);
+});
+
 export const connectDB = async () => {
   try {
     const client = await pool.connect();
