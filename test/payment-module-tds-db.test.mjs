@@ -70,7 +70,7 @@ test('native payment modules withhold atomically and share the TDS register', { 
       expense = result.body.expense; assert.equal(result.code, 201);
       assert.equal(Number(expense.debit), 98000); assert.equal(Number(expense.tds_amount), 2000);
       const deduction = (await pg.query("SELECT * FROM tds_deductions WHERE source_table='expenses' AND source_id=$1", [expense.id])).rows[0];
-      assert.equal(Number(deduction.gross_amount), 100000); assert.equal(deduction.payment_state, 'pending'); assert.equal(deduction.deductee_name, 'SUPPLIER');
+      assert.equal(Number(deduction.gross_amount), 100000); assert.equal(deduction.payment_state, 'pending'); assert.equal(deduction.deductee_name, 'Supplier');
     });
     await t.test('farmer create keeps native payment, cash/bank legs and register aligned', async () => {
       const result = await invoke(createFarmerPayment, { ...base, particular: 'BANK', cash_amount: 0, bank_amount: 100000 }, { originalUrl: '/farmers/1/payments', method: 'POST', params: { farmerId: '1' } }, true);
@@ -78,11 +78,12 @@ test('native payment modules withhold atomically and share the TDS register', { 
       assert.equal(Number(farmer.amount), 98000); assert.equal(Number(farmer.bank_amount), 98000); assert.equal(Number(farmer.tds_amount), 2000);
       assert.equal(Number(result.body.daybook_entries[0].debit), 98000);
       const deduction = (await pg.query("SELECT * FROM tds_deductions WHERE source_table='farmer_payments' AND source_id=$1", [farmer.id])).rows[0];
-      assert.equal(deduction.member_id, 1); assert.equal(deduction.deductee_name, 'Farmer'); assert.equal(deduction.pan, 'ABCDE1234F');
+      assert.equal(deduction.member_id, 1); assert.equal(deduction.deductee_name, 'Payee'); assert.equal(deduction.pan, 'ABCDE1234F');
+      assert.equal(farmer.tds_member_id, 1); assert.equal(farmer.tds_deductee_name, 'Payee'); assert.equal(farmer.tds_aadhaar, '123456789012');
     });
     await t.test('every remaining outgoing source uses the same manual withholding contract', async () => {
       const entries = [
-        ['daybook','/daybook',{}], ['cashflow','/cashflow/entries',{cash_flow_month_id:1}], ['firm_transaction','/firms/transactions',{firm_id:1}],
+        ['daybook','/daybook',{}], ['cashflow','/cashflow/entries',{cash_flow_month_id:1}], ['firm_transaction','/firms/transactions',{firm_id:1,name:'Payee'}],
         ['vendor_payment','/vendors/commitments/1/payments',{commitment_id:1}], ['vendor_inventory_payment','/vendors/inventory/1/payments',{order_id:1}],
         ['misc_income','/misc-income',{direction:'debit',party_name:'Refund payee'}], ['partner_profit_payment','/sites/1/profit-payments',{member_id:1}],
         ['imprest_expense','/imprest/expense',{to_entity:'Imprest supplier'}],
@@ -94,6 +95,12 @@ test('native payment modules withhold atomically and share the TDS register', { 
         assert.equal(Number(result.body[source.amount || 'amount']),97500,module);
         const deduction = (await pg.query('SELECT * FROM tds_deductions WHERE source_table=$1 AND source_id=$2',[source.table,result.body.id])).rows[0];
         assert.equal(deduction.source_module,module); assert.equal(Number(deduction.tds_amount),2500); assert.equal(Number(deduction.tds_rate),2.5);
+        if (['cashflow', 'firm_transaction', 'vendor_payment', 'vendor_inventory_payment', 'partner_profit_payment'].includes(module)) {
+          assert.equal(result.body.tds_member_id, 1, module);
+          assert.equal(result.body.tds_deductee_name, 'Payee', module);
+          assert.equal(result.body.tds_pan, 'ABCDE1234F', module);
+          assert.equal(deduction.aadhaar, '123456789012', module);
+        }
       }
     });
     await t.test('register retains source identity and protects linked entries from manual edits', async () => {
@@ -182,6 +189,24 @@ test('native payment modules withhold atomically and share the TDS register', { 
       const row = (await pg.query('SELECT * FROM tds_deductions WHERE id=$1',[result.body.id])).rows[0];
       assert.equal(row.deductee_name,'New member name'); assert.equal(row.pan,'FGHIJ1234K'); assert.equal(row.aadhaar,'123456789012');
       assert.equal(Number(row.gross_amount)-Number(row.tds_amount),145500);
+    });
+    await t.test('Client search matches formatted primary and alternate phone numbers as well as PAN', async () => {
+      await pg.exec('ALTER TABLE members ADD COLUMN alt_phone text, ADD COLUMN whatsapp text');
+      await pg.query("UPDATE members SET phone='+91 98765 43210',alt_phone='87654-32109',whatsapp='76543 21098' WHERE id=1");
+      for (const q of ['9876543210', '+91-98765-43210', '8765432109', '7654321098', 'FGHIJ1234K', 'New member']) {
+        const result = await invoke(listDeductees, {}, { query: { site_id: 1, q } });
+        assert.deepEqual(result.body.deductees.map(client => client.id), [1], q);
+      }
+    });
+    await t.test('Land Purchase uses the chosen linked Client instead of stale default farmer KYC', async () => {
+      await pg.query("INSERT INTO members(id,site_id,full_name,pan_no,aadhar_no) VALUES(3,1,'Selected Seller','KLMNO1234P','234567890123')");
+      const result = await invoke(createFarmerPayment, { ...base, related_member_id: 3, particular: 'BANK', cash_amount: 0, bank_amount: 100000 }, { originalUrl: '/farmers/1/payments', method: 'POST', params: { farmerId: '1' } }, true);
+      assert.equal(result.code, 201);
+      assert.equal(result.body.payment.tds_member_id, 3);
+      assert.equal(result.body.payment.tds_deductee_name, 'Selected Seller');
+      assert.equal(result.body.payment.tds_pan, 'KLMNO1234P');
+      assert.equal(result.body.payment.tds_aadhaar, '234567890123');
+      assert.equal(Number(result.body.payment.amount), 98000);
     });
     await t.test('older Commission and Day Book commission forms use the Project Commission policy', async () => {
       const body={...base,amount:200000,particular:'Agent',by_note:'OM BANK',tds_rate:3,tds_member_id:1,payment_mode:undefined};

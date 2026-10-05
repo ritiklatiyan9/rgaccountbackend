@@ -108,7 +108,10 @@ export async function preparePaymentTds(req, db = pool) {
     : target.module === 'cashflow' ? parent?.linked_member_id
       : ['vendor_payment','vendor_inventory_payment'].includes(target.module) ? parent?.vendor_member_id
         : target.module === 'partner_profit_payment' ? body.member_id || existing?.member_id : null;
-  const sourceName = parent?.name || parent?.vendor_name || parent?.linked_member_name || body.party_name || body.to_entity || (target.table === 'plot_commissions' ? body.particular : '') || existing?.tds_deductee_name;
+  const parentPartyName = target.module === 'farmer_payment' ? parent?.name
+    : ['vendor_payment','vendor_inventory_payment'].includes(target.module) ? parent?.vendor_name
+      : target.module === 'cashflow' ? parent?.linked_member_name : null;
+  const sourceName = parentPartyName || body.party_name || body.to_entity || body.name || (target.table === 'plot_commissions' ? body.particular : '') || existing?.tds_deductee_name;
   const deductee = normalized.tds_amount > 0
     ? await resolvePaymentDeductee(body, siteId, existing, { memberId: sourceMember, name: sourceName }, db)
     : await resolveTdsDeductee(body, siteId, existing, db);

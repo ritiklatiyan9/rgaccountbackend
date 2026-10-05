@@ -23,7 +23,7 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
       CREATE TABLE users(id int PRIMARY KEY,name text); INSERT INTO users VALUES(1,'Admin'),(2,'Sub admin');
       CREATE TABLE user_sites(user_id int,site_id int); INSERT INTO user_sites VALUES(2,1);
       CREATE TABLE members(id int PRIMARY KEY,site_id int,full_name text,pan_no text,aadhar_no text);
-      INSERT INTO members VALUES(1,1,'Agent','ABCDE1234F','123456789012');
+      INSERT INTO members VALUES(1,1,'Agent','ABCDE1234F','123456789012'),(2,1,'Plot Buyer','FGHIJ1234K','234567890123');
       CREATE TABLE plots(id int PRIMARY KEY,plot_no text); INSERT INTO plots VALUES(1,'A1');
       CREATE TABLE application_settings(site_id int,setting_key text,setting_value jsonb);
       INSERT INTO application_settings VALUES(1,'tds_workflow','{"plot_commission":{"enabled":true,"rate":2,"section":"194H"},"land_purchase_commission":{"enabled":false,"rate":2,"section":"194H"},"land_sale_commission":{"enabled":true,"rate":2,"section":"194H"}}');
@@ -42,7 +42,7 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
     let payment;
     const list = async (user) => (await invoke(listDeductions, {}, { query: { site_id: 1, financial_year: 2026 }, ...(user ? { user } : {}) })).body.deductions;
     await t.test('create atomically stores net cash and one pending linked deduction', async () => {
-      const result = await invoke(createPlotCommissionPayment, { master_id: 1, date: '2026-10-01', amount: 100000, payment_mode: 'BANK', tds_applicable: true, tds_member_id:1 });
+      const result = await invoke(createPlotCommissionPayment, { master_id: 1, date: '2026-10-01', amount: 100000, payment_mode: 'BANK', tds_applicable: true });
       assert.equal(result.code, 201); payment = result.body.payment;
       assert.equal(Number(payment.amount), 98000); assert.equal(Number(payment.tds_amount), 2000);
       assert.equal(payment.tds_member_id,1); assert.equal(payment.tds_pan,'ABCDE1234F'); assert.equal(payment.tds_aadhaar,'123456789012');
@@ -104,6 +104,8 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
       await assert.rejects(invoke(createPlotCommissionPayment, { master_id: 2, amount: 100000, date: '2026-10-01', tds_applicable: true }), /Enable/);
       const { body } = await invoke(createPlotCommissionPayment, { master_id: 3, amount: 100000, date: '2026-10-01', tds_applicable: true, tds_mode: 'manual', tds_amount: 3000 });
       const id = body.payment.id; assert.equal(Number(body.payment.amount), 97000);
+      assert.equal(body.payment.tds_member_id, 1); assert.equal(body.payment.tds_deductee_name, 'Agent');
+      assert.equal(body.payment.tds_pan, 'ABCDE1234F');
       await query("UPDATE application_settings SET setting_value=jsonb_set(setting_value,'{land_sale_commission,enabled}','false')");
       await invoke(updatePlotCommissionPayment, { remarks: 'Preserve TDS snapshot' }, { params: { id } });
       assert.equal((await list()).find(row => row.commission_payment_id === id).tds_amount, '3000.00');
@@ -119,10 +121,11 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
       await query("INSERT INTO plot_commissions_v2 VALUES(5,1,1,NULL,NULL,1,666667,'Pending',now())");
       const ids=[];
       for (const [date,gross,held,net] of [['2026-05-13',200000,6000,194000],['2026-05-14',150000,4500,145500],['2026-05-16',316667,9500,307167]]) {
-        const result=await invoke(createPlotCommissionPayment,{master_id:5,date,amount:gross,payment_mode:'BANK',tds_applicable:true,tds_member_id:1,tds_rate:3,...(date==='2026-05-16'?{tds_mode:'manual',tds_amount:9500}:{})});
+        const result=await invoke(createPlotCommissionPayment,{master_id:5,date,amount:gross,payment_mode:'BANK',tds_applicable:true,tds_member_id:2,tds_rate:3,...(date==='2026-05-16'?{tds_mode:'manual',tds_amount:9500}:{})});
         assert.equal(result.code,201);
         assert.equal(Number(result.body.payment.amount),net);
         assert.equal(Number(result.body.payment.tds_amount),held);
+        assert.equal(result.body.payment.tds_member_id,1, 'Commission agent overrides a stale linked buyer mapping');
         ids.push(result.body.payment.id);
         await query("UPDATE plot_commission_payments SET status='approved' WHERE id=$1",[result.body.payment.id]);
       }
