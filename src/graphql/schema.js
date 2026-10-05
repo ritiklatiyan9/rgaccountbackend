@@ -100,6 +100,7 @@ const ExpensesPageFiltersInput = new GraphQLInputObjectType({
     missingBill: { type: GraphQLBoolean },
     // "Money Related To" multi-select: rows linked to ANY of these clients.
     relatedMemberIds: { type: new GraphQLList(new GraphQLNonNull(GraphQLInt)) },
+    expenseIds: { type: new GraphQLList(new GraphQLNonNull(GraphQLInt)) },
     order:       { type: ExpenseSortOrderEnum },
     onlySite:    { type: GraphQLBoolean },
     createdBy:   { type: GraphQLInt },
@@ -1106,6 +1107,7 @@ const QueryType = new GraphQLObjectType({
           dateTo: filters.dateTo || undefined,
           missing_bill: filters.missingBill ? 'true' : undefined,
           related_member_ids: positiveIntList(filters.relatedMemberIds),
+          expense_ids: Array.isArray(filters.expenseIds) ? positiveIntList(filters.expenseIds) || [] : undefined,
           entry_origin: ['original', 'transfer'].includes(filters.entryOrigin) ? filters.entryOrigin : undefined,
           order: filters.order || 'desc',
           // Expenses module should show only entries from expense page.
@@ -1168,6 +1170,7 @@ const QueryType = new GraphQLObjectType({
           dateTo: filters.dateTo || undefined,
           missing_bill: filters.missingBill ? 'true' : undefined,
           related_member_ids: positiveIntList(filters.relatedMemberIds),
+          expense_ids: Array.isArray(filters.expenseIds) ? positiveIntList(filters.expenseIds) || [] : undefined,
           entry_origin: ['original', 'transfer'].includes(filters.entryOrigin) ? filters.entryOrigin : undefined,
           order: filters.order || 'desc',
           only_site: filters.onlySite === false ? undefined : 'true',

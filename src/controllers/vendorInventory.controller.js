@@ -83,6 +83,13 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
   const conditions = ['o.site_id = $1'];
   const values = [siteId];
   let idx = 2;
+  if (req.query.record_ids !== undefined) {
+    const raw = String(req.query.record_ids);
+    const ids = raw ? raw.split(',').map(Number) : [];
+    if (ids.some(id => !Number.isSafeInteger(id) || id <= 0)) return res.status(400).json({ message: 'Invalid linked record filter' });
+    conditions.push(`o.id = ANY($${idx++}::int[])`);
+    values.push(ids);
+  }
   if (dateFrom) { conditions.push(`o.order_date >= $${idx}::date`); values.push(dateFrom); idx++; }
   if (dateTo) { conditions.push(`o.order_date <= $${idx}::date`); values.push(dateTo); idx++; }
 

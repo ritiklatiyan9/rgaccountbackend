@@ -3,7 +3,7 @@ const router = express.Router();
 
 import {
   getMemberPlotOptions, createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete, getMemberOptions,
-  getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo,
+  getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo, getMemberLinkedRecords,
   extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites, getMemberIdentityReview, previewMemberSiteRegistrations,
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
@@ -86,6 +86,7 @@ router.post('/:id/incorporate-kyc', requireRole('admin', 'sub_admin'), requirePe
 router.get('/:id/identity-review', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), requirePermission('clients', 'update'), getMemberIdentityReview);
 
 // Member transactions
+router.get('/:id/links', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberLinkedRecords);
 router.get('/:id/transactions', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberTransactions);
 router.get('/:id/financial-info', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberFinancialInfo);
 

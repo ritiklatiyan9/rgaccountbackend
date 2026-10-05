@@ -38,15 +38,37 @@ function matchingIdentity(source,target) {
     || ['aadhar_no','pan_no'].some(field=>identity(source[field]) && identity(source[field])===identity(target[field])));
 }
 
-async function identityMatches(db,source,organizationId) {
+async function identityMatches(db,source,organizationId,fields=['phone','aadhar_no','pan_no']) {
   const {rows}=await db.query(`SELECT m.* FROM members m JOIN sites s ON s.id=m.site_id
     WHERE s.organization_id=$1 AND m.id<>$2 AND (
       ($3<>'' AND RIGHT(REGEXP_REPLACE(COALESCE(m.phone,''),'[^0-9]','','g'),10)=$3)
       OR ($4<>'' AND UPPER(REGEXP_REPLACE(COALESCE(m.aadhar_no,''),'[^A-Za-z0-9]','','g'))=$4)
       OR ($5<>'' AND UPPER(REGEXP_REPLACE(COALESCE(m.pan_no,''),'[^A-Za-z0-9]','','g'))=$5)
       OR (m.shared_profile_id=$6::uuid)) ORDER BY m.site_id,m.id FOR UPDATE OF m`,
-    [organizationId,source.id,normalizeMemberPhone(source.phone),identity(source.aadhar_no),identity(source.pan_no),source.shared_profile_id || null]);
+    [organizationId,source.id,fields.includes('phone') ? normalizeMemberPhone(source.phone) : '',
+      fields.includes('aadhar_no') ? identity(source.aadhar_no) : '',
+      fields.includes('pan_no') ? identity(source.pan_no) : '',source.shared_profile_id || null]);
   return rows;
+}
+
+/** Selected-site registration must keep the persistent link used by future
+ * edits. A server-created copy is known to be the same person; existing rows
+ * must already be linked or have a matching name and non-conflicting identity.
+ * Caller owns the transaction and organisation directory lock. */
+export async function linkMemberSiteRegistration(db,{source,target,user,isCopy=false}) {
+  const ids=[source.id,target.id];
+  const {rows}=await db.query(`SELECT m.id,m.shared_profile_id FROM members m JOIN sites s ON s.id=m.site_id
+    WHERE s.organization_id=$1 AND m.id=ANY($2::int[]) ORDER BY m.id FOR UPDATE OF m`,[user.organization_id,ids]);
+  if(rows.length!==2) fail('These site registrations are unavailable to your account.',403);
+  const groups=new Set(rows.map(row=>row.shared_profile_id).filter(Boolean));
+  const alreadyLinked=groups.size===1 && rows.every(row=>row.shared_profile_id);
+  if(!isCopy && !alreadyLinked && !matchingIdentity(source,target)) return false;
+  if(groups.size>1) fail('These registrations already belong to different shared profiles. Review them before linking this user.');
+  const group=[...groups][0] || randomUUID();
+  await db.query('UPDATE members SET shared_profile_id=$1,updated_at=now() WHERE id=ANY($2::int[])',[group,ids]);
+  source.shared_profile_id=group;
+  target.shared_profile_id=group;
+  return true;
 }
 
 async function copyProfile(db,source,targets,fields,{fillOnly=false}={}) {
@@ -211,21 +233,58 @@ async function publishVerifiedMemberProfile(db,{memberId,user,previousProfile}) 
     kyc_shared_count:kycShared,warnings};
 }
 
+/** Older selected-site registrations recorded KYC reuse without a profile ID.
+ * Recover those explicit links from the verified-case history, including reuse
+ * from a reused case. Never infer a link from a name or identity number alone,
+ * and never pull a registration out of another established profile group. */
+async function restoreVerifiedProfileLinks(db,source,user) {
+  // Established groups may come from an explicit selection that excluded some
+  // former KYC copies. Only repair profiles which have never been grouped.
+  if(source.shared_profile_id || !source.verified_kyc_case_id) return;
+  const {rows:targets}=await db.query(`WITH RECURSIVE related_cases AS (
+      SELECT k.id,k.reused_from_case_id FROM kyc_cases k
+      WHERE k.client_member_id=$1 AND k.site_id=$2 AND k.status='VERIFIED'
+      UNION
+      SELECT k.id,k.reused_from_case_id FROM kyc_cases k
+      JOIN related_cases related ON k.id=related.reused_from_case_id OR k.reused_from_case_id=related.id
+      JOIN members owner ON owner.id=k.client_member_id AND owner.site_id=k.site_id
+      JOIN sites owner_site ON owner_site.id=owner.site_id AND owner_site.organization_id=$3
+      WHERE k.status='VERIFIED'
+    ) SELECT m.* FROM members m JOIN sites s ON s.id=m.site_id
+    WHERE s.organization_id=$3 AND m.id<>$1
+      AND m.shared_profile_id IS NULL
+      AND EXISTS (SELECT 1 FROM kyc_cases k JOIN related_cases related ON related.id=k.id
+        WHERE k.client_member_id=m.id AND k.site_id=m.site_id)
+    ORDER BY m.id FOR UPDATE OF m`,[source.id,source.site_id,user.organization_id]);
+  if(!targets.length) return;
+  const group=source.shared_profile_id || randomUUID();
+  await db.query('UPDATE members SET shared_profile_id=$1,updated_at=now() WHERE id=ANY($2::int[])',
+    [group,[source.id,...targets.map(target=>target.id)]]);
+  source.shared_profile_id=group;
+}
+
 /** Apply identity/KYC changes only to registrations explicitly linked at add
  * time. Historical unlinked clients are not guessed from a changed mobile. */
 export async function syncSharedMemberProfile(db,{memberId,user,changedFields=[],verified=false,previousProfile}) {
   if(verified) return publishVerifiedMemberProfile(db,{memberId,user,previousProfile});
   const source=await loadSource(db,memberId,user);
-  if(!source.shared_profile_id) return {updated_count:0,kyc_shared_count:0};
+  const fields=SHARED_FIELDS.filter(field=>changedFields.includes(field));
+  if(!fields.length) return {updated_count:0,updated_site_count:0,kyc_shared_count:0};
+  await restoreVerifiedProfileLinks(db,source,user);
+  if(!source.shared_profile_id) return {updated_count:0,updated_site_count:0,kyc_shared_count:0};
   const {rows:targets}=await db.query(`SELECT m.* FROM members m JOIN sites s ON s.id=m.site_id
     WHERE s.organization_id=$1 AND m.shared_profile_id=$2 AND m.id<>$3 ORDER BY m.id FOR UPDATE OF m`,
     [user.organization_id,source.shared_profile_id,source.id]);
-  const fields=SHARED_FIELDS.filter(field=>changedFields.includes(field));
-  if(fields.some(field=>['phone','aadhar_no','pan_no'].includes(field)
-    && (!previousProfile || (field==='phone' ? normalizeMemberPhone(source[field])!==normalizeMemberPhone(previousProfile[field]) : identity(source[field])!==identity(previousProfile[field]))))) {
-    const matches=await identityMatches(db,source,user.organization_id);
+  const changedIdentities=fields.filter(field=>['phone','aadhar_no','pan_no'].includes(field)
+    && (!previousProfile || (field==='phone' ? normalizeMemberPhone(source[field])!==normalizeMemberPhone(previousProfile[field]) : identity(source[field])!==identity(previousProfile[field]))));
+  if(changedIdentities.length) {
+    // An unchanged legacy mobile/PAN elsewhere must not block correcting the
+    // Aadhaar. Check only the identity values actually being replaced.
+    const matches=await identityMatches(db,source,user.organization_id,changedIdentities);
     if(matches.some(target=>target.shared_profile_id!==source.shared_profile_id)) fail('These identity details belong to another client in a site. No shared profile changes were saved.');
   }
   await copyProfile(db,source,targets,fields);
-  return {updated_count:targets.length,kyc_shared_count:0};
+  return {shared_profile_id:source.shared_profile_id,updated_count:targets.length,
+    updated_site_count:new Set(targets.filter(target=>Number(target.site_id)!==Number(source.site_id)).map(target=>target.site_id)).size,
+    kyc_shared_count:0};
 }

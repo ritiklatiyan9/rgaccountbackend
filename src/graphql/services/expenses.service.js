@@ -59,6 +59,8 @@ function normalizeFilters(filters = {}) {
     normalized.related_member_ids = filters.related_member_ids;
   }
 
+  if (Array.isArray(filters.expense_ids)) normalized.expense_ids = filters.expense_ids;
+
   return normalized;
 }
 

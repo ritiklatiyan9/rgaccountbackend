@@ -1,8 +1,10 @@
 import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
-import { lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
+import { linkMemberSiteRegistration, lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
 import { reviewMemberIdentity, linkMemberIdentity } from '../services/memberIdentityLink.service.js';
 import { resolveMemberIdentityId } from '../services/memberIdentityConsolidation.service.js';
 import { findSiteRegistrationMatches, getSiteRegistrationStatus } from '../services/memberSiteRegistration.service.js';
+import { getMemberLinks, MEMBER_LINK_MODULES } from '../services/memberLinks.service.js';
+import permissionModel from '../models/Permission.model.js';
 import { copyIncorporatedKycDocuments } from '../services/memberKycDocuments.service.js';
 export { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { linkSelectedMemberPlot } from '../services/memberPlotSelection.service.js';
@@ -454,10 +456,15 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
           continue;
         }
 
-        const [matched] = await findSiteRegistrationMatches(client, {
+        const matches = await findSiteRegistrationMatches(client, {
           memberIds: [source.id], siteIds: [targetSiteId], lock: true, includeProfile: true,
         });
+        const [matched] = matches;
         if (matched) {
+          if(matches.length>1 && (!source.shared_profile_id || matched.shared_profile_id!==source.shared_profile_id)) {
+            throw Object.assign(new Error('More than one matching client exists in a site. Review the registrations before linking this user.'),{statusCode:409});
+          }
+          await linkMemberSiteRegistration(client,{source,target:matched,user});
           const reuse = await reuseVerifiedKycForMember(client, {
             source, targetMember: matched, siteId: targetSiteId, userId: user.id,
           });
@@ -478,6 +485,7 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
           if (source[field] !== undefined) copy[field] = source[field];
         });
         const cloned = await memberModel.create(copy, client);
+        await linkMemberSiteRegistration(client,{source,target:cloned,user,isCopy:true});
         const reuse = await reuseVerifiedKycForMember(client, {
           source, targetMember: cloned, siteId: targetSiteId, userId: user.id,
         });
@@ -632,6 +640,22 @@ export const getMember = asyncHandler(async (req, res) => {
   res.json({ member: { ...member, ...Object.fromEntries(documentUrls), plots: plots.get(String(member.id)) || [] } });
 });
 
+/** GET /members/:id/links?site_id=X&scope=all */
+export const getMemberLinkedRecords = asyncHandler(async (req, res) => {
+  const memberId = await resolveMemberIdentityId(pool, Number(req.params.id), req.user);
+  const siteId = req.query.site_id == null ? null : Number(req.query.site_id);
+  if (!Number.isSafeInteger(memberId) || memberId <= 0 || (siteId !== null && (!Number.isSafeInteger(siteId) || siteId <= 0))) {
+    return res.status(400).json({ message: 'A valid client and site are required.' });
+  }
+  const permissions = new Map();
+  if (!['admin', 'super_admin'].includes(req.user.role)) {
+    await Promise.all([...new Set(MEMBER_LINK_MODULES.map(module => module.permission))].map(async module => {
+      permissions.set(module, await permissionModel.getPermission(req.user.id, module));
+    }));
+  }
+  res.json(await getMemberLinks(pool, { memberId, siteId, user: req.user, permissions, allSites: req.query.scope === 'all' }));
+});
+
 /** GET /members/:id/identity-review */
 export const getMemberIdentityReview = asyncHandler(async (req, res) => {
   const memberId = await resolveMemberIdentityId(pool, Number(req.params.id), req.user);
@@ -749,6 +773,7 @@ export const updateMember = asyncHandler(async (req, res) => {
     }
     const sharing=identityLink ? {updated_count:identityLink.registration_count-1,kyc_shared_count:identityLink.kyc_shared_count}
       : await syncSharedMemberProfile(client,{memberId,user:req.user,changedFields:Object.keys(data),previousProfile:existing});
+    if(sharing.shared_profile_id) updated.shared_profile_id=sharing.shared_profile_id;
     await client.query('COMMIT');
     return res.json({member:updated,sharing,identity_link:identityLink});
   } catch (error) {await client.query('ROLLBACK');throw error;}

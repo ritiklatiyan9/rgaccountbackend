@@ -211,6 +211,13 @@ export const listVendorCommitments = asyncHandler(async (req, res) => {
   const conditions = ['vc.site_id = $1'];
   const values = [siteId];
   let paramIdx = 2;
+  if (req.query.record_ids !== undefined) {
+    const raw = String(req.query.record_ids);
+    const ids = raw ? raw.split(',').map(Number) : [];
+    if (ids.some(id => !Number.isSafeInteger(id) || id <= 0)) return res.status(400).json({ message: 'Invalid linked record filter' });
+    conditions.push(`vc.id = ANY($${paramIdx++}::int[])`);
+    values.push(ids);
+  }
   if (dateFrom) { conditions.push(`vc.start_date >= $${paramIdx}::date`); values.push(dateFrom); paramIdx++; }
   if (dateTo) { conditions.push(`vc.start_date <= $${paramIdx}::date`); values.push(dateTo); paramIdx++; }
 

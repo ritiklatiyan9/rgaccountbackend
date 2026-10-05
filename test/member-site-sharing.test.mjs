@@ -147,6 +147,106 @@ test('manual registration reuses the previewed registration and completes existi
   assert.equal((await query('SELECT count(*)::int AS n FROM members')).rows[0].n,3);
 });
 
+test('manual site registration links verified profiles so edits from any registered site update all copies', async t => {
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data({aadhar_no:'123456789012',email:'old@example.test',bank_name:'OLD BANK'}),db);
+  await verifiedCase(db,source);
+  const existing=await memberModel.create(data({site_id:2,aadhar_no:source.aadhar_no}),db);
+  await verifiedCase(db,existing);
+  const unrelated=await memberModel.create(data({site_id:4,aadhar_no:source.aadhar_no}),db);
+  const registered=await invoke(registerMemberInSites,{site_ids:[2,3]},{id:source.id});
+  assert.equal(registered.status,201);
+  const members=(await query('SELECT * FROM members WHERE site_id<>4 ORDER BY site_id')).rows;
+  assert.ok(members[0].shared_profile_id);
+  assert.ok(members.every(row=>row.shared_profile_id===members[0].shared_profile_id));
+  const casesBefore=(await query('SELECT * FROM kyc_cases ORDER BY id')).rows;
+  const updated=await invoke(updateMember,{aadhar_no:'234567890123',pan_no:'ABCDE1234F',
+    full_name:'CORRECTED CLIENT',address:'New address',email:'',bank_name:'NEW BANK',nominee_name:'NEW NOMINEE'}, {id:existing.id});
+  assert.equal(updated.status,200);
+  assert.equal(updated.data.sharing.updated_site_count,2);
+  for(const row of (await query('SELECT * FROM members WHERE site_id<>4')).rows) {
+    assert.equal(row.aadhar_no,'234567890123');assert.equal(row.pan_no,'ABCDE1234F');
+    assert.equal(row.full_name,'CORRECTED CLIENT');assert.equal(row.address,'New address');
+    assert.equal(row.email,null);assert.equal(row.bank_name,'NEW BANK');assert.equal(row.nominee_name,'NEW NOMINEE');
+  }
+  assert.deepEqual((await query('SELECT * FROM kyc_cases ORDER BY id')).rows,casesBefore);
+  assert.equal((await query('SELECT aadhar_no,shared_profile_id FROM members WHERE id=$1',[unrelated.id])).rows[0].aadhar_no,source.aadhar_no);
+  assert.deepEqual((await query('SELECT amount::text FROM financial_entries ORDER BY id')).rows.map(row=>row.amount),['12345.67','987.65']);
+});
+
+test('registering a profile without identity fields still links its newly created site copies', async t => {
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data({phone:null}),db);
+  const saved=await invoke(registerMemberInSites,{site_ids:[2,3]},{id:source.id});
+  assert.equal(saved.status,201);
+  await invoke(updateMember,{address:'Shared address'},{id:saved.data.created[1].member_id});
+  assert.ok((await query('SELECT address FROM members')).rows.every(row=>row.address==='Shared address'));
+});
+
+test('manual registration does not link a different person found through a reused mobile', async t => {
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data(),db);
+  await verifiedCase(db,source);
+  const unrelated=await memberModel.create(data({site_id:2,full_name:'OTHER PERSON'}),db);
+  await invoke(registerMemberInSites,{site_ids:[2,3]},{id:source.id});
+  await invoke(updateMember,{address:'Shared address'},{id:source.id});
+  const after=(await query('SELECT * FROM members WHERE id=$1',[unrelated.id])).rows[0];
+  assert.equal(after.shared_profile_id,null);assert.equal(after.address,null);
+});
+
+test('editing an older verified KYC copy restores its reuse links across sites without guessing independent registrations',async t=>{
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data({aadhar_no:'123456789012'}),db);
+  const originalCase=await verifiedCase(db,source);
+  const second=await memberModel.create(data({site_id:2,aadhar_no:source.aadhar_no}),db);
+  const secondCase=await verifiedCase(db,second);
+  const third=await memberModel.create(data({site_id:3,aadhar_no:source.aadhar_no}),db);
+  const thirdCase=await verifiedCase(db,third);
+  await query('UPDATE kyc_cases SET reused_from_case_id=$1 WHERE id=$2',[originalCase.id,secondCase.id]);
+  await query('UPDATE kyc_cases SET reused_from_case_id=$1 WHERE id=$2',[secondCase.id,thirdCase.id]);
+  const independent=await memberModel.create(data({site_id:3,aadhar_no:source.aadhar_no}),db);
+  await verifiedCase(db,independent);
+  const otherOrg=await memberModel.create(data({site_id:4,aadhar_no:source.aadhar_no}),db);
+  const foreignCase=await verifiedCase(db,otherOrg);
+  await query('UPDATE kyc_cases SET reused_from_case_id=$1 WHERE id=$2',[originalCase.id,foreignCase.id]);
+  const result=await invoke(updateMember,{aadhar_no:'234567890123',email:'new@example.test'},{id:second.id});
+  assert.equal(result.status,200);assert.equal(result.data.sharing.updated_site_count,2);
+  const repaired=(await query('SELECT * FROM members WHERE id=ANY($1::int[])',[[source.id,second.id,third.id]])).rows;
+  assert.ok(result.data.member.shared_profile_id);
+  assert.ok(repaired.every(row=>row.shared_profile_id===result.data.member.shared_profile_id && row.aadhar_no==='234567890123' && row.email==='new@example.test'));
+  for(const id of [independent.id,otherOrg.id]) {
+    const untouched=(await query('SELECT * FROM members WHERE id=$1',[id])).rows[0];
+    assert.equal(untouched.shared_profile_id,null);assert.equal(untouched.aadhar_no,source.aadhar_no);assert.equal(untouched.email,null);
+  }
+});
+
+test('edits never reattach verified KYC copies omitted from an established profile group',async t=>{
+  const {db,query}=await fixture(t);
+  const source=(await invoke(createMember,{site_id:1,full_name:'Test Client',phone:'9876543210'})).data.member;
+  const originalCase=await verifiedCase(db,source);
+  const omitted=await memberModel.create(data({site_id:2}),db);
+  const omittedCase=await verifiedCase(db,omitted);
+  await query('UPDATE kyc_cases SET reused_from_case_id=$1 WHERE id=$2',[originalCase.id,omittedCase.id]);
+  await invoke(updateMember,{address:'Shared address'},{id:source.id});
+  const after=(await query('SELECT * FROM members WHERE id=$1',[omitted.id])).rows[0];
+  assert.equal(after.shared_profile_id,null);assert.equal(after.address,null);
+});
+
+test('manual registration requires review for ambiguous matches and preserves separate established groups',async t=>{
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data(),db);
+  await memberModel.create(data({site_id:2}),db);await memberModel.create(data({site_id:2}),db);
+  assert.equal((await invoke(registerMemberInSites,{site_ids:[3,2]},{id:source.id})).status,409);
+  assert.equal((await query('SELECT count(*)::int AS n FROM members WHERE site_id=3')).rows[0].n,0);
+  assert.ok((await query('SELECT shared_profile_id FROM members')).rows.every(row=>row.shared_profile_id===null));
+  await query('DELETE FROM members WHERE id=(SELECT max(id) FROM members)');
+  await query('UPDATE members SET shared_profile_id=$1 WHERE id=$2',['11111111-1111-4111-8111-111111111111',source.id]);
+  await query('UPDATE members SET shared_profile_id=$1 WHERE site_id=2',['22222222-2222-4222-8222-222222222222']);
+  const before=(await query('SELECT * FROM members ORDER BY id')).rows;
+  assert.equal((await invoke(registerMemberInSites,{site_ids:[2,3]},{id:source.id})).status,409);
+  assert.deepEqual((await query('SELECT * FROM members ORDER BY id')).rows,before);
+});
+
 test('preview rejects malformed selections before querying and deduplicates valid IDs', async t => {
   const {db}=await fixture(t);
   const source=await memberModel.create(data(),db);
@@ -250,6 +350,19 @@ test('a cross-site phone conflict rolls back all profile edits, and unlinked leg
   const legacy=await memberModel.create(data({site_id:3,phone:'9000000002'}),db);
   const result=await transaction(db,()=>syncSharedMemberProfile(db,{memberId:legacy.id,user,changedFields:['phone']}));
   assert.equal(result.updated_count,0);
+});
+
+test('Aadhaar corrections ignore unchanged legacy identity duplicates but reject a conflicting new Aadhaar atomically',async t=>{
+  const {db,query}=await fixture(t);
+  const source=(await invoke(createMember,{site_id:1,full_name:'Test Client',phone:'9876543210',aadhar_no:'123456789012',pan_no:'ABCDE1234F'})).data.member;
+  await verifiedCase(db,source);
+  const legacy=await memberModel.create(data({site_id:2,full_name:'OTHER CLIENT',pan_no:source.pan_no}),db);
+  const updated=await invoke(updateMember,{aadhar_no:'234567890123'},{id:source.id});
+  assert.equal(updated.status,200);
+  assert.ok((await query('SELECT aadhar_no FROM members WHERE shared_profile_id=$1',[source.shared_profile_id])).rows.every(row=>row.aadhar_no==='234567890123'));
+  await query('UPDATE members SET aadhar_no=$1 WHERE id=$2',['345678901234',legacy.id]);
+  await assert.rejects(invoke(updateMember,{aadhar_no:'345678901234',address:'Must roll back'},{id:source.id}),{statusCode:409});
+  assert.ok((await query('SELECT aadhar_no,address FROM members WHERE shared_profile_id=$1',[source.shared_profile_id])).rows.every(row=>row.aadhar_no==='234567890123' && row.address===null));
 });
 
 test('failures while copying KYC documents roll back registrations, links and verification together',async t=>{

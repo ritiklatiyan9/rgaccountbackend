@@ -386,7 +386,7 @@ class ExpenseModel extends MasterModel {
    * Calculates running balance dynamically across both tables.
    */
   async findPaginatedUnified(siteId, filters, page = 1, limit = 20, pool) {
-    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by, related_member_ids, entry_origin } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, missing_bill, order = 'desc', only_site, created_by, related_member_ids, expense_ids, entry_origin } = filters;
     const offset = (Math.max(1, page) - 1) * limit;
     const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -423,6 +423,11 @@ class ExpenseModel extends MasterModel {
     const party = buildRelatedPartyWhere(related_member_ids, params, pIdx, 'u.original_id');
     if (party.clause) whereClause += ` AND u.source = 'expenses'${party.clause}`;
     pIdx = party.pIdx;
+
+    if (Array.isArray(expense_ids)) {
+      whereClause += ` AND u.source = 'expenses' AND u.original_id = ANY($${pIdx++}::int[])`;
+      params.push(expense_ids);
+    }
 
     const filterParams = [...params]; // snapshot before LIMIT/OFFSET
 
@@ -615,7 +620,7 @@ class ExpenseModel extends MasterModel {
    * Unified Breakdown stats based on the active filters
    */
   async getUnifiedBreakdowns(siteId, filters, pool) {
-    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, only_site, created_by, related_member_ids, entry_origin } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, only_site, created_by, related_member_ids, expense_ids, entry_origin } = filters;
     const params = [siteId];
     let pIdx = 2;
     let whereClause = '';
@@ -644,13 +649,17 @@ class ExpenseModel extends MasterModel {
       pIdx++;
     }
 
+    if (Array.isArray(expense_ids)) {
+      whereClause += ` AND u.id = ANY($${pIdx++}::int[])`;
+      params.push(expense_ids);
+    }
     const party = buildRelatedPartyWhere(related_member_ids, params, pIdx, 'u.id');
     whereClause += party.clause;
     pIdx = party.pIdx;
 
     // When only_site=true, use simplified queries against expenses table only.
     // A client filter means expense rows only, exactly as the list applies it.
-    if (only_site === 'true' || party.clause) {
+    if (only_site === 'true' || party.clause || Array.isArray(expense_ids)) {
       const modeQ = `
         SELECT COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode,
           COALESCE(SUM(debit), 0)::numeric as total_debit,
