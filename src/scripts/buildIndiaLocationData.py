@@ -3,8 +3,10 @@ import gzip
 import json
 import sys
 import zipfile
+import math
 from collections import defaultdict
 from pathlib import Path
+from statistics import median
 
 postal_path, cities_path, admin1_path, admin2_path = sys.argv[1:5]
 
@@ -29,6 +31,14 @@ with zipfile.ZipFile(postal_path) as archive:
 postal = []
 for pin, rows in sorted(pins.items()):
     pairs = set((r[2], r[3]) for r in rows)
+    center = (median(p[0] for p in pairs), median(p[1] for p in pairs))
+    # A few postal rows have coordinates of a distant namesake. A robust
+    # center excludes those outliers instead of dragging the PIN across India.
+    inliers = {p for p in pairs if math.hypot((p[0]-center[0])*111, (p[1]-center[1])*111*math.cos(math.radians(center[0]))) <= 100}
+    if len(inliers) <= len(pairs)/2:
+        continue
+    rows = [r for r in rows if (r[2], r[3]) in inliers]
+    pairs = inliers
     states = sorted(set(r[0] for r in rows))
     districts = sorted(set(r[1] for r in rows))
     if len(states) != 1:

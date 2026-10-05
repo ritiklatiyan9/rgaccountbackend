@@ -7,10 +7,12 @@ import { backupMaintenanceEnabled } from '../src/middlewares/backupMaintenance.m
 import pool from '../src/config/db.js';
 import { up as migrateMemberSiteSharing } from '../src/migrations/187_member_site_sharing.js';
 import { up as migrateMemberIdentityLinking } from '../src/migrations/192_member_identity_linking.js';
+import { up as migrateMemberIdentityConsolidation } from '../src/migrations/194_member_identity_consolidation.js';
 import { up as migrateTdsDeducteeMapping } from '../src/migrations/191_tds_deductee_mapping.js';
 import { up as migrateDataStorage } from '../src/migrations/193_data_storage.js';
 await migrateMemberSiteSharing(pool);
 await migrateMemberIdentityLinking(pool);
+await migrateMemberIdentityConsolidation(pool);
 await migrateTdsDeducteeMapping(pool);
 await migrateDataStorage(pool);
 const server = http.createServer(app);

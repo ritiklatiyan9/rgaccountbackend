@@ -148,12 +148,15 @@ export const listDeductees = asyncHandler(async (req, res) => {
   const siteId = await siteFor(req.user, req.query.site_id);
   const q = String(req.query.q ?? '').trim().slice(0, 100);
   const { rows } = await pool.query(
-    `SELECT id, full_name, phone, UPPER(NULLIF(TRIM(pan_no), '')) AS pan,
+    `SELECT id, full_name, phone, to_jsonb(members)->>'alt_phone' AS alt_phone,
+       to_jsonb(members)->>'whatsapp' AS whatsapp, UPPER(NULLIF(TRIM(pan_no), '')) AS pan,
        NULLIF(regexp_replace(COALESCE(aadhar_no, ''), '\\D', '', 'g'), '') AS aadhaar
      FROM members WHERE site_id=$1 AND UPPER(COALESCE(to_jsonb(members)->>'status','ACTIVE')) <> 'BLOCKED'
-       AND ($2='%%' OR full_name ILIKE $2 OR phone ILIKE $2 OR pan_no ILIKE $2)
+       AND ($2='%%' OR full_name ILIKE $2 OR phone ILIKE $2 OR pan_no ILIKE $2
+         OR to_jsonb(members)->>'alt_phone' ILIKE $2 OR to_jsonb(members)->>'whatsapp' ILIKE $2
+         OR ($3<>'' AND regexp_replace(CONCAT_WS(' ',phone,to_jsonb(members)->>'alt_phone',to_jsonb(members)->>'whatsapp'),'[^0-9]','','g') LIKE '%'||$3||'%'))
      ORDER BY full_name, id`,
-    [siteId, `%${q.replace(/[\\%_]/g, '\\$&')}%`],
+    [siteId, `%${q.replace(/[\\%_]/g, '\\$&')}%`, /\d/.test(q) && !/\p{L}/u.test(q) ? q.replace(/\D/g, '').slice(-10) : ''],
   );
   res.json({ deductees: rows });
 });

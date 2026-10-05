@@ -1,6 +1,7 @@
 import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
 import { reviewMemberIdentity, linkMemberIdentity } from '../services/memberIdentityLink.service.js';
+import { resolveMemberIdentityId } from '../services/memberIdentityConsolidation.service.js';
 import { copyIncorporatedKycDocuments } from '../services/memberKycDocuments.service.js';
 export { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { linkSelectedMemberPlot } from '../services/memberPlotSelection.service.js';
@@ -634,7 +635,8 @@ export const getMemberAutocomplete = asyncHandler(async (req, res) => {
 
 /** GET /members/:id */
 export const getMember = asyncHandler(async (req, res) => {
-  const member = await memberModel.findByIdWithKyc(parseInt(req.params.id), pool);
+  const memberId = await resolveMemberIdentityId(pool, parseInt(req.params.id), req.user);
+  const member = await memberModel.findByIdWithKyc(memberId, pool);
   if (!member) return res.status(404).json({ message: 'Member not found' });
   const site = await assertMemberSiteAccess(pool, req.user, member.site_id);
   if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
@@ -647,7 +649,7 @@ export const getMember = asyncHandler(async (req, res) => {
 
 /** GET /members/:id/identity-review */
 export const getMemberIdentityReview = asyncHandler(async (req, res) => {
-  const memberId = Number(req.params.id);
+  const memberId = await resolveMemberIdentityId(pool, Number(req.params.id), req.user);
   if (!Number.isSafeInteger(memberId) || memberId <= 0) return res.status(400).json({ message: 'A valid user is required.' });
   const { summary } = await reviewMemberIdentity(pool, {
     memberId, user: req.user, phone: req.query.phone,
@@ -658,7 +660,7 @@ export const getMemberIdentityReview = asyncHandler(async (req, res) => {
 
 /** PUT /members/:id */
 export const updateMember = asyncHandler(async (req, res) => {
-  const memberId = parseInt(req.params.id);
+  const memberId = await resolveMemberIdentityId(pool, parseInt(req.params.id), req.user);
 
   // Run all 3 in PARALLEL: existence/site lookup, phone uniqueness, document uploads.
   // The phone check runs unconditionally (with `$2 IS NULL` guard) so we don't add a serial step.
@@ -756,11 +758,12 @@ export const updateMember = asyncHandler(async (req, res) => {
         LIMIT 1`,[existing.site_id,memberId,data.phone]);
       if(rows.length) throw Object.assign(new Error('This mobile number is already registered in this site.'),{statusCode:409});
     }
-    const updated = await memberModel.update(memberId, data, client);
+    const updated = identityLink ? await memberModel.findById(memberId, client)
+      : await memberModel.update(memberId, data, client);
     if (req.body.plot_id != null && req.body.plot_id !== '') {
       await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId, siteId: existing.site_id });
     }
-    const sharing=identityLink ? {updated_count:identityLink.registration_count-1,kyc_shared_count:0}
+    const sharing=identityLink ? {updated_count:identityLink.registration_count-1,kyc_shared_count:identityLink.kyc_shared_count}
       : await syncSharedMemberProfile(client,{memberId,user:req.user,changedFields:Object.keys(data),previousProfile:existing});
     await client.query('COMMIT');
     return res.json({member:updated,sharing,identity_link:identityLink});
@@ -810,7 +813,7 @@ export const bulkDeleteMembers = asyncHandler(async (req, res) => {
 
 /** GET /members/:id/transactions?site_id=X */
 export const getMemberTransactions = asyncHandler(async (req, res) => {
-  const memberId = parseInt(req.params.id);
+  const memberId = await resolveMemberIdentityId(pool, parseInt(req.params.id), req.user);
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
@@ -875,7 +878,7 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
 
 /** GET /members/:id/financial-info?site_id=X */
 export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
-  const memberId = parseInt(req.params.id);
+  const memberId = await resolveMemberIdentityId(pool, parseInt(req.params.id), req.user);
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 

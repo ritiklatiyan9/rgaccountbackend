@@ -66,7 +66,7 @@ async function copyProfile(db,source,targets,fields,{fillOnly=false}={}) {
   await db.query(`UPDATE members SET ${assignments.join(',')},updated_at=now() WHERE id=ANY($${values.length}::int[])`,values);
 }
 
-async function shareVerifiedCase(db,{source,target,user,refresh=false}) {
+export async function shareVerifiedCase(db,{source,target,user,refresh=false}) {
   if(!source.verified_kyc_case_id) return false;
   const {rows:[current]}=await db.query(`SELECT id,reused_from_case_id FROM kyc_cases
     WHERE client_member_id=$1 AND site_id=$2 AND status='VERIFIED'

@@ -1,7 +1,7 @@
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { getTdsWorkflow, commissionTdsModule, parsePaymentTds } from '../services/tdsWorkflow.service.js';
-import { resolveTdsDeductee, TDS_DEDUCTEE_FIELDS } from '../services/tdsDeductee.service.js';
+import { resolveTdsDeductee, resolvePaymentDeductee, TDS_DEDUCTEE_FIELDS } from '../services/tdsDeductee.service.js';
 import { plotCommissionV2Model, plotCommissionPaymentModel } from '../models/PlotCommissionV2.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
@@ -615,7 +615,8 @@ const landSubjectDetail = async (kind, subjectId, numSiteId, entryVisibility) =>
     label: `${purchase ? 'Land purchase' : 'Land sale'} · ${meta.name}`,
     counterparty: meta.name, counterparty_label: purchase ? 'Farmer' : 'Buyer', phone: meta.phone,
     amount: num(meta.amount), amount_label: purchase ? 'Purchase price' : 'Sale price',
-    area: areaText(meta), land_name: meta.land_name, deal_date: meta.deal_date,
+    area: areaText(meta), area_bigha: num(meta.area_bigha), area_gaz: num(meta.area_gaz),
+    land_name: meta.land_name, deal_date: meta.deal_date,
     suggested_commission: num(meta.suggested_commission),
     back: { path: '/farmers/commission', label: 'Land Commission' },
   };
@@ -712,7 +713,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   await assertCommissionSite(req.user, master.site_id);
   const workflow = await getTdsWorkflow(master.site_id);
   const tds = parsePaymentTds(req.body, workflow[commissionTdsModule(master)]);
-  const deductee = await resolveTdsDeductee(req.body, master.site_id);
+  const deductee = tds.tds_amount > 0 ? await resolvePaymentDeductee(req.body, master.site_id, null, { memberId: master.agent_id, force: true }) : await resolveTdsDeductee(req.body, master.site_id);
   const numericAmount = tds.amount;
   const grossAmount = numericAmount + tds.tds_amount;
   const mode = payment_mode || 'CASH';
@@ -918,7 +919,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   const master = (await pool.query('SELECT * FROM plot_commissions_v2 WHERE id=$1', [existing.plot_commission_id])).rows[0];
   const workflow = await getTdsWorkflow(existing.site_id);
   const tds = parsePaymentTds(req.body, workflow[commissionTdsModule(master)], existing);
-  const deductee = await resolveTdsDeductee(req.body, existing.site_id, existing);
+  const deductee = tds.tds_amount > 0 ? await resolvePaymentDeductee(req.body, existing.site_id, existing, { memberId: master.agent_id, force: true }) : await resolveTdsDeductee(req.body, existing.site_id, existing);
   const { date, amount, payment_mode, bank_name, transaction_id, cheque_no, remarks, voucher_url, assigned_admin_id } = req.body;
 
   if (date !== undefined && !isValidLedgerDate(date)) {

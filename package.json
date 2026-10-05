@@ -169,7 +169,8 @@
     "migrate:google-drive-share-jobs": "node src/migrations/190_google_drive_share_jobs.js",
     "migrate:tds-deductee-mapping": "node src/migrations/191_tds_deductee_mapping.js",
     "migrate:data-storage": "node src/migrations/193_data_storage.js",
-    "test:data-storage": "node --test test/data-storage.test.mjs"
+    "test:data-storage": "node --test test/data-storage.test.mjs",
+    "migrate:member-identity-consolidation": "node src/migrations/194_member_identity_consolidation.js"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

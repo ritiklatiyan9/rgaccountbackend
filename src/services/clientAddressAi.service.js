@@ -1,17 +1,37 @@
 import { completeJson } from './openRouterStream.service.js';
-import { addressParts, cleanLocationText, cleanPin, normaliseState } from './clientLocation.js';
+import { addressParts, cleanAddressText, cleanLocationText, cleanPin, normaliseState } from './clientLocation.js';
 import { lookupIndianLocation, placeKey, sameIndianPlace } from './indiaLocationReference.js';
 
-export const addressTextForAi = member => cleanLocationText(member.address)
+export const addressTextForAi = member => (cleanAddressText(member.address) || cleanAddressText(member.permanent_address))
   .replace(/(?:C\s*\/\s*O|S\s*\/\s*O|D\s*\/\s*O|W\s*\/\s*O|CARE OF)\b[^,;]*(?:[,;]|$)/gi, ' ')
   .replace(/\b[A-Z]{5}\d{4}[A-Z]\b/gi, ' ')
   .replace(/(?<!\d)(?:\d[ -]?){8,}(?!\d)/g, ' ')
   .replace(/\b(?:HOUSE|FLAT|PLOT|DOOR|H\.?\s*NO)\s*(?:NO\.?\s*)?[\w/-]+/gi, ' ')
   .replace(/\s+/g, ' ').trim().slice(0, 1000);
 
+// Validate an AI transliteration against the printed Hindi locality. This
+// supplies no place/coordinates; it only checks the sound of a proposed name.
+const consonants = { क: 'k', ख: 'kh', ग: 'g', घ: 'gh', ङ: 'ng', च: 'ch', छ: 'chh', ज: 'j', झ: 'jh', ञ: 'ny', ट: 't', ठ: 'th', ड: 'd', ढ: 'dh', ण: 'n', त: 't', थ: 'th', द: 'd', ध: 'dh', न: 'n', प: 'p', फ: 'ph', ब: 'b', भ: 'bh', म: 'm', य: 'y', र: 'r', ल: 'l', व: 'v', श: 'sh', ष: 'sh', स: 's', ह: 'h' };
+const signs = { 'ा': 'a', 'ि': 'i', 'ी': 'i', 'ु': 'u', 'ू': 'u', 'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au', 'ृ': 'ri', '्': '' };
+const vowels = { अ: 'a', आ: 'a', इ: 'i', ई: 'i', उ: 'u', ऊ: 'u', ए: 'e', ऐ: 'ai', ओ: 'o', औ: 'au', 'ं': 'n', 'ँ': 'n' };
+const spellingKey = value => {
+  const letters = [...String(value ?? '').normalize('NFKC')];
+  let result = '';
+  for (let i = 0; i < letters.length; i++) {
+    const letter = letters[i];
+    if (consonants[letter]) {
+      let consonant = consonants[letter];
+      if (letters[i + 1] === '़') { consonant = ({ ज: 'z', फ: 'f', ड: 'r', ढ: 'rh', क: 'q' })[letter] || consonant; i++; }
+      result += consonant + (Object.hasOwn(signs, letters[i + 1]) ? signs[letters[++i]] : 'a');
+    } else result += vowels[letter] ?? (letter === '़' ? '' : letter);
+  }
+  return placeKey(result).replace(/AA/g, 'A').replace(/\b([A-Z]+)A\b/g, '$1');
+};
+
 const closeSpelling = (left, right) => {
-  const a = placeKey(left), b = placeKey(right);
-  if (a === b || sameIndianPlace(a, b)) return true;
+  if (placeKey(left) === placeKey(right) || sameIndianPlace(left, right)) return true;
+  const a = spellingKey(left), b = spellingKey(right);
+  if (a === b) return true;
   if (Math.min(a.length, b.length) < 6 || Math.abs(a.length - b.length) > 2) return false;
   let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {

@@ -1,7 +1,7 @@
-import { addressParts, cacheKey, cleanLocationText, coordinates } from './clientLocation.js';
+import { addressParts, cacheKey, cleanAddressText, coordinates } from './clientLocation.js';
 import { selectActiveDocuments } from './memberKycDocumentSelection.js';
 import { combineReviewedDocuments } from './memberKycReview.service.js';
-import { lookupIndianLocation } from './indiaLocationReference.js';
+import { isPlaceholderAddress, lookupIndianLocation } from './indiaLocationReference.js';
 
 // Only the latest verified case for this member in this site. Latest OCR result
 // per document and active document slots prevent old uploads winning a conflict.
@@ -30,33 +30,37 @@ export function applyVerifiedKycAddresses(members, documents) {
     byMember.get(String(document.member_id)).push(document);
   }
   return members.map(member => {
-    const result = { ...member, address: cleanLocationText(member.address) || cleanLocationText(member.permanent_address),
-      address_source: cleanLocationText(member.address) ? 'profile' : cleanLocationText(member.permanent_address) ? 'permanent' : null };
+    const result = { ...member, address: cleanAddressText(member.address) || cleanAddressText(member.permanent_address),
+      address_source: cleanAddressText(member.address) ? 'profile' : cleanAddressText(member.permanent_address) ? 'permanent' : null };
+    if (!result.address && [member.address, member.permanent_address, member.city, member.village, member.district, member.state, member.pincode].some(isPlaceholderAddress)) result.address_review_reason = 'placeholder';
     const rows = byMember.get(String(member.id));
     if (!rows?.length) return result;
     const reviewed = combineReviewedDocuments(selectActiveDocuments(rows));
     result.kyc_case_id = rows[0].case_id;
     // Never combine an existing profile address with fields from another KYC
     // address. KYC is a fallback, not an overwrite of reviewed profile fields.
-    if (!result.address && !reviewed.conflicts.address && reviewed.extracted.address) {
-      result.address = reviewed.extracted.address;
+    if (!result.address && !reviewed.conflicts.address && cleanAddressText(reviewed.extracted.address)) {
+      result.address = cleanAddressText(reviewed.extracted.address);
+      delete result.address_review_reason;
       result.address_source = 'kyc';
       for (const field of ['city', 'state', 'pincode']) {
-        if (!cleanLocationText(result[field]) && !reviewed.conflicts[field]) result[field] = reviewed.extracted[field] || '';
+        if (!cleanAddressText(result[field]) && !reviewed.conflicts[field]) result[field] = cleanAddressText(reviewed.extracted[field]);
       }
     }
-    result.kyc_address_needs_review = !result.address && (Boolean(reviewed.conflicts.address) || rows.some(row => row.ocr_status !== 'DONE') || reviewed.needsReprocessing.length > 0);
+    if (!result.address && isPlaceholderAddress(reviewed.extracted.address)) result.address_review_reason = 'placeholder';
+    result.kyc_address_needs_review = !result.address && (Boolean(result.address_review_reason) || Boolean(reviewed.conflicts.address) || rows.some(row => row.ocr_status !== 'DONE') || reviewed.needsReprocessing.length > 0);
     return result;
   });
 }
 
 export async function loadClientMapAddresses(members, { db, siteId }) {
   if (!members.length) return members;
-  const ids = members.filter(member => !cleanLocationText(member.address) && !cleanLocationText(member.permanent_address)).map(member => Number(member.id));
+  const ids = members.filter(member => !cleanAddressText(member.address) && !cleanAddressText(member.permanent_address)).map(member => Number(member.id));
   const documents = ids.length ? (await db.query(MAP_KYC_ADDRESSES_SQL, [siteId, ids])).rows : [];
   const enriched = applyVerifiedKycAddresses(members, documents).map(member => {
-    if (member.source === 'manual' || coordinates(member.lat, member.lng)) return member;
+    if (member.source === 'manual') return member;
     const point = lookupIndianLocation({ ...addressParts(member), address: member.address });
+    if (coordinates(member.lat, member.lng) && !point?.postal_correction) return member;
     return point ? { ...member, lat: point.lat, lng: point.lng, source: point.source, precision: point.precision } : member;
   });
   const keys = [...new Set(enriched.filter(member => member.source !== 'manual' && !coordinates(member.lat, member.lng) && addressParts(member).has_address).map(cacheKey))];

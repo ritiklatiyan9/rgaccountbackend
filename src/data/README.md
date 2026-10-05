@@ -9,6 +9,8 @@ Sources downloaded 5 October 2026:
 - https://download.geonames.org/export/dump/admin1CodesASCII.txt
 - https://download.geonames.org/export/dump/admin2Codes.txt
 
-Attribution: [GeoNames](https://www.geonames.org/), [Creative Commons Attribution 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: restricted city records to India, normalized administrative labels, and averaged distinct postal coordinates into PIN centroids. Map attribution links to GeoNames alongside OpenStreetMap.
+Attribution: [GeoNames](https://www.geonames.org/), [Creative Commons Attribution 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: restricted city records to India, normalized administrative labels, excluded postal coordinates more than 100 km from their PIN's median location, and averaged the remaining distinct coordinates into PIN centroids. PINs without a majority of nearby coordinates are omitted. Map attribution links to GeoNames alongside OpenStreetMap.
 
 To regenerate, download those four public files and run `python3 src/scripts/buildIndiaLocationData.py IN.zip cities1000.zip admin1CodesASCII.txt admin2Codes.txt`. Regeneration makes no client-data requests.
+
+`india-postal-corrections.json` records independently verified corrections to the postal dump. PIN 247776 belongs to Shamli, confirmed by the [Shamli district administration](https://shamli.nic.in/contact-us/). The dump incorrectly places it at Muzaffarnagar's coordinates and historical district. Its corrected approximate location uses the named Shamli city from the same GeoNames reference, and includes the Hindi alias शामली. Historical Muzaffarnagar labels are accepted for this PIN and reported as Shamli. These corrections take priority over saved automatic coordinates and caches; manual pins retain priority. The original member profile is not rewritten.

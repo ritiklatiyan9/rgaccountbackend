@@ -24,7 +24,7 @@ test('uses the latest evidenced KYC address, preserves a profile address, and re
   assert.equal(rows[0].raw_text, undefined); assert.equal(rows[0].extracted_fields, undefined);
   const map = buildClientMap(rows);
   assert.equal(map.summary.geocoded, 2); assert.equal(map.summary.from_kyc, 1);
-  assert.equal(map.members[0].precision, 'pincode'); assert.equal(map.members[0].location_status, 'approximate');
+  assert.equal(map.members[0].precision, 'city'); assert.equal(map.members[0].location_status, 'approximate');
 });
 
 test('conflicting active documents and unfinished replacement OCR require review', () => {
@@ -60,6 +60,77 @@ test('rejects ambiguous towns and mismatching postal regions, and ignores a city
   assert.equal(buildClientMap([{ id: 1, city: 'Meerut', source: 'manual', lat: null, lng: 77 }]).summary.geocoded, 0);
 });
 
+test('template text in verified KYC is flagged for review instead of locating the real town Amet', async () => {
+  const templates = ['Lorem ipsum dolor sit amet, consectetuer adipiscing elit', 'लोरम इप्सम डॉलर सिट अमेट, कंसेक्टेटुदुर', 'लोगम हस्त डॉलर सिट अमेट, कंकेटेडुए एंटीसिस एलिट', 'C/O Name Roxy, Xxxxxxxxx, Bxxxxxxx North, Kxxxxxxx-5XXXXX'];
+  const rows = await loadClientMapAddresses(templates.map((_, i) => ({ id: i + 1 })), {
+    siteId: 10, db: { query: async () => ({ rows: templates.map((address, i) => document(i + 1, i + 1, address)) }) },
+  });
+  const map = buildClientMap(rows);
+  assert.equal(map.summary.geocoded, 0); assert.equal(map.summary.ai_ready, 0);
+  assert.equal(map.summary.placeholder_addresses, templates.length);
+  assert.ok(rows.every(row => row.kyc_address_needs_review && row.address_review_reason === 'placeholder'));
+  for (const address of templates) {
+    assert.equal(lookupIndianLocation({ address }), null);
+    assert.equal(addressParts({ address }).has_address, false);
+    assert.equal(addressTextForAi({ address }), '');
+  }
+  assert.equal(lookupIndianLocation({ address: 'Amet, Rajasthan' }).city, 'Amet');
+  const fallback = applyVerifiedKycAddresses([{ id: 1, address: templates[0] }], [document(1, 1, 'Meerut, Uttar Pradesh')]);
+  assert.equal(fallback[0].address_source, 'kyc'); assert.equal(fallback[0].address_review_reason, undefined);
+  assert.equal(addressParts({ city: 'Bxxxxxxx North', state: 'Kxxxxxxx' }).has_address, false);
+});
+
+test('recognizes spaced OCR locality/state fields and Hindi addresses without replacing saved fields', () => {
+  const row = { id: 1, city: 'D E L H I', state: 'D E L H I' };
+  assert.equal(buildClientMap([row]).summary.geocoded, 1); assert.equal(row.city, 'D E L H I');
+  assert.equal(addressParts({ state: 'U T T A R . P R A D E S H' }).state, 'UTTAR PRADESH');
+  assert.equal(buildClientMap([{ id: 2, address: 'मेरठ, उत्तर प्रदेश' }]).summary.geocoded, 1);
+});
+
+test('postal outliers are excluded and nearby named towns improve district-centroid pins', () => {
+  const postal = lookupIndianLocation({ pincode: '250617' });
+  assert.equal(postal.district, 'Bagpat'); assert.ok(postal.lat > 29 && postal.lng < 77.7);
+  const shamli = lookupIndianLocation({ pincode: '247776', city: 'Shamli', state: 'Uttar Pradesh' });
+  assert.equal(shamli.precision, 'city'); assert.ok(shamli.lng < 77.4);
+  assert.equal(lookupIndianLocation({ pincode: '247776', city: 'Shamli', district: 'Shamli' }).city, 'Shamli');
+  assert.equal(lookupIndianLocation({ pincode: '247776', city: 'Shamli', district: 'Meerut' }), null);
+});
+
+test('247776 resolves to Shamli even without a city or with historical Muzaffarnagar labels', () => {
+  for (const input of [
+    { pincode: '247776' },
+    { pincode: '247776', city: 'Muzaffarnagar', district: 'Muzaffarnagar' },
+    { pincode: '247776', city: 'शामली', district: 'Muzaffarnagar' },
+    { address: 'PO: SHAMLI, DIST: SHAMLI, UTTAR PRADESH - 247776' },
+  ]) {
+    const parts = addressParts(input);
+    const point = lookupIndianLocation({ ...parts, address: input.address });
+    assert.equal(parts.city, input.city === 'शामली' ? 'शामली' : 'SHAMLI'); assert.equal(parts.district, 'SHAMLI');
+    assert.equal(point.city, 'Shamli'); assert.equal(point.district, 'Shamli');
+    assert.ok(point.lat > 29.44 && point.lat < 29.46 && point.lng > 77.30 && point.lng < 77.32);
+  }
+  assert.equal(lookupIndianLocation({ pincode: '247776', state: 'Rajasthan' }), null);
+});
+
+test('corrected postal reference replaces stale automatic pins while preserving manual pins and profile data', async () => {
+  const rows = [
+    { id: 1, pincode: '247776', city: 'Muzaffarnagar', district: 'Muzaffarnagar', lat: 29.4146, lng: 77.7433, source: 'nominatim' },
+    { id: 2, pincode: '247776', lat: 29.4146, lng: 77.7433, source: 'manual' },
+    { id: 3, pincode: '247776', city: 'शामली', lat: 29.4146, lng: 77.7433, source: 'ai_geonames' },
+  ];
+  const snapshot = structuredClone(rows);
+  const queries = [];
+  const resolved = await loadClientMapAddresses(rows, { siteId: 5, db: { query: async sql => { queries.push(sql); return { rows: [] }; } } });
+  for (const map of [buildClientMap(rows), buildClientMap(resolved)]) {
+    assert.ok(map.members[0].lng < 77.32 && map.members[2].lng < 77.32);
+    assert.equal(map.members[0].city, 'SHAMLI'); assert.equal(map.members[0].district, 'SHAMLI');
+    assert.equal(map.members[1].lng, 77.7433); assert.equal(map.members[1].location_status, 'manual');
+    assert.equal(map.summary.geocoded, 3);
+  }
+  assert.deepEqual(rows, snapshot);
+  assert.ok(queries.every(sql => !/\b(?:UPDATE|INSERT|DELETE)\b/i.test(sql)));
+});
+
 const aiPayload = { fields: { city: 'Meerut', state: 'Uttar Pradesh' }, evidence: { city: 'Meerutt', state: 'Uttar Pradesh' }, confidence: { city: 0.99, state: 0.99 } };
 const typoAddress = { address: 'Market, Meerutt, Uttar Pradesh' };
 test('AI repairs evidenced spelling only and gets coordinates from the public reference', () => {
@@ -69,6 +140,13 @@ test('AI repairs evidenced spelling only and gets coordinates from the public re
   assert.equal(validateAiLocality({ ...aiPayload, fields: { city: 'Mumbai' } }, typoAddress), null);
   assert.equal(validateAiLocality({ ...aiPayload, confidence: { city: 0.8 } }, typoAddress), null);
   assert.equal(validateAiLocality({ fields: { pincode: '250001' }, evidence: { pincode: '250001' }, confidence: { pincode: 0.99 } }, { address: 'Meerut' }), null);
+});
+
+test('AI transliteration must match the printed Hindi town and cannot substitute a different city', () => {
+  const member = { address: 'शामलि, उत्तर प्रदेश' };
+  const payload = { fields: { city: 'Shamli', state: 'Uttar Pradesh' }, evidence: { city: 'शामलि', state: 'उत्तर प्रदेश' }, confidence: { city: 0.99, state: 0.99 } };
+  assert.equal(validateAiLocality(payload, member).city, 'Shamli');
+  assert.equal(validateAiLocality({ ...payload, fields: { ...payload.fields, city: 'Mumbai' } }, member), null);
 });
 
 test('AI gets only address fields; removed relatives, IDs and contact details are never submitted', async () => {

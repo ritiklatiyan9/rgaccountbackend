@@ -1,4 +1,4 @@
-import { addressParts, coordinates, cleanLocationText, normaliseLocation } from './clientLocation.js';
+import { addressParts, coordinates, cleanAddressText, cleanLocationText, normaliseLocation } from './clientLocation.js';
 import { lookupIndianLocation } from './indiaLocationReference.js';
 
 // One snapshot, one ledger aggregation and one owner per plot. Name matching is
@@ -56,19 +56,20 @@ const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
 export function buildClientMap(rows, { siteId, unlinked = {} } = {}) {
   const members = [];
   const seen = new Set();
-  const summary = { total: 0, geocoded: 0, manual: 0, approx: 0, with_address: 0, from_kyc: 0, auto_located: 0, ready_to_locate: 0, ai_ready: 0, invalid_pincode: 0 };
+  const summary = { total: 0, geocoded: 0, manual: 0, approx: 0, with_address: 0, from_kyc: 0, placeholder_addresses: 0, auto_located: 0, ready_to_locate: 0, ai_ready: 0, invalid_pincode: 0 };
   for (const row of rows) {
     if (row.id == null || seen.has(String(row.id))) continue;
     seen.add(String(row.id));
     const address = addressParts(row);
     const saved = coordinates(row.lat, row.lng);
-    const inferred = !saved && row.source !== 'manual' ? lookupIndianLocation({ ...address, address: cleanLocationText(row.address) || row.permanent_address }) : null;
-    const coord = saved || inferred;
+    const candidate = row.source !== 'manual' ? lookupIndianLocation({ ...address, address: cleanAddressText(row.address) || cleanAddressText(row.permanent_address) }) : null;
+    const inferred = candidate && (!saved || candidate.postal_correction) ? candidate : null;
+    const coord = inferred || saved;
     const source = inferred?.source || row.source;
     const roles = [...new Set([row.member_type, ...(Array.isArray(row.member_types) ? row.member_types : [])].map(normaliseLocation).filter(Boolean))];
     const member = {
       ...row, ...address, lat: coord?.lat ?? null, lng: coord?.lng ?? null,
-      address: cleanLocationText(row.address) || cleanLocationText(row.permanent_address), name: cleanLocationText(row.name),
+      address: cleanAddressText(row.address) || cleanAddressText(row.permanent_address), name: cleanLocationText(row.name),
       source, precision: inferred?.precision || row.precision,
       member_type: roles[0] || 'OTHER', member_types: roles.length ? roles : ['OTHER'],
       location_status: coord ? (source === 'manual' ? 'manual' : 'approximate') : (address.can_geocode && source !== 'manual' ? 'pending' : 'needs_address'),
@@ -80,6 +81,7 @@ export function buildClientMap(rows, { siteId, unlinked = {} } = {}) {
     if (coord) { summary.geocoded++; summary[source === 'manual' ? 'manual' : 'approx']++; }
     if (inferred || source === 'geonames' || source === 'ai_geonames') summary.auto_located++;
     if (row.address_source === 'kyc') summary.from_kyc++;
+    if (row.address_review_reason === 'placeholder') summary.placeholder_addresses++;
     if (address.has_address) summary.with_address++;
     if (!coord && address.can_geocode && row.source !== 'manual') summary.ready_to_locate++;
     if (!coord && address.has_address && row.source !== 'manual') summary.ai_ready++;

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { memberModel } from '../models/Member.model.js';
 import { DOC_FIELDS } from './memberProfileFields.js';
 import { assertMemberSiteAccess, normalizeMemberPhone, REUSABLE_KYC_PROFILE_FIELDS } from './memberPhoneReuse.service.js';
+import { consolidateMemberRegistrations } from './memberIdentityConsolidation.service.js';
 
 const sharedFields = [...new Set([...REUSABLE_KYC_PROFILE_FIELDS, ...DOC_FIELDS])];
 const fail = (message, statusCode = 409, code = 'MEMBER_IDENTITY_CONFLICT') => {
@@ -68,7 +69,7 @@ export async function reviewMemberIdentity(db, { memberId, user, phone, aadharNo
   } };
 }
 
-/** Link registrations; never delete members, move transactions or change roles.
+/** Link selected identities and consolidate duplicate registrations within a site.
  * The selected profile supplies KYC; the submitted name/mobile are authoritative.
  * All work, including the history record, is committed with the user's edit. */
 export async function linkMemberIdentity(db, { review, user, profileMemberId, selectedMemberIds, revision, data }) {
@@ -117,15 +118,20 @@ export async function linkMemberIdentity(db, { review, user, profileMemberId, se
   for (const member of selected) {
     await memberModel.update(member.id, { ...shared, shared_profile_id: group, updated_at: updatedAt }, db);
   }
-  // The normal update runs after this. Use the chosen profile for hidden KYC
-  // fields rather than the stale values echoed by the short Edit User form.
+  // Use the chosen profile for hidden KYC fields rather than the stale values
+  // echoed by the short Edit User form.
   for (const field of sharedFields) delete data[field];
   Object.assign(data, shared);
+  // Apply the edited site's fields before consolidation. Its role selection and
+  // short-form blanks must not overwrite roles/notes recovered from duplicates.
+  await memberModel.update(review.source.id, data, db);
   const after = selected.map(member => snapshot({ ...member, ...shared, shared_profile_id: group, updated_at: updatedAt }));
   await db.query(`INSERT INTO member_identity_link_events
     (organization_id,member_id,user_id,shared_profile_id,profiles_before,profiles_after)
     VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)`,
     [user.organization_id, review.source.id, user.id, group, JSON.stringify(before), JSON.stringify(after)]);
-  return { shared_profile_id: group, registration_count: selected.length,
+  const consolidation = await consolidateMemberRegistrations(db, { memberIds: selected.map(row => row.id),
+    sourceMemberId: review.source.id, profileMemberId: profile.id, user, originalProfiles: selected });
+  return { ...consolidation, shared_profile_id: group, registration_count: selected.length,
     member_ids: selected.map(row => row.id), site_count: new Set(selected.map(row => row.site_id)).size };
 }

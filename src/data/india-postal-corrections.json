@@ -1,0 +1,13 @@
+[
+  {
+    "pincode": "247776",
+    "city": "Shamli",
+    "district": "Shamli",
+    "state": "Uttar Pradesh",
+    "previous_districts": ["Muzaffarnagar"],
+    "aliases": ["शामली"],
+    "verified_on": "2026-10-05",
+    "source_url": "https://shamli.nic.in/contact-us/",
+    "reason": "The postal dump incorrectly uses Muzaffarnagar's coordinates and historical district for Shamli's PIN. Use the named Shamli locality from the city reference as an approximate postal location."
+  }
+]

@@ -15,7 +15,7 @@ import { clearCacheByPrefixes } from '../config/cache.js';
 import { attachDayBookTds } from '../services/daybookTds.service.js';
 import { withPaymentTds, tdsUpdateSet } from '../services/paymentTds.service.js';
 import { commissionTdsModule, getTdsWorkflow, parsePaymentTds } from '../services/tdsWorkflow.service.js';
-import { resolveTdsDeductee } from '../services/tdsDeductee.service.js';
+import { resolveTdsDeductee, resolvePaymentDeductee } from '../services/tdsDeductee.service.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
@@ -2120,7 +2120,8 @@ export const updateModuleEntryFromDayBook = asyncHandler(async (req, res) => {
       const workflow = await getTdsWorkflow(row.site_id);
       const normalized = parsePaymentTds(req.body, workflow[module], row);
       nextAmount = normalized.amount;
-      commissionTds = { ...normalized, ...await resolveTdsDeductee(req.body, row.site_id, row, client) };
+      const deductee = normalized.tds_amount > 0 ? await resolvePaymentDeductee(req.body, row.site_id, row, { memberId: master.agent_id, force: true }, client) : await resolveTdsDeductee(req.body, row.site_id, row, client);
+      commissionTds = { ...normalized, ...deductee };
       delete commissionTds.amount;
     }
 

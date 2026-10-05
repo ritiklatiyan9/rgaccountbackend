@@ -7,6 +7,7 @@ import { MEMBER_FIELDS,DOC_FIELDS } from '../src/services/memberProfileFields.js
 import { lockMemberDirectory,registerMemberAcrossSites,syncSharedMemberProfile } from '../src/services/memberSiteSharing.service.js';
 import { up } from '../src/migrations/187_member_site_sharing.js';
 import { up as linkMigration } from '../src/migrations/192_member_identity_linking.js';
+import { up as consolidationMigration } from '../src/migrations/194_member_identity_consolidation.js';
 import { reviewMemberIdentity } from '../src/services/memberIdentityLink.service.js';
 import { createMember,updateMember } from '../src/controllers/member.controller.js';
 import { createCase,verifyCase } from '../src/controllers/memberKyc.controller.js';
@@ -28,7 +29,7 @@ async function fixture(t,{migrate=true}={}) {
     CREATE TABLE kyc_cases(id SERIAL PRIMARY KEY,booking_id INTEGER,client_member_id INTEGER REFERENCES members(id),
       site_id INTEGER REFERENCES sites(id),mode TEXT,status TEXT,created_by INTEGER,verified_by INTEGER,
       verified_at TIMESTAMPTZ,reused_from_case_id INTEGER REFERENCES kyc_cases(id),created_at TIMESTAMPTZ,updated_at TIMESTAMPTZ);
-    CREATE TABLE documents(id SERIAL PRIMARY KEY,kyc_case_id INTEGER REFERENCES kyc_cases(id),client_member_id INTEGER,
+    CREATE TABLE documents(id SERIAL PRIMARY KEY,kyc_case_id INTEGER REFERENCES kyc_cases(id),client_member_id INTEGER REFERENCES members(id),
       site_id INTEGER,type TEXT,member_document_field TEXT,original_name TEXT,file_path TEXT,file_hash TEXT,mime_type TEXT,
       file_size BIGINT,ocr_status TEXT,ocr_engine TEXT,ocr_completed_at TIMESTAMPTZ,ocr_error TEXT,uploaded_source TEXT,
       uploaded_by INTEGER,created_at TIMESTAMPTZ,updated_at TIMESTAMPTZ);
@@ -41,7 +42,7 @@ async function fixture(t,{migrate=true}={}) {
     INSERT INTO financial_entries VALUES(1,1,12345.67),(2,2,987.65);`);
   const query=async(text,values)=>{const result=await sql.query(text,values);return {...result,rowCount:result.affectedRows};};
   const db={query,release(){}};const fixturePool={query,connect:async()=>db};
-  if(migrate) {await up(fixturePool);await up(fixturePool);await linkMigration(fixturePool);} // additive and restart-safe
+  if(migrate) {await up(fixturePool);await up(fixturePool);await linkMigration(fixturePool);await consolidationMigration(fixturePool);} // additive and restart-safe
   const oldQuery=pool.query,oldConnect=pool.connect;
   pool.query=query;pool.connect=async()=>db;
   t.after(()=>{pool.query=oldQuery;pool.connect=oldConnect;});
@@ -309,7 +310,7 @@ test('a document-copy failure rolls back the reviewed profile and verification t
   assert.ok((await query('SELECT address FROM members')).rows.every(row=>row.address===null));
 });
 
-test('later KYC verification updates every explicitly linked registration including legacy duplicates in the source site',async t=>{
+test('later KYC verification updates the consolidated member and every other linked site',async t=>{
   const {db,query}=await fixture(t);
   const source=(await invoke(createMember,{site_id:1,full_name:'Test Client',phone:'9876543210'})).data.member;
   const duplicate=await memberModel.create(data({full_name:'OLD TEST CLIENT',member_types:['PARTNER'],member_type:'PARTNER'}),db);
@@ -318,11 +319,11 @@ test('later KYC verification updates every explicitly linked registration includ
     same_person_confirmed:'true',identity_profile_member_id:source.id,identity_member_ids:reviewed.registrations.map(row=>row.id),identity_revision:reviewed.summary.revision},{id:source.id});
   assert.equal(link.status,200);assert.equal(link.data.identity_link.registration_count,4);
   const kyc=await verifiedCase(db,source,{status:'OPEN'});
-  await verifiedCase(db,duplicate,{status:'OPEN'});
   const result=await invoke(verifyCase,{member_update:{full_name:'REVIEWED TEST CLIENT',address:'VERIFIED ADDRESS'}},{id:kyc.id});
   assert.equal(result.status,200);
   const members=(await query('SELECT full_name,address FROM members')).rows;
-  assert.equal(members.length,4);assert.ok(members.every(row=>row.full_name==='REVIEWED TEST CLIENT' && row.address==='VERIFIED ADDRESS'));
-  assert.equal((await query("SELECT count(DISTINCT client_member_id)::int AS n FROM kyc_cases WHERE status='VERIFIED'")).rows[0].n,4);
-  assert.deepEqual((await query('SELECT member_types FROM members WHERE id=$1',[duplicate.id])).rows[0].member_types,['PARTNER']);
+  assert.equal(members.length,3);assert.ok(members.every(row=>row.full_name==='REVIEWED TEST CLIENT' && row.address==='VERIFIED ADDRESS'));
+  assert.equal((await query("SELECT count(DISTINCT client_member_id)::int AS n FROM kyc_cases WHERE status='VERIFIED'")).rows[0].n,3);
+  assert.deepEqual((await query('SELECT member_types FROM members WHERE id=$1',[source.id])).rows[0].member_types,['CLIENT','PARTNER']);
+  assert.equal((await query('SELECT canonical_member_id FROM member_identity_aliases WHERE member_id=$1',[duplicate.id])).rows[0].canonical_member_id,source.id);
 });

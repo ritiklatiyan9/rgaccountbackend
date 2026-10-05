@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import pool from '../config/db.js';
 import { getTdsWorkflow, parsePaymentTds } from './tdsWorkflow.service.js';
-import { resolveTdsDeductee, TDS_DEDUCTEE_FIELDS } from './tdsDeductee.service.js';
+import { resolveTdsDeductee, resolvePaymentDeductee, TDS_DEDUCTEE_FIELDS } from './tdsDeductee.service.js';
 
 export const TDS_SOURCES = Object.freeze({
   daybook: { table: 'day_book', amount: 'debit' },
@@ -68,7 +68,7 @@ export async function preparePaymentTds(req, db = pool) {
   if (!hasDraft) return null; // Historic TDS remains protected by the DB guard.
   const applicable = body.tds_applicable === true || body.tds_applicable === 'true';
   if (![true, false, 'true', 'false'].includes(body.tds_applicable)) fail('TDS Applicable must be a boolean.');
-  let existing, siteId = req.imprestSiteId || body.site_id || req.params?.siteId;
+  let existing, parent, siteId = req.imprestSiteId || body.site_id || req.params?.siteId;
   const siteMatch = /^\/sites\/(\d+)\//.exec(path);
   if (siteMatch) siteId = siteMatch[1];
   if (target.id) {
@@ -80,7 +80,7 @@ export async function preparePaymentTds(req, db = pool) {
     const [table, foreignKey] = target.parent;
     const parentId = existing?.[foreignKey] || target.parentId || body[foreignKey];
     if (parentId) {
-      const parent = (await db.query(`SELECT site_id FROM ${table} WHERE id=$1`, [parentId])).rows[0];
+      parent = (await db.query(`SELECT * FROM ${table} WHERE id=$1`, [parentId])).rows[0];
       if (!parent) return null;
       siteId = parent.site_id;
     } else if (!(target.module === 'cashflow' && path === '/daybook' && siteId)) return null;
@@ -104,7 +104,14 @@ export async function preparePaymentTds(req, db = pool) {
     body.cash_amount = mode === 'CASH' ? normalized.amount : 0;
     body.bank_amount = mode === 'CASH' ? 0 : normalized.amount;
   }
-  const deductee = await resolveTdsDeductee(body, siteId, existing, db);
+  const sourceMember = target.module === 'farmer_payment' ? parent?.member_id
+    : target.module === 'cashflow' ? parent?.linked_member_id
+      : ['vendor_payment','vendor_inventory_payment'].includes(target.module) ? parent?.vendor_member_id
+        : target.module === 'partner_profit_payment' ? body.member_id || existing?.member_id : null;
+  const sourceName = parent?.name || parent?.vendor_name || parent?.linked_member_name || body.party_name || body.to_entity || (target.table === 'plot_commissions' ? body.particular : '') || existing?.tds_deductee_name;
+  const deductee = normalized.tds_amount > 0
+    ? await resolvePaymentDeductee(body, siteId, existing, { memberId: sourceMember, name: sourceName }, db)
+    : await resolveTdsDeductee(body, siteId, existing, db);
   return { table: target.table, fields: { tds_amount: normalized.tds_amount, tds_rate: normalized.tds_rate, tds_mode: normalized.tds_mode, tds_section: normalized.tds_section, tds_module: normalized.tds_amount > 0 ? module : null, ...deductee, tds_revision: randomUUID() } };
 }
 export function paymentTdsMiddleware(req, res, next) {
