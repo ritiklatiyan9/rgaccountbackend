@@ -5,6 +5,7 @@ import { TDS_SOURCES } from '../services/paymentTds.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { TDS_FIELDS, parseDeduction, tdsDueDate, validDate } from '../utils/tds.js';
+import { resolveTdsDeductee } from '../services/tdsDeductee.service.js';
 
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);
 const fail = (statusCode, message) => { throw Object.assign(new Error(message), { statusCode }); };
@@ -70,7 +71,9 @@ export const listDeductions = asyncHandler(async (req, res) => {
 
 export const createDeduction = asyncHandler(async (req, res) => {
   const siteId = await siteFor(req.user, req.body?.site_id);
-  const data = parseDeduction(req.body || {});
+  const body = req.body || {};
+  const person = await resolveTdsDeductee({ tds_member_id: body.member_id, tds_deductee_name: body.deductee_name, tds_pan: body.pan, tds_aadhaar: body.aadhaar }, siteId);
+  const data = parseDeduction({ ...body, member_id: person.tds_member_id, deductee_name: person.tds_deductee_name, pan: person.tds_pan, aadhaar: person.tds_aadhaar });
   await assertMember(data.member_id, siteId);
   const { rows } = await pool.query(
     `INSERT INTO tds_deductions (site_id, ${TDS_FIELDS.join(', ')}, created_by, updated_by)
@@ -84,7 +87,9 @@ export const updateDeduction = asyncHandler(async (req, res) => {
   const row = await findRow(req.user, req.params.id);
   if (row.commission_payment_id || row.source_id) fail(409, 'Edit deduction details from the source payment.');
   if (row.deposit_date) fail(409, 'Deposited deductions are locked.');
-  const data = parseDeduction(req.body || {});
+  const body = req.body || {};
+  const person = await resolveTdsDeductee({ tds_member_id: body.member_id, tds_deductee_name: body.deductee_name, tds_pan: body.pan, tds_aadhaar: body.aadhaar }, row.site_id);
+  const data = parseDeduction({ ...body, member_id: person.tds_member_id, deductee_name: person.tds_deductee_name, pan: person.tds_pan, aadhaar: person.tds_aadhaar });
   await assertMember(data.member_id, row.site_id);
   const updated = await pool.query(
     `UPDATE tds_deductions SET ${TDS_FIELDS.map((key, i) => `${key}=$${i + 2}`).join(', ')},
@@ -142,12 +147,12 @@ export const recordDeposit = asyncHandler(async (req, res) => {
 export const listDeductees = asyncHandler(async (req, res) => {
   const siteId = await siteFor(req.user, req.query.site_id);
   const q = String(req.query.q ?? '').trim().slice(0, 100);
-  if (q.length < 2) return res.json({ deductees: [] });
   const { rows } = await pool.query(
     `SELECT id, full_name, phone, UPPER(NULLIF(TRIM(pan_no), '')) AS pan,
        NULLIF(regexp_replace(COALESCE(aadhar_no, ''), '\\D', '', 'g'), '') AS aadhaar
-     FROM members WHERE site_id=$1 AND (full_name ILIKE $2 OR phone ILIKE $2 OR pan_no ILIKE $2)
-     ORDER BY full_name LIMIT 20`,
+     FROM members WHERE site_id=$1 AND UPPER(COALESCE(to_jsonb(members)->>'status','ACTIVE')) <> 'BLOCKED'
+       AND ($2='%%' OR full_name ILIKE $2 OR phone ILIKE $2 OR pan_no ILIKE $2)
+     ORDER BY full_name, id`,
     [siteId, `%${q.replace(/[\\%_]/g, '\\$&')}%`],
   );
   res.json({ deductees: rows });

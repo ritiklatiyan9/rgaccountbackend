@@ -3,9 +3,12 @@ import http from 'http';
 import app from './app.js';
 import pool, { connectDB } from './config/db.js';
 import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
+import { up as migrateMemberIdentityLinking } from './migrations/192_member_identity_linking.js';
 import { up as migrateGoogleDrive } from './migrations/188_google_drive_sharing.js';
 import { up as migrateGoogleDriveSiteAccess } from './migrations/189_google_drive_site_access.js';
 import { up as migrateGoogleDriveJobs } from './migrations/190_google_drive_share_jobs.js';
+import { up as migrateTdsDeducteeMapping } from './migrations/191_tds_deductee_mapping.js';
+import { up as migrateDataStorage } from './migrations/193_data_storage.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
 import { startSmsReminderScheduler } from './services/smsReminder.service.js';
@@ -26,9 +29,12 @@ initCache();
 connectDB().then(async () => {
   // Direct node/nodemon starts must have the same required client schema as npm start.
   await migrateMemberSiteSharing(pool);
+  await migrateMemberIdentityLinking(pool);
   await migrateGoogleDrive(pool);
   await migrateGoogleDriveSiteAccess(pool);
   await migrateGoogleDriveJobs(pool);
+  await migrateTdsDeducteeMapping(pool);
+  await migrateDataStorage(pool);
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

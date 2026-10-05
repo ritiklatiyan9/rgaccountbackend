@@ -18,6 +18,7 @@ export const ALL_MODULES = Object.freeze([
     'plot_payments',
     'plot_registry',
     'document_search',
+    'data_storage',
     'expenses',
     'expense_approval',
     'imprest',
@@ -58,6 +59,7 @@ const RESTRICTED_MODULES = new Set([
     'backups',
     'expense_approval',
     'document_search',
+    'data_storage',
     'document_imprest',
     'upi_collect',
     // New money-touching modules (budgets, inventory valuation) — stay

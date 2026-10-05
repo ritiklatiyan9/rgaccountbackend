@@ -6,6 +6,8 @@ import { memberModel } from '../src/models/Member.model.js';
 import { MEMBER_FIELDS,DOC_FIELDS } from '../src/services/memberProfileFields.js';
 import { lockMemberDirectory,registerMemberAcrossSites,syncSharedMemberProfile } from '../src/services/memberSiteSharing.service.js';
 import { up } from '../src/migrations/187_member_site_sharing.js';
+import { up as linkMigration } from '../src/migrations/192_member_identity_linking.js';
+import { reviewMemberIdentity } from '../src/services/memberIdentityLink.service.js';
 import { createMember,updateMember } from '../src/controllers/member.controller.js';
 import { createCase,verifyCase } from '../src/controllers/memberKyc.controller.js';
 
@@ -39,7 +41,7 @@ async function fixture(t,{migrate=true}={}) {
     INSERT INTO financial_entries VALUES(1,1,12345.67),(2,2,987.65);`);
   const query=async(text,values)=>{const result=await sql.query(text,values);return {...result,rowCount:result.affectedRows};};
   const db={query,release(){}};const fixturePool={query,connect:async()=>db};
-  if(migrate) {await up(fixturePool);await up(fixturePool);} // additive and restart-safe
+  if(migrate) {await up(fixturePool);await up(fixturePool);await linkMigration(fixturePool);} // additive and restart-safe
   const oldQuery=pool.query,oldConnect=pool.connect;
   pool.query=query;pool.connect=async()=>db;
   t.after(()=>{pool.query=oldQuery;pool.connect=oldConnect;});
@@ -305,4 +307,22 @@ test('a document-copy failure rolls back the reviewed profile and verification t
   await assert.rejects(invoke(verifyCase,{member_update:{address:'VERIFIED ADDRESS'}},{id:kyc.id}),/reject_target_documents/);
   assert.equal((await query('SELECT status FROM kyc_cases WHERE id=$1',[kyc.id])).rows[0].status,'OPEN');
   assert.ok((await query('SELECT address FROM members')).rows.every(row=>row.address===null));
+});
+
+test('later KYC verification updates every explicitly linked registration including legacy duplicates in the source site',async t=>{
+  const {db,query}=await fixture(t);
+  const source=(await invoke(createMember,{site_id:1,full_name:'Test Client',phone:'9876543210'})).data.member;
+  const duplicate=await memberModel.create(data({full_name:'OLD TEST CLIENT',member_types:['PARTNER'],member_type:'PARTNER'}),db);
+  const reviewed=await reviewMemberIdentity(db,{memberId:source.id,user,phone:source.phone});
+  const link=await invoke(updateMember,{full_name:'TEST CLIENT',phone:source.phone,
+    same_person_confirmed:'true',identity_profile_member_id:source.id,identity_revision:reviewed.summary.revision},{id:source.id});
+  assert.equal(link.status,200);assert.equal(link.data.identity_link.registration_count,4);
+  const kyc=await verifiedCase(db,source,{status:'OPEN'});
+  await verifiedCase(db,duplicate,{status:'OPEN'});
+  const result=await invoke(verifyCase,{member_update:{full_name:'REVIEWED TEST CLIENT',address:'VERIFIED ADDRESS'}},{id:kyc.id});
+  assert.equal(result.status,200);
+  const members=(await query('SELECT full_name,address FROM members')).rows;
+  assert.equal(members.length,4);assert.ok(members.every(row=>row.full_name==='REVIEWED TEST CLIENT' && row.address==='VERIFIED ADDRESS'));
+  assert.equal((await query("SELECT count(DISTINCT client_member_id)::int AS n FROM kyc_cases WHERE status='VERIFIED'")).rows[0].n,4);
+  assert.deepEqual((await query('SELECT member_types FROM members WHERE id=$1',[duplicate.id])).rows[0].member_types,['PARTNER']);
 });

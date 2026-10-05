@@ -12,6 +12,10 @@ import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import { installmentModel } from '../models/Installment.model.js';
 import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
+import { attachDayBookTds } from '../services/daybookTds.service.js';
+import { withPaymentTds, tdsUpdateSet } from '../services/paymentTds.service.js';
+import { commissionTdsModule, getTdsWorkflow, parsePaymentTds } from '../services/tdsWorkflow.service.js';
+import { resolveTdsDeductee } from '../services/tdsDeductee.service.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { emptyBucketMap, BUCKETS } from '../utils/paymentMode.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
@@ -1163,6 +1167,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       display_order: index + 1,
     }));
 
+  await attachDayBookTds(allEntries, pool);
+
   // ── Attach bank mappings (migration 089) ──
   // A Day Book row's money lives on exactly one cash_flow_entries mirror row:
   // linked day_book rows (FARMER PAYMENT etc.) have no mirror of their own —
@@ -2039,7 +2045,7 @@ const MODULE_TABLES = Object.freeze({
 const loadModuleRow = async (source, id, client) => {
   const cfg = MODULE_TABLES[source];
   if (!cfg) return null;
-  const { rows } = await client.query(`SELECT * FROM ${source} WHERE id = $1`, [id]);
+  const { rows } = await client.query(`SELECT * FROM ${source} WHERE id = $1 FOR UPDATE`, [id]);
   return rows[0] ? { cfg, row: rows[0] } : null;
 };
 
@@ -2106,6 +2112,18 @@ export const updateModuleEntryFromDayBook = asyncHandler(async (req, res) => {
       }
     }
 
+    let commissionTds = {};
+    if (source === 'plot_commission_payments' && Object.hasOwn(req.body, 'tds_applicable')) {
+      const master = (await client.query('SELECT * FROM plot_commissions_v2 WHERE id=$1', [row.plot_commission_id])).rows[0];
+      if (!master) throw Object.assign(new Error('Commission not found'), { statusCode: 404 });
+      const module = commissionTdsModule(master);
+      const workflow = await getTdsWorkflow(row.site_id);
+      const normalized = parsePaymentTds(req.body, workflow[module], row);
+      nextAmount = normalized.amount;
+      commissionTds = { ...normalized, ...await resolveTdsDeductee(req.body, row.site_id, row, client) };
+      delete commissionTds.amount;
+    }
+
     // An empty mode means "leave as is" rather than NULL — vendor_payments
     // declares payment_mode NOT NULL, so clearing it would just error.
     let nextMode = row[cfg.mode];
@@ -2127,9 +2145,11 @@ export const updateModuleEntryFromDayBook = asyncHandler(async (req, res) => {
       }
     }
 
+    const commissionFields = Object.keys(commissionTds);
+    const commissionSet = commissionFields.map((key, index) => `, ${key}=$${index + 7}`).join('');
     const { rows } = await client.query(
       `UPDATE ${source}
-          SET ${cfg.date} = $1, ${cfg.amount} = $2, ${cfg.mode} = $3, ${cfg.remarks} = $4, transaction_time = $6::time
+          SET ${cfg.date} = $1, ${cfg.amount} = $2, ${cfg.mode} = $3, ${cfg.remarks} = $4, transaction_time = $6::time${tdsUpdateSet(source)}${commissionSet}
         WHERE id = $5
         RETURNING *`,
       [
@@ -2139,6 +2159,7 @@ export const updateModuleEntryFromDayBook = asyncHandler(async (req, res) => {
         remarks !== undefined ? (remarks || null) : row[cfg.remarks],
         id,
         transactionTimeForWrite(row.transaction_time ?? null),
+        ...Object.values(commissionTds),
       ]
     );
 
@@ -2342,6 +2363,7 @@ export const updateFarmerPaymentFromDayBook = asyncHandler(async (req, res) => {
       fpUpdate.cheque_status = effectiveMode === 'CHEQUE' ? 'PENDING' : null;
     }
 
+    Object.assign(fpUpdate, withPaymentTds('farmer_payments', {}));
     const keys = Object.keys(fpUpdate);
     const result = await client.query(
       `UPDATE farmer_payments

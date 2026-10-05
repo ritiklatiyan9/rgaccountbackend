@@ -29,7 +29,7 @@ export function validKey(key) {
 }
 
 export function validLocalKey(key) {
-  return validKey(key) && /^(excel|kyc_documents)\/[^/]+$/.test(key);
+  return validKey(key) && /^(excel|kyc_documents|data_storage)\/[^/]+$/.test(key);
 }
 
 function s3Source(value, profiles) {
@@ -51,7 +51,7 @@ function s3Source(value, profiles) {
 }
 
 function localUrlKey(value, table, column) {
-  if (value.startsWith('local::')) return `${table === 'excel_files' || column === 's3_key' ? 'excel' : 'kyc_documents'}/${value.slice(7)}`;
+  if (value.startsWith('local::')) return `${table === 'data_storage_entries' ? 'data_storage' : table === 'excel_files' || column === 's3_key' ? 'excel' : 'kyc_documents'}/${value.slice(7)}`;
   let pathname = value;
   if (/^https?:\/\//i.test(value)) {
     let url;

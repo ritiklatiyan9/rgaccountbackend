@@ -60,6 +60,7 @@ const EXACT_MODULES = Object.freeze({
   bank_accounts: 'banking',
   documents: 'documents', ocr_results: 'documents',
   excel_files: 'spreadsheets', file_folders: 'spreadsheets',
+  data_storage_entries: 'spreadsheets',
   upi_accounts: 'upi', payment_qrs: 'upi',
   site_partner_shares: 'partner_finance', land_partner_shares: 'partner_finance',
   partner_profit_payments: 'partner_finance', manual_profit_sandboxes: 'partner_finance',

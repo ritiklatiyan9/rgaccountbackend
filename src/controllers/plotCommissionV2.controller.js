@@ -1,6 +1,7 @@
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { getTdsWorkflow, commissionTdsModule, parsePaymentTds } from '../services/tdsWorkflow.service.js';
+import { resolveTdsDeductee, TDS_DEDUCTEE_FIELDS } from '../services/tdsDeductee.service.js';
 import { plotCommissionV2Model, plotCommissionPaymentModel } from '../models/PlotCommissionV2.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
 import pool from '../config/db.js';
@@ -711,6 +712,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   await assertCommissionSite(req.user, master.site_id);
   const workflow = await getTdsWorkflow(master.site_id);
   const tds = parsePaymentTds(req.body, workflow[commissionTdsModule(master)]);
+  const deductee = await resolveTdsDeductee(req.body, master.site_id);
   const numericAmount = tds.amount;
   const grossAmount = numericAmount + tds.tds_amount;
   const mode = payment_mode || 'CASH';
@@ -768,14 +770,16 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
          site_id, plot_commission_id, date, amount, balance_after_payment,
          payment_mode, bank_name, transaction_id, remarks, status,
          voucher_number, voucher_url, assigned_admin_id, created_by,
-         cheque_no, cheque_status, transaction_time, tds_amount, tds_rate, tds_mode, tds_section
+         cheque_no, cheque_status, transaction_time, tds_amount, tds_rate, tds_mode, tds_section,
+         tds_member_id, tds_deductee_name, tds_pan, tds_aadhaar
        )
        SELECT
          m.site_id, $1, $2::date, $3::numeric,
          (m.total_commission - (m.already_paid + $3::numeric + $15::numeric)),
          $4::text, $5::text, $6::text, $7::text, 'pending',
          $8::text, $9::text, $10::int, $11::int,
-         $12::text, $13::text, $14::time, $15::numeric, $16::numeric, $17::text, $18::text
+         $12::text, $13::text, $14::time, $15::numeric, $16::numeric, $17::text, $18::text,
+         $19::int, $20::text, $21::text, $22::text
        FROM master m
        RETURNING *
      )
@@ -796,6 +800,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
       chequeStatus,                                               // $13
       transactionTimeForWrite(),                                  // $14
       tds.tds_amount, tds.tds_rate, tds.tds_mode, tds.tds_section,
+      ...TDS_DEDUCTEE_FIELDS.map(key => deductee[key]),
     ]
   );
 
@@ -913,6 +918,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   const master = (await pool.query('SELECT * FROM plot_commissions_v2 WHERE id=$1', [existing.plot_commission_id])).rows[0];
   const workflow = await getTdsWorkflow(existing.site_id);
   const tds = parsePaymentTds(req.body, workflow[commissionTdsModule(master)], existing);
+  const deductee = await resolveTdsDeductee(req.body, existing.site_id, existing);
   const { date, amount, payment_mode, bank_name, transaction_id, cheque_no, remarks, voucher_url, assigned_admin_id } = req.body;
 
   if (date !== undefined && !isValidLedgerDate(date)) {
@@ -930,6 +936,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   if (date !== undefined) add('date', date);
   add('amount', tds.amount);
   for (const key of ['tds_amount', 'tds_rate', 'tds_mode', 'tds_section']) add(key, tds[key]);
+  for (const key of TDS_DEDUCTEE_FIELDS) add(key, deductee[key]);
   if (payment_mode !== undefined) add('payment_mode', payment_mode);
   if (bank_name !== undefined) add('bank_name', bank_name ? bank_name.trim() : null);
   if (transaction_id !== undefined) add('transaction_id', transaction_id ? transaction_id.trim() : null);

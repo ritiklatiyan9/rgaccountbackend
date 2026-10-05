@@ -117,26 +117,30 @@ export async function registerMemberAcrossSites(db,{memberId,user}) {
     const known=new Set(matches.map(member=>member.id));
     matches.push(...linked.filter(member=>!known.has(member.id)));
   }
-  const bySite=new Map([[Number(source.site_id),source]]);
+  const bySite=new Map([[Number(source.site_id),[source]]]);
   for(const target of matches) {
-    if(bySite.has(Number(target.site_id))) fail('More than one matching client exists in a site. Resolve the duplicates before adding this user.');
-    bySite.set(Number(target.site_id),target);
+    const registrations=bySite.get(Number(target.site_id)) || [];
+    if(registrations.length && !(target.shared_profile_id===group
+      && registrations.every(member=>member.shared_profile_id===group))) {
+      fail('More than one matching client exists in a site. Resolve the duplicates before adding this user.');
+    }
+    bySite.set(Number(target.site_id),[...registrations,target]);
   }
   await db.query('UPDATE members SET shared_profile_id=$1 WHERE id=ANY($2::int[])',[group,[source.id,...matches.map(target=>target.id)]]);
   source.shared_profile_id=group;
   const {rows:sites}=await db.query('SELECT id FROM sites WHERE organization_id=$1 ORDER BY id',[user.organization_id]);
   const created=[];let kycShared=0;
   for(const site of sites) {
-    if(Number(site.id)===Number(source.site_id)) continue;
-    let target=bySite.get(Number(site.id));
-    if(!target) {
+    let targets=bySite.get(Number(site.id));
+    if(Number(site.id)===Number(source.site_id)) targets=targets.filter(target=>target.id!==source.id);
+    if(!targets) {
       const data={site_id:site.id,created_by:user.id,shared_profile_id:group};
       for(const field of copyFields) if(source[field]!==undefined) data[field]=source[field];
-      target=await memberModel.create(data,db);created.push(target.id);
+      const target=await memberModel.create(data,db);created.push(target.id);targets=[target];
     } else {
-      await copyProfile(db,source,[target],SHARED_FIELDS,{fillOnly:true});
+      await copyProfile(db,source,targets,SHARED_FIELDS,{fillOnly:true});
     }
-    if(await shareVerifiedCase(db,{source,target,user})) kycShared++;
+    for(const target of targets) if(await shareVerifiedCase(db,{source,target,user})) kycShared++;
   }
   return {shared_profile_id:group,site_count:sites.length,created_count:created.length,existing_count:matches.length,kyc_shared_count:kycShared};
 }
@@ -164,10 +168,15 @@ async function publishVerifiedMemberProfile(db,{memberId,user,previousProfile}) 
   source.shared_profile_id=group;
   let created=0,updated=0,kycShared=0;
   const warnings=[];
+  const sameSite=candidates.filter(target=>Number(target.site_id)===Number(source.site_id) && target.shared_profile_id===group);
+  await copyProfile(db,source,sameSite,SHARED_FIELDS);
+  updated+=sameSite.length;
+  for(const target of sameSite) if(await shareVerifiedCase(db,{source,target,user,refresh:true})) kycShared++;
   for(const site of sites) {
     if(Number(site.id)===Number(source.site_id)) continue;
     const registrations=candidates.filter(target=>Number(target.site_id)===Number(site.id));
-    let target=registrations.find(member=>member.shared_profile_id===group);
+    const linked=registrations.filter(member=>member.shared_profile_id===group);
+    let target=linked[0];
     if(!target) {
       const matches=registrations.filter(samePerson);
       // Do not merge two established groups or guess between duplicate legacy
@@ -191,6 +200,11 @@ async function publishVerifiedMemberProfile(db,{memberId,user,previousProfile}) 
       await copyProfile(db,source,[target],SHARED_FIELDS);updated++;
     }
     if(await shareVerifiedCase(db,{source,target,user,refresh:true})) kycShared++;
+    // Explicitly linked legacy duplicates keep their financial references.
+    for(const additional of linked.slice(1)) {
+      await copyProfile(db,source,[additional],SHARED_FIELDS);updated++;
+      if(await shareVerifiedCase(db,{source,target:additional,user,refresh:true})) kycShared++;
+    }
   }
   return {shared_profile_id:group,site_count:sites.length-warnings.length,
     organization_site_count:sites.length,created_count:created,updated_count:updated,

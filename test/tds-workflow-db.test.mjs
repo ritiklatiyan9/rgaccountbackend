@@ -1,4 +1,5 @@
 import { up as nativeWorkflow } from '../src/migrations/184_payment_module_tds.js';
+import { up as mapping } from '../src/migrations/191_tds_deductee_mapping.js';
 import { TDS_SOURCES } from '../src/services/paymentTds.service.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -6,6 +7,8 @@ import pool from '../src/config/db.js';
 import { up as register } from '../src/migrations/179_tds_register.js';
 import { up as workflow } from '../src/migrations/183_commission_tds_workflow.js';
 import { createPlotCommissionPayment, updatePlotCommissionPayment } from '../src/controllers/plotCommissionV2.controller.js';
+import { updateModuleEntryFromDayBook } from '../src/controllers/dayBook.controller.js';
+import { attachDayBookTds } from '../src/services/daybookTds.service.js';
 import { listDeductions, recordDeposit, updateDeduction, deleteDeduction } from '../src/controllers/tds.controller.js';
 
 const invoke = (handler, body = {}, extra = {}) => new Promise((resolve, reject) => handler({ body, user: { id: 1, role: 'admin' }, query: {}, params: {}, ...extra }, { status(code) { this.code = code; return this; }, json(body) { resolve({ code: this.code || 200, body }); } }, reject));
@@ -35,12 +38,14 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
     `);
     for (const table of new Set(Object.values(TDS_SOURCES).map(source => source.table))) await pg.exec(`CREATE TABLE ${table}(id serial PRIMARY KEY,site_id int,amount numeric,debit numeric)`);
     await register(pool); await workflow(pool); await workflow(pool); await nativeWorkflow(pool);
+    await mapping(pool); await mapping(pool);
     let payment;
     const list = async (user) => (await invoke(listDeductions, {}, { query: { site_id: 1, financial_year: 2026 }, ...(user ? { user } : {}) })).body.deductions;
     await t.test('create atomically stores net cash and one pending linked deduction', async () => {
-      const result = await invoke(createPlotCommissionPayment, { master_id: 1, date: '2026-10-01', amount: 100000, payment_mode: 'BANK', tds_applicable: true });
+      const result = await invoke(createPlotCommissionPayment, { master_id: 1, date: '2026-10-01', amount: 100000, payment_mode: 'BANK', tds_applicable: true, tds_member_id:1 });
       assert.equal(result.code, 201); payment = result.body.payment;
       assert.equal(Number(payment.amount), 98000); assert.equal(Number(payment.tds_amount), 2000);
+      assert.equal(payment.tds_member_id,1); assert.equal(payment.tds_pan,'ABCDE1234F'); assert.equal(payment.tds_aadhaar,'123456789012');
       assert.equal(Number((await query('SELECT amount FROM cash_movements WHERE source_id=$1', [payment.id])).rows[0].amount), 98000);
       const rows = await list(); assert.equal(rows.length, 1); assert.equal(rows[0].payment_state, 'pending');
       assert.equal(Number(rows[0].gross_amount), 100000); assert.equal(rows[0].pan, 'ABCDE1234F');
@@ -53,6 +58,11 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
       await assert.rejects(query("INSERT INTO plot_commission_payments(site_id,plot_commission_id,date,amount,status) VALUES(1,1,'2026-10-01',1,'pending')"), /exceeds/);
     });
     await t.test('edit recomputes percentage and updates the same deduction', async () => {
+      const mirrored=[{id:`pcp_${payment.id}`,source_key:'plot_commission_payments',source_id:payment.id,debit:98000}];
+      await attachDayBookTds(mirrored,pool);
+      assert.equal(mirrored[0].tds_module,'plot_commission'); assert.equal(Number(mirrored[0].tds_amount),2000);
+      await invoke(updateModuleEntryFromDayBook,{amount:100000,tds_applicable:true,tds_rate:2}, {params:{source:'plot_commission_payments',id:payment.id}});
+      assert.equal(Number((await list())[0].net_amount),98000);
       await invoke(updatePlotCommissionPayment, { amount: 50000, tds_applicable: true, tds_rate: 2 }, { params: { id: payment.id } });
       const rows = await list(); assert.equal(rows.length, 1); assert.equal(Number(rows[0].tds_amount), 1000); assert.equal(Number(rows[0].net_amount), 49000);
       await query("UPDATE plot_commission_payments SET status='approved' WHERE id=$1", [payment.id]);
@@ -86,6 +96,8 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
       await assert.rejects(query('DELETE FROM plot_commission_payments WHERE id=$1', [payment.id]), /deposited/);
       await assert.rejects(query('DELETE FROM plot_commissions_v2 WHERE id=1'), /deposited/);
       await assert.rejects(query("UPDATE plot_commission_payments SET status='rejected' WHERE id=$1", [payment.id]), /deposited/);
+      await assert.rejects(query("UPDATE plot_commission_payments SET tds_pan='FGHIJ1234K' WHERE id=$1",[payment.id]), /deposited/);
+      await assert.rejects(query('UPDATE plot_commission_payments SET tds_member_id=NULL WHERE id=$1',[payment.id]), /deposited/);
       await assert.rejects(invoke(updatePlotCommissionPayment, { amount: 40000, tds_applicable: true }, { params: { id: payment.id } }), /deposited/);
     });
     await t.test('module settings, manual deductions, disabling and removing TDS', async () => {
@@ -102,6 +114,24 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
     await t.test('site access is enforced for reads and new payments', async () => {
       await assert.rejects(invoke(listDeductions, {}, { user: { id: 2, role: 'sub_admin' }, query: { site_id: 2, financial_year: 2026 } }), /Access denied/);
       await assert.rejects(invoke(createPlotCommissionPayment, { master_id: 4, amount: 1000, date: '2026-10-01' }, { user: { id: 2, role: 'sub_admin' } }), /Access denied/);
+    });
+    await t.test('the three May examples settle gross commission while only net payments move through bank', async () => {
+      await query("INSERT INTO plot_commissions_v2 VALUES(5,1,1,NULL,NULL,1,666667,'Pending',now())");
+      const ids=[];
+      for (const [date,gross,held,net] of [['2026-05-13',200000,6000,194000],['2026-05-14',150000,4500,145500],['2026-05-16',316667,9500,307167]]) {
+        const result=await invoke(createPlotCommissionPayment,{master_id:5,date,amount:gross,payment_mode:'BANK',tds_applicable:true,tds_member_id:1,tds_rate:3,...(date==='2026-05-16'?{tds_mode:'manual',tds_amount:9500}:{})});
+        assert.equal(result.code,201);
+        assert.equal(Number(result.body.payment.amount),net);
+        assert.equal(Number(result.body.payment.tds_amount),held);
+        ids.push(result.body.payment.id);
+        await query("UPDATE plot_commission_payments SET status='approved' WHERE id=$1",[result.body.payment.id]);
+      }
+      const rows=(await list()).filter(row=>ids.includes(row.commission_payment_id));
+      assert.equal(rows.reduce((sum,row)=>sum+Number(row.gross_amount),0),666667);
+      assert.equal(rows.reduce((sum,row)=>sum+Number(row.net_amount),0),646667);
+      assert.equal(rows.reduce((sum,row)=>sum+Number(row.tds_amount),0),20000);
+      assert.equal(Number((await query('SELECT sum(amount) AS net FROM cash_movements WHERE source_id=ANY($1::int[])',[ids])).rows[0].net),646667);
+      assert.equal((await query('SELECT status FROM plot_commissions_v2 WHERE id=5')).rows[0].status,'Completed');
     });
   } finally { await pg.close(); }
 });

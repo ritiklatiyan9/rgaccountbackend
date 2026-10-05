@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import pool from '../config/db.js';
 import { getTdsWorkflow, parsePaymentTds } from './tdsWorkflow.service.js';
+import { resolveTdsDeductee, TDS_DEDUCTEE_FIELDS } from './tdsDeductee.service.js';
 
 export const TDS_SOURCES = Object.freeze({
   daybook: { table: 'day_book', amount: 'debit' },
@@ -15,14 +16,23 @@ export const TDS_SOURCES = Object.freeze({
   vendor_inventory_payment: { table: 'vendor_inventory_payments', parent: ['vendor_inventory_orders', 'order_id'] },
   misc_income: { table: 'misc_income_entries' },
   partner_profit_payment: { table: 'partner_profit_payments' },
+  legacy_commission: { table: 'plot_commissions', workflowModule: 'plot_commission' },
 });
 const context = new AsyncLocalStorage();
-const fields = ['tds_amount', 'tds_rate', 'tds_mode', 'tds_section', 'tds_module', 'tds_deductee_name', 'tds_pan', 'tds_revision'];
+const fields = ['tds_amount', 'tds_rate', 'tds_mode', 'tds_section', 'tds_module', ...TDS_DEDUCTEE_FIELDS, 'tds_revision'];
 const fail = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 export function paymentTdsTarget(path, body = {}) {
   const routes = [
     [/^\/expenses(?:\/(\d+))?$/, 'expense'],
     [/^\/daybook(?:\/(\d+))?$/, 'daybook'],
+    [/^\/daybook\/expense\/(\d+)$/, 'expense'],
+    [/^\/daybook\/farmer-payment\/(\d+)$/, 'farmer_payment'],
+    [/^\/daybook\/cashflow-entry\/(\d+)$/, 'cashflow'],
+    [/^\/daybook\/firm-transaction\/(\d+)$/, 'firm_transaction'],
+    [/^\/commissions(?:\/(\d+))?$/, 'legacy_commission'],
+    [/^\/daybook\/commission\/(\d+)$/, 'legacy_commission'],
+    [/^\/daybook\/module-entry\/vendor_payments\/(\d+)$/, 'vendor_payment'],
+    [/^\/daybook\/module-entry\/partner_profit_payments\/(\d+)$/, 'partner_profit_payment'],
     [/^\/cashflow\/entries(?:\/(\d+))?$/, 'cashflow'],
     [/^\/firms\/transactions(?:\/(\d+))?$/, 'firm_transaction'],
     [/^\/misc-income(?:\/(\d+))?$/, 'misc_income'],
@@ -39,8 +49,13 @@ export function paymentTdsTarget(path, body = {}) {
   if (match) { module = match[1] === 'commitments' ? 'vendor_payment' : 'vendor_inventory_payment'; parentId = match[2]; }
   // Day Book's special entries write to their native owner, never its mirror.
   if (path === '/daybook' && String(body.entry_type).toUpperCase() === 'FARMER PAYMENT') { module = 'farmer_payment'; parentId = body.farmer_id; }
-  if (path === '/daybook' && ['COMMISSION', 'CASH FLOW', 'FIRM TRANSACTION', 'PLOT PAYMENT'].includes(String(body.entry_type).toUpperCase())) return null;
-  return module ? { ...TDS_SOURCES[module], module, id, parentId, amount: module === 'farmer_payment' && path === '/daybook' ? 'debit' : TDS_SOURCES[module].amount || 'amount' } : null;
+  if (path === '/daybook' && String(body.entry_type).toUpperCase() === 'CASH FLOW') module = 'cashflow';
+  if (path === '/daybook' && String(body.entry_type).toUpperCase() === 'FIRM TRANSACTION') module = 'firm_transaction';
+  if (path === '/daybook' && String(body.entry_type).toUpperCase() === 'PLOT COMMISSION') module = 'legacy_commission';
+  if (path === '/daybook' && ['COMMISSION', 'PLOT PAYMENT'].includes(String(body.entry_type).toUpperCase())) return null;
+  const farmerDayBook = module === 'farmer_payment' && path.startsWith('/daybook');
+  const commissionDayBook = module === 'legacy_commission' && path.startsWith('/daybook');
+  return module ? { ...TDS_SOURCES[module], module: TDS_SOURCES[module].workflowModule || module, id, parentId, storedAmount: TDS_SOURCES[module].amount || 'amount', amount: farmerDayBook || commissionDayBook ? 'debit' : TDS_SOURCES[module].amount || 'amount' } : null;
 }
 
 export async function preparePaymentTds(req, db = pool) {
@@ -64,9 +79,13 @@ export async function preparePaymentTds(req, db = pool) {
   if (target.parent) {
     const [table, foreignKey] = target.parent;
     const parentId = existing?.[foreignKey] || target.parentId || body[foreignKey];
-    const parent = (await db.query(`SELECT site_id FROM ${table} WHERE id=$1`, [parentId])).rows[0];
-    if (!parent) return null;
-    siteId = parent.site_id;
+    if (parentId) {
+      const parent = (await db.query(`SELECT site_id FROM ${table} WHERE id=$1`, [parentId])).rows[0];
+      if (!parent) return null;
+      siteId = parent.site_id;
+    } else if (!(target.module === 'cashflow' && path === '/daybook' && siteId)) return null;
+    // A new Day Book personal ledger resolves/creates its month in the owner
+    // controller. Its site is already present in this creation request.
   }
   const gross = Number(body[target.amount]);
   const outgoing = target.amount === 'debit' ? gross > 0 && !(Number(body.credit) > 0)
@@ -77,17 +96,16 @@ export async function preparePaymentTds(req, db = pool) {
   if (!outgoing && !existing?.tds_amount) return null;
   const module = existing?.tds_module || target.module;
   const workflow = await getTdsWorkflow(siteId);
-  const normalized = parsePaymentTds({ ...body, amount: gross, tds_applicable: applicable }, workflow[module], existing ? { ...existing, amount: existing[target.amount] } : null);
+  const normalized = parsePaymentTds({ ...body, amount: gross, tds_applicable: applicable }, workflow[module], existing ? { ...existing, amount: existing[target.storedAmount] } : null);
   body[target.amount] = normalized.amount;
-  if (target.module === 'farmer_payment' && target.amount === 'amount') {
+  if (target.module === 'farmer_payment') {
     const mode = String(body.payment_mode || existing?.payment_mode || 'CASH').toUpperCase();
     if (mode === 'SPLIT' && normalized.tds_amount > 0) fail('Use separate cash and bank payments when deducting TDS.');
     body.cash_amount = mode === 'CASH' ? normalized.amount : 0;
     body.bank_amount = mode === 'CASH' ? 0 : normalized.amount;
   }
-  const pan = String(body.tds_pan || '').trim().toUpperCase();
-  if (pan && !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) fail('Enter a valid deductee PAN.');
-  return { table: target.table, fields: { tds_amount: normalized.tds_amount, tds_rate: normalized.tds_rate, tds_mode: normalized.tds_mode, tds_section: normalized.tds_section, tds_module: normalized.tds_amount > 0 ? module : null, tds_deductee_name: String(body.tds_deductee_name || '').trim().slice(0, 200) || null, tds_pan: pan || null, tds_revision: randomUUID() } };
+  const deductee = await resolveTdsDeductee(body, siteId, existing, db);
+  return { table: target.table, fields: { tds_amount: normalized.tds_amount, tds_rate: normalized.tds_rate, tds_mode: normalized.tds_mode, tds_section: normalized.tds_section, tds_module: normalized.tds_amount > 0 ? module : null, ...deductee, tds_revision: randomUUID() } };
 }
 export function paymentTdsMiddleware(req, res, next) {
   preparePaymentTds(req).then(draft => context.run(draft, next), next);

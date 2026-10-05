@@ -4,11 +4,15 @@ import pool from '../src/config/db.js';
 import MasterModel from '../src/models/MasterModel.js';
 import { up as register } from '../src/migrations/179_tds_register.js';
 import { up as migrate } from '../src/migrations/184_payment_module_tds.js';
+import { up as mapping } from '../src/migrations/191_tds_deductee_mapping.js';
 import { defaultTdsWorkflow } from '../src/services/tdsWorkflow.service.js';
-import { TDS_SOURCES, paymentTdsMiddleware } from '../src/services/paymentTds.service.js';
+import { TDS_SOURCES, paymentTdsMiddleware, preparePaymentTds } from '../src/services/paymentTds.service.js';
 import { createExpense } from '../src/controllers/expense.controller.js';
 import { createPayment as createFarmerPayment } from '../src/controllers/farmer.controller.js';
-import { listDeductions, recordDeposit, updateDeduction, deleteDeduction } from '../src/controllers/tds.controller.js';
+import { updateExpenseFromDayBook, updateFarmerPaymentFromDayBook, updateModuleEntryFromDayBook, createDayBookEntry, updateCommissionFromDayBook } from '../src/controllers/dayBook.controller.js';
+import { createCommission } from '../src/controllers/commission.controller.js';
+import { attachDayBookTds } from '../src/services/daybookTds.service.js';
+import { listDeductions, recordDeposit, updateDeduction, deleteDeduction, listDeductees, createDeduction } from '../src/controllers/tds.controller.js';
 
 const invoke = (handler, body = {}, extra = {}, useTds = false) => new Promise((resolve, reject) => {
   const req = { body, user: { id: 1, role: 'admin' }, query: {}, params: {}, ...extra };
@@ -49,9 +53,16 @@ test('native payment modules withhold atomically and share the TDS register', { 
       account_no text,branch text,category text,sub_category text,remark text,remarks text,note text,by_note text,
       voucher_url text,voucher_urls text[],bill_url text,bill_urls text[],transaction_time time,farmer_payment_id int,
       updated_at timestamptz DEFAULT now(), approved_by int, approved_at timestamptz,interest_amount numeric DEFAULT 0)`);
+    await pg.exec('ALTER TABLE farmer_payments DROP COLUMN site_id');
+    await pg.exec('ALTER TABLE plot_commissions ADD COLUMN father_name text, ADD COLUMN plot_no text, ADD COLUMN plot_size text, ADD COLUMN plot_rate text; ALTER TABLE day_book ADD COLUMN commission_id int');
     await register(pool);
+    await pg.exec('ALTER TABLE members ADD COLUMN phone text');
     await pg.exec('ALTER TABLE tds_deductions ADD COLUMN commission_payment_id int, ADD COLUMN source_module text, ADD COLUMN calculation_mode text');
     await migrate(pool); await migrate(pool);
+    const definition=(await pg.query("SELECT pg_get_functiondef('sync_native_payment_tds()'::regprocedure) AS definition")).rows[0].definition;
+    await pg.exec(definition.replace(/mode:=COALESCE[^\n]+?; status:=/, "mode:=COALESCE(draft->>'payment_mode',draft->>'cash_type','CASH'); status:="));
+    await pg.exec('DROP TRIGGER native_payment_tds_guard ON plot_commissions; DROP TRIGGER native_payment_tds_sync ON plot_commissions; ALTER TABLE plot_commissions DROP COLUMN tds_amount, DROP COLUMN tds_rate, DROP COLUMN tds_mode, DROP COLUMN tds_section, DROP COLUMN tds_module, DROP COLUMN tds_revision');
+    await mapping(pool); await mapping(pool);
     const base = { site_id: 1, date: '2026-10-01', payment_date: '2026-10-01', amount: 100000, payment_mode: 'BANK', tds_applicable: true, tds_mode: 'percentage', tds_rate: 2, tds_section: 'OTHER' };
     let expense, farmer;
     await t.test('expense create stores 98K net and 2K held with one linked pending register row', async () => {
@@ -99,6 +110,34 @@ test('native payment modules withhold atomically and share the TDS register', { 
       await assert.rejects(pg.query("UPDATE expenses SET status='rejected' WHERE id=$1",[expense.id]), /deposited/);
       await assert.rejects(pg.query('DELETE FROM expenses WHERE id=$1',[expense.id]), /deposited/);
     });
+    await t.test('Day Book edits preserve gross settlement, net legs and the same linked register row', async () => {
+      await invoke(updateExpenseFromDayBook,{...base,debit:100000,credit:0,particular:'Updated note'}, {originalUrl:`/daybook/expense/${expense.id}`,method:'PUT',params:{id:expense.id}},true);
+      const expenseRow=(await pg.query('SELECT * FROM expenses WHERE id=$1',[expense.id])).rows[0];
+      assert.equal(Number(expenseRow.debit),98000); assert.equal(Number(expenseRow.tds_amount),2000);
+      const result=await invoke(updateFarmerPaymentFromDayBook,{...base,debit:100000,credit:0,remarks:'Updated note'}, {originalUrl:`/daybook/farmer-payment/${farmer.id}`,method:'PUT',params:{id:farmer.id}},true);
+      assert.equal(Number(result.body.entry.amount),98000); assert.equal(Number(result.body.entry.bank_amount),98000);
+      for (const [table,path] of [['cash_flow_entries','cashflow-entry'],['firm_transactions','firm-transaction']]) {
+        const row=(await pg.query(`SELECT * FROM ${table} LIMIT 1`)).rows[0];
+        const handler=(req,res,next)=>new MasterModel(table).update(row.id,{debit:req.body.debit},pool).then(entry=>res.json({entry}),next);
+        const result=await invoke(handler,{...base,debit:100000,credit:0,tds_mode:'manual',tds_amount:2500},{originalUrl:`/daybook/${path}/${row.id}`,method:'PUT'},true);
+        assert.equal(Number(result.body.entry.debit),97500,table); assert.equal(Number(result.body.entry.tds_amount),2500,table);
+      }
+      const newLedger={...base,entry_type:'CASH FLOW',ledger_name:'New ledger',debit:100000,credit:0};
+      const draft=await preparePaymentTds({body:newLedger,user:{id:1},originalUrl:'/daybook',method:'POST'},pool);
+      assert.equal(draft.table,'cash_flow_entries'); assert.equal(newLedger.debit,98000);
+      for (const [table,module] of [['vendor_payments','vendor_payment'],['partner_profit_payments','partner_profit_payment']]) {
+        const row=(await pg.query(`SELECT * FROM ${table} LIMIT 1`)).rows[0];
+        const result=await invoke(updateModuleEntryFromDayBook,{...base,amount:100000,tds_mode:'manual',tds_amount:2500}, {originalUrl:`/daybook/module-entry/${table}/${row.id}`,method:'PUT',params:{source:table,id:row.id}},true);
+        assert.equal(Number(result.body.entry.amount),97500,module);
+        assert.equal(Number(result.body.entry.tds_amount),2500,module);
+      }
+      const mirrored=[{id:`expense_${expense.id}`,debit:98000},{id:50,farmer_payment_id:farmer.id,debit:98000},{id:'ppp_1',source_key:'partner_profit_payments',source_id:1,debit:97500}];
+      await attachDayBookTds(mirrored,pool);
+      assert.equal(Number(mirrored[0].tds_amount),2000); assert.equal(mirrored[0].tds_module,'expense');
+      assert.equal(Number(mirrored[1].tds_amount),2000); assert.equal(mirrored[1].debit,98000);
+      assert.equal(mirrored[2].tds_module,'partner_profit_payment');
+      assert.equal(Number((await pg.query("SELECT count(*) AS n FROM tds_deductions WHERE source_table='farmer_payments' AND source_id=$1",[farmer.id])).rows[0].n),1);
+    });
     await t.test('deposited taxpayer snapshots survive later member and source-note changes', async () => {
       const deduction = (await pg.query("SELECT * FROM tds_deductions WHERE source_module='vendor_payment'")).rows[0];
       await pg.query("UPDATE vendor_payments SET status='approved' WHERE id=$1",[deduction.source_id]);
@@ -119,6 +158,48 @@ test('native payment modules withhold atomically and share the TDS register', { 
       assert.equal((await pg.query('SELECT payment_state FROM tds_deductions WHERE id=$1',[linked.id])).rows[0].payment_state,'reversed');
       await pg.query('DELETE FROM farmer_payments WHERE id=$1',[farmer.id]);
       assert.equal((await pg.query('SELECT id FROM tds_deductions WHERE id=$1',[linked.id])).rows.length,0);
+    });
+    await t.test('Clients dropdown lists people without typing and KYC is copied from the selected Client', async () => {
+      const roster = await invoke(listDeductees, {}, { query: { site_id: 1 } });
+      assert.equal(roster.body.deductees.length, 1);
+      assert.equal(roster.body.deductees[0].full_name, 'New member name');
+      const result = await invoke(createExpense, { ...base, debit:200000, credit:0, tds_rate:3, tds_member_id:1, tds_deductee_name:'Stale name', tds_pan:'ABCDE1234F' }, { originalUrl:'/expenses',method:'POST' }, true);
+      const source = result.body.expense;
+      assert.equal(Number(source.debit),194000);
+      assert.equal(Number(source.tds_amount),6000);
+      assert.equal(source.tds_deductee_name,'New member name');
+      assert.equal(source.tds_pan,'FGHIJ1234K');
+      assert.equal(source.tds_aadhaar,'123456789012');
+      const stored = (await pg.query("SELECT * FROM tds_deductions WHERE source_table='expenses' AND source_id=$1",[source.id])).rows[0];
+      assert.equal(stored.member_id,1); assert.equal(stored.pan,source.tds_pan); assert.equal(stored.aadhaar,source.tds_aadhaar);
+      await pg.query("UPDATE expenses SET status='approved' WHERE id=$1",[source.id]);
+      await invoke(recordDeposit,{site_id:1,ids:[stored.id],deposit_date:'2026-10-07',challan_no:'MAPPED'});
+      await assert.rejects(pg.query('UPDATE expenses SET tds_member_id=NULL,tds_pan=NULL WHERE id=$1',[source.id]), /deposited/);
+      await assert.rejects(invoke(createExpense, { ...base,site_id:2,debit:200000,credit:0,tds_applicable:false,tds_member_id:1 },{originalUrl:'/expenses',method:'POST'},true), /not available/);
+    });
+    await t.test('manual register mappings also use canonical Client KYC', async () => {
+      const result = await invoke(createDeduction,{site_id:1,member_id:1,deductee_name:'Wrong name',pan:'ABCDE1234F',aadhaar:'',section:'194H',deduction_date:'2026-05-14',gross_amount:150000,tds_rate:3,tds_amount:4500});
+      const row = (await pg.query('SELECT * FROM tds_deductions WHERE id=$1',[result.body.id])).rows[0];
+      assert.equal(row.deductee_name,'New member name'); assert.equal(row.pan,'FGHIJ1234K'); assert.equal(row.aadhaar,'123456789012');
+      assert.equal(Number(row.gross_amount)-Number(row.tds_amount),145500);
+    });
+    await t.test('older Commission and Day Book commission forms use the Project Commission policy', async () => {
+      const body={...base,amount:200000,particular:'Agent',by_note:'OM BANK',tds_rate:3,tds_member_id:1,payment_mode:undefined};
+      const created=await invoke(createCommission,body,{originalUrl:'/commissions',method:'POST'},true);
+      const source=created.body.commission;
+      assert.equal(Number(source.amount),194000); assert.equal(Number(source.tds_amount),6000);
+      let deduction=(await pg.query("SELECT * FROM tds_deductions WHERE source_table='plot_commissions' AND source_id=$1",[source.id])).rows[0];
+      assert.equal(deduction.source_module,'plot_commission'); assert.equal(deduction.source_details.payment_mode,'BANK');
+      assert.equal(deduction.pan,'FGHIJ1234K'); assert.equal(deduction.member_id,1);
+      const edited=await invoke(updateCommissionFromDayBook,{...base,debit:150000,credit:0,tds_rate:3}, {originalUrl:`/daybook/commission/${source.id}`,method:'PUT',params:{id:source.id}},true);
+      assert.equal(Number(edited.body.entry.amount),145500);
+      deduction=(await pg.query('SELECT * FROM tds_deductions WHERE id=$1',[deduction.id])).rows[0];
+      assert.equal(Number(deduction.gross_amount),150000); assert.equal(Number(deduction.tds_amount),4500);
+      const daybook=await invoke(createDayBookEntry,{...base,entry_type:'PLOT COMMISSION',particular:'Agent',debit:200000,credit:0,tds_rate:3,tds_member_id:1},{originalUrl:'/daybook',method:'POST'},true);
+      assert.equal(Number(daybook.body.commission.amount),194000); assert.equal(Number(daybook.body.entry.debit),194000);
+      const mirror=[{id:daybook.body.entry.id,commission_id:daybook.body.commission.id,debit:194000}];
+      await attachDayBookTds(mirror,pool);
+      assert.equal(Number(mirror[0].tds_amount),6000); assert.equal(mirror[0].tds_module,'plot_commission');
     });
   } finally { await pg.close(); }
 });

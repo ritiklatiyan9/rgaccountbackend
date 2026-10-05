@@ -1,5 +1,6 @@
 import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
+import { reviewMemberIdentity, linkMemberIdentity } from '../services/memberIdentityLink.service.js';
 import { copyIncorporatedKycDocuments } from '../services/memberKycDocuments.service.js';
 export { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { linkSelectedMemberPlot } from '../services/memberPlotSelection.service.js';
@@ -644,6 +645,17 @@ export const getMember = asyncHandler(async (req, res) => {
   res.json({ member: { ...member, ...Object.fromEntries(documentUrls), plots: plots.get(String(member.id)) || [] } });
 });
 
+/** GET /members/:id/identity-review */
+export const getMemberIdentityReview = asyncHandler(async (req, res) => {
+  const memberId = Number(req.params.id);
+  if (!Number.isSafeInteger(memberId) || memberId <= 0) return res.status(400).json({ message: 'A valid user is required.' });
+  const { summary } = await reviewMemberIdentity(pool, {
+    memberId, user: req.user, phone: req.query.phone,
+    aadharNo: req.query.aadhar_no, panNo: req.query.pan_no,
+  });
+  res.json(summary);
+});
+
 /** PUT /members/:id */
 export const updateMember = asyncHandler(async (req, res) => {
   const memberId = parseInt(req.params.id);
@@ -671,6 +683,7 @@ export const updateMember = asyncHandler(async (req, res) => {
           WHERE m.site_id = me.site_id
             AND RIGHT(REGEXP_REPLACE(COALESCE(m.phone, ''), '[^0-9]', '', 'g'), 10) = $1
             AND m.id != $2
+            AND (me.shared_profile_id IS NULL OR m.shared_profile_id IS DISTINCT FROM me.shared_profile_id)
           LIMIT 1`,
         [data.phone, memberId]
       )
@@ -692,8 +705,10 @@ export const updateMember = asyncHandler(async (req, res) => {
   // check existed (a KYC stub, a family line, a legacy import) must not make a
   // record permanently uneditable when the edit never touches the phone — and a
   // stored number that differs only in spacing counts as unchanged.
-  if (phoneCheck.rows.length > 0 && !samePhone(data.phone, existing.phone)) {
+  const confirmIdentity = req.body.same_person_confirmed === 'true' || req.body.same_person_confirmed === true;
+  if (phoneCheck.rows.length > 0 && !samePhone(data.phone, existing.phone) && !confirmIdentity) {
     return res.status(409).json({
+      code: 'MEMBER_IDENTITY_CONFLICT',
       message: `Phone number ${data.phone} is already registered to ${phoneCheck.rows[0].full_name}`,
       member_id: phoneCheck.rows[0].id,
     });
@@ -722,9 +737,22 @@ export const updateMember = asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
     await lockMemberDirectory(client,req.user);
+    let identityLink = null;
+    if (confirmIdentity) {
+      const review = await reviewMemberIdentity(client, {
+        memberId, user: req.user, phone: data.phone, aadharNo: data.aadhar_no, panNo: data.pan_no, lock: true,
+      });
+      identityLink = await linkMemberIdentity(client, {
+        review, user: req.user, profileMemberId: req.body.identity_profile_member_id,
+        revision: req.body.identity_revision, data,
+      });
+    }
     if(data.phone && !samePhone(data.phone,existing.phone)) {
-      const {rows}=await client.query(`SELECT id FROM members WHERE site_id=$1 AND id<>$2
-        AND RIGHT(REGEXP_REPLACE(COALESCE(phone,''),'[^0-9]','','g'),10)=$3 LIMIT 1`,[existing.site_id,memberId,data.phone]);
+      const {rows}=await client.query(`SELECT m.id FROM members m JOIN members me ON me.id=$2
+        WHERE m.site_id=$1 AND m.id<>$2
+        AND RIGHT(REGEXP_REPLACE(COALESCE(m.phone,''),'[^0-9]','','g'),10)=$3
+        AND (me.shared_profile_id IS NULL OR m.shared_profile_id IS DISTINCT FROM me.shared_profile_id)
+        LIMIT 1`,[existing.site_id,memberId,data.phone]);
       if(rows.length) throw Object.assign(new Error('This mobile number is already registered in this site.'),{statusCode:409});
     }
     const updated = await memberModel.update(memberId, data, client);
@@ -733,7 +761,7 @@ export const updateMember = asyncHandler(async (req, res) => {
     }
     const sharing=await syncSharedMemberProfile(client,{memberId,user:req.user,changedFields:Object.keys(data)});
     await client.query('COMMIT');
-    return res.json({member:updated,sharing});
+    return res.json({member:updated,sharing,identity_link:identityLink});
   } catch (error) {await client.query('ROLLBACK');throw error;}
   finally {client.release();}
 });

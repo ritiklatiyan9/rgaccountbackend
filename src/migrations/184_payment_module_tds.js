@@ -94,7 +94,7 @@ export async function up(database = pool) {
         SELECT to_jsonb(m) INTO person FROM members m WHERE id=member AND site_id=site;
         IF person IS NULL THEN member:=NULL; END IF;
         name:=COALESCE(name,person->>'full_name',NULLIF(draft->>'party_name',''),NULLIF(draft->>'to_entity',''),NULLIF(draft->>'name',''),NULLIF(draft->>'particular',''),label);
-        mode:=COALESCE(draft->>'payment_mode',draft->>'cash_type','CASH'); status:=COALESCE(draft->>'status','approved'); cheque:=draft->>'cheque_status';
+        mode:=COALESCE(draft->>'payment_mode',draft->>'cash_type',CASE WHEN TG_TABLE_NAME='plot_commissions' AND upper(COALESCE(draft->>'by_note','')) LIKE '%CHEQUE%' THEN 'CHEQUE' WHEN TG_TABLE_NAME='plot_commissions' AND upper(COALESCE(draft->>'by_note','')) ~ '(BANK|ONLINE|NEFT|RTGS|UPI)' THEN 'BANK' ELSE 'CASH' END); status:=COALESCE(draft->>'status','approved'); cheque:=draft->>'cheque_status';
         state:=CASE WHEN lower(status) IN ('rejected','returned') OR upper(COALESCE(cheque,'')) IN ('BOUNCED','RETURNED') THEN 'reversed'
           WHEN financial_transaction_posts('debit',status,mode,cheque) THEN 'active' ELSE 'pending' END;
         INSERT INTO tds_deductions(site_id,member_id,deductee_name,pan,aadhaar,section,deduction_date,gross_amount,tds_rate,tds_amount,
@@ -113,7 +113,7 @@ export async function up(database = pool) {
           calculation_mode=EXCLUDED.calculation_mode,source_label=CASE WHEN tds_deductions.deposit_date IS NULL THEN EXCLUDED.source_label ELSE tds_deductions.source_label END,source_details=EXCLUDED.source_details,payment_state=EXCLUDED.payment_state,updated_at=NOW();
         RETURN NULL;
       END $$;`);
-    const tables = new Map(Object.entries(TDS_SOURCES).filter(([key]) => key !== 'imprest_expense').map(([key, source]) => [source.table, [key, source.amount || 'amount']]));
+    const tables = new Map(Object.entries(TDS_SOURCES).filter(([key]) => key !== 'imprest_expense').map(([key, source]) => [source.table, [source.workflowModule || key, source.amount || 'amount']]));
     for (const [table, [module, amount]] of tables) {
       await client.query(`ALTER TABLE ${table}
         ADD COLUMN IF NOT EXISTS tds_amount NUMERIC(14,2) NOT NULL DEFAULT 0,

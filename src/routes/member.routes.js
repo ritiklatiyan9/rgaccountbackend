@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   getMemberPlotOptions, createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete, getMemberOptions,
   getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo,
-  extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites,
+  extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites, getMemberIdentityReview,
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import { getKycSources, incorporateKyc } from '../controllers/memberKycIncorporation.controller.js';
@@ -82,6 +82,7 @@ router.post('/bulk-register-sites', requireRole('admin', 'sub_admin'), requirePe
 router.post('/:id/register-sites', requireRole('admin', 'sub_admin'), requirePermission('clients', 'write'), bustMemberCache, registerMemberInSites);
 router.get('/:id/kyc-sources', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getKycSources);
 router.post('/:id/incorporate-kyc', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), requirePermission('clients', 'update'), bustMemberCache, incorporateKyc);
+router.get('/:id/identity-review', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), requirePermission('clients', 'update'), getMemberIdentityReview);
 
 // Member transactions
 router.get('/:id/transactions', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberTransactions);

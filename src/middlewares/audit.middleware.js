@@ -15,6 +15,7 @@ const MODULE_MAP = {
   commissions: 'commissions', 'land-deals': 'land_deals', 'misc-income': 'misc_income', tds: 'tds', 'plot-commission': 'plot_commission', cashflow: 'cashflow',
   firms: 'firm_transactions', plots: 'plot_payments', 'plot-documents': 'plot_payments',
   documents: 'document_search', 'record-documents': 'document_search', forecast: 'finance_forecast',
+  'data-storage': 'data_storage',
   expenses: 'expenses', registries: 'plot_registry', members: 'clients', 'member-kyc': 'clients',
   daybook: 'daybook', banks: 'cashflow', imprest: 'imprest', 'document-imprest': 'document_imprest',
   'edit-requests': 'edit_approvals', permissions: 'permissions', 'member-categories': 'clients',
