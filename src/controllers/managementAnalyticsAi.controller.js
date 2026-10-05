@@ -341,7 +341,9 @@ export const runGeocode = asyncHandler(async (req, res) => {
   if (!ADMIN_ROLES.has(req.user?.role)) return res.status(403).json({ message: 'Admin access required' });
   const scope = await scopeOrReject(req, res);
   if (!scope) return;
-  const result = await geocodePendingMembers({ siteId: scope.siteId, limit: req.body?.limit, afterId: req.body?.after_id });
+  const useAI = req.body?.use_ai === true;
+  if (useAI && !process.env.OPENROUTER_API_KEY) return res.status(503).json({ message: 'AI address lookup is not configured on this server.' });
+  const result = await geocodePendingMembers({ siteId: scope.siteId, limit: req.body?.limit, afterId: req.body?.after_id, useAI });
   if (result.geocoded > 0) await clearCacheByPrefixes(['management-analytics|', 'members|']);
   res.json(result);
 });

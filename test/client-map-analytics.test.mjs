@@ -9,10 +9,10 @@ test('normalizes locality spacing, state aliases and PIN formatting into a share
   assert.notEqual(cacheKey({ city: 'Meerut', village: 'A' }), cacheKey({ city: 'Meerut', village: 'B' }));
 });
 
-test('extracts an unambiguous PIN and state from saved address without guessing the street or city', () => {
+test('extracts a supported locality, PIN and state from saved address', () => {
   const result = addressParts({ address: 'House 22, Meerut, Uttar Pradesh 250001' });
   assert.equal(result.pincode, '250001'); assert.equal(result.state, 'UTTAR PRADESH');
-  assert.equal(result.city, ''); assert.equal(result.inferred_pincode, true); assert.equal(result.can_geocode, true);
+  assert.equal(result.city, 'MEERUT'); assert.equal(result.inferred_pincode, true); assert.equal(result.can_geocode, true);
   assert.equal(addressParts({ address: 'Mobile 9825000199' }).pincode, '');
   assert.equal(addressParts({ address: '250001 or 250002' }).pincode, '');
   assert.equal(addressParts({ address: '250001', pincode: '123' }).pincode, '');
@@ -42,8 +42,8 @@ test('map includes all members and conserves coverage with incomplete, invalid a
   ], { siteId: 5 });
   assert.equal(map.members.length, 4); assert.equal(map.summary.total, 4);
   assert.equal(map.summary.geocoded + map.unresolved.count, map.summary.total);
-  assert.equal(map.summary.manual, 1); assert.equal(map.summary.approx, 1);
-  assert.equal(map.summary.ready_to_locate, 1); assert.equal(map.members[0].total_paid, 12.34);
+  assert.equal(map.summary.manual, 1); assert.equal(map.summary.approx, 2);
+  assert.equal(map.summary.ready_to_locate, 0); assert.equal(map.members[0].total_paid, 12.34);
   assert.deepEqual(map.members[1].member_types, ['BROKER', 'CLIENT']);
   assert.equal(map.members[2].location_status, 'needs_address');
 });
@@ -71,7 +71,7 @@ test('rejects mismatched states, PINs, invalid coordinates and ambiguous town na
 
 test('uses cached coordinates and negative cache without contacting a provider', async () => {
   for (const lat of [28, null]) {
-    const result = await geocodeAddress({ city: 'Meerut' }, { db: { query: async () => ({ rows: [{ lat, lng: 77, precision: 'city', source: 'nominatim' }] }) }, fetchImpl: () => { throw new Error('Unexpected network'); } });
+    const result = await geocodeAddress({ city: 'UnlistedTown' }, { db: { query: async () => ({ rows: [{ lat, lng: 77, precision: 'city', source: 'nominatim' }] }) }, fetchImpl: () => { throw new Error('Unexpected network'); } });
     assert.equal(result?.lat ?? null, lat);
   }
 });
@@ -80,14 +80,14 @@ test('caches successful misses but never caches provider failures', async () => 
   for (const failed of [false, true]) {
     const queries = [];
     const options = { db: { query: async (sql, args) => { queries.push([sql, args]); return { rows: [] }; } }, sleep: async () => {}, fetchImpl: async () => ({ ok: !failed, status: 429, json: async () => [] }) };
-    if (failed) await assert.rejects(geocodeAddress({ city: 'Meerut' }, options), /429/);
-    else assert.equal(await geocodeAddress({ city: 'Meerut' }, options), null);
+    if (failed) await assert.rejects(geocodeAddress({ city: 'UnlistedTown' }, options), /429/);
+    else assert.equal(await geocodeAddress({ city: 'UnlistedTown' }, options), null);
     assert.equal(queries.length, failed ? 1 : 2);
   }
 });
 
 test('deadline pauses before making a network call or caching a miss', async () => {
-  await assert.rejects(geocodeAddress({ city: 'Meerut' }, {
+  await assert.rejects(geocodeAddress({ city: 'UnlistedTown' }, {
     db: { query: async () => ({ rows: [] }) }, deadline: 0,
     fetchImpl: () => { throw new Error('Unexpected network'); },
   }), { code: 'BATCH_DEADLINE' });

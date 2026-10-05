@@ -1,4 +1,5 @@
 import { addressParts, coordinates, cleanLocationText, normaliseLocation } from './clientLocation.js';
+import { lookupIndianLocation } from './indiaLocationReference.js';
 
 // One snapshot, one ledger aggregation and one owner per plot. Name matching is
 // only allowed for a unique name in this site, including deleted names to avoid
@@ -6,6 +7,7 @@ import { addressParts, coordinates, cleanLocationText, normaliseLocation } from 
 export const CLIENT_MAP_SQL = `WITH
   site_members AS MATERIALIZED (
     SELECT id, full_name, member_type, member_types, status, address, city, village, district, state, pincode,
+      to_jsonb(members)->>'permanent_address' AS permanent_address,
       occupation, latitude, longitude, geocode_source, geocode_precision FROM members WHERE site_id = $1
   ),
   name_index AS (
@@ -39,7 +41,7 @@ export const CLIENT_MAP_SQL = `WITH
   ),
   map_members AS (
     SELECT m.id, m.full_name AS name, m.member_type, COALESCE(m.member_types, ARRAY[m.member_type]) AS member_types,
-      m.address, m.city, m.village, m.district, m.state, m.pincode, m.occupation,
+      m.address, m.permanent_address, m.city, m.village, m.district, m.state, m.pincode, m.occupation,
       m.latitude AS lat, m.longitude AS lng, m.geocode_source AS source, m.geocode_precision AS precision,
       COALESCE(mm.plot_count,0) AS plot_count, COALESCE(mm.total_paid,0) AS total_paid,
       COALESCE(mm.sale_value,0) AS sale_value, COALESCE(mm.outstanding,0) AS outstanding
@@ -54,30 +56,37 @@ const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
 export function buildClientMap(rows, { siteId, unlinked = {} } = {}) {
   const members = [];
   const seen = new Set();
-  const summary = { total: 0, geocoded: 0, manual: 0, approx: 0, with_address: 0, ready_to_locate: 0, invalid_pincode: 0 };
+  const summary = { total: 0, geocoded: 0, manual: 0, approx: 0, with_address: 0, from_kyc: 0, auto_located: 0, ready_to_locate: 0, ai_ready: 0, invalid_pincode: 0 };
   for (const row of rows) {
     if (row.id == null || seen.has(String(row.id))) continue;
     seen.add(String(row.id));
     const address = addressParts(row);
-    const coord = coordinates(row.lat, row.lng);
+    const saved = coordinates(row.lat, row.lng);
+    const inferred = !saved && row.source !== 'manual' ? lookupIndianLocation({ ...address, address: cleanLocationText(row.address) || row.permanent_address }) : null;
+    const coord = saved || inferred;
+    const source = inferred?.source || row.source;
     const roles = [...new Set([row.member_type, ...(Array.isArray(row.member_types) ? row.member_types : [])].map(normaliseLocation).filter(Boolean))];
     const member = {
       ...row, ...address, lat: coord?.lat ?? null, lng: coord?.lng ?? null,
-      address: cleanLocationText(row.address), name: cleanLocationText(row.name),
+      address: cleanLocationText(row.address) || cleanLocationText(row.permanent_address), name: cleanLocationText(row.name),
+      source, precision: inferred?.precision || row.precision,
       member_type: roles[0] || 'OTHER', member_types: roles.length ? roles : ['OTHER'],
-      location_status: coord ? (row.source === 'manual' ? 'manual' : 'approximate') : (address.can_geocode && row.source !== 'manual' ? 'pending' : 'needs_address'),
+      location_status: coord ? (source === 'manual' ? 'manual' : 'approximate') : (address.can_geocode && source !== 'manual' ? 'pending' : 'needs_address'),
       total_paid: number(row.total_paid), outstanding: number(row.outstanding),
       sale_value: number(row.sale_value), plot_count: number(row.plot_count),
     };
     members.push(member);
     summary.total++;
-    if (coord) { summary.geocoded++; summary[row.source === 'manual' ? 'manual' : 'approx']++; }
+    if (coord) { summary.geocoded++; summary[source === 'manual' ? 'manual' : 'approx']++; }
+    if (inferred || source === 'geonames' || source === 'ai_geonames') summary.auto_located++;
+    if (row.address_source === 'kyc') summary.from_kyc++;
     if (address.has_address) summary.with_address++;
     if (!coord && address.can_geocode && row.source !== 'manual') summary.ready_to_locate++;
+    if (!coord && address.has_address && row.source !== 'manual') summary.ai_ready++;
     if (address.invalid_pincode) summary.invalid_pincode++;
   }
   return {
-    site_id: siteId, members, summary,
+    site_id: siteId, members, summary, ai_available: Boolean(process.env.OPENROUTER_API_KEY),
     unresolved: { count: summary.total - summary.geocoded, no_address: members.filter((m) => !m.has_address && m.lat === null).length },
     unlinked: { plots: number(unlinked.plots), total_paid: number(unlinked.total_paid) },
     generated_at: new Date().toISOString(),

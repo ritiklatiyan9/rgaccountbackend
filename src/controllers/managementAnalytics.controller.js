@@ -5,6 +5,7 @@
 // payment BEHAVIOUR facts (who paid when) with the approved/non-bounced predicate applied.
 import pool from '../config/db.js';
 import { CLIENT_MAP_SQL, buildClientMap } from '../services/clientMapAnalytics.service.js';
+import { loadClientMapAddresses } from '../services/clientMapAddresses.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { cleanText } from '../services/openRouterStream.service.js';
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
@@ -437,7 +438,8 @@ export const getClientMap = asyncHandler(async (req, res) => {
   if (!scope) return;
   const { rows } = await pool.query(CLIENT_MAP_SQL, [scope.siteId]);
   const { members = [], unlinked = {} } = rows[0] || {};
-  const map = buildClientMap(members, { siteId: scope.siteId, unlinked });
+  const enriched = await loadClientMapAddresses(members, { db: pool, siteId: scope.siteId });
+  const map = buildClientMap(enriched, { siteId: scope.siteId, unlinked });
   // Older frontends still request only points. Opt in to the complete dataset
   // without duplicating thousands of mapped members in the same response.
   if (req.query.dataset !== 'members') {

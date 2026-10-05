@@ -1,5 +1,8 @@
 import pool from '../config/db.js';
 import { addressParts, cacheKey, cleanPin, coordinates, normaliseState } from './clientLocation.js';
+import { lookupIndianLocation } from './indiaLocationReference.js';
+import { loadClientMapAddresses } from './clientMapAddresses.service.js';
+import { locateAddressWithAi } from './clientAddressAi.service.js';
 
 export { cacheKey } from './clientLocation.js';
 // User-triggered, small batches only. See docs/client-map-analytics.md for provider policy.
@@ -36,17 +39,30 @@ export function selectGeocodeHit(rows, member, precision) {
   return hits[0] || null;
 }
 
-export async function geocodeAddress(member, { db = pool, fetchImpl = fetch, deadline = Infinity, sleep = pause } = {}) {
-  if (!addressParts(member).can_geocode) return null;
+export async function geocodeAddress(member, { db = pool, fetchImpl = fetch, deadline = Infinity, sleep = pause, useAI = false, aiLookup = locateAddressWithAi } = {}) {
+  const parts = addressParts(member);
+  const local = lookupIndianLocation({ ...parts, address: member.address });
+  if (local) return local;
+  if (!parts.can_geocode && !(useAI && parts.has_address)) return null;
   const key = cacheKey(member);
-  const cached = await db.query(`SELECT lat, lng, precision, source FROM geocode_cache
+  const cached = await db.query(`SELECT lat, lng, precision, source, raw FROM geocode_cache
     WHERE query_key = $1 AND created_at > now() - CASE WHEN lat IS NULL THEN interval '7 days' ELSE interval '180 days' END`, [key]);
   if (cached.rows[0]) {
     const row = cached.rows[0];
     const pair = coordinates(row.lat, row.lng);
-    return pair ? { ...pair, precision: row.precision, source: row.source } : null;
+    if (pair) return { ...pair, precision: row.precision, source: row.source };
+    if (!useAI || row.source === 'ai_geonames') return null;
   }
   let hit = null;
+  if (useAI) {
+    if (Date.now() + 8500 > deadline) { const error = new Error('Continue in the next batch'); error.code = 'BATCH_DEADLINE'; throw error; }
+    hit = await aiLookup(member, { timeoutMs: 8000 });
+    await db.query(`INSERT INTO geocode_cache (query_key,lat,lng,precision,source,raw)
+      VALUES ($1,$2,$3,$4,'ai_geonames',$5::jsonb) ON CONFLICT (query_key) DO UPDATE
+      SET lat=EXCLUDED.lat,lng=EXCLUDED.lng,precision=EXCLUDED.precision,source=EXCLUDED.source,raw=EXCLUDED.raw,created_at=now()`,
+    [key, hit?.lat ?? null, hit?.lng ?? null, hit?.precision ?? null, hit ? JSON.stringify({ locality: hit.locality }) : null]);
+    return hit;
+  }
   for (const { params, precision } of searchAttempts(member)) {
     if (Date.now() + FETCH_TIMEOUT_MS + 1100 > deadline) {
       const error = new Error('Continue in the next batch'); error.code = 'BATCH_DEADLINE'; throw error;
@@ -76,9 +92,9 @@ export async function geocodeAddress(member, { db = pool, fetchImpl = fetch, dea
   return hit;
 }
 
-const snapshot = (member) => JSON.stringify(['address', 'city', 'village', 'district', 'state', 'pincode'].map((key) => member[key] ?? null));
+const snapshot = (member) => JSON.stringify(['address', 'city', 'village', 'district', 'state', 'pincode', 'permanent_address'].map((key) => member[key] ?? null));
 
-export async function geocodePendingMembers({ siteId, limit = 100, afterId = 0 }, { db = pool, lookup = geocodeAddress } = {}) {
+export async function geocodePendingMembers({ siteId, limit = 100, afterId = 0, useAI = false }, { db = pool, lookup = geocodeAddress, loadAddresses = loadClientMapAddresses } = {}) {
   const cap = Math.min(Math.max(Math.trunc(Number(limit) || 100), 1), 300);
   const cursor = Math.max(0, Math.trunc(Number(afterId) || 0));
   const client = await db.connect();
@@ -87,10 +103,12 @@ export async function geocodePendingMembers({ siteId, limit = 100, afterId = 0 }
     const lock = await client.query(`SELECT pg_try_advisory_lock(hashtext('client-map-geocoder')) AS locked`);
     locked = Boolean(lock.rows[0]?.locked);
     if (!locked) return { busy: true, processed: 0, geocoded: 0, next_after_id: cursor, message: 'An address lookup is already running. Try again shortly.' };
-    const { rows } = await client.query(`SELECT id, address, city, village, district, state, pincode FROM members
+    const { rows } = await client.query(`SELECT id, address, permanent_address, city, village, district, state, pincode,
+        latitude AS lat,longitude AS lng,geocode_source AS source FROM members
       WHERE site_id=$1 AND LOWER(BTRIM(COALESCE(status,'active'))) <> 'deleted'
         AND geocode_source IS DISTINCT FROM 'manual' AND ${NO_COORDINATES} ORDER BY id`, [siteId]);
-    const eligible = rows.filter((row) => addressParts(row).can_geocode);
+    const resolved = await loadAddresses(rows, { db: client, siteId });
+    const eligible = resolved.filter(row => !coordinates(row.lat, row.lng) && (addressParts(row).can_geocode || (useAI && addressParts(row).has_address)));
     const batch = eligible.filter((row) => Number(row.id) > cursor).slice(0, cap);
     const results = new Map();
     const deadline = Date.now() + BATCH_MS;
@@ -98,17 +116,22 @@ export async function geocodePendingMembers({ siteId, limit = 100, afterId = 0 }
     for (const member of batch) {
       try {
         const key = cacheKey(member);
-        if (!results.has(key)) results.set(key, await lookup(member, { db: client, deadline }));
+        if (!results.has(key)) results.set(key, await lookup(member, { db: client, deadline, useAI }));
         const hit = results.get(key);
         if (hit) {
+          // KYC-derived and AI-normalized locations stay in the cache. They are
+          // read afresh with the address, rather than overwriting profile pins.
+          if (member.address_source === 'kyc' || hit.source === 'ai_geonames') {
+            geocoded++; processed++; next = Number(member.id); continue;
+          }
           // Compare the address snapshot and pin state: edits made while the
           // provider was responding must never be overwritten by stale results.
           const updated = await client.query(`UPDATE members SET latitude=$2, longitude=$3,
-            geocode_source='nominatim', geocode_precision=$4, geocoded_at=now()
+            geocode_source=$7, geocode_precision=$4, geocoded_at=now()
             WHERE id=$1 AND site_id=$5 AND geocode_source IS DISTINCT FROM 'manual'
               AND LOWER(BTRIM(COALESCE(status,'active'))) <> 'deleted' AND ${NO_COORDINATES}
-              AND jsonb_build_array(address,city,village,district,state,pincode)=$6::jsonb`,
-          [member.id, hit.lat, hit.lng, hit.precision, siteId, snapshot(member)]);
+              AND jsonb_build_array(address,city,village,district,state,pincode,permanent_address)=$6::jsonb`,
+          [member.id, hit.lat, hit.lng, hit.precision, siteId, snapshot(rows.find(row => row.id === member.id) || member), hit.source || 'nominatim']);
           geocoded += updated.rowCount;
         } else unmatched++;
         processed++; next = Number(member.id);
@@ -121,7 +144,7 @@ export async function geocodePendingMembers({ siteId, limit = 100, afterId = 0 }
     const remaining = eligible.filter((row) => Number(row.id) > next).length;
     return { processed, geocoded, unmatched, failed, paused, remaining,
       next_after_id: remaining ? next : 0, has_more: remaining > 0,
-      skipped_no_address: rows.length - eligible.length };
+      skipped_no_address: resolved.filter(row => !addressParts(row).has_address).length };
   } finally {
     try { if (locked) await client.query(`SELECT pg_advisory_unlock(hashtext('client-map-geocoder'))`); }
     catch (error) { client.release(error); throw error; }

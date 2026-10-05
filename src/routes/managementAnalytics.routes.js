@@ -44,6 +44,6 @@ router.post(
 router.post('/assistant', aiLimiter, streamAssistant);
 router.post('/insights', aiLimiter, generateInsights);
 router.post('/chart-insight', aiLimiter, chartInsight);
-router.post('/geocode/run', requireRole('admin'), runGeocode);
+router.post('/geocode/run', requireRole('admin'), aiLimiter, runGeocode);
 
 export default router;
