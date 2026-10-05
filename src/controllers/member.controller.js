@@ -670,7 +670,7 @@ export const updateMember = asyncHandler(async (req, res) => {
   }
 
   const existingPromise = pool.query(
-    `SELECT id, site_id, latitude, longitude, geocode_source, address, city, state, pincode, village, district, phone, member_type,
+    `SELECT id, site_id, latitude, longitude, geocode_source, address, city, state, pincode, village, district, phone, aadhar_no, pan_no, member_type,
             COALESCE(member_types, ARRAY[member_type]) AS member_types
        FROM members WHERE id = $1`,
     [memberId]
@@ -744,10 +744,11 @@ export const updateMember = asyncHandler(async (req, res) => {
       });
       identityLink = await linkMemberIdentity(client, {
         review, user: req.user, profileMemberId: req.body.identity_profile_member_id,
+        selectedMemberIds: req.body.identity_member_ids,
         revision: req.body.identity_revision, data,
       });
     }
-    if(data.phone && !samePhone(data.phone,existing.phone)) {
+    if(!identityLink && data.phone && !samePhone(data.phone,existing.phone)) {
       const {rows}=await client.query(`SELECT m.id FROM members m JOIN members me ON me.id=$2
         WHERE m.site_id=$1 AND m.id<>$2
         AND RIGHT(REGEXP_REPLACE(COALESCE(m.phone,''),'[^0-9]','','g'),10)=$3
@@ -759,7 +760,8 @@ export const updateMember = asyncHandler(async (req, res) => {
     if (req.body.plot_id != null && req.body.plot_id !== '') {
       await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId, siteId: existing.site_id });
     }
-    const sharing=await syncSharedMemberProfile(client,{memberId,user:req.user,changedFields:Object.keys(data)});
+    const sharing=identityLink ? {updated_count:identityLink.registration_count-1,kyc_shared_count:0}
+      : await syncSharedMemberProfile(client,{memberId,user:req.user,changedFields:Object.keys(data),previousProfile:existing});
     await client.query('COMMIT');
     return res.json({member:updated,sharing,identity_link:identityLink});
   } catch (error) {await client.query('ROLLBACK');throw error;}

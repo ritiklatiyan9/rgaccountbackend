@@ -9,6 +9,7 @@ import { createDataStorageRouter } from '../src/routes/dataStorage.routes.js';
 import requirePermission from '../src/middlewares/permission.middleware.js';
 import { attachmentReferences, validLocalKey } from '../src/services/backupAttachments.js';
 import { moduleForTable } from '../src/services/backupModules.js';
+import { createDataStorageFiles } from '../src/utils/dataStorageFiles.js';
 
 const admin = { id: 1, role: 'admin', organization_id: 1 };
 const subAdmin = { id: 2, role: 'sub_admin', organization_id: 1 };
@@ -164,6 +165,28 @@ test('Data Storage files are included in existing backup discovery', () => {
   assert.equal(moduleForTable('data_storage_entries'), 'spreadsheets');
 });
 
+test('new files use AWS S3 and never silently fall back to local disk', async () => {
+  const sent = [];
+  const bytes = Buffer.from('AWS storage test');
+  const body = Readable.from(bytes);
+  const files = createDataStorageFiles({ bucketName: 'test-bucket', s3Client: {
+    async send(command) { sent.push(command); return { Body: body }; },
+  } });
+  const key = await files.upload(bytes, 12);
+  assert.match(key, /^data_storage\/12\/[0-9a-f-]{36}$/);
+  assert.equal(sent[0].constructor.name, 'PutObjectCommand');
+  assert.equal(sent[0].input.Bucket, 'test-bucket');
+  assert.equal(sent[0].input.ContentType, 'application/octet-stream');
+  assert.equal(sent[0].input.Body, bytes);
+  assert.equal(await files.open(key), body);
+  assert.equal(sent[1].constructor.name, 'GetObjectCommand');
+  await files.remove(key);
+  assert.equal(sent[2].constructor.name, 'DeleteObjectCommand');
+  assert.ok(sent.every((command) => command.input.Bucket === 'test-bucket' && command.input.Key === key));
+  const unconfigured = createDataStorageFiles({ s3Client: null, bucketName: '' });
+  await assert.rejects(unconfigured.upload(bytes, 12), { statusCode: 503 });
+});
+
 test('HTTP API enforces authentication and each action permission, accepts multipart files and streams downloads', async (t) => {
   const { database, files } = await fixture(t);
   const app = express();
@@ -205,6 +228,19 @@ test('HTTP API enforces authentication and each action permission, accepts multi
   assert.equal(download.headers.get('content-type'), 'application/octet-stream');
   assert.equal(download.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(await download.text(), '<script>test</script>');
+  const preview = await request(`/${file.id}/preview?site_id=1`, {}, 'viewer');
+  assert.equal(preview.status, 200);
+  assert.match(preview.headers.get('content-disposition'), /^inline;/);
+  assert.equal(preview.headers.get('content-type'), 'application/octet-stream');
+  assert.equal(await preview.text(), '<script>test</script>');
+  assert.equal((await request(`/${file.id}/preview?site_id=1`, {}, 'denied')).status, 403);
+  assert.equal((await request(`/${file.id}/preview?site_id=2`)).status, 404);
+  const unicodeBody = new FormData();
+  unicodeBody.set('site_id', '1');
+  unicodeBody.set('file', new Blob(['Hindi filename']), 'खाता.txt');
+  const unicodeUpload = await request('/files', { method: 'POST', body: unicodeBody }, 'editor');
+  assert.equal(unicodeUpload.status, 201);
+  assert.equal((await unicodeUpload.json()).entry.name, 'खाता.txt');
   for (const [url, method, payload] of [
     ['/folders', 'POST', { site_id: 1, name: 'Forbidden' }],
     [`/${file.id}?site_id=1`, 'PATCH', { name: 'Forbidden' }],

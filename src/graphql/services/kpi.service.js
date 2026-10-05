@@ -200,12 +200,16 @@ export async function getLandProfitDetail(siteId, end) {
   const saleValue = numberOf(row.sale_value);
   const received = numberOf(row.received);
   const remaining = numberOf(row.remaining);
+  const purchaseCost = numberOf(row.purchase_cost);
   const bookProfit = numberOf(row.book_profit);
   const paidToFarmers = numberOf(row.paid_to_farmers);
   return {
     saleValue: roundMoney(saleValue),
-    purchaseCost: roundMoney(row.purchase_cost),
+    purchaseCost: roundMoney(purchaseCost),
     otherCost: roundMoney(row.other_cost),
+    // Price difference on sold pieces only; receipts and unsold purchases do
+    // not change the Land Profit card's sale-price basis.
+    saleProfit: roundMoney(saleValue - purchaseCost),
     bookProfit: roundMoney(bookProfit),
     currentProfit: roundMoney(received - paidToFarmers),
     received: roundMoney(received),

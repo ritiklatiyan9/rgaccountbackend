@@ -236,6 +236,7 @@ const LandProfitDetailType = new GraphQLObjectType({
     saleValue:     { type: new GraphQLNonNull(GraphQLFloat) },
     purchaseCost:  { type: new GraphQLNonNull(GraphQLFloat) },
     otherCost:     { type: new GraphQLNonNull(GraphQLFloat) },
+    saleProfit:    { type: new GraphQLNonNull(GraphQLFloat) },
     bookProfit:    { type: new GraphQLNonNull(GraphQLFloat) },
     currentProfit: { type: new GraphQLNonNull(GraphQLFloat) },
     received:      { type: new GraphQLNonNull(GraphQLFloat) },

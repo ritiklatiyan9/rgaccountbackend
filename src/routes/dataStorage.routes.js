@@ -14,7 +14,16 @@ export function createDataStorageRouter({ database = pool, files = dataStorageFi
   const service = createDataStorageService(database, files);
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_STORAGE_FILE_BYTES, files: 1, fields: 2, fieldSize: 1024 } });
   const receiveFile = (req, res, next) => upload.single('file')(req, res, (error) => {
-    if (!error) return next();
+    if (!error) {
+      // Multipart filename headers from browsers use UTF-8 bytes; Busboy's
+      // default parameter charset is Latin-1. Preserve Hindi and other names.
+      const original = req.file?.originalname;
+      if (original && [...original].every((character) => character.charCodeAt(0) <= 255)) {
+        try { req.file.originalname = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(original, 'latin1')); }
+        catch { /* A correctly decoded Latin-1 name is retained. */ }
+      }
+      return next();
+    }
     res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
       message: error.code === 'LIMIT_FILE_SIZE' ? 'Files must be 50 MB or smaller.' : 'Upload one file per request with a site and destination folder.',
     });

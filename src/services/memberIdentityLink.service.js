@@ -43,13 +43,22 @@ export async function reviewMemberIdentity(db, { memberId, user, phone, aadharNo
   for (const siteId of new Set(registrations.map(row => row.site_id))) {
     if (!await assertMemberSiteAccess(db, user, siteId)) unavailable = true;
   }
-  const blockedReason = unavailable ? 'An administrator with access to all affected sites must link these identities.'
-    : ['aadhar_no', 'pan_no'].some(field => new Set(registrations.map(row => identity(row[field])).filter(Boolean)).size > 1)
-      ? 'These registrations have different Aadhaar or PAN numbers. Correct those details before confirming they are the same person.' : null;
+  const blockedReason = unavailable ? 'An administrator with access to all affected sites must link these identities.' : null;
   const visible = unavailable ? registrations.filter(row => row.id === source.id) : registrations;
+  const conflicts = [];
+  for (let i = 0; i < visible.length; i++) {
+    for (const other of visible.slice(i + 1)) {
+      for (const field of ['aadhar_no', 'pan_no']) {
+        if (identity(visible[i][field]) && identity(other[field]) && identity(visible[i][field]) !== identity(other[field])) {
+          conflicts.push({ member_ids: [visible[i].id, other.id], field: field === 'pan_no' ? 'PAN' : 'Aadhaar' });
+        }
+      }
+    }
+  }
   const revision = createHash('sha256').update(JSON.stringify(registrations.map(snapshot))).digest('hex');
   return { source, registrations, summary: {
     needs_linking: needsLinking, blocked_reason: blockedReason, revision,
+    selection_supported: true, source_member_id: source.id, identity_conflicts: conflicts,
     site_count: new Set(visible.map(row => row.site_id)).size,
     registrations: visible.map(row => ({
       id: row.id, site_id: row.site_id, site_name: row.site_name, full_name: row.full_name,
@@ -62,14 +71,33 @@ export async function reviewMemberIdentity(db, { memberId, user, phone, aadharNo
 /** Link registrations; never delete members, move transactions or change roles.
  * The selected profile supplies KYC; the submitted name/mobile are authoritative.
  * All work, including the history record, is committed with the user's edit. */
-export async function linkMemberIdentity(db, { review, user, profileMemberId, revision, data }) {
+export async function linkMemberIdentity(db, { review, user, profileMemberId, selectedMemberIds, revision, data }) {
   if (review.summary.blocked_reason) fail(review.summary.blocked_reason);
   if (revision !== review.summary.revision) fail('The registrations changed. Review the identities again before saving.', 409, 'IDENTITY_REVIEW_CHANGED');
-  const profile = review.registrations.find(row => Number(row.id) === Number(profileMemberId));
-  if (!profile) fail('Choose a profile from the reviewed registrations.', 400);
-  const group = review.source.shared_profile_id || profile.shared_profile_id || randomUUID();
+  let ids = selectedMemberIds;
+  if (typeof ids === 'string') {
+    try { ids = JSON.parse(ids); } catch { fail('Select valid registrations to link.', 400); }
+  }
+  if (!Array.isArray(ids) || ids.some(id => !['number', 'string'].includes(typeof id) || !Number.isSafeInteger(Number(id)) || Number(id) <= 0)) {
+    fail('Select valid registrations to link.', 400);
+  }
+  const selectedIds = new Set(ids.map(Number));
+  if (selectedIds.size < 2) fail('Select at least two registrations to link.', 400);
+  if (!selectedIds.has(Number(review.source.id))) fail('Include the user you are editing in the selection.', 400);
+  const selected = review.registrations.filter(row => selectedIds.has(Number(row.id)));
+  if (selected.length !== selectedIds.size) fail('Some selected registrations are unavailable. Review the list again.', 400);
+  const profile = selected.find(row => Number(row.id) === Number(profileMemberId));
+  if (!profile) fail('Choose a KYC profile from the selected registrations.', 400);
+  if (['aadhar_no', 'pan_no'].some(field => new Set(selected.map(row => identity(row[field])).filter(Boolean)).size > 1)) {
+    fail('The selected registrations have different Aadhaar or PAN numbers. Correct those details before confirming they are the same person.');
+  }
+  // Reusing a group with unchecked members would silently include those people
+  // in subsequent edits. Detach the selected registrations into a fresh group
+  // whenever neither preferred existing group contains only selected records.
+  const candidates = [review.source.shared_profile_id, profile.shared_profile_id].filter(Boolean);
+  const group = candidates.find(groupId => !review.registrations.some(row => row.shared_profile_id === groupId && !selectedIds.has(Number(row.id)))) || randomUUID();
   // A sparse registration must not erase documents/details present elsewhere.
-  const preferred = [profile, ...review.registrations.filter(row => row.id !== profile.id)];
+  const preferred = [profile, ...selected.filter(row => row.id !== profile.id)];
   const shared = {};
   for (const field of sharedFields) {
     const value = preferred.find(row => row[field] != null && row[field] !== '')?.[field];
@@ -84,19 +112,20 @@ export async function linkMemberIdentity(db, { review, user, profileMemberId, re
     if (data[field] !== undefined && (data[field] ?? '') !== (review.source[field] ?? '')) shared[field] = data[field];
   }
   if (!shared.full_name?.trim()) fail('A full name is required.', 400);
-  const before = review.registrations.map(snapshot);
+  const before = selected.map(snapshot);
   const updatedAt = new Date();
-  for (const member of review.registrations) {
+  for (const member of selected) {
     await memberModel.update(member.id, { ...shared, shared_profile_id: group, updated_at: updatedAt }, db);
   }
   // The normal update runs after this. Use the chosen profile for hidden KYC
   // fields rather than the stale values echoed by the short Edit User form.
   for (const field of sharedFields) delete data[field];
   Object.assign(data, shared);
-  const after = review.registrations.map(member => snapshot({ ...member, ...shared, shared_profile_id: group, updated_at: updatedAt }));
+  const after = selected.map(member => snapshot({ ...member, ...shared, shared_profile_id: group, updated_at: updatedAt }));
   await db.query(`INSERT INTO member_identity_link_events
     (organization_id,member_id,user_id,shared_profile_id,profiles_before,profiles_after)
     VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb)`,
     [user.organization_id, review.source.id, user.id, group, JSON.stringify(before), JSON.stringify(after)]);
-  return { shared_profile_id: group, registration_count: review.registrations.length, site_count: review.summary.site_count };
+  return { shared_profile_id: group, registration_count: selected.length,
+    member_ids: selected.map(row => row.id), site_count: new Set(selected.map(row => row.site_id)).size };
 }

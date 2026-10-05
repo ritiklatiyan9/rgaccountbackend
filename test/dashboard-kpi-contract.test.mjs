@@ -70,7 +70,7 @@ test('registry and frontend contracts expose cash, bank, remaining balance, land
 
   for (const field of [
     'plotIncoming', 'finalSaleValue', 'matchedReceived', 'unmatchedReceived', 'landProfitDetail',
-    'purchaseCostAlreadyExpensed', 'paidToFarmers', 'registryPaymentDetail', 'runningExpense',
+    'purchaseCostAlreadyExpensed', 'paidToFarmers', 'saleProfit', 'registryPaymentDetail', 'runningExpense',
     'expectedProfit', 'currentProfit', 'adminImprestReserved',
     'pendingImprestReservations', 'distributableBalance',
   ]) {
@@ -79,10 +79,29 @@ test('registry and frontend contracts expose cash, bank, remaining balance, land
   }
 
   assert.match(dashboard, /navigate\('\/farmers\/land-profit'\)/);
-  assert.match(dashboard, /const landProfit = parseFloat\(land\?\.currentProfit\)/);
+  assert.match(dashboard, /const landProfit = parseFloat\(land\?\.saleProfit\)/);
   assert.match(dashboard, /finalPlotSaleValue[\s\S]*?Plot Payments sale price \(100%\)/);
   assert.match(dashboard, /Sale price ·[\s\S]*?current plots[\s\S]*?fmt\(eligiblePlotSaleValue\)/);
   assert.match(dashboard, /Plot Payments Pricing sale price \(not received money\)/);
   assert.match(dashboard, /kpiKey="plotPayments"[\s\S]*?Still to collect[\s\S]*?fmt\(plotRemaining\)/);
   assert.match(dashboard, /kpiKey="registryPayments"[\s\S]*?\+ Bank/);
+});
+
+test('Land Profit card, details and assistant agree on the sold-land price difference', async () => {
+  const dashboard = await readFrontend('src/pages/Dashboard.jsx');
+  const card = await readFrontend('src/components/dashboard/KpiCard.jsx');
+  const assistant = await readBackend('src/controllers/dashboardAssistant.controller.js');
+  const modalStart = dashboard.indexOf("{kpiModal === 'landProfit' && (() => {");
+  const modalEnd = dashboard.indexOf('{/* ── Personal Ledger', modalStart);
+  const modal = dashboard.slice(modalStart, modalEnd);
+
+  assert.match(dashboard, /kpiKey="landProfit"\s+value=\{landProfit\}/);
+  assert.match(modal, /const landProfit = parseFloat\(land\.saleProfit\)/);
+  assert.match(modal, /Land Profit = Sale price − Purchase price \(sold land only\)/);
+  assert.match(modal, /fmt\(land\.saleValue\)/);
+  assert.match(modal, /fmt\(land\.purchaseCost\)/);
+  assert.doesNotMatch(modal, /land\.currentProfit|land\.paidToFarmers|land\.bookProfit/);
+  assert.match(card, /formula: 'Sale price − purchase price of sold land only'/);
+  assert.match(dashboard, /landProfit: `[^`]*land\.saleProfit[^`]*land\.saleValue[^`]*land\.purchaseCost/);
+  assert.match(assistant, /landProfit: [^\n]*landProfitDetail\?\.saleProfit/);
 });

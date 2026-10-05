@@ -221,7 +221,8 @@ export async function syncSharedMemberProfile(db,{memberId,user,changedFields=[]
     WHERE s.organization_id=$1 AND m.shared_profile_id=$2 AND m.id<>$3 ORDER BY m.id FOR UPDATE OF m`,
     [user.organization_id,source.shared_profile_id,source.id]);
   const fields=SHARED_FIELDS.filter(field=>changedFields.includes(field));
-  if(fields.some(field=>['phone','aadhar_no','pan_no'].includes(field))) {
+  if(fields.some(field=>['phone','aadhar_no','pan_no'].includes(field)
+    && (!previousProfile || (field==='phone' ? normalizeMemberPhone(source[field])!==normalizeMemberPhone(previousProfile[field]) : identity(source[field])!==identity(previousProfile[field]))))) {
     const matches=await identityMatches(db,source,user.organization_id);
     if(matches.some(target=>target.shared_profile_id!==source.shared_profile_id)) fail('These identity details belong to another client in a site. No shared profile changes were saved.');
   }

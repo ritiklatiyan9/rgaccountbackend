@@ -504,7 +504,7 @@ const getLiveDashboardSnapshot = async (siteId, request, user) => {
       currentProfit: componentVisible(visibility, 'kpi_profit') ? finiteNumber(kpis.currentProfit) : null,
       plotReceived: componentVisible(visibility, 'kpi_plotPayments') ? finiteNumber(kpis.plotIncoming?.received) : null,
       plotRemaining: componentVisible(visibility, 'kpi_plotPayments') ? finiteNumber(kpis.plotIncoming?.remaining) : null,
-      landProfit: componentVisible(visibility, 'kpi_landProfit') ? finiteNumber(kpis.landProfitDetail?.bookProfit) : null,
+      landProfit: componentVisible(visibility, 'kpi_landProfit') ? finiteNumber(kpis.landProfitDetail?.saleProfit) : null,
       landReceived: componentVisible(visibility, 'kpi_landProfit') ? finiteNumber(kpis.landProfitDetail?.received) : null,
       totalIncoming: componentVisible(visibility, 'kpi_plotPayments') ? finiteNumber(kpis.plotIncoming?.received) + finiteNumber(kpis.landProfitDetail?.received) : null,
       totalExpense: componentVisible(visibility, 'kpi_totalExpense') ? finiteNumber(kpis.totalExpense) : null,

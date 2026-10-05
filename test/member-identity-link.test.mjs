@@ -47,7 +47,8 @@ function update(id, body, user = actor) {
 async function reviewedBody(db, memberId, changes = {}, user = actor) {
   const body = { phone: '9897659617', full_name: 'RAHUL TOMAR', ...changes };
   const review = await reviewMemberIdentity(db, { memberId, user, phone: body.phone });
-  return { ...body, same_person_confirmed: 'true', identity_profile_member_id: memberId, identity_revision: review.summary.revision };
+  return { ...body, same_person_confirmed: 'true', identity_profile_member_id: memberId,
+    identity_member_ids: review.registrations.map(row => row.id), identity_revision: review.summary.revision };
 }
 
 test('different names and two shared groups become one identity; all registration and financial links survive', async t => {
@@ -160,4 +161,55 @@ test('registering an explicitly linked identity again accepts same-site legacy r
     assert.equal(result.created_count, 0); await query('COMMIT');
   } catch (error) { await query('ROLLBACK'); throw error; }
   assert.equal((await query('SELECT count(DISTINCT shared_profile_id)::int AS n FROM members')).rows[0].n, 1);
+});
+
+test('only selected registrations are linked and old groups do not absorb unchecked copies on later edits', async t => {
+  const { db, query, add } = await fixture(t);
+  const first = '11111111-1111-4111-8111-111111111111', second = '22222222-2222-4222-8222-222222222222';
+  const a = await add({ shared_profile_id: first });
+  const excludedA = await add({ site_id: 2, shared_profile_id: first, full_name: 'OLD RAHUL NAME', address: 'EXCLUDED ADDRESS' });
+  const b = await add({ site_id: 2, shared_profile_id: second, phone: '9897659617', full_name: 'RAHUL KUMAR TOMAR' });
+  const excludedB = await add({ shared_profile_id: second, phone: '9897659617', full_name: 'EXCLUDED RAHUL', aadhar_front_url: 'excluded/document.jpg' });
+  const untouched = (await query('SELECT * FROM members WHERE id=ANY($1::int[]) ORDER BY id', [[excludedA.id, excludedB.id]])).rows;
+  const body = await reviewedBody(db, a.id);
+  body.identity_member_ids = JSON.stringify([a.id, b.id]); body.identity_profile_member_id = b.id;
+  const result = await update(a.id, body);
+  assert.equal(result.status, 200); assert.equal(result.data.identity_link.registration_count, 2);
+  assert.deepEqual(result.data.identity_link.member_ids, [a.id, b.id]);
+  assert.notEqual(result.data.identity_link.shared_profile_id, first); assert.notEqual(result.data.identity_link.shared_profile_id, second);
+  assert.equal((await query('SELECT aadhar_front_url FROM members WHERE id=$1', [a.id])).rows[0].aadhar_front_url, null);
+  assert.deepEqual((await query('SELECT * FROM members WHERE id=ANY($1::int[]) ORDER BY id', [[excludedA.id, excludedB.id]])).rows, untouched);
+  assert.equal((await update(a.id, { full_name: 'NEW SHARED NAME', phone: '9897659617' })).status, 200);
+  assert.equal((await query('SELECT full_name FROM members WHERE id=$1', [b.id])).rows[0].full_name, 'NEW SHARED NAME');
+  assert.deepEqual((await query('SELECT * FROM members WHERE id=ANY($1::int[]) ORDER BY id', [[excludedA.id, excludedB.id]])).rows, untouched);
+  const event = (await query('SELECT * FROM member_identity_link_events')).rows[0];
+  assert.deepEqual(event.profiles_before.map(row => row.id), [a.id, b.id]);
+});
+
+test('an unchecked matching mobile with different government identity does not block or contaminate the selected identity', async t => {
+  const { db, query, add } = await fixture(t);
+  const a = await add({ pan_no: 'ABCDE1234F' });
+  const b = await add({ site_id: 2, phone: '9897659617', pan_no: 'ABCDE1234F' });
+  const excluded = await add({ phone: '9897659617', full_name: 'ANOTHER PERSON', pan_no: 'VWXYZ1234F' });
+  const before = (await query('SELECT * FROM members WHERE id=$1', [excluded.id])).rows[0];
+  const reviewed = await reviewMemberIdentity(db, { memberId: a.id, user: actor, phone: '9897659617' });
+  assert.ok(reviewed.summary.identity_conflicts.some(pair => pair.member_ids.includes(excluded.id)));
+  const body = await reviewedBody(db, a.id); body.identity_member_ids = [a.id, b.id];
+  assert.equal((await update(a.id, body)).status, 200);
+  assert.equal((await update(a.id, { full_name: 'EDITED SELECTED PERSON', phone: '9897659617', pan_no: 'ABCDE1234F' })).status, 200);
+  assert.deepEqual((await query('SELECT * FROM members WHERE id=$1', [excluded.id])).rows[0], before);
+});
+
+test('selection must include the edited user, at least two reviewed members, and the chosen KYC source', async t => {
+  const { db, query, add } = await fixture(t);
+  const a = await add(); const b = await add({ phone: '9897659617' });
+  const c = await add({ site_id: 2, phone: '9897659617' });
+  const otherOrg = await add({ site_id: 3, phone: '9897659617' });
+  const base = await reviewedBody(db, a.id);
+  for (const invalid of [undefined, 'invalid JSON', [a.id], [b.id, c.id], [a.id, otherOrg.id], [a.id, b.id, false]]) {
+    await assert.rejects(update(a.id, { ...base, identity_member_ids: invalid }), { statusCode: 400 });
+  }
+  await assert.rejects(update(a.id, { ...base, identity_member_ids: [a.id, b.id], identity_profile_member_id: c.id }), /selected registrations/);
+  assert.equal((await query('SELECT count(*)::int AS n FROM member_identity_link_events')).rows[0].n, 0);
+  assert.ok((await query('SELECT shared_profile_id FROM members')).rows.every(row => row.shared_profile_id === null));
 });

@@ -315,7 +315,7 @@ test('later KYC verification updates every explicitly linked registration includ
   const duplicate=await memberModel.create(data({full_name:'OLD TEST CLIENT',member_types:['PARTNER'],member_type:'PARTNER'}),db);
   const reviewed=await reviewMemberIdentity(db,{memberId:source.id,user,phone:source.phone});
   const link=await invoke(updateMember,{full_name:'TEST CLIENT',phone:source.phone,
-    same_person_confirmed:'true',identity_profile_member_id:source.id,identity_revision:reviewed.summary.revision},{id:source.id});
+    same_person_confirmed:'true',identity_profile_member_id:source.id,identity_member_ids:reviewed.registrations.map(row=>row.id),identity_revision:reviewed.summary.revision},{id:source.id});
   assert.equal(link.status,200);assert.equal(link.data.identity_link.registration_count,4);
   const kyc=await verifiedCase(db,source,{status:'OPEN'});
   await verifiedCase(db,duplicate,{status:'OPEN'});
