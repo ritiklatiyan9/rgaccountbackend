@@ -3,6 +3,7 @@ import { memberModel } from '../models/Member.model.js';
 import { DOC_FIELDS } from './memberProfileFields.js';
 import { assertMemberSiteAccess, normalizeMemberPhone, REUSABLE_KYC_PROFILE_FIELDS } from './memberPhoneReuse.service.js';
 import { consolidateMemberRegistrations } from './memberIdentityConsolidation.service.js';
+import { relatedIdentityName } from './memberIdentityNameMatch.js';
 
 const sharedFields = [...new Set([...REUSABLE_KYC_PROFILE_FIELDS, ...DOC_FIELDS])];
 const fail = (message, statusCode = 409, code = 'MEMBER_IDENTITY_CONFLICT') => {
@@ -13,30 +14,29 @@ const snapshot = member => Object.fromEntries(
   ['id', 'site_id', 'shared_profile_id', 'updated_at', 'verified_kyc_case_id', ...sharedFields].map(field => [field, member[field] ?? null]),
 );
 
-/** Caller holds the directory lock when writing. Include every linked copy of
- * each matching registration, even if a copy still has an old name or mobile. */
-export async function reviewMemberIdentity(db, { memberId, user, phone, aadharNo, panNo, lock = false }) {
+/** Caller holds the directory lock when writing. Suggestions use the entered
+ * name/mobile; shared document placeholders must not pull in unrelated people. */
+export async function reviewMemberIdentity(db, { memberId, user, phone, fullName, lock = false }) {
   const { rows: [source] } = await db.query(`SELECT m.*,s.name AS site_name FROM members m
     JOIN sites s ON s.id=m.site_id WHERE m.id=$1 AND s.organization_id=$2`, [memberId, user.organization_id]);
   if (!source || !await assertMemberSiteAccess(db, user, source.site_id)) fail('This user is unavailable to your account.', 403);
   const normalizedPhone = normalizeMemberPhone(phone ?? source.phone);
   if (phone && !normalizedPhone) fail('Enter a complete 10-digit mobile number.', 400);
-  const { rows: registrations } = await db.query(`WITH RECURSIVE matched AS (
-      SELECT m.id,m.shared_profile_id FROM members m JOIN sites s ON s.id=m.site_id
-      WHERE s.organization_id=$1 AND (m.id=$2
-        OR ($3<>'' AND RIGHT(REGEXP_REPLACE(COALESCE(m.phone,''),'[^0-9]','','g'),10)=$3)
-        OR ($4<>'' AND UPPER(REGEXP_REPLACE(COALESCE(m.aadhar_no,''),'[^A-Za-z0-9]','','g'))=$4)
-        OR ($5<>'' AND UPPER(REGEXP_REPLACE(COALESCE(m.pan_no,''),'[^A-Za-z0-9]','','g'))=$5))
-      UNION
-      SELECT m.id,m.shared_profile_id FROM members m JOIN sites s ON s.id=m.site_id
-      JOIN matched previous ON m.shared_profile_id=previous.shared_profile_id
-      WHERE s.organization_id=$1
-    ) SELECT m.*,s.name AS site_name, k.id AS verified_kyc_case_id
-      FROM members m JOIN matched ON matched.id=m.id JOIN sites s ON s.id=m.site_id
+  const reviewName = String(fullName ?? source.full_name).trim();
+  const { rows: directory } = await db.query(`SELECT m.id,m.site_id,m.full_name,m.phone,m.shared_profile_id
+    FROM members m JOIN sites s ON s.id=m.site_id WHERE s.organization_id=$1`, [user.organization_id]);
+  const matching = directory.filter((row) => row.id === source.id
+    || (normalizedPhone && normalizeMemberPhone(row.phone) === normalizedPhone)
+    || relatedIdentityName(row.full_name, reviewName, {
+      allowInitials: Boolean(source.shared_profile_id && row.shared_profile_id === source.shared_profile_id),
+    }));
+  const { rows: registrations } = await db.query(`SELECT m.*,s.name AS site_name, k.id AS verified_kyc_case_id
+      FROM members m JOIN sites s ON s.id=m.site_id
       LEFT JOIN LATERAL (SELECT id FROM kyc_cases WHERE client_member_id=m.id AND status='VERIFIED'
         ORDER BY verified_at DESC NULLS LAST,id DESC LIMIT 1) k ON true
+      WHERE m.id=ANY($1::int[]) AND s.organization_id=$2
       ORDER BY m.site_id,m.id ${lock ? 'FOR UPDATE OF m' : ''}`,
-    [user.organization_id, memberId, normalizedPhone, identity(aadharNo ?? source.aadhar_no), identity(panNo ?? source.pan_no)]);
+    [matching.map((row) => row.id), user.organization_id]);
   const needsLinking = registrations.some(row => row.id !== source.id
     && (!source.shared_profile_id || row.shared_profile_id !== source.shared_profile_id));
   // Do not expose or change registrations beyond the actor's site assignments.
@@ -60,11 +60,14 @@ export async function reviewMemberIdentity(db, { memberId, user, phone, aadharNo
   return { source, registrations, summary: {
     needs_linking: needsLinking, blocked_reason: blockedReason, revision,
     selection_supported: true, source_member_id: source.id, identity_conflicts: conflicts,
+    match_criteria: { full_name: reviewName, phone: normalizedPhone },
     site_count: new Set(visible.map(row => row.site_id)).size,
     registrations: visible.map(row => ({
       id: row.id, site_id: row.site_id, site_name: row.site_name, full_name: row.full_name,
       phone: row.phone, email: row.email, member_types: row.member_types || [row.member_type],
       kyc_verified: Boolean(row.verified_kyc_case_id),
+      match_reason: row.id === source.id ? 'SOURCE'
+        : normalizedPhone && normalizeMemberPhone(row.phone) === normalizedPhone ? 'PHONE' : 'NAME',
     })),
   } };
 }
@@ -96,7 +99,12 @@ export async function linkMemberIdentity(db, { review, user, profileMemberId, se
   // in subsequent edits. Detach the selected registrations into a fresh group
   // whenever neither preferred existing group contains only selected records.
   const candidates = [review.source.shared_profile_id, profile.shared_profile_id].filter(Boolean);
-  const group = candidates.find(groupId => !review.registrations.some(row => row.shared_profile_id === groupId && !selectedIds.has(Number(row.id)))) || randomUUID();
+  const { rows: eligibleGroups } = candidates.length ? await db.query(`SELECT DISTINCT m.shared_profile_id FROM members m
+    WHERE m.shared_profile_id=ANY($1::uuid[]) AND NOT EXISTS (
+      SELECT 1 FROM members remaining WHERE remaining.shared_profile_id=m.shared_profile_id AND NOT (remaining.id=ANY($2::int[]))
+    )`, [candidates, [...selectedIds]]) : { rows: [] };
+  const eligible = new Set(eligibleGroups.map((row) => row.shared_profile_id));
+  const group = candidates.find((groupId) => eligible.has(groupId)) || randomUUID();
   // A sparse registration must not erase documents/details present elsewhere.
   const preferred = [profile, ...selected.filter(row => row.id !== profile.id)];
   const shared = {};

@@ -2,6 +2,7 @@ import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
 import { reviewMemberIdentity, linkMemberIdentity } from '../services/memberIdentityLink.service.js';
 import { resolveMemberIdentityId } from '../services/memberIdentityConsolidation.service.js';
+import { findSiteRegistrationMatches, getSiteRegistrationStatus } from '../services/memberSiteRegistration.service.js';
 import { copyIncorporatedKycDocuments } from '../services/memberKycDocuments.service.js';
 export { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { linkSelectedMemberPlot } from '../services/memberPlotSelection.service.js';
@@ -376,6 +377,21 @@ const parsedIds = (value) => Array.isArray(value)
   ? [...new Set(value.map((id) => Number.parseInt(id, 10)).filter(Number.isInteger))]
   : [];
 
+/** Read-only preview of existing registrations and their actual KYC cases. */
+export const previewMemberSiteRegistrations = asyncHandler(async (req, res) => {
+  const requested = req.body.member_ids;
+  if (!Array.isArray(requested) || requested.length === 0 || requested.length > 1000
+    || requested.some((id) => !Number.isSafeInteger(Number(id)) || Number(id) <= 0)) {
+    return res.status(400).json({ message: 'Select between 1 and 1000 valid members' });
+  }
+  try {
+    res.json(await getSiteRegistrationStatus(pool, { memberIds: [...new Set(requested.map(Number))], user: req.user }));
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    throw error;
+  }
+});
+
 const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
   const client = await pool.connect();
   try {
@@ -438,40 +454,9 @@ const copyMemberToSites = async ({ memberIds, siteIds, user }) => {
           continue;
         }
 
-        const matchConditions = [];
-        const matchParams = [targetSiteId];
-        const addMatch = (column, value, normaliser = 'alphanumeric') => {
-          if (!value) return;
-          matchParams.push(String(value).trim());
-          const parameter = `$${matchParams.length}`;
-          if (normaliser === 'phone') {
-            matchConditions.push(`RIGHT(REGEXP_REPLACE(COALESCE(${column}, ''), '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(${parameter}, '\\D', '', 'g'), 10)`);
-          } else if (normaliser === 'aadhaar') {
-            matchConditions.push(`RIGHT(REGEXP_REPLACE(COALESCE(${column}, ''), '\\D', '', 'g'), 12) = RIGHT(REGEXP_REPLACE(${parameter}, '\\D', '', 'g'), 12)`);
-          } else {
-            matchConditions.push(`UPPER(REGEXP_REPLACE(COALESCE(${column}, ''), '[^A-Za-z0-9]', '', 'g')) = UPPER(REGEXP_REPLACE(${parameter}, '[^A-Za-z0-9]', '', 'g'))`);
-          }
-        };
-        addMatch('phone', source.phone, 'phone');
-        addMatch('aadhar_no', source.aadhar_no, 'aadhaar');
-        addMatch('pan_no', source.pan_no);
-        if (matchConditions.length === 0) {
-          matchParams.push(source.full_name);
-          let fallback = `UPPER(full_name) = UPPER($${matchParams.length})`;
-          if (source.father_name) {
-            matchParams.push(source.father_name);
-            fallback += ` AND UPPER(COALESCE(father_name, '')) = UPPER($${matchParams.length})`;
-          }
-          if (source.date_of_birth) {
-            matchParams.push(source.date_of_birth);
-            fallback += ` AND date_of_birth = $${matchParams.length}`;
-          }
-          matchConditions.push(`(${fallback})`);
-        }
-        const { rows: [matched] } = await client.query(
-          `SELECT * FROM members WHERE site_id = $1 AND (${matchConditions.join(' OR ')}) LIMIT 1 FOR UPDATE`,
-          matchParams
-        );
+        const [matched] = await findSiteRegistrationMatches(client, {
+          memberIds: [source.id], siteIds: [targetSiteId], lock: true, includeProfile: true,
+        });
         if (matched) {
           const reuse = await reuseVerifiedKycForMember(client, {
             source, targetMember: matched, siteId: targetSiteId, userId: user.id,
@@ -652,8 +637,7 @@ export const getMemberIdentityReview = asyncHandler(async (req, res) => {
   const memberId = await resolveMemberIdentityId(pool, Number(req.params.id), req.user);
   if (!Number.isSafeInteger(memberId) || memberId <= 0) return res.status(400).json({ message: 'A valid user is required.' });
   const { summary } = await reviewMemberIdentity(pool, {
-    memberId, user: req.user, phone: req.query.phone,
-    aadharNo: req.query.aadhar_no, panNo: req.query.pan_no,
+    memberId, user: req.user, phone: req.query.phone, fullName: req.query.full_name,
   });
   res.json(summary);
 });
@@ -742,7 +726,7 @@ export const updateMember = asyncHandler(async (req, res) => {
     let identityLink = null;
     if (confirmIdentity) {
       const review = await reviewMemberIdentity(client, {
-        memberId, user: req.user, phone: data.phone, aadharNo: data.aadhar_no, panNo: data.pan_no, lock: true,
+        memberId, user: req.user, phone: data.phone, fullName: data.full_name, lock: true,
       });
       identityLink = await linkMemberIdentity(client, {
         review, user: req.user, profileMemberId: req.body.identity_profile_member_id,

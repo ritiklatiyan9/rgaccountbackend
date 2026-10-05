@@ -4,7 +4,7 @@ const router = express.Router();
 import {
   getMemberPlotOptions, createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete, getMemberOptions,
   getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo,
-  extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites, getMemberIdentityReview,
+  extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites, getMemberIdentityReview, previewMemberSiteRegistrations,
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import { getKycSources, incorporateKyc } from '../controllers/memberKycIncorporation.controller.js';
@@ -79,6 +79,7 @@ router.put('/:id', requireRole('admin', 'sub_admin'), memberUpload, requirePermi
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), bustMemberCache, deleteMember);
 router.post('/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('clients', 'delete'), bustMemberCache, bulkDeleteMembers);
 router.post('/bulk-register-sites', requireRole('admin', 'sub_admin'), requirePermission('clients', 'write'), bustMemberCache, registerMembersInSites);
+router.post('/site-registration-status', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), previewMemberSiteRegistrations);
 router.post('/:id/register-sites', requireRole('admin', 'sub_admin'), requirePermission('clients', 'write'), bustMemberCache, registerMemberInSites);
 router.get('/:id/kyc-sources', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getKycSources);
 router.post('/:id/incorporate-kyc', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), requirePermission('clients', 'update'), bustMemberCache, incorporateKyc);

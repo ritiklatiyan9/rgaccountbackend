@@ -9,7 +9,7 @@ import { up } from '../src/migrations/187_member_site_sharing.js';
 import { up as linkMigration } from '../src/migrations/192_member_identity_linking.js';
 import { up as consolidationMigration } from '../src/migrations/194_member_identity_consolidation.js';
 import { reviewMemberIdentity } from '../src/services/memberIdentityLink.service.js';
-import { createMember,updateMember } from '../src/controllers/member.controller.js';
+import { createMember,updateMember,registerMemberInSites,previewMemberSiteRegistrations } from '../src/controllers/member.controller.js';
 import { createCase,verifyCase } from '../src/controllers/memberKyc.controller.js';
 
 // All operations use an isolated PostgreSQL engine. The configured application
@@ -122,6 +122,40 @@ test('verified profile and original document references/OCR are copied once and 
   assert.equal((await query('SELECT count(*)::int AS n FROM ocr_results')).rows[0].n,6);
   assert.equal((await query('SELECT count(DISTINCT file_path)::int AS n FROM documents')).rows[0].n,2);
   assert.ok((await query('SELECT * FROM members')).rows.every(row=>row.photo===source.photo && row.address===source.address));
+});
+
+test('manual registration reuses the previewed registration and completes existing KYC without duplicates', async t => {
+  const {db,query}=await fixture(t);
+  const source=await memberModel.create(data({address:'Verified address'}),db);
+  await verifiedCase(db,source);
+  const target=await memberModel.create(data({site_id:2,phone:'+91 98765 43210',address:'Old address'}),db);
+  await verifiedCase(db,target,{status:'PENDING'});
+  const preview=await invoke(previewMemberSiteRegistrations,{member_ids:[source.id]});
+  assert.equal(preview.data.sites.find(site=>site.site_id===2).registrations[0].member_id,target.id);
+  assert.equal(preview.data.sites.find(site=>site.site_id===2).verified_count,0);
+  const saved=await invoke(registerMemberInSites,{site_ids:[2,3]},{id:source.id});
+  assert.equal(saved.status,201);
+  assert.equal(saved.data.existing[0].member_id,target.id);
+  assert.equal(saved.data.existing[0].kyc_reused,true);
+  assert.equal(saved.data.created.length,1);
+  const after=await invoke(previewMemberSiteRegistrations,{member_ids:[source.id]});
+  assert.ok(after.data.sites.every(site=>site.registered_count===1 && site.verified_count===1));
+  assert.equal((await query('SELECT address FROM members WHERE id=$1',[target.id])).rows[0].address,'Verified address');
+  const retry=await invoke(registerMemberInSites,{site_ids:[2,3]},{id:source.id});
+  assert.equal(retry.status,200);
+  assert.equal(retry.data.created.length,0);
+  assert.equal((await query('SELECT count(*)::int AS n FROM members')).rows[0].n,3);
+});
+
+test('preview rejects malformed selections before querying and deduplicates valid IDs', async t => {
+  const {db}=await fixture(t);
+  const source=await memberModel.create(data(),db);
+  for(const ids of [[],['12bad'],[0],[null],Array(1001).fill(1)]) {
+    assert.equal((await invoke(previewMemberSiteRegistrations,{member_ids:ids})).status,400);
+  }
+  const preview=await invoke(previewMemberSiteRegistrations,{member_ids:[source.id,String(source.id)]});
+  assert.equal(preview.status,200);
+  assert.equal(preview.data.members.length,1);
 });
 
 test('Add User reuses an existing verified registration and copies its documents without duplicating the lineage',async t=>{

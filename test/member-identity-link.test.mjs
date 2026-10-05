@@ -110,6 +110,42 @@ test('an unconfirmed duplicate edit is still blocked and does not change any ide
   assert.equal((await query('SELECT count(*)::int AS n FROM member_identity_link_events')).rows[0].n, 0);
 });
 
+test('review suggestions use the entered phone and related full names, never shared government placeholders or unrelated linked names', async t => {
+  const {db,add}=await fixture(t);
+  const group='11111111-1111-4111-8111-111111111111';
+  const source=await add({full_name:'RAHUL CHAUHAN',phone:'9000000000',aadhar_no:'123456789012',shared_profile_id:group});
+  const sameName=await add({site_id:2,full_name:'RAHUL CHAUHAN',phone:'9000000001'});
+  const middle=await add({site_id:2,full_name:'RAHUL KUMAR CHAUHAN',phone:'9000000002'});
+  const spelling=await add({site_id:2,full_name:'RAHUL CHOUHAN',phone:'9000000003'});
+  const enteredPhone=await add({full_name:'RAHUL C',phone:'+91 87918 18929'});
+  const unrelated=await add({site_id:2,full_name:'SUBHASH CHOUDHARY',phone:'6396042016',aadhar_no:'123456789012',shared_profile_id:group});
+  const oldPhone=await add({site_id:2,full_name:'LOKENDRA SAROHA',phone:'9000000000',aadhar_no:'123456789012'});
+  const firstOnly=await add({site_id:2,full_name:'RAHUL TOMAR',phone:'9000000004'});
+  const {summary}=await reviewMemberIdentity(db,{memberId:source.id,user:actor,phone:'8791818929',fullName:'RAHUL CHAUHAN'});
+  assert.deepEqual(new Set(summary.registrations.map(row=>row.id)),new Set([source.id,sameName.id,middle.id,spelling.id,enteredPhone.id]));
+  assert.ok(!summary.registrations.some(row=>[unrelated.id,oldPhone.id,firstOnly.id].includes(row.id)));
+  assert.equal(summary.registrations.find(row=>row.id===enteredPhone.id).match_reason,'PHONE');
+  assert.equal(summary.registrations.find(row=>row.id===middle.id).match_reason,'NAME');
+  assert.deepEqual(summary.match_criteria,{full_name:'RAHUL CHAUHAN',phone:'8791818929'});
+  const renamed=await reviewMemberIdentity(db,{memberId:source.id,user:actor,phone:'',fullName:'RAHUL TOMAR'});
+  assert.deepEqual(new Set(renamed.summary.registrations.map(row=>row.id)),new Set([source.id,firstOnly.id]));
+});
+
+test('a hidden unrelated copy cannot follow an explicitly selected identity or later updates', async t => {
+  const {db,query,add}=await fixture(t);
+  const group='11111111-1111-4111-8111-111111111111';
+  const source=await add({shared_profile_id:group});
+  const hidden=await add({site_id:2,full_name:'SUBHASH CHOUDHARY',phone:'9000000001',shared_profile_id:group});
+  const selected=await add({site_id:2,phone:'9897659617'});
+  const before=(await query('SELECT * FROM members WHERE id=$1',[hidden.id])).rows[0];
+  const body=await reviewedBody(db,source.id);
+  assert.deepEqual(new Set(body.identity_member_ids),new Set([source.id,selected.id]));
+  const result=await update(source.id,body);
+  assert.notEqual(result.data.identity_link.shared_profile_id,group);
+  await update(source.id,{full_name:'RAHUL TOMAR',phone:'9897659618'});
+  assert.deepEqual((await query('SELECT * FROM members WHERE id=$1',[hidden.id])).rows[0],before);
+});
+
 test('a selected verified profile supplies audited KYC and documents to other selected sites', async t => {
   const { db, query, add } = await fixture(t);
   const a = await add({ address: 'OLD ADDRESS' });
