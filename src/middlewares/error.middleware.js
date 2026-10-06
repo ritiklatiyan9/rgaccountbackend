@@ -2,7 +2,8 @@ const errorMiddleware = (err, req, res, next) => {
   console.error(err.stack);
   const isInsufficientImprest = err.constraint === 'imprest_sufficient_balance';
   const isMissingImprestOwner = err.constraint === 'imprest_debit_owner_required';
-  const isImprestConflict = isInsufficientImprest || isMissingImprestOwner;
+  const isInsufficientSiteCash = err.constraint === 'imprest_site_cash_funding';
+  const isImprestConflict = isInsufficientImprest || isMissingImprestOwner || isInsufficientSiteCash;
   const statusCode = (['tds_workflow', 'project_unit_profile', 'plot_money_transfer_protected', 'transaction_transfer_protected', 'cheque_clearance_before_approval'].includes(err.constraint) ? 409 : 0) || Number(err.statusCode)
     || (err.code === 'LIMIT_FILE_SIZE' ? 413 : isImprestConflict ? 409 : 500);
   const message = err.code === 'LIMIT_FILE_SIZE'
@@ -11,7 +12,7 @@ const errorMiddleware = (err, req, res, next) => {
       ? 'Plot transfers are temporarily unavailable. Please contact an administrator to enable them.'
       : (statusCode < 500 ? err.message : 'Something went wrong with it');
   let imprestDetails = {};
-  if (isInsufficientImprest && err.detail) {
+  if ((isInsufficientImprest || isInsufficientSiteCash) && err.detail) {
     try {
       imprestDetails = JSON.parse(err.detail);
     } catch {
@@ -20,7 +21,9 @@ const errorMiddleware = (err, req, res, next) => {
   }
   res.status(statusCode).json({
     message,
-    code: isInsufficientImprest
+    code: isInsufficientSiteCash
+      ? 'INSUFFICIENT_SITE_BALANCE'
+      : isInsufficientImprest
       ? 'INSUFFICIENT_IMPREST'
       : isMissingImprestOwner
         ? 'IMPREST_OWNER_REQUIRED'

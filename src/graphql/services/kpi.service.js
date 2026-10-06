@@ -16,7 +16,7 @@
  * They remain visible in Personal Ledger and in the all-ledger Site Balance.
  */
 import { getPartnerProfitPaid } from '../../services/partnerPayments.service.js';
-import pool from '../../config/db.js';
+import pool from '../../config/financialReportDb.js';
 
 // ── Date range WHERE fragments ──
 const dateFilter = (col, paramStart) =>
@@ -809,7 +809,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     getLandProfitDetail(siteId, end),
     getRunningExpense(siteId, end),
     getLandRevenue(siteId, start, end),
-    getPartnerProfitPaid(siteId, end),
+    getPartnerProfitPaid(siteId, end, pool),
   ]);
 
   const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);

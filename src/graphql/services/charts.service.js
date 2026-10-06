@@ -2,7 +2,7 @@
  * Chart Service — Pre-aggregated data for dashboard charts.
  * All computation in PostgreSQL; frontend receives ready-to-render arrays.
  */
-import pool from '../../config/db.js';
+import pool from '../../config/financialReportDb.js';
 
 /**
  * Revenue vs Expense trend — grouped by resolution.

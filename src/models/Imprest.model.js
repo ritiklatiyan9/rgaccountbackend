@@ -6,6 +6,11 @@ class ImprestAllocationModel extends MasterModel {
     super('imprest_allocations');
   }
 
+  async findByIdForUpdate(id, db) {
+    const { rows } = await db.query('SELECT * FROM imprest_allocations WHERE id = $1 FOR UPDATE', [id]);
+    return rows[0];
+  }
+
   /**
    * All allocations for a specific sub-admin
    */

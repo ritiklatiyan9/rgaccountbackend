@@ -10,11 +10,13 @@ import { up as migrateMemberIdentityLinking } from '../src/migrations/192_member
 import { up as migrateMemberIdentityConsolidation } from '../src/migrations/194_member_identity_consolidation.js';
 import { up as migrateTdsDeducteeMapping } from '../src/migrations/191_tds_deductee_mapping.js';
 import { up as migrateDataStorage } from '../src/migrations/193_data_storage.js';
+import { up as migrateImprestCashGuard } from '../src/migrations/195_imprest_cash_funding_guard.js';
 await migrateMemberSiteSharing(pool);
 await migrateMemberIdentityLinking(pool);
 await migrateMemberIdentityConsolidation(pool);
 await migrateTdsDeducteeMapping(pool);
 await migrateDataStorage(pool);
+await migrateImprestCashGuard(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

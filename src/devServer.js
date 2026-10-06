@@ -9,6 +9,7 @@ import { up as migrateTdsDeducteeMapping } from './migrations/191_tds_deductee_m
 import { up as migrateDataStorage } from './migrations/193_data_storage.js';
 import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
 import { up as migrateMemberIdentityLinking } from './migrations/192_member_identity_linking.js';
+import { up as migrateImprestCashGuard } from './migrations/195_imprest_cash_funding_guard.js';
 
 // Local previews serve the application without starting production reminder
 // schedulers. They use the same authentication, permissions and database.
@@ -21,6 +22,7 @@ connectDB().then(async () => {
   await migrateMemberIdentityLinking(pool);
   await migrateTdsDeducteeMapping(pool);
   await migrateDataStorage(pool);
+  await migrateImprestCashGuard(pool);
   server.listen(port, '127.0.0.1', () => {
     console.log(`Local API ready at http://127.0.0.1:${port}`);
   });

@@ -471,7 +471,7 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
     await client.query('BEGIN');
 
     // 1. Verify allocation belongs to this sub-admin
-    const existing = await imprestAllocationModel.findById(parseInt(id), client);
+    const existing = await imprestAllocationModel.findByIdForUpdate(parseInt(id), client);
     if (!existing) {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Allocation not found' });
@@ -491,6 +491,28 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
     // from_own_float=true, but must never debit the retired Admin ledger again.
     const fundedByGiverFloat = giverResult.rows[0]?.role === 'sub_admin';
     const recipientIsAdmin = ADMIN_ROLES.has(req.user.role);
+
+    // A pending handover reserves cash but does not guarantee it still exists:
+    // other cash records may have changed since it was created. Recheck under
+    // the same site lock as creation/approval. Release only this row's existing
+    // reservation when measuring its funding; keep all other handovers reserved.
+    if (!fundedByGiverFloat && !recipientIsAdmin && Number(existing.amount) > 0) {
+      await lockSiteDistribution(client, existing.site_id);
+      const distributable = await siteDistributable(client, existing.site_id);
+      const { rows: [reservation] } = await client.query(`SELECT CASE
+        WHEN from_own_float = false AND created_at < $2::date THEN amount ELSE 0 END AS amount
+        FROM imprest_allocations WHERE id = $1`, [existing.id, indiaTomorrow()]);
+      const availableForReceipt = Math.round((distributable.available + Number(reservation?.amount || 0)) * 100) / 100;
+      if (Number(existing.amount) > availableForReceipt + 0.005) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INSUFFICIENT_SITE_BALANCE', ...distributable,
+          available_for_receipt: availableForReceipt,
+          shortfall: Math.round((Number(existing.amount) - Math.max(availableForReceipt, 0)) * 100) / 100,
+          message: `This handover is no longer covered by site cash. ${FUNDING_HINT}`,
+        });
+      }
+    }
 
     if (fundedByGiverFloat) {
       await lockImprestAccounts(client, existing.admin_id, req.user.id);
@@ -1012,8 +1034,8 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
     });
   }
   const parsedSiteId = req.imprestSiteId || parseInt(site_id);
-  const requestAmount = parseFloat(amount || debit) || 0;
-  if (requestAmount <= 0) return res.status(400).json({ message: 'Amount must be positive' });
+  const requestAmount = parseFloat(amount || debit);
+  if (!Number.isFinite(requestAmount) || requestAmount <= 0) return res.status(400).json({ message: 'Amount must be positive' });
   if (assigned_admin_id && Number(assigned_admin_id) === Number(req.user.id)) {
     return res.status(400).json({ message: 'Choose another user to review your Imprest request' });
   }
@@ -1041,23 +1063,49 @@ export const createExpenseRequest = asyncHandler(async (req, res) => {
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
   };
 
-  const request = await imprestExpenseRequestModel.create({
-    sub_admin_id: req.user.id,
-    site_id: parsedSiteId,
-    amount: requestAmount,
-    expense_data: JSON.stringify(expenseData),
-    reason: reason ? reason.trim() : null,
-    assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
-    request_type: requestType,
-    status: 'PENDING',
-  }, pool);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (requestType === 'IMPREST') {
+      const reviewer = req.imprestParticipants?.assigned_admin_id;
+      if (reviewer?.role === 'sub_admin') {
+        await lockImprestAccounts(client, reviewer.id);
+        const available = await imprestLedgerModel.getBalance(reviewer.id, parsedSiteId, client);
+        if (requestAmount > available + 0.005) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ code: 'INSUFFICIENT_IMPREST', balance: available,
+            message: 'The selected holder does not have enough available imprest for this request.' });
+        }
+      } else {
+        await lockSiteDistribution(client, parsedSiteId);
+        const distributable = await siteDistributable(client, parsedSiteId);
+        if (requestAmount > distributable.available + 0.005) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ code: 'INSUFFICIENT_SITE_BALANCE', ...distributable,
+            message: `There is not enough site cash for this refill request. ${FUNDING_HINT}` });
+        }
+      }
+    }
+    const request = await imprestExpenseRequestModel.create({
+      sub_admin_id: req.user.id,
+      site_id: parsedSiteId,
+      amount: requestAmount,
+      expense_data: JSON.stringify(expenseData),
+      reason: reason ? reason.trim() : null,
+      assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
+      request_type: requestType,
+      status: 'PENDING',
+    }, client);
+    await client.query('COMMIT');
 
-  res.status(201).json({
-    request,
-    message: requestType === 'IMPREST'
-      ? 'Imprest request submitted for review'
-      : 'Expense request submitted for review',
-  });
+    res.status(201).json({
+      request,
+      message: requestType === 'IMPREST'
+        ? 'Imprest request submitted for review'
+        : 'Expense request submitted for review',
+    });
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
 });
 
 /**
