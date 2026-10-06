@@ -5,12 +5,16 @@ const TIMEOUT_MS = Number(process.env.DMS_OCR_TIMEOUT_MS || 120_000);
 // Models Groq has withdrawn. Keep in step with chequeMatching.service.js.
 const RETIRED_GROQ_MODELS = new Set(['llama-3.3-70b-versatile']);
 const DEFAULT_GROQ_KYC_MODEL = 'openai/gpt-oss-120b';
-export const DEFAULT_OPENROUTER_KYC_MODEL = 'google/gemini-3.1-pro-preview';
-// Upgrade the previous shipped default even when it is still pinned in the
-// host's environment. Explicit alternatives continue to be supported.
+export const DEFAULT_OPENROUTER_KYC_MODEL = 'google/gemini-3.1-flash-lite';
+// Move previous shipped defaults to the affordable KYC model even when they
+// remain pinned in the host's environment. Preserve other explicit alternatives.
+const PREVIOUS_OPENROUTER_KYC_DEFAULTS = new Set([
+  'qwen/qwen3-vl-30b-a3b-instruct',
+  'google/gemini-3.1-pro-preview',
+]);
 export const resolveOpenRouterKycModel = () => {
   const configured=String(process.env.OPENROUTER_KYC_MODEL || '').trim();
-  return !configured || configured==='qwen/qwen3-vl-30b-a3b-instruct'
+  return !configured || PREVIOUS_OPENROUTER_KYC_DEFAULTS.has(configured)
     ? DEFAULT_OPENROUTER_KYC_MODEL : configured;
 };
 
@@ -277,7 +281,7 @@ export const extractMemberKycFromText = async (text, documentType = 'OTHER', doc
 export const extractMemberKyc = async (buffer, mime, documentType = 'OTHER', { documentSide = null } = {}) => {
   const aiEngine=resolveEngine();
   const model=aiEngine==='openrouter' ? resolveOpenRouterKycModel() : null;
-  // Read the original image/PDF with the same stronger KYC model. A global
+  // Read the original image/PDF with the same KYC model. A global
   // document-OCR setting must not silently keep KYC on the old vision model.
   const { text, engine } = await runDmsOcr(buffer, mime, model ? {
     engine:'openrouter',model,

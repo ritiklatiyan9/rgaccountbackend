@@ -95,11 +95,25 @@ test('normalization keeps printed date formats, Hindi gender and line-wrapped id
   for(const quote of ['DOB: 23-04-1990','DOB: 23.04.1990']) assert.deepEqual(result('date_of_birth','1990-04-23',quote),{date_of_birth:'1990-04-23'});
 });
 
-test('KYC reads original images and PDFs with the upgraded OpenRouter model before structuring evidence',async t=>{
+test('KYC defaults to Flash-Lite and replaces previous model pins while preserving explicit alternatives',t=>{
+  const original=process.env.OPENROUTER_KYC_MODEL;
+  t.after(()=>{if(original===undefined) delete process.env.OPENROUTER_KYC_MODEL;else process.env.OPENROUTER_KYC_MODEL=original;});
+  assert.equal(DEFAULT_OPENROUTER_KYC_MODEL,'google/gemini-3.1-flash-lite');
+  delete process.env.OPENROUTER_KYC_MODEL;
+  assert.equal(resolveOpenRouterKycModel(),DEFAULT_OPENROUTER_KYC_MODEL);
+  for(const configured of ['', '   ', 'qwen/qwen3-vl-30b-a3b-instruct', 'google/gemini-3.1-pro-preview', ' google/gemini-3.1-pro-preview ']) {
+    process.env.OPENROUTER_KYC_MODEL=configured;
+    assert.equal(resolveOpenRouterKycModel(),DEFAULT_OPENROUTER_KYC_MODEL);
+  }
+  process.env.OPENROUTER_KYC_MODEL=' custom/vision-model ';
+  assert.equal(resolveOpenRouterKycModel(),'custom/vision-model');
+});
+
+test('KYC reads original images and PDFs with Flash-Lite even when Pro is pinned before structuring evidence',async t=>{
   const keys=['KYC_AI_ENGINE','OPENROUTER_API_KEY','OPENROUTER_KYC_MODEL','OPENROUTER_KYC_PDF_ENGINE'];
   const original=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
   process.env.KYC_AI_ENGINE='openrouter';process.env.OPENROUTER_API_KEY='test-key';
-  process.env.OPENROUTER_KYC_MODEL='qwen/qwen3-vl-30b-a3b-instruct';delete process.env.OPENROUTER_KYC_PDF_ENGINE;
+  process.env.OPENROUTER_KYC_MODEL='google/gemini-3.1-pro-preview';delete process.env.OPENROUTER_KYC_PDF_ENGINE;
   t.after(()=>{for(const key of keys) {if(original[key]===undefined) delete process.env[key];else process.env[key]=original[key];}});
   assert.equal(resolveOpenRouterKycModel(),DEFAULT_OPENROUTER_KYC_MODEL);
   const requests=[];
@@ -108,10 +122,14 @@ test('KYC reads original images and PDFs with the upgraded OpenRouter model befo
     const content=Array.isArray(body.messages[0].content) ? 'Name: Raj Kumar' : JSON.stringify(payload('full_name','Raj Kumar','Name: Raj Kumar'));
     return new Response(JSON.stringify({choices:[{message:{content}}]}),{status:200,headers:{'Content-Type':'application/json'}});
   });
-  assert.deepEqual((await extractMemberKyc(Buffer.from('fixture image'),'image/jpeg','AADHAAR')).fields,{full_name:'Raj Kumar'});
+  const imageResult=await extractMemberKyc(Buffer.from('fixture image'),'image/jpeg','AADHAAR');
+  assert.deepEqual(imageResult.fields,{full_name:'Raj Kumar'});
+  assert.equal(imageResult.engine,'or:gemini-3.1-flash-lite');
   assert.equal(requests[0].model,DEFAULT_OPENROUTER_KYC_MODEL);assert.equal(requests[1].model,DEFAULT_OPENROUTER_KYC_MODEL);
   assert.equal(requests[0].messages[0].content[1].image_url.detail,'high');assert.equal(requests[1].response_format.type,'json_object');
   assert.deepEqual((await extractMemberKyc(Buffer.from('%PDF-fixture'),'application/pdf','AADHAAR')).fields,{full_name:'Raj Kumar'});
+  assert.equal(requests.length,4);
+  assert.ok(requests.every(request=>request.model==='google/gemini-3.1-flash-lite'));
   assert.deepEqual(requests[2].plugins,[{id:'file-parser',pdf:{engine:'native'}}]);
   process.env.OPENROUTER_KYC_MODEL='custom/vision-model';assert.equal(resolveOpenRouterKycModel(),'custom/vision-model');
 });
