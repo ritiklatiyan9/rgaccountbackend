@@ -10,13 +10,17 @@ import { up as migrateMemberIdentityLinking } from '../src/migrations/192_member
 import { up as migrateMemberIdentityConsolidation } from '../src/migrations/194_member_identity_consolidation.js';
 import { up as migrateTdsDeducteeMapping } from '../src/migrations/191_tds_deductee_mapping.js';
 import { up as migrateDataStorage } from '../src/migrations/193_data_storage.js';
+import { up as migrateImprestApprovalIndexes } from '../src/migrations/197_imprest_approval_activity_indexes.js';
 import { up as migrateImprestCashGuard } from '../src/migrations/195_imprest_cash_funding_guard.js';
+import { up as migrateExistingVoucherGaps } from '../src/migrations/196_existing_voucher_gaps_filled.js';
 await migrateMemberSiteSharing(pool);
 await migrateMemberIdentityLinking(pool);
 await migrateMemberIdentityConsolidation(pool);
 await migrateTdsDeducteeMapping(pool);
 await migrateDataStorage(pool);
 await migrateImprestCashGuard(pool);
+await migrateImprestApprovalIndexes(pool);
+await migrateExistingVoucherGaps(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

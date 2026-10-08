@@ -22,6 +22,7 @@ export const ALL_MODULES = Object.freeze([
     'expenses',
     'expense_approval',
     'imprest',
+    'imprest_management',
     'document_imprest',
     'upi_collect',
     'construction',
@@ -55,6 +56,7 @@ const READ_ONLY_MODULES = new Set(['home', 'dashboard', 'finance_forecast', 'bal
 // existing sub-admins. An administrator must opt users into these sensitive
 // document/payment surfaces from the permission matrix.
 const RESTRICTED_MODULES = new Set([
+    'imprest_management',
     // Database-wide downloads and restoration are granted explicitly.
     'backups',
     'expense_approval',

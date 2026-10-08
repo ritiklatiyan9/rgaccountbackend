@@ -612,6 +612,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   // instead of staying visible until someone uploads it.
   if ((!module || module === 'expense') && visEx.include) {
     const { where, params } = buildWhere('e', 'e', [
+      `(to_jsonb(e)->>'voucher_gap_filled_at') IS NULL`,
       `(e.voucher_url IS NULL OR e.voucher_url = '')`,
       `(e.bill_url IS NULL OR e.bill_url = '')`,
       // Only cash payments need a voucher — bank/UPI/cheque leave their own trail.

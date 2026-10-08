@@ -10,6 +10,8 @@ import { up as migrateGoogleDriveSiteAccess } from './migrations/189_google_driv
 import { up as migrateGoogleDriveJobs } from './migrations/190_google_drive_share_jobs.js';
 import { up as migrateTdsDeducteeMapping } from './migrations/191_tds_deductee_mapping.js';
 import { up as migrateDataStorage } from './migrations/193_data_storage.js';
+import { up as migrateExistingVoucherGaps } from './migrations/196_existing_voucher_gaps_filled.js';
+import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
 import { startSmsReminderScheduler } from './services/smsReminder.service.js';
@@ -37,6 +39,8 @@ connectDB().then(async () => {
   await migrateGoogleDriveJobs(pool);
   await migrateTdsDeducteeMapping(pool);
   await migrateDataStorage(pool);
+  await migrateExistingVoucherGaps(pool);
+  await migrateImprestApprovalIndexes(pool);
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

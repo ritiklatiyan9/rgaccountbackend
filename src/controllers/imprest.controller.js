@@ -10,6 +10,8 @@ import {
 import { dayBookModel } from '../models/DayBook.model.js';
 import { expenseModel } from '../models/Expense.model.js';
 import { findEligibleImprestParticipant } from '../middlewares/imprestSiteAccess.middleware.js';
+import { hasImprestManagementScope } from '../middlewares/imprestPermission.middleware.js';
+import { loadImprestApprovalActivity } from '../services/imprestApprovalActivity.service.js';
 import { uploadPlotDoc, getPlotDocUrl, deletePlotDoc } from '../utils/plotDocStorage.js';
 import pool from '../config/db.js';
 import { getAccessibleSiteBalances, getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
@@ -257,7 +259,7 @@ export const createAllocation = asyncHandler(async (req, res) => {
 export const listAllocations = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
-  const callerIsAdmin = ADMIN_ROLES.has(req.user.role);
+  const callerIsAdmin = ADMIN_ROLES.has(req.user.role) || hasImprestManagementScope(req);
 
   if (callerIsAdmin) {
     const allocations = await imprestAllocationModel.findAllWithDetails(parsedSiteId, pool);
@@ -613,7 +615,7 @@ export const getBalance = asyncHandler(async (req, res) => {
   const userId = req.query.user_id ? parseInt(req.query.user_id) : req.user.id;
 
   // Admin can check any user's balance; sub-admin only their own
-  if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && userId !== req.user.id) {
+  if (!ADMIN_ROLES.has(req.user.role) && !hasImprestManagementScope(req) && userId !== req.user.id) {
     return res.status(403).json({ message: 'Insufficient permissions' });
   }
 
@@ -648,7 +650,7 @@ export const getLedger = asyncHandler(async (req, res) => {
   const { date_from, date_to, page = 1, limit = 20, site_id } = req.query;
   const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
 
-  if (req.user.role !== 'admin' && req.user.role !== 'super_admin' && userId !== req.user.id) {
+  if (!ADMIN_ROLES.has(req.user.role) && !hasImprestManagementScope(req) && userId !== req.user.id) {
     return res.status(403).json({ message: 'Insufficient permissions' });
   }
 
@@ -885,7 +887,7 @@ export const listTransfers = asyncHandler(async (req, res) => {
   const siteId = req.imprestSiteId;
   if (!siteId) return res.status(400).json({ message: 'Site is required' });
 
-  const callerIsAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+  const callerIsAdmin = ADMIN_ROLES.has(req.user.role) || hasImprestManagementScope(req);
   const requestedUserId = parseInt(req.query.user_id, 10);
   const userId = callerIsAdmin
     ? (Number.isInteger(requestedUserId) && requestedUserId > 0 ? requestedUserId : null)
@@ -1119,7 +1121,7 @@ export const listExpenseRequests = asyncHandler(async (req, res) => {
   const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
 
   let requests;
-  if (req.user.role === 'admin' || req.user.role === 'super_admin') {
+  if (ADMIN_ROLES.has(req.user.role) || hasImprestManagementScope(req)) {
     if (status === 'PENDING') {
       requests = await imprestExpenseRequestModel.findPending(parsedSiteId, pool);
     } else {
@@ -1602,12 +1604,24 @@ export const listReturns = asyncHandler(async (req, res) => {
   const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
 
   let returns;
-  if (req.user.role === 'admin' || req.user.role === 'super_admin') {
+  if (ADMIN_ROLES.has(req.user.role) || hasImprestManagementScope(req)) {
     returns = await imprestReturnModel.findAllWithDetails(parsedSiteId, pool);
   } else {
     returns = await imprestReturnModel.findBySubAdminId(req.user.id, parsedSiteId, pool);
   }
   res.json({ returns: await withProofUrls(returns) });
+});
+
+/** GET /imprest/approval-activity — personal assignments and opted-in site reviews. */
+export const getApprovalActivity = asyncHandler(async (req, res) => {
+  const activity = await loadImprestApprovalActivity(pool, {
+    siteId: req.imprestSiteId,
+    userId: req.user.id,
+    isAdmin: ADMIN_ROLES.has(req.user.role),
+    canReadPersonal: req.canReadPersonalImprest === true,
+    canManage: req.canManageImprest === true,
+  });
+  res.json({ ...activity, received: await withProofUrls(activity.received) });
 });
 
 /**

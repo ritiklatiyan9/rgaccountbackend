@@ -50,6 +50,8 @@ test('Imprest page and notification bell expose direct assigned actions', async 
   assert.match(dashboard, /Accept request[\s\S]*?handleReviewRequest\(item, 'approve'\)/);
   assert.match(dashboard, /CardButton icon=\{Check\} label="Confirm receipt"/);
   assert.match(layout, /handleNotifConfirmReceipt[\s\S]*?allocations\/\$\{entry\.id\}\/confirm/);
-  assert.match(layout, /scope=assigned[\s\S]*?assignedImprests/);
+  assert.match(layout, /fetchImprestApprovalActivity\(api, siteId, user.id\)/);
+  const activity = await readBackend('src/services/imprestApprovalActivity.service.js');
+  assert.match(activity, /r\.assigned_admin_id = \$2 AND r\.sub_admin_id <> \$2/);
   assert.match(layout, /const canReviewEntry = isAdmin \|\| Number\(entry\.assigned_admin_id\)/);
 });

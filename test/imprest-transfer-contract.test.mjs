@@ -25,7 +25,7 @@ test('imprest transfers keep staff ledgers atomic and route Admin sides through 
 test('transfer routes require site access, permissions, and eligible participants', async () => {
   const routes = await readSource('src/routes/imprest.routes.js');
 
-  assert.match(routes, /router\.get\('\/transfers', requirePermission\('imprest', 'read'\), accessByRequiredQuerySite/);
+  assert.match(routes, /router\.get\('\/transfers', requireImprestReadAccess, accessByRequiredQuerySite/);
   assert.match(routes, /router\.post\('\/transfers', requirePermission\('imprest', 'write'\), accessByRequiredBodySite, requireTransferSource, requireTransferRecipient/);
 });
 
