@@ -360,7 +360,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const { where, params } = buildWhere('mie', 'mie', [], visMie.scoped ? req.user.id : null);
     const q = `
       SELECT mie.*, c.name AS category_name, c.color AS category_color,
-             COALESCE(mie.party_name, c.name) AS entity_name,
+             NULLIF(TRIM(mie.party_name), '') AS entity_name,
              ('Misc income · ' || c.name)::text AS entity_type,
              NULL::text AS entity_phone, NULL::text AS entity_address, NULL::text AS entity_plot_no,
              s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
@@ -420,7 +420,10 @@ export const listAllPending = asyncHandler(async (req, res) => {
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
              p.plot_no, COALESCE(p.buyer_name, ld.buyer_name, lf.name) AS buyer_name, ag.full_name AS agent_name,
              ag.full_name AS entity_name, 'Commission agent'::text AS entity_type,
-             COALESCE(p.plot_no, lf.name, ld.buyer_name) AS entity_plot_no, COALESCE(p.buyer_name, ld.buyer_name, lf.name) AS entity_secondary,
+             p.plot_no AS entity_plot_no, COALESCE(p.buyer_name, ld.buyer_name, lf.name) AS entity_secondary,
+             CASE WHEN pcm.plot_id IS NOT NULL THEN 'Plot commission'
+                  WHEN pcm.farmer_id IS NOT NULL THEN 'Land purchase commission'
+                  ELSE 'Land sale commission' END AS category,
              COALESCE('Plot ' || p.plot_no, 'Land purchase · ' || lf.name, 'Land sale · ' || ld.buyer_name) AS subject_label,
              'plot_commission_payment' AS source
       FROM plot_commission_payments pcp
@@ -451,9 +454,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const q = `
                   SELECT cfe.*, cfe.site_id, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
-             cfm.ledger_name, cfm.month, cfm.year, cfm.linked_user_id,
+             cfm.ledger_name, cfm.ledger_type, cfm.month, cfm.year, cfm.linked_user_id,
              lu.name AS linked_user_name, lu.email AS linked_user_email,
-             COALESCE(lu.name, tf.name, cfe.to_name, ff.name, NULLIF(TRIM(cfm.ledger_name), ''), u.name, u.email, cfe.particular) AS entity_name,
+             COALESCE(NULLIF(TRIM(cfe.to_name), ''), tf.name, ff.name, NULLIF(TRIM(cfm.ledger_name), ''), lu.name) AS entity_name,
              CASE
                WHEN lu.id IS NOT NULL THEN 'Mapped ledger user'
                WHEN tf.id IS NOT NULL OR ff.id IS NOT NULL THEN 'Firm / account'
@@ -525,7 +528,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
                   SELECT pp.*, pp.payment_type AS payment_mode, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
              p.plot_no, COALESCE(pp.buyer_name, p.buyer_name) AS buyer_name,
-             COALESCE(pp.buyer_name, p.buyer_name, pp.payment_from, u.name, u.email, 'Plot ' || p.plot_no) AS entity_name,
+             COALESCE(NULLIF(TRIM(pp.buyer_name), ''), NULLIF(TRIM(p.buyer_name), ''), NULLIF(TRIM(pp.payment_from), '')) AS entity_name,
              'Plot buyer / payer'::text AS entity_type,
              p.plot_no AS entity_plot_no, pp.payment_from AS entity_secondary,
              'plot_payment' AS source
@@ -581,7 +584,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const q = `
                   SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
-             COALESCE(em.full_name, e.to_entity, e.from_entity, u.name, u.email) AS entity_name,
+             COALESCE(em.full_name, CASE WHEN e.debit > 0
+               THEN COALESCE(NULLIF(TRIM(e.to_entity), ''), NULLIF(TRIM(e.from_entity), ''))
+               ELSE COALESCE(NULLIF(TRIM(e.from_entity), ''), NULLIF(TRIM(e.to_entity), '')) END) AS entity_name,
              CASE
                WHEN em.id IS NOT NULL THEN COALESCE(em.member_type, 'Member')
                WHEN e.to_entity IS NOT NULL OR e.from_entity IS NOT NULL THEN 'Expense party'
@@ -621,7 +626,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
     const q = `
                   SELECT e.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
-             COALESCE(em.full_name, e.to_entity, e.from_entity, u.name, u.email) AS entity_name,
+             COALESCE(em.full_name, CASE WHEN e.debit > 0
+               THEN COALESCE(NULLIF(TRIM(e.to_entity), ''), NULLIF(TRIM(e.from_entity), ''))
+               ELSE COALESCE(NULLIF(TRIM(e.from_entity), ''), NULLIF(TRIM(e.to_entity), '')) END) AS entity_name,
              CASE
                WHEN em.id IS NOT NULL THEN COALESCE(em.member_type, 'Member')
                WHEN e.to_entity IS NOT NULL OR e.from_entity IS NOT NULL THEN 'Expense party'
@@ -717,8 +724,9 @@ export const listAllPending = asyncHandler(async (req, res) => {
       SELECT vip.*, vip.payment_date AS date, s.name AS site_name,
              COALESCE(u.name, u.email) AS created_by_name,
              COALESCE(aa.name, aa.email) AS assigned_admin_name,
-             COALESCE(vio.vendor_name, vio.item_name) AS entity_name,
+             NULLIF(TRIM(vio.vendor_name), '') AS entity_name,
              'Vendor inventory'::text AS entity_type,
+             vio.item_category AS category, vio.vendor_name AS party_name,
              vio.item_name AS entity_secondary, NULL::text AS entity_plot_no,
              'vendor_inventory_payment' AS source
         FROM vendor_inventory_payments vip
@@ -768,8 +776,10 @@ export const listAllPending = asyncHandler(async (req, res) => {
               COALESCE(
                 dm.full_name, df.name, dpc.particular, dlu.name,
                 dpp.buyer_name, dp.buyer_name, dft.name, dfi.name,
-                d.to_entity, d.from_entity, dcfm.ledger_name,
-                u.name, u.email, d.particular
+                CASE WHEN d.debit > 0
+                  THEN COALESCE(NULLIF(TRIM(d.to_entity), ''), NULLIF(TRIM(d.from_entity), ''))
+                  ELSE COALESCE(NULLIF(TRIM(d.from_entity), ''), NULLIF(TRIM(d.to_entity), '')) END,
+                dcfm.ledger_name
               ) AS entity_name,
               CASE
                 WHEN dm.id IS NOT NULL THEN COALESCE(dm.member_type, 'Member')
