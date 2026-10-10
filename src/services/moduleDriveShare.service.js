@@ -6,6 +6,8 @@ import balanceSheetModel from '../models/BalanceSheet.model.js';
 import { istDateFolder, siteFolderName } from './googleDrive.service.js';
 import { prepareDriveDocumentLinks } from './driveDocumentLinks.service.js';
 import { safeFilePart } from './yearEndDocuments.service.js';
+import { TDS_DRIVE_COLUMNS, loadTdsDriveSheets, normalizeModuleDriveFilters } from './tdsDriveReport.service.js';
+import { transactionParticularsText, transactionParticulars } from './transactionDisplay.service.js';
 
 // Only server-owned adapters/expressions are selectable. User values are
 // parameters; auth/settings/chat, OCR bodies and arbitrary JSON are never exported.
@@ -33,7 +35,7 @@ const PAYMENT_COLUMNS = {
   misc_income: 'id date category_name particular amount payment_mode bank_account_name cheque_no cheque_status status remarks created_by_name',
 };
 const paymentColumns = (key) => columns(PAYMENT_COLUMNS[key]).map((column) => ({ ...column, label: ({ to_entity: 'Paid To', from_entity: 'Paid From', account_no: 'Bank Account', tds_amount: 'TDS Amount', tds_rate: 'TDS Rate', tds_section: 'TDS Section' })[column.key] || column.label }));
-const ledgerFields = columns('id date entry_date particular party entity_name category linked_detail debit credit payment_mode bank_account_name source source_key source_id status cheque_status cheque_no created_by_name remarks');
+const ledgerFields = columns('entry_date particulars party_name category module_name sub_category ledger_name ledger_type particular plot_no plot_tag debit credit running_balance gross_amount tds_amount net_amount payment_mode raw_mode bank_account_name source_key source_id linked_client_name linked_detail status cheque_status cheque_no transaction_id created_by_name remarks challan_no ca_name settlement_kind settlement_reference id');
 const MEMBER_DOCUMENT_FIELDS = ['photo', 'aadhar_front_url', 'aadhar_back_url', 'pan_card_url', 'voter_id_url', 'passport_url', 'driving_license_url', 'cheque_url', 'other_kyc_url'];
 const STORED_FIELDS = ['voucher_url', 'bill_url', 'customer_signature_url', 'authority_signature_url', 'evidence_photo_url', 'document_url', 'file_path', 'storage_key', 's3_key', 'photo_key', 'return_photo_key', 'outcome_photo_key', ...MEMBER_DOCUMENT_FIELDS];
 const STORED_ARRAY_FIELDS = ['voucher_urls', 'bill_urls'];
@@ -97,7 +99,7 @@ const DEFINITIONS = [
   entry('bank_reconciliation', 'Bank Reconciliation', 'daybook', [dataset('Bank Statement', 'bank_daybook_statement_view_rows b JOIN bank_daybook_statement_views v ON v.id=b.view_id', 'v.site_id', [...fields('b', 'id position transaction_date value_date transaction_reference cheque_reference narration debit credit running_balance'), c('statement_file', 'v.source_filename'), c('account_number', 'v.account_number'), c('is_active', 'v.is_active')])]),
   entry('transaction_reconciliation', 'Transaction Reconciliation', 'daybook', [bankStatements('TRANSACTION'), dataset('Posted Transactions', 'bank_transaction_module_links l JOIN bank_statement_uploads u ON u.id=l.upload_id AND u.site_id=l.site_id AND u.organization_id=l.organization_id JOIN bank_statement_transactions b ON b.id=l.bank_transaction_id AND b.upload_id=l.upload_id AND b.site_id=l.site_id AND b.organization_id=l.organization_id', 'l.site_id', [...fields('l', 'id upload_id bank_transaction_id direction module_key source_entry_id entry_date entry_amount created_at'), c('status', "'POSTED'"), c('bank_reference', 'b.transaction_reference')], { where: "u.workflow='TRANSACTION'", organizationCol: 'l.organization_id', order: 'l.entry_date,l.id' })]),
   entry('cheque_reconciliation', 'Cheque Reconciliation', 'expense_approval', [bankStatements('CHEQUE'), dataset('Confirmed Cheques', 'bank_reconciliation_links l JOIN bank_statement_uploads u ON u.id=l.upload_id AND u.site_id=l.site_id AND u.organization_id=l.organization_id JOIN bank_statement_transactions b ON b.id=l.bank_transaction_id AND b.upload_id=l.upload_id AND b.site_id=l.site_id AND b.organization_id=l.organization_id', 'l.site_id', fields('l', 'id upload_id bank_transaction_id candidate_source candidate_entry_id resulting_status bank_value_date bank_reference confirmed_at'), { where: "u.workflow='CHEQUE'", organizationCol: 'l.organization_id', order: 'l.confirmed_at,l.id' }), dataset('Matching Candidates', 'bank_reconciliation_suggestions s JOIN bank_reconciliation_runs r ON r.id=s.run_id JOIN bank_statement_uploads u ON u.id=r.upload_id AND u.site_id=r.site_id AND u.organization_id=r.organization_id JOIN bank_statement_transactions b ON b.id=s.bank_transaction_id AND b.upload_id=r.upload_id AND b.site_id=r.site_id AND b.organization_id=r.organization_id', 'r.site_id', [...fields('s', 'id run_id bank_transaction_id candidate_source candidate_entry_id proposed_status match_origin confidence review_state decision_reason override_reason created_at'), c('run_status', 'r.status')], { where: "u.workflow='CHEQUE'", organizationCol: 'r.organization_id', order: 's.run_id,s.id' })]),
-  entry('tds', 'TDS Register', 'tds', [dataset('TDS Deductions', 'tds_deductions t', 't.site_id', [...fields('t', 'id deductee_name pan section deduction_date gross_amount tds_rate tds_amount nature deposit_date challan_no notes'), c('net_amount', 't.gross_amount-t.tds_amount')])]),
+  entry('tds', 'TDS Register', 'tds', [{ adapter: 'tds', name: 'TDS Register', columns: TDS_DRIVE_COLUMNS }]),
   entry('wallet', 'My Cash Wallet', null, [dataset('Wallet History', 'wallet_entries e JOIN wallet_entry_details d ON d.wallet_entry_id=e.id LEFT JOIN users u ON u.id=e.counterparty_id', "(d.details->>'site_id')::int", [...fields('e', 'id created_at kind amount description source_table source_id'), c('counterparty', 'u.name'), c('party', "d.details->>'party_name'"), c('plot_no', "d.details->>'plot_no'")], { where: 'e.user_id=$4::int' })], { requiresViewAll: false, personal: true }),
   entry('construction', 'Construction', 'construction', [reportDataset('construction')], { recordDocuments: 'construction' }),
   entry('inventory', 'Inventory', 'inventory', [reportDataset('inventory', { creator: 'mv' })], { requiresViewAll: false, recordDocuments: 'inventory' }),
@@ -174,17 +176,28 @@ const collectRowDocuments = (rows, moduleKey, documents) => {
 const loadDataset = async (definition, context) => {
   const { siteId, visibility, entityId, user } = context;
   if (definition.fullOnly && !visibility.canViewAll) return null;
+  if (definition.adapter === 'tds') return loadTdsDriveSheets(siteId, context.filters, pool, user);
   if (definition.adapter === 'balance_sheet') {
     // The model's metadata remains exact; use the largest int limit so the
     // cloud workbook includes the complete statement, not a screen page.
-    const report = await balanceSheetModel.getReport({ siteId, creatorId: visibility.creatorId, limit: 2147483647, grain: 'month' });
+    const filters = context.filters || {};
+    const report = await balanceSheetModel.getReport({ siteId, creatorId: visibility.creatorId, limit: 2147483647, grain: 'month',
+      ...(context.filters ? { dateFrom: filters.date_from || null, dateTo: filters.date_to || null, scope: filters.scope || 'all', source: filters.source || 'all',
+        paymentMode: (filters.payment_mode || 'all').toLowerCase(), direction: filters.direction || 'all', search: filters.q || '' } : {}),
+    });
+    let running = Number(report?.summary?.closing_balance) || 0;
+    const transactions = (report?.transactions || []).map(row => {
+      const result = { ...row, running_balance: running };
+      running -= (Number(row.credit) || 0) - (Number(row.debit) || 0);
+      return result;
+    });
     const summaryKeys = 'opening_balance total_debit total_credit net_movement closing_balance total_entries';
     return [
-      { definition: { name: 'Balance Summary', columns: columns(visibility.canViewAll ? `${summaryKeys} imprest_float balance_in_hand` : summaryKeys) }, rows: report?.summary ? [report.summary] : [] },
-      { definition: { name: 'By Source', columns: columns('source_key entries total_debit total_credit net') }, rows: report?.by_source || [] },
-      { definition: { name: 'By Payment Mode', columns: columns('bucket payment_mode entries total_debit total_credit net') }, rows: report?.by_mode || [] },
-      { definition: { name: 'Monthly Totals', columns: columns('period total_debit total_credit net') }, rows: report?.timeline || [] },
-      { definition, rows: report?.transactions || [] },
+      { definition: { name: 'Balance Summary', countRecords: false, columns: columns(visibility.canViewAll ? `${summaryKeys} imprest_float balance_in_hand` : summaryKeys) }, rows: report?.summary ? [report.summary] : [] },
+      { definition: { name: 'By Source', countRecords: false, columns: columns('source_key entries total_debit total_credit net') }, rows: report?.by_source || [] },
+      { definition: { name: 'By Payment Mode', countRecords: false, columns: columns('bucket payment_mode entries total_debit total_credit net') }, rows: report?.by_mode || [] },
+      { definition: { name: 'Monthly Totals', countRecords: false, columns: columns('period total_debit total_credit net') }, rows: report?.timeline || [] },
+      { definition, rows: transactions },
     ];
   }
   if (definition.adapter) return { definition, rows: await loadModuleReport(definition.adapter, siteId, visibility.creatorId) };
@@ -232,13 +245,17 @@ const loadRecordDocuments = async (definition, context, sheets, documents) => {
 };
 
 const loadReceiptDocuments = async (loaded, context, documents) => {
+  const sourceReceipts = { day_book: 'daybook', expenses: 'expense', farmer_payments: 'farmer_payment', personal_ledger: 'cashflow_entry',
+    firm_transactions: 'firm_transaction', plot_payments: 'plot_payment', plot_commission_payments: 'commission_payment', plot_registry_payments: 'registry_payment',
+    vendor_payments: 'vendor_payment', partner_profit_payments: 'partner_profit_payment', land_deal_payments: 'land_deal_payment', misc_income_entries: 'misc_income_entry' };
   const targets = [];
   for (const { definition, rows } of loaded) {
     for (const row of rows) {
-      const receiptModule = definition.receiptModule || (definition.adapter === 'expenses'
+      const ledger = ['daybook', 'balance_sheet'].includes(definition.adapter);
+      const receiptModule = definition.receiptModule || (definition.adapter === 'tds' ? sourceReceipts[row.receipt_source_key] : ledger ? sourceReceipts[row.native_source_key || row.source_key] : definition.adapter === 'expenses'
         ? ({ expenses: 'expense', farmer_payment: 'farmer_payment', commission: 'commission_payment', vendor_payment: 'vendor_payment', personal_ledger: 'cashflow_entry', daybook: 'daybook' })[row.source]
         : definition.name === 'Sale Payments' ? 'land_deal_payment' : definition.name === 'Ledger Entries' ? 'cashflow_entry' : null);
-      const recordId = definition.adapter === 'expenses' ? row.original_id : row.id;
+      const recordId = definition.adapter === 'tds' ? row.receipt_source_id : ledger ? row.native_source_id || row.source_id : definition.adapter === 'expenses' ? row.original_id : row.id;
       if (receiptModule && recordId != null) targets.push({ module: receiptModule, record_id: String(recordId) });
     }
   }
@@ -252,7 +269,7 @@ const loadReceiptDocuments = async (loaded, context, documents) => {
   for (const row of rows) collectRowDocuments([row], row.module, documents);
 };
 
-export const buildModuleDriveShareBundle = async ({ moduleKey, siteId, user, entityId = null, scope = 'overall' }) => {
+export const buildModuleDriveShareBundle = async ({ moduleKey, siteId, user, entityId = null, scope = 'overall', filters = null }) => {
   if (scope !== 'overall') fail(400, 'Module exports use the overall scope');
   const definition = getModuleDriveDefinition(moduleKey);
   if (!definition) fail(404, 'This module is not available for Drive sharing');
@@ -267,13 +284,18 @@ export const buildModuleDriveShareBundle = async ({ moduleKey, siteId, user, ent
     if (!record) fail(404, 'Plot not found in this site');
     recordLabel = `Plot ${record.plot_no}`;
   }
-  const context = { siteId: selectedSite, entityId: selectedEntity, user, visibility };
+  const viewFilters = normalizeModuleDriveFilters(moduleKey, filters);
+  const context = { siteId: selectedSite, entityId: selectedEntity, user, visibility, filters: viewFilters };
   const loaded = (await Promise.all(definition.sheets.map((sheet) => loadDataset(sheet, context)))).flat().filter(Boolean);
   const documents = [];
-  const sheets = loaded.map(({ definition: sheet, rows }) => {
+  const sheets = loaded.map(({ definition: sheet, rows: rawRows }) => {
+    const rows = ['daybook', 'balance_sheet'].includes(sheet.adapter) ? rawRows.map(row => {
+      const display = transactionParticulars(row);
+      return { ...row, particulars: transactionParticularsText(row), party_name: display.name, category: display.category, module_name: display.module };
+    }) : rawRows;
     collectRowDocuments(rows, moduleKey, documents);
     const cols = publicColumns(sheet);
-    return { name: sheet.name.slice(0, 31), columns: cols, rows: projectRows(rows, cols) };
+    return { name: sheet.name.slice(0, 31), columns: cols, rows: projectRows(rows, cols), ...(sheet.countRecords === false ? { countRecords: false } : {}) };
   });
   await Promise.all([loadRecordDocuments(definition, context, sheets, documents), loadReceiptDocuments(loaded, context, documents)]);
   const uniqueDocuments = [...new Map(documents.map((document) => [`${document.sourceModule}:${document.sourceId}:${document.url}`, document])).values()]
@@ -286,14 +308,15 @@ export const buildModuleDriveShareBundle = async ({ moduleKey, siteId, user, ent
     entityId: selectedEntity || selectedSite, entityType: selectedEntity ? definition.entityType : 'module', scope: 'overall',
     site, siteFolderName: siteFolderName(site), label, folderSegments: [istDateFolder(generatedAt), definition.label, safeFilePart(label)],
     generatedAt, generatedBy: user.name || user.email || 'User', entryVisibility: visibility,
+    viewFilters,
     sheets, documents: linkedDocuments, documentSources: uniqueDocuments,
-    summary: { record_count: sheets.reduce((sum, sheet) => sum + sheet.rows.length, 0), document_count: linkedDocuments.length },
+    summary: { record_count: sheets.reduce((sum, sheet) => sum + (sheet.countRecords === false ? 0 : sheet.rows.length), 0), document_count: linkedDocuments.length },
   };
 };
 
 export const planModuleDriveShareFiles = (bundle) => [{
   folder: 'Excel Reports',
-  name: bundle.entryVisibility?.canViewAll === false
-    ? `${bundle.label} - Entries by User ${bundle.entryVisibility.creatorId}` : bundle.label,
+  name: `${bundle.entryVisibility?.canViewAll === false
+    ? `${bundle.label} - Entries by User ${bundle.entryVisibility.creatorId}` : bundle.label}${bundle.viewFilters ? ' - Current view' : ''}`,
   kind: 'module_report', formats: ['xlsx'],
 }];

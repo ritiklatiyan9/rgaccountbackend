@@ -9,6 +9,7 @@
  * Tolerance: ₹0.01 (floating-point rounding)
  */
 import pool from '../../config/db.js';
+import { ACTIVE_SOURCE_TDS_SQL, excludeLinkedTdsSettlement, excludeSourceLinkedTdsSettlement } from '../../services/daybookTds.service.js';
 
 const TOLERANCE = 0.01;
 const postedMirrorDebit = `CASE WHEN financial_transaction_posts(
@@ -19,7 +20,7 @@ const postedMirrorCredit = `CASE WHEN financial_transaction_posts(
   cfe.status, cfe.cash_type, cfe.cheque_status) THEN COALESCE(cfe.credit, 0) ELSE 0 END`;
 const postedExpenseNet = `(CASE WHEN financial_transaction_posts(
   CASE WHEN debit < 0 THEN 'credit' ELSE 'debit' END,
-  status, payment_mode, cheque_status) THEN COALESCE(debit, 0) ELSE 0 END
+  status, payment_mode, cheque_status) THEN COALESCE(debit, 0) + COALESCE(tds_amount, 0) ELSE 0 END
   - CASE WHEN financial_transaction_posts(
     CASE WHEN credit < 0 THEN 'debit' ELSE 'credit' END,
     status, payment_mode, cheque_status) THEN COALESCE(credit, 0) ELSE 0 END)`;
@@ -59,31 +60,31 @@ async function runFromSourceTables(siteId, start, end) {
   const expResult = await pool.query(
     `SELECT COALESCE(SUM(debit), 0)::numeric AS total
      FROM (
-       SELECT fp.amount AS debit FROM farmer_payments fp
+       SELECT fp.amount + COALESCE(fp.tds_amount, 0) AS debit FROM farmer_payments fp
        JOIN farmers f ON f.id = fp.farmer_id
-       WHERE f.site_id = $1 AND fp.date >= $2 AND fp.date < $3
+       WHERE ${excludeSourceLinkedTdsSettlement('farmer_payments', 'fp.id')} AND f.site_id = $1 AND fp.date >= $2 AND fp.date < $3
          AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
        UNION ALL
        SELECT ${postedExpenseNet} AS debit FROM expenses
-       WHERE site_id = $1 AND date >= $2 AND date < $3
+       WHERE ${excludeSourceLinkedTdsSettlement('expenses')} AND site_id = $1 AND date >= $2 AND date < $3
        UNION ALL
-       SELECT amount AS debit FROM plot_commissions
-       WHERE site_id = $1 AND date >= $2 AND date < $3
+       SELECT amount + COALESCE(tds_amount, 0) AS debit FROM plot_commissions
+       WHERE ${excludeSourceLinkedTdsSettlement('plot_commissions')} AND site_id = $1 AND date >= $2 AND date < $3
          AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, by_note, cheque_status)
        UNION ALL
-       SELECT amount AS debit FROM plot_commission_payments
-       WHERE site_id = $1 AND date >= $2 AND date < $3
+       SELECT amount + COALESCE(tds_amount, 0) AS debit FROM plot_commission_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('plot_commission_payments')} AND site_id = $1 AND date >= $2 AND date < $3
          AND financial_transaction_posts(
            CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END,
            status, payment_mode, cheque_status
          )
        UNION ALL
-       SELECT amount AS debit FROM vendor_payments
-       WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
+       SELECT amount + COALESCE(tds_amount, 0) AS debit FROM vendor_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('vendor_payments')} AND site_id = $1 AND payment_date >= $2 AND payment_date < $3
          AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
        UNION ALL
-       SELECT amount AS debit FROM vendor_inventory_payments
-       WHERE site_id = $1 AND payment_date >= $2 AND payment_date < $3
+       SELECT amount + COALESCE(tds_amount, 0) AS debit FROM vendor_inventory_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('vendor_inventory_payments')} AND site_id = $1 AND payment_date >= $2 AND payment_date < $3
          AND source_vendor_payment_id IS NULL
          AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
        UNION ALL
@@ -94,6 +95,7 @@ async function runFromSourceTables(siteId, start, end) {
        UNION ALL
        SELECT ${postedExpenseNet} AS debit FROM day_book
        WHERE site_id = $1 AND date >= $2 AND date < $3
+         AND ${excludeSourceLinkedTdsSettlement('day_book')}
          AND entry_type = 'EXPENSE'
          AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
      ) u`,
@@ -166,7 +168,8 @@ async function runFromCashFlowEntries(siteId, start, end) {
     `SELECT COALESCE(SUM(${postedMirrorDebit} - ${postedMirrorCredit}), 0)::numeric AS total_debit
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
-       AND cfe.source_module IN (${expPlaceholders})`,
+       AND cfe.source_module IN (${expPlaceholders})
+       AND ${excludeLinkedTdsSettlement('cfe')}`,
     [siteId, start, end, ...expenseModules]
   );
   const totalExpense = parseFloat(expResult.rows[0].total_debit) || 0;
@@ -178,6 +181,7 @@ async function runFromCashFlowEntries(siteId, start, end) {
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND cfe.source_module = 'plot_registry_payments'
+       AND ${excludeLinkedTdsSettlement('cfe')}
        AND EXISTS (
          SELECT 1 FROM plot_registry_payments prp
          WHERE prp.id = cfe.source_id AND prp.source_plot_payment_id IS NULL
@@ -192,6 +196,7 @@ async function runFromCashFlowEntries(siteId, start, end) {
      FROM cash_flow_entries cfe
      WHERE cfe.site_id = $1 AND cfe.date >= $2 AND cfe.date < $3
        AND cfe.source_module = 'day_book'
+       AND ${excludeLinkedTdsSettlement('cfe')}
        AND EXISTS (
          SELECT 1 FROM day_book db
          WHERE db.id = cfe.source_id AND db.entry_type = 'EXPENSE'
@@ -204,7 +209,25 @@ async function runFromCashFlowEntries(siteId, start, end) {
   // NOTE: Person-ledger debit is intentionally NOT added here. It belongs to
   // outstanding (given-returned), not expense — including it would double-deduct
   // and break parity with Run A / getProfitSummary.
-  const adjExpense = totalExpense + registryExpense + orphanExpense;
+  // Mirrors store net cash, so add the active owner withholding once. The
+  // EXISTS guard detects a missing owner mirror without multiplying split rows.
+  const withholdingResult = await pool.query(`
+    SELECT COALESCE(SUM(t.tds_amount), 0)::numeric AS total
+      FROM (${ACTIVE_SOURCE_TDS_SQL}) t
+     WHERE t.site_id = $1 AND t.entry_date >= $2 AND t.entry_date < $3
+       AND EXISTS (
+         SELECT 1 FROM cash_flow_entries cfe
+          WHERE cfe.site_id = t.site_id AND cfe.source_module = t.source_key AND cfe.source_id = t.source_id
+            AND ${excludeLinkedTdsSettlement('cfe')}
+            AND (cfe.source_module = ANY($4::text[]) OR (
+              cfe.source_module = 'day_book' AND EXISTS (
+                SELECT 1 FROM day_book db WHERE db.id = cfe.source_id AND db.entry_type = 'EXPENSE'
+                  AND db.farmer_payment_id IS NULL AND db.commission_id IS NULL AND db.vendor_payment_id IS NULL
+              )
+            ))
+       )`, [siteId, start, end, expenseModules]);
+  const withholding = parseFloat(withholdingResult.rows[0].total) || 0;
+  const adjExpense = totalExpense + registryExpense + orphanExpense + withholding;
   const netProfit = totalRevenue - adjExpense;
 
   // Outstanding from person ledger (same source for both runs)
@@ -266,8 +289,8 @@ export function getQueryDescriptions() {
       runB: 'Posted credit minus debit from receipt mirrors, including transfer offsets and refunds',
     },
     totalExpense: {
-      runA: 'Net posted payments minus recoveries from operating modules; each direction uses its approval and cheque-clearance rules',
-      runB: 'Posted debit minus credit from matching cash-flow mirrors. Personal-ledger movements are counted in outstanding.',
+      runA: 'Gross posted operating costs: net payments plus active TDS withholding, minus recoveries. TDS settlements are excluded.',
+      runB: 'Posted net cash-flow mirrors plus each active owner withholding once. TDS settlements and personal custody movements are excluded from expense.',
     },
     netProfit: {
       formula: 'totalRevenue − totalExpense',

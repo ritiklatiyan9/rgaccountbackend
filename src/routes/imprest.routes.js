@@ -36,22 +36,7 @@ import requirePermission from '../middlewares/permission.middleware.js';
 import { requireImprestReadAccess } from '../middlewares/imprestPermission.middleware.js';
 import requireImprestSiteAccess, { requireImprestParticipant } from '../middlewares/imprestSiteAccess.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
-import multer from 'multer';
-import path from 'path';
-
-// Optional camera-proof upload (images only, 10 MB) — buffer goes to the shared
-// S3/local store. Must run before the body-reading site-access middlewares so
-// multipart fields are parsed into req.body.
-const uploadProofPhoto = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const okExt = /\.(jpg|jpeg|png|webp)$/.test(path.extname(file.originalname).toLowerCase());
-    const okMime = /^image\/(jpe?g|png|webp)$/.test(file.mimetype);
-    if (okExt && okMime) return cb(null, true);
-    cb(new Error('Proof must be a photo (jpg, png or webp)'));
-  },
-}).single('photo');
+import uploadProofPhoto from '../middlewares/proofUpload.middleware.js';
 
 const cachedImprestRead = cacheResponse({ ttlSeconds: 30, namespace: 'imprest' });
 const imprestReadCache = (req, res, next) => req.user.role === 'sub_admin' ? next() : cachedImprestRead(req, res, next);

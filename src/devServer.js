@@ -9,6 +9,7 @@ import { up as migrateTdsDeducteeMapping } from './migrations/191_tds_deductee_m
 import { up as migrateDataStorage } from './migrations/193_data_storage.js';
 import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
 import { up as migrateMemberIdentityLinking } from './migrations/192_member_identity_linking.js';
+import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_financial_settlements.js';
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { up as migrateImprestCashGuard } from './migrations/195_imprest_cash_funding_guard.js';
 import { up as migrateExistingVoucherGaps } from './migrations/196_existing_voucher_gaps_filled.js';
@@ -23,6 +24,7 @@ connectDB().then(async () => {
   await migrateMemberSiteSharing(pool);
   await migrateMemberIdentityLinking(pool);
   await migrateTdsDeducteeMapping(pool);
+  await migrateTdsFinancialSettlements(pool);
   await migrateDataStorage(pool);
   await migrateImprestCashGuard(pool);
   await migrateImprestApprovalIndexes(pool);

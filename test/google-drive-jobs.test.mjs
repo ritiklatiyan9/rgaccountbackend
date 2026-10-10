@@ -69,7 +69,7 @@ const makeRunner = ({ share = shareFixture(), plan = [statement], visibility = {
     generatedContentHash, logicalFileKey, shareSyncSummary,
     existingShareFolderSegments: async (_ctx, fallback) => fallback,
     existingModuleShareFolderSegments: async (_ctx, fallback) => fallback,
-    getModuleDriveDefinition: (key) => key === 'plot_payments' ? { key, permission: 'plot_payments', label: 'Plot Payments' } : null,
+    getModuleDriveDefinition: (key) => ['plot_payments', 'tds'].includes(key) ? { key, permission: 'plot_payments', label: 'Plot Payments' } : null,
     assertModuleDriveAccess: async (args) => {
       calls.siteChecks.push(args);
       if (authorize) await authorize(args);
@@ -434,4 +434,17 @@ test('repeated workbook is unchanged without media progress; a new payment updat
   assert.deepEqual(repeat.progress.sync, { created: 0, updated: 0, unchanged: 1, failed: 0 });
   assert.deepEqual(updated.progress.sync, { created: 0, updated: 1, unchanged: 0, failed: 0 });
   assert.equal(repeat.progress.label, 'Already up to date');
+});
+
+
+test('TDS worker retains the exact module filters after queue serialization', async () => {
+  const filters = { date_from: '2026-10-01', date_to: '2026-10-31', status: 'due', source_module: 'expense', search: 'Person One' };
+  const h = makeRunner({
+    share: shareFixture({ module: 'tds', entity_type: 'module', request: JSON.parse(JSON.stringify({ formats: ['xlsx'], filters, visibility: { canViewAll: true, creatorId: null } })) }),
+    plan: [{ folder: 'Excel Reports', name: 'TDS Register - Current view', kind: 'module_report', formats: ['xlsx'] }],
+  });
+  const result = await h.runShareJob(h.share);
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(h.calls.builds[0].filters, filters);
+  assert.equal(h.calls.builds[0].moduleKey, 'tds');
 });

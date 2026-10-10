@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { up as financialSettlements } from '../src/migrations/198_tds_financial_settlements.js';
 import { up as nativeWorkflow } from '../src/migrations/184_payment_module_tds.js';
 import { up as mapping } from '../src/migrations/191_tds_deductee_mapping.js';
 import { TDS_SOURCES } from '../src/services/paymentTds.service.js';
@@ -11,7 +13,7 @@ import { updateModuleEntryFromDayBook } from '../src/controllers/dayBook.control
 import { attachDayBookTds } from '../src/services/daybookTds.service.js';
 import { listDeductions, recordDeposit, updateDeduction, deleteDeduction } from '../src/controllers/tds.controller.js';
 
-const invoke = (handler, body = {}, extra = {}) => new Promise((resolve, reject) => handler({ body, user: { id: 1, role: 'admin' }, query: {}, params: {}, ...extra }, { status(code) { this.code = code; return this; }, json(body) { resolve({ code: this.code || 200, body }); } }, reject));
+const invoke = (handler, body = {}, extra = {}) => new Promise((resolve, reject) => handler({ body: handler === recordDeposit ? { payment_kind: 'government_direct', payment_mode: 'BANK', bank_account_id: 1, request_id: randomUUID(), ...body } : body, user: { id: 1, role: 'admin' }, query: {}, params: {}, ...extra }, { status(code) { this.code = code; return this; }, json(body) { resolve({ code: this.code || 200, body }); } }, reject));
 test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, async t => {
   const { PGlite } = await import(process.env.PGLITE_MODULE);
   const pg = new PGlite();
@@ -39,6 +41,29 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
     for (const table of new Set(Object.values(TDS_SOURCES).map(source => source.table))) await pg.exec(`CREATE TABLE ${table}(id serial PRIMARY KEY,site_id int,amount numeric,debit numeric)`);
     await register(pool); await workflow(pool); await workflow(pool); await nativeWorkflow(pool);
     await mapping(pool); await mapping(pool);
+    // Finance settlements post one site cash/bank movement. The owner/module
+    // fixture still uses its existing independent payout mirror.
+    await pg.exec(`
+      CREATE TABLE bank_accounts(id int PRIMARY KEY,site_id int REFERENCES sites(id),is_active boolean DEFAULT true);
+      INSERT INTO bank_accounts VALUES(1,1,true);
+      ALTER TABLE cash_flow_entries
+        ADD COLUMN IF NOT EXISTS cash_flow_month_id int,
+        ADD COLUMN IF NOT EXISTS date date,
+        ADD COLUMN IF NOT EXISTS particular text,
+        ADD COLUMN IF NOT EXISTS credit numeric DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS cash_type text,
+        ADD COLUMN IF NOT EXISTS bank_account_id int,
+        ADD COLUMN IF NOT EXISTS remarks text,
+        ADD COLUMN IF NOT EXISTS created_by int,
+        ADD COLUMN IF NOT EXISTS source_module text,
+        ADD COLUMN IF NOT EXISTS source_id int,
+        ADD COLUMN IF NOT EXISTS status text,
+        ADD COLUMN IF NOT EXISTS approved_by int,
+        ADD COLUMN IF NOT EXISTS approved_at timestamptz;
+      CREATE FUNCTION ensure_site_cashflow_month(integer,date,integer) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+    `);
+    await financialSettlements(pool); await financialSettlements(pool);
+
     let payment;
     const list = async (user) => (await invoke(listDeductions, {}, { query: { site_id: 1, financial_year: 2026 }, ...(user ? { user } : {}) })).body.deductions;
     await t.test('create atomically stores net cash and one pending linked deduction', async () => {
@@ -93,12 +118,12 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
       await invoke(recordDeposit, { site_id: 1, ids: [row.id], deposit_date: '2026-10-02', challan_no: 'TEST-CHALLAN' });
       assert.equal((await list())[0].challan_no, 'TEST-CHALLAN');
       await assert.rejects(invoke(recordDeposit, { site_id: 1, ids: [row.id], deposit_date: '2026-10-03', challan_no: 'DUPLICATE' }), /already deposited/);
-      await assert.rejects(query('DELETE FROM plot_commission_payments WHERE id=$1', [payment.id]), /deposited/);
-      await assert.rejects(query('DELETE FROM plot_commissions_v2 WHERE id=1'), /deposited/);
-      await assert.rejects(query("UPDATE plot_commission_payments SET status='rejected' WHERE id=$1", [payment.id]), /deposited/);
-      await assert.rejects(query("UPDATE plot_commission_payments SET tds_pan='FGHIJ1234K' WHERE id=$1",[payment.id]), /deposited/);
-      await assert.rejects(query('UPDATE plot_commission_payments SET tds_member_id=NULL WHERE id=$1',[payment.id]), /deposited/);
-      await assert.rejects(invoke(updatePlotCommissionPayment, { amount: 40000, tds_applicable: true }, { params: { id: payment.id } }), /deposited/);
+      await assert.rejects(query('DELETE FROM plot_commission_payments WHERE id=$1', [payment.id]), /deposited|funded|locked/);
+      await assert.rejects(query('DELETE FROM plot_commissions_v2 WHERE id=1'), /deposited|funded|locked/);
+      await assert.rejects(query("UPDATE plot_commission_payments SET status='rejected' WHERE id=$1", [payment.id]), /deposited|funded|locked/);
+      await assert.rejects(query("UPDATE plot_commission_payments SET tds_pan='FGHIJ1234K' WHERE id=$1",[payment.id]), /deposited|funded|locked/);
+      await assert.rejects(query('UPDATE plot_commission_payments SET tds_member_id=NULL WHERE id=$1',[payment.id]), /deposited|funded|locked/);
+      await assert.rejects(invoke(updatePlotCommissionPayment, { amount: 40000, tds_applicable: true }, { params: { id: payment.id } }), /deposited|funded|locked/);
     });
     await t.test('module settings, manual deductions, disabling and removing TDS', async () => {
       await assert.rejects(invoke(createPlotCommissionPayment, { master_id: 2, amount: 100000, date: '2026-10-01', tds_applicable: true }), /Enable/);

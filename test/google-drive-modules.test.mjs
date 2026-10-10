@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { REPORTS } from '../src/services/reportDefinitions.js';
+import { transactionParticularsText, transactionParticulars } from '../src/services/transactionDisplay.service.js';
+import { TDS_DRIVE_COLUMNS, normalizeModuleDriveFilters } from '../src/services/tdsDriveReport.service.js';
 
 // Execute the production adapter without DB, S3 or Google side effects. Only
 // import/export wiring is replaced, all authorization and SQL building is real.
@@ -14,7 +16,8 @@ const site = { id: 2, name: 'Test Site', city: 'Test', state: 'Test' };
 function harness(options = {}) {
   const calls = { queries: [], adapters: [], links: [], balance: [] };
   const deps = {
-    REPORTS,
+    REPORTS, TDS_DRIVE_COLUMNS, normalizeModuleDriveFilters, transactionParticularsText, transactionParticulars,
+    loadTdsDriveSheets: async (siteId, filters) => options.tds?.(siteId, filters) || [{ definition: { name: 'TDS Register', columns: TDS_DRIVE_COLUMNS }, rows: [] }],
     pool: { query: async (sql, values) => {
       calls.queries.push({ sql, values });
       if (options.query) {
@@ -227,4 +230,28 @@ test('client documents use site registrations and allowlisted KYC links without 
   assert.equal(bundle.documents.length, 2);
   assert.ok(bundle.documents.every((doc) => doc.url.startsWith('https://example.test/public/drive-documents/')));
   assert.equal(Object.hasOwn(bundle.sheets[0].rows[0], 'aadhar_front_url'), false);
+});
+
+test('TDS current view keeps its validated filters and primary row count, with a distinct workbook filename', async () => {
+  const filters = { date_from: '2026-10-01', status: 'due' };
+  const h = harness({ tds: async (siteId, selected) => {
+    assert.equal(siteId, 2); assert.deepEqual(selected, filters);
+    return [{ definition: { name: 'TDS Register', adapter: 'tds', columns: TDS_DRIVE_COLUMNS }, rows: [{ id: 1, deductee_name: 'Person One' }] },
+      { definition: { name: 'Site TDS Balances', countRecords: false, columns: [{ key: 'payable', label: 'TDS payable', type: 'money' }] }, rows: [{ payable: 20 }] }];
+  } });
+  const bundle = await build(h, 'tds', { filters });
+  assert.equal(bundle.summary.record_count, 1); assert.deepEqual(bundle.viewFilters, filters);
+  assert.match(h.planModuleDriveShareFiles(bundle)[0].name, /Current view$/);
+});
+
+test('Balance Sheet sharing uses module filters without pagination and keeps the displayed running balance', async () => {
+  const h = harness({ balance: { summary: { closing_balance: 90 }, transactions: [{ id: '1', credit: 10, debit: 0, source_key: 'personal_ledger', source_id: 1,
+    particular: 'RTGS', party_name: 'BALAJI ASSOCIATES', ledger_name: 'BALAJI ASSOCIATES', ledger_type: 'person' }], by_source: [{ entries: 1 }] } });
+  const filters = { date_from: '2026-10-01', date_to: '2026-10-31', scope: 'bank', source: 'personal_ledger', payment_mode: 'RTGS', direction: 'credit', q: 'BALAJI' };
+  const bundle = await build(h, 'balance_sheet', { filters });
+  assert.deepEqual(h.calls.balance[0], { siteId: 2, creatorId: null, limit: 2147483647, grain: 'month', dateFrom: filters.date_from, dateTo: filters.date_to,
+    scope: 'bank', source: 'personal_ledger', paymentMode: 'rtgs', direction: 'credit', search: 'BALAJI' });
+  const row = bundle.sheets.find(sheet => sheet.name === 'Statement').rows[0];
+  assert.equal(row.running_balance, 90); assert.equal(bundle.summary.record_count, 1);
+  assert.equal(row.particulars, 'BALAJI ASSOCIATES · Category: Person · Module: Personal Ledger · RTGS');
 });

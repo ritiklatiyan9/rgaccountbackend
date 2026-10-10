@@ -6,6 +6,7 @@ import { getModuleDriveDefinition, listModuleDriveDefinitions, assertModuleDrive
 import { renderModuleShareHtml } from '../services/driveShareWorkbook.service.js';
 import { enqueueShare } from '../services/driveShareJobs.service.js';
 import { existingModuleShareFolderSegments } from '../services/driveShareDestination.service.js';
+import { normalizeModuleDriveFilters } from '../services/tdsDriveReport.service.js';
 
 const bad = (message) => Object.assign(new Error(message), { statusCode: 400 });
 const positiveInt = (value) => {
@@ -29,7 +30,8 @@ const resolveRequest = async (req, mutation = false) => {
   // Document links are included in Excel. Copying large attachments is a separate explicit operation.
   if (src.include_documents === true || String(src.include_documents).toLowerCase() === 'true') throw bad('Documents are shared as links inside Excel');
   const entryVisibility = await assertModuleDriveAccess({ moduleKey, siteId, user: req.user });
-  return { moduleKey, definition, siteId, entityId, entryVisibility, formats: ['xlsx'], scope: 'overall' };
+  const filters = normalizeModuleDriveFilters(moduleKey, src.filters);
+  return { moduleKey, definition, siteId, entityId, entryVisibility, filters, formats: ['xlsx'], scope: 'overall' };
 };
 
 const historyRows = ({ orgId, moduleKey, siteId, entityType, entityId, visibility, userId, limit = 50 }) => pool.query(
@@ -82,6 +84,7 @@ export const previewModuleShare = asyncHandler(async (req, res) => {
       recipients: recipients.map((r) => ({ email: r.email, role: r.role, all_sites: r.site_id == null })),
       label: bundle.label, groups: plan.map(({ folder, name, kind, formats }) => ({ folder, files: [{ name, kind, formats }] })),
       preview_html: renderModuleShareHtml(bundle), summary: { ...bundle.summary, site_name: bundle.site.name },
+      view_filters: bundle.viewFilters,
       last_share: lastShare ? publicShare(lastShare) : null,
     });
   } catch (err) { if (err.statusCode) throw err; return sendDriveError(res, err); }
@@ -117,7 +120,7 @@ export const createModuleShare = asyncHandler(async (req, res) => {
     if (rows.length) return res.status(409).json({ message: 'A share for this module or record is already in progress', code: 'GOOGLE_DRIVE_SHARE_IN_PROGRESS' });
     const share = await enqueueShare({ orgId, siteId: args.siteId, moduleKey: args.moduleKey, entityType: bundle.entityType, entityId: bundle.entityId,
       scope: 'overall', label: bundle.label, folderPath: folderPathKey([ctx.connection.root_folder_name || MODULE_ROOT_NAME, bundle.siteFolderName || bundle.site.name, ...bundle.folderSegments]),
-      request: { formats: ['xlsx'], include_documents: false, visibility: args.entryVisibility, record_id: args.entityId },
+      request: { formats: ['xlsx'], include_documents: false, visibility: args.entryVisibility, record_id: args.entityId, filters: args.filters },
       userId: req.user.id,
     });
     res.status(202).json({ share: publicShare(share) });

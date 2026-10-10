@@ -47,6 +47,9 @@ test('payment, bank, duplicate retry, cutoff and void reconcile without reducing
       CREATE TABLE site_partner_shares(site_id int, member_id int, share_pct numeric);
       CREATE TABLE farmers(id int PRIMARY KEY, site_id int);
       CREATE TABLE land_partner_shares(farmer_id int, member_id int);
+      CREATE TABLE tds_settlements(id int, existing_entry_id int);
+      CREATE TABLE tds_accounting_deductions(id int, site_id int, deduction_date date, source_table text,
+        source_id int, commission_payment_id int, tds_amount numeric, gross_amount numeric, accounting_state text);
       CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
       CREATE TABLE imprest_ledger(user_id int, site_id int, amount numeric, created_at timestamptz);
       CREATE TABLE imprest_allocations(site_id int, status text, amount numeric, from_own_float boolean, created_at timestamptz);

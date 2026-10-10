@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { normalizeModuleDriveFilters } from '../src/services/tdsDriveReport.service.js';
 
 const source = (await readFile(new URL('../src/controllers/moduleDriveShare.controller.js', import.meta.url), 'utf8'))
   .replace(/^import[\s\S]*?from ['"][^'"]+['"];$/gm, '').replace(/^export /gm, '');
@@ -10,7 +11,7 @@ const response = () => ({ statusCode: 200, status(code) { this.statusCode = code
 const harness = (overrides = {}) => {
   const queries = [], calls = [];
   const deps = {
-    asyncHandler: (fn) => fn,
+    asyncHandler: (fn) => fn, normalizeModuleDriveFilters,
     getModuleDriveDefinition: (key) => key === definition.key ? definition : null,
     listModuleDriveDefinitions: () => [definition, { key: 'legal', label: 'Legal' }],
     assertModuleDriveAccess: async (args) => { calls.push(args); if (args.moduleKey === 'legal') throw Object.assign(new Error('denied'), { statusCode: 403 }); return { canViewAll: false, creatorId: 8 }; },
@@ -80,4 +81,22 @@ test('module POST queues before loading or rendering a full dataset so progress 
   assert.equal(queued.entityId, 2);
   assert.deepEqual(queued.request.visibility, { canViewAll: false, creatorId: 8 });
   assert.equal(queued.prepared, undefined);
+});
+
+test('TDS preview filters are validated and preserved in the queued request for the worker', async () => {
+  let queued;
+  const tds = { key: 'tds', label: 'TDS Register' };
+  const h = harness({
+    getModuleDriveDefinition: key => key === 'tds' ? tds : null,
+    driveClientFor: async () => ({ connection: { root_folder_id: 'root', root_folder_name: 'Accounts' } }),
+    pool: { query: async sql => ({ rows: sql.includes('SELECT id,name FROM sites') ? [{ id: 2, name: 'Site A' }] : [] }) },
+    existingModuleShareFolderSegments: async (_args, fallback) => fallback,
+    istDateFolder: () => '10-10-2026', safeFilePart: value => value, siteFolderName: site => site.name,
+    folderPathKey: parts => parts.join('/'), MODULE_ROOT_NAME: 'Accounts',
+    enqueueShare: async args => { queued = args; return { id: 42, status: 'queued', request: args.request }; },
+  });
+  const filters = { date_from: '2026-10-01', date_to: '2026-10-31', status: 'due', source_module: 'expense', pan: 'present' };
+  await h.createModuleShare({ ...req(), params: { moduleKey: 'tds' }, body: { site_id: 2, filters } }, response());
+  assert.deepEqual(queued.request.filters, filters);
+  await assert.rejects(h.createModuleShare({ ...req(), params: { moduleKey: 'tds' }, body: { site_id: 2, filters: { creatorId: 1 } } }, response()), { statusCode: 400 });
 });

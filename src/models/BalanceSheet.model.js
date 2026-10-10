@@ -1,5 +1,8 @@
 import pool from '../config/db.js';
 import { SEQUENCE_ORDER_BY } from '../services/daybookOrderSync.service.js';
+import { attachTransactionParticulars } from '../services/transactionParticulars.service.js';
+import { attachDayBookTds } from '../services/daybookTds.service.js';
+import { getTdsSummary } from '../services/tdsAccounting.service.js';
 
 /**
  * Balance Sheet reads `ledger_entries` — the canonical money view created in
@@ -17,6 +20,11 @@ const SCOPED = `
     SELECT
       le.*,
       creator_cfe.transaction_time,
+      settlement.id AS tds_settlement_id,
+      settlement.kind AS tds_settlement_kind,
+      settlement.amount AS tds_settlement_amount,
+      settlement.challan_no,
+      settlement.ca_name,
       plot.id AS plot_id,
       plot.plot_no,
       plot.block AS plot_block,
@@ -26,6 +34,9 @@ const SCOPED = `
     FROM ledger_entries le
     LEFT JOIN cash_flow_entries creator_cfe
       ON creator_cfe.id = NULLIF(SPLIT_PART(le.id, ':', 1), '')::int
+    LEFT JOIN tds_settlements settlement
+      ON (le.source_key = 'tds_settlements' AND settlement.id = le.source_id)
+      OR settlement.existing_entry_id = creator_cfe.id
     LEFT JOIN users approval_admin
       ON approval_admin.id = le.assigned_admin_id
     -- A Bank Plot Statement must identify the actual plot record, not just
@@ -59,7 +70,7 @@ const SCOPED = `
     WHERE le.site_id = $1
       AND ($4::text = 'all' OR ($4::text = 'cash' AND le.bucket = 'cash')
                             OR ($4::text = 'bank' AND le.bucket <> 'cash'))
-      AND ($5::text = 'all' OR le.source_key = $5::text)
+      AND ($5::text = 'all' OR CASE WHEN settlement.id IS NOT NULL THEN 'tds_settlements' ELSE le.source_key END = $5::text)
       -- 'cash'/'bank' select the whole bucket; any other value (cheque, upi,
       -- imps, rtgs…) matches the exact mode the user recorded.
       AND ($6::text = 'all' OR le.bucket = $6::text OR le.raw_mode = $6::text)
@@ -74,6 +85,8 @@ const SCOPED = `
         OR COALESCE(le.entity_name, '') ILIKE CONCAT('%', $8::text, '%')
         OR COALESCE(le.linked_detail, '') ILIKE CONCAT('%', $8::text, '%')
         OR COALESCE(le.remarks, '') ILIKE CONCAT('%', $8::text, '%')
+        OR COALESCE(settlement.challan_no, '') ILIKE CONCAT('%', $8::text, '%')
+        OR COALESCE(settlement.ca_name, '') ILIKE CONCAT('%', $8::text, '%')
       )
       AND ($11::int IS NULL OR plot.id = $11::int)
       AND ($12::text IS NULL OR creator_cfe.created_by = ANY(string_to_array($12::text, ',')::int[]))
@@ -139,11 +152,11 @@ const REPORT_META_QUERY = `${SCOPED}
     'by_source', COALESCE((
       SELECT jsonb_agg(to_jsonb(s) ORDER BY s.total_credit + s.total_debit DESC)
       FROM (
-        SELECT source_key, COUNT(*)::int AS entries,
+        SELECT CASE WHEN tds_settlement_id IS NOT NULL THEN 'tds_settlements' ELSE source_key END AS source_key, COUNT(*)::int AS entries,
           COALESCE(SUM(debit), 0)::numeric AS total_debit,
           COALESCE(SUM(credit), 0)::numeric AS total_credit,
           COALESCE(SUM(credit - debit), 0)::numeric AS net
-        FROM period_entries GROUP BY source_key
+        FROM period_entries GROUP BY CASE WHEN tds_settlement_id IS NOT NULL THEN 'tds_settlements' ELSE source_key END
       ) s
     ), '[]'::jsonb),
     'by_mode', COALESCE((
@@ -214,7 +227,13 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
     TO_CHAR(entry_date, 'YYYY-MM-DD') AS entry_date,
     particular, remarks, debit, credit,
     raw_mode AS payment_mode,
-    bucket, source_key, source_id, status, cheque_status, cheque_no,
+    bucket,
+    CASE WHEN tds_settlement_id IS NOT NULL THEN 'tds_settlements' ELSE source_key END AS source_key,
+    CASE WHEN tds_settlement_id IS NOT NULL THEN tds_settlement_id ELSE source_id END AS source_id,
+    source_key AS native_source_key, source_id AS native_source_id,
+    tds_settlement_id, tds_settlement_kind, tds_settlement_amount, challan_no, ca_name,
+    (tds_settlement_id IS NOT NULL) AS read_only,
+    status, cheque_status, cheque_no,
     voucher_url, entity_name, linked_detail, created_by_name, created_at,
     bank_account_id, bank_account_name,
     plot_id, plot_no, plot_block,
@@ -257,7 +276,17 @@ class BalanceSheetModel {
     if (!report) return null;
 
     const transactionResult = await pool.query(REPORT_TRANSACTIONS_QUERY, params);
-    return { ...report, transactions: transactionResult.rows };
+    await attachDayBookTds(transactionResult.rows, pool);
+    await attachTransactionParticulars(transactionResult.rows, pool);
+    const tds = await getTdsSummary(siteId, { asOf: dateTo || undefined, dateFrom, dateTo }, pool);
+    return {
+      ...report,
+      tds,
+      summary: { ...report.summary, tds_payable: tds.payable, tds_with_ca: tds.with_ca, tds_reserve: tds.reserve,
+        available_balance: scope === 'all' && source === 'all' && paymentMode === 'all' && direction === 'all' && !search && !plotId && !creatorId
+          ? Math.round((Number(report.summary.balance_in_hand) - tds.reserve) * 100) / 100 : null },
+      transactions: transactionResult.rows,
+    };
   }
 }
 

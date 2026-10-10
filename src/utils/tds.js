@@ -1,5 +1,5 @@
 // Pure TDS rules shared by the register and its tests. No database access.
-export const TDS_SECTIONS = Object.freeze(['192', '194C', '194H', '194I', '194IA', '194J', '194Q', 'OTHER']);
+export const TDS_SECTIONS = Object.freeze(['192', '194C', '194H', '393_1_1ii', '194I', '194IA', '194J', '194Q', 'OTHER']);
 
 const PAN = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 const invalid = (message) => { throw Object.assign(new Error(message), { statusCode: 400 }); };
@@ -42,7 +42,7 @@ export function parseDeduction(body) {
   const memberId = body.member_id == null || body.member_id === '' ? null : Number(body.member_id);
   if (memberId !== null && !(Number.isSafeInteger(memberId) && memberId > 0)) invalid('Choose a valid member.');
   return {
-    member_id: memberId, deductee_name: name, pan, aadhaar, section: body.section, deduction_date: date,
+    member_id: memberId, deductee_name: name, pan, aadhaar, section: body.section === '194H' && date >= '2026-04-01' ? '393_1_1ii' : body.section, deduction_date: date,
     gross_amount: gross, tds_rate: rate, tds_amount: tds, nature: String(body.nature ?? '').trim().slice(0, 200),
     deposit_date: deposit, challan_no: String(body.challan_no ?? '').trim().slice(0, 40) || null,
     notes: String(body.notes ?? '').trim().slice(0, 2000),

@@ -5,6 +5,8 @@ import { plotRegistryModel } from '../models/PlotRegistry.model.js';
 import { expenseModel } from '../models/Expense.model.js';
 import { cashFlowMonthModel } from '../models/CashFlow.model.js';
 import { readLandSalesReport, readLandProfitReport } from '../controllers/landDeal.controller.js';
+import { attachTransactionParticulars } from './transactionParticulars.service.js';
+import { attachDayBookTds, attachDayBookTdsSettlements } from './daybookTds.service.js';
 
 const scope = alias => `($2::text IS NULL OR ${alias}.created_by = ANY(string_to_array($2::text, ',')::int[]))`;
 const posted = alias => `financial_transaction_posts(CASE WHEN ${alias}.amount < 0 THEN 'credit' ELSE 'debit' END, ${alias}.status, ${alias}.payment_mode, ${alias}.cheque_status)`;
@@ -84,12 +86,18 @@ export async function loadModuleReport(key, siteId, creatorId, db = pool) {
       FROM misc_income_entries e JOIN misc_income_categories c ON c.id = e.category_id
       LEFT JOIN users u ON u.id = e.created_by LEFT JOIN users a ON a.id = e.assigned_admin_id
       WHERE e.site_id = $1 AND ${scope('e')} ORDER BY e.date DESC, e.id DESC`, siteId, creatorId);
-    case 'daybook': return queryRows(db, `
-      SELECT l.*, l.entry_date AS date, l.raw_mode AS payment_mode, l.source_key AS source,
+    case 'daybook': {
+      const entries = await queryRows(db, `
+      SELECT l.*, e.voucher_url, l.entry_date AS date, l.raw_mode AS payment_mode, l.source_key AS source,
              l.entity_name AS party, l.linked_detail AS category
       FROM ledger_entries l JOIN cash_flow_entries e ON e.id::text = split_part(l.id, ':', 1) AND e.site_id = l.site_id
-      WHERE l.site_id = $1 AND COALESCE(l.ledger_type, '') <> 'person' AND ${scope('e')}
+      WHERE l.site_id = $1 AND ${scope('e')}
       ORDER BY l.entry_date DESC, l.id DESC`, siteId, creatorId);
+      await attachDayBookTds(entries, db);
+      await attachDayBookTdsSettlements(entries, db);
+      await attachTransactionParticulars(entries, db);
+      return entries;
+    }
     default: throw new Error('Unknown module report.');
   }
 }

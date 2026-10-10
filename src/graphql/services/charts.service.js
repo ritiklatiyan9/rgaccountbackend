@@ -3,6 +3,7 @@
  * All computation in PostgreSQL; frontend receives ready-to-render arrays.
  */
 import pool from '../../config/financialReportDb.js';
+import { OPERATING_TDS_SQL, excludeLinkedTdsSettlement, excludeSourceLinkedTdsSettlement } from '../../services/daybookTds.service.js';
 
 /**
  * Revenue vs Expense trend — grouped by resolution.
@@ -94,14 +95,21 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
          )
        GROUP BY 1
      ),
+     expense_movements AS (
+       SELECT le.entry_date, le.debit - le.credit AS cost
+       FROM ledger_entries le
+       WHERE le.site_id = $1 AND le.entry_date >= $2 AND le.entry_date < $3
+         AND (le.debit <> 0 OR le.credit <> 0)
+         AND le.source_key NOT IN ('plot_payments', 'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'firm_transactions', 'partner_profit_payments', 'tds_settlements')
+         AND le.ledger_type <> 'person'
+         AND ${excludeLinkedTdsSettlement('le')}
+       UNION ALL
+       SELECT t.entry_date, t.tds_amount AS cost FROM (${OPERATING_TDS_SQL}) t
+        WHERE t.site_id = $1 AND t.entry_date >= $2 AND t.entry_date < $3
+     ),
      exp AS (
-       SELECT date_trunc($4::text, entry_date)::date AS bucket, COALESCE(SUM(debit - credit), 0)::numeric AS total
-       FROM ledger_entries
-       WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
-         AND (debit <> 0 OR credit <> 0)
-         AND source_key NOT IN ('plot_payments', 'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'firm_transactions', 'partner_profit_payments')
-         AND ledger_type <> 'person'
-       GROUP BY 1
+       SELECT date_trunc($4::text, entry_date)::date AS bucket, COALESCE(SUM(cost), 0)::numeric AS total
+         FROM expense_movements GROUP BY 1
      )
      SELECT rs.bucket AS date,
             to_char(rs.bucket, CASE
@@ -147,13 +155,14 @@ export async function getExpenseByCategory(siteId, start, end, top = 8) {
   const { rows } = await pool.query(
     `SELECT category, COALESCE(SUM(
        CASE WHEN financial_transaction_posts(CASE WHEN debit < 0 THEN 'credit' ELSE 'debit' END,
-         status, payment_mode, cheque_status) THEN debit ELSE 0 END
+         status, payment_mode, cheque_status) THEN debit + COALESCE(tds_amount, 0) ELSE 0 END
        - CASE WHEN financial_transaction_posts(CASE WHEN credit < 0 THEN 'debit' ELSE 'credit' END,
          status, payment_mode, cheque_status) THEN credit ELSE 0 END
      ), 0)::numeric AS total
      FROM expenses
      WHERE site_id = $1 AND date >= $2 AND date < $3
        AND (debit <> 0 OR credit <> 0)
+       AND ${excludeSourceLinkedTdsSettlement('expenses')}
      GROUP BY category
      ORDER BY total DESC
      LIMIT $4`,

@@ -74,5 +74,5 @@ export function parsePaymentTds(body, config, existing = null) {
   const deduction = mode === 'percentage' ? money(gross * rate / 100) : money(body.tds_amount ?? existing?.tds_amount);
   if (!Number.isFinite(deduction) || deduction <= 0 || deduction >= gross) fail('TDS must be greater than zero and less than the gross amount.');
   return { amount: money(gross - deduction), tds_amount: deduction, tds_mode: mode,
-    tds_rate: mode === 'manual' ? money(deduction / gross * 100) : rate, tds_section: section };
+    tds_rate: mode === 'manual' ? money(deduction / gross * 100) : rate, tds_section: section === '194H' && String(body.date || body.payment_date || '').slice(0,10) >= '2026-04-01' ? '393_1_1ii' : section };
 }

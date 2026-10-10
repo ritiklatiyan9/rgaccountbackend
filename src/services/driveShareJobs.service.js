@@ -264,7 +264,7 @@ export const runShareJob = async (share) => {
     }
     const includeDocuments = req.include_documents === true;
     const bundle = preparedBundles.take(share.id, entryVisibility) || await (generic ? buildModuleDriveShareBundle({
-      moduleKey: share.module, entityId: req.record_id || null, siteId, user, entryVisibility, scope: share.scope,
+      moduleKey: share.module, entityId: req.record_id || null, siteId, user, entryVisibility, scope: share.scope, filters: req.filters,
     }) : buildPlotCommissionShareBundle({ plotId, siteId, user, entryVisibility, scope: share.scope,
       paymentId: share.payment_id ? Number(share.payment_id) : null, includeDocuments, includeDocumentLinks: true }));
     const plan = generic ? planModuleDriveShareFiles(bundle, { formats: req.formats }) : planShareFiles(bundle, { scope: share.scope, formats: req.formats, includeDocuments, documentMode: includeDocuments ? 'copies' : 'links' });

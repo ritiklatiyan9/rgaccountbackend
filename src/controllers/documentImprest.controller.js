@@ -176,7 +176,7 @@ export const createDocumentImprest = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Document name is required' });
   }
   if (!req.file) {
-    return res.status(400).json({ message: 'A handover photo is required as proof' });
+    return res.status(400).json({ message: 'A handover PDF or photo is required as proof' });
   }
   const siteId = parseInt(site_id, 10);
   if (!Number.isInteger(siteId) || siteId <= 0) return res.status(400).json({ message: 'A valid site_id is required' });

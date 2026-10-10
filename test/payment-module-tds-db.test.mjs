@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { up as financialSettlements } from '../src/migrations/198_tds_financial_settlements.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pool from '../src/config/db.js';
@@ -15,7 +17,7 @@ import { attachDayBookTds } from '../src/services/daybookTds.service.js';
 import { listDeductions, recordDeposit, updateDeduction, deleteDeduction, listDeductees, createDeduction } from '../src/controllers/tds.controller.js';
 
 const invoke = (handler, body = {}, extra = {}, useTds = false) => new Promise((resolve, reject) => {
-  const req = { body, user: { id: 1, role: 'admin' }, query: {}, params: {}, ...extra };
+  const req = { body: handler === recordDeposit ? { payment_kind: 'government_direct', payment_mode: 'BANK', bank_account_id: 1, request_id: randomUUID(), ...body } : body, user: { id: 1, role: 'admin' }, query: {}, params: {}, ...extra };
   const res = { status(code) { this.code = code; return this; }, json(body) { resolve({ code: this.code || 200, body }); } };
   if (useTds) paymentTdsMiddleware(req, res, error => error ? reject(error) : handler(req, res, reject));
   else handler(req, res, reject);
@@ -63,6 +65,29 @@ test('native payment modules withhold atomically and share the TDS register', { 
     await pg.exec(definition.replace(/mode:=COALESCE[^\n]+?; status:=/, "mode:=COALESCE(draft->>'payment_mode',draft->>'cash_type','CASH'); status:="));
     await pg.exec('DROP TRIGGER native_payment_tds_guard ON plot_commissions; DROP TRIGGER native_payment_tds_sync ON plot_commissions; ALTER TABLE plot_commissions DROP COLUMN tds_amount, DROP COLUMN tds_rate, DROP COLUMN tds_mode, DROP COLUMN tds_section, DROP COLUMN tds_module, DROP COLUMN tds_revision');
     await mapping(pool); await mapping(pool);
+    // Finance settlements post one site cash/bank movement. The owner/module
+    // fixture still uses its existing independent payout mirror.
+    await pg.exec(`
+      CREATE TABLE bank_accounts(id int PRIMARY KEY,site_id int REFERENCES sites(id),is_active boolean DEFAULT true);
+      INSERT INTO bank_accounts VALUES(1,1,true);
+      ALTER TABLE cash_flow_entries
+        ADD COLUMN IF NOT EXISTS cash_flow_month_id int,
+        ADD COLUMN IF NOT EXISTS date date,
+        ADD COLUMN IF NOT EXISTS particular text,
+        ADD COLUMN IF NOT EXISTS credit numeric DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS cash_type text,
+        ADD COLUMN IF NOT EXISTS bank_account_id int,
+        ADD COLUMN IF NOT EXISTS remarks text,
+        ADD COLUMN IF NOT EXISTS created_by int,
+        ADD COLUMN IF NOT EXISTS source_module text,
+        ADD COLUMN IF NOT EXISTS source_id int,
+        ADD COLUMN IF NOT EXISTS status text,
+        ADD COLUMN IF NOT EXISTS approved_by int,
+        ADD COLUMN IF NOT EXISTS approved_at timestamptz;
+      CREATE FUNCTION ensure_site_cashflow_month(integer,date,integer) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+    `);
+    await financialSettlements(pool); await financialSettlements(pool);
+
     const base = { site_id: 1, date: '2026-10-01', payment_date: '2026-10-01', amount: 100000, payment_mode: 'BANK', tds_applicable: true, tds_mode: 'percentage', tds_rate: 2, tds_section: 'OTHER' };
     let expense, farmer;
     await t.test('expense create stores 98K net and 2K held with one linked pending register row', async () => {
@@ -113,9 +138,9 @@ test('native payment modules withhold atomically and share the TDS register', { 
       await assert.rejects(invoke(recordDeposit,{site_id:1,ids:[deduction.id],deposit_date:'2026-10-02',challan_no:'C1'}), /pending/);
       await pg.query("UPDATE expenses SET status='approved' WHERE id=$1",[expense.id]);
       await invoke(recordDeposit,{site_id:1,ids:[deduction.id],deposit_date:'2026-10-02',challan_no:'C1'});
-      await assert.rejects(pg.query('UPDATE expenses SET debit=90000 WHERE id=$1',[expense.id]), /deposited/);
-      await assert.rejects(pg.query("UPDATE expenses SET status='rejected' WHERE id=$1",[expense.id]), /deposited/);
-      await assert.rejects(pg.query('DELETE FROM expenses WHERE id=$1',[expense.id]), /deposited/);
+      await assert.rejects(pg.query('UPDATE expenses SET debit=90000 WHERE id=$1',[expense.id]), /deposited|funded|locked/);
+      await assert.rejects(pg.query("UPDATE expenses SET status='rejected' WHERE id=$1",[expense.id]), /deposited|funded|locked/);
+      await assert.rejects(pg.query('DELETE FROM expenses WHERE id=$1',[expense.id]), /deposited|funded|locked/);
     });
     await t.test('Day Book edits preserve gross settlement, net legs and the same linked register row', async () => {
       await invoke(updateExpenseFromDayBook,{...base,debit:100000,credit:0,particular:'Updated note'}, {originalUrl:`/daybook/expense/${expense.id}`,method:'PUT',params:{id:expense.id}},true);
@@ -181,7 +206,7 @@ test('native payment modules withhold atomically and share the TDS register', { 
       assert.equal(stored.member_id,1); assert.equal(stored.pan,source.tds_pan); assert.equal(stored.aadhaar,source.tds_aadhaar);
       await pg.query("UPDATE expenses SET status='approved' WHERE id=$1",[source.id]);
       await invoke(recordDeposit,{site_id:1,ids:[stored.id],deposit_date:'2026-10-07',challan_no:'MAPPED'});
-      await assert.rejects(pg.query('UPDATE expenses SET tds_member_id=NULL,tds_pan=NULL WHERE id=$1',[source.id]), /deposited/);
+      await assert.rejects(pg.query('UPDATE expenses SET tds_member_id=NULL,tds_pan=NULL WHERE id=$1',[source.id]), /deposited|funded|locked/);
       await assert.rejects(invoke(createExpense, { ...base,site_id:2,debit:200000,credit:0,tds_applicable:false,tds_member_id:1 },{originalUrl:'/expenses',method:'POST'},true), /not available/);
     });
     await t.test('manual register mappings also use canonical Client KYC', async () => {

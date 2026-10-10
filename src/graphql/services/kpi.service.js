@@ -17,6 +17,8 @@
  */
 import { getPartnerProfitPaid } from '../../services/partnerPayments.service.js';
 import pool from '../../config/financialReportDb.js';
+import { OPERATING_TDS_SQL, excludeLinkedTdsSettlement } from '../../services/daybookTds.service.js';
+import { getTdsSummary, indiaToday } from '../../services/tdsAccounting.service.js';
 
 // ── Date range WHERE fragments ──
 const dateFilter = (col, paramStart) =>
@@ -26,6 +28,10 @@ const numberOf = (value) => parseFloat(value) || 0;
 const intOf = (value) => parseInt(value, 10) || 0;
 const roundMoney = (value) => Math.round(numberOf(value) * 100) / 100;
 const roundPct = (value) => Math.round(numberOf(value) * 100) / 100;
+const tdsCutoff = (end) => {
+  const inclusive = new Date(new Date(end).getTime() - 86400000).toISOString().slice(0, 10);
+  return inclusive < indiaToday() ? inclusive : indiaToday();
+};
 
 // ── Revenue: money in, from the shared ledger ──
 // `ledger_entries` (migration 079) is the same view the Day Book and the
@@ -166,11 +172,15 @@ export async function getLandProfitDetail(siteId, end) {
        WHERE farmer_id IS NOT NULL
        GROUP BY farmer_id
      ), posted_farmer_cost AS (
-       SELECT fp.farmer_id, COALESCE(SUM(le.debit - le.credit), 0)::numeric AS posted_cost
+       SELECT fp.farmer_id, (COALESCE(SUM(le.debit - le.credit), 0) +
+         COALESCE((SELECT SUM(t.tds_amount) FROM (${OPERATING_TDS_SQL}) t
+           JOIN farmer_payments held_fp ON t.source_key = 'farmer_payments' AND held_fp.id = t.source_id
+          WHERE t.site_id = $1 AND t.entry_date < $2::date AND held_fp.farmer_id = fp.farmer_id), 0))::numeric AS posted_cost
        FROM ledger_entries le
        JOIN farmer_payments fp
          ON le.source_key = 'farmer_payments' AND fp.id = le.source_id
        WHERE le.site_id = $1 AND le.entry_date < $2::date
+         AND ${excludeLinkedTdsSettlement('le')}
        GROUP BY fp.farmer_id
      ), attributed_cost AS (
        SELECT COALESCE(SUM(LEAST(
@@ -259,18 +269,25 @@ export async function getLandRevenue(siteId, start, end) {
 // remaining payment balance and with the shared site ledger.
 export async function getExpenseBreakdown(siteId, start, end) {
   const { rows } = await pool.query(
-    `SELECT source_key AS source_type,
-            COALESCE(SUM(debit - credit), 0)::numeric AS total_debit,
-            COUNT(*)::int AS txn_count
-       FROM ledger_entries
-      WHERE site_id = $1 AND entry_date >= $2 AND entry_date < $3
-        AND (debit <> 0 OR credit <> 0)
-        AND source_key NOT IN (
-          'firm_transactions', 'personal_ledger', 'plot_payments',
-          'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments'
-        )
-        AND ledger_type <> 'person'
-      GROUP BY source_key`,
+    `WITH expenses AS (
+       SELECT le.source_key, le.site_id, le.entry_date, le.debit - le.credit AS cost, 1 AS txn_count
+         FROM ledger_entries le
+        WHERE le.site_id = $1 AND le.entry_date >= $2 AND le.entry_date < $3
+          AND (le.debit <> 0 OR le.credit <> 0)
+          AND le.source_key NOT IN (
+            'firm_transactions', 'personal_ledger', 'plot_payments',
+            'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements'
+          )
+          AND le.ledger_type <> 'person'
+          AND ${excludeLinkedTdsSettlement('le')}
+       UNION ALL
+       SELECT t.source_key, t.site_id, t.entry_date, t.tds_amount AS cost, 0 AS txn_count
+         FROM (${OPERATING_TDS_SQL}) t
+        WHERE t.site_id = $1 AND t.entry_date >= $2 AND t.entry_date < $3
+     )
+     SELECT source_key AS source_type, COALESCE(SUM(cost), 0)::numeric AS total_debit,
+            SUM(txn_count)::int AS txn_count
+       FROM expenses GROUP BY source_key`,
     [siteId, start, end]
   );
 
@@ -288,15 +305,18 @@ export async function getExpenseBreakdown(siteId, start, end) {
 // source policy above, while totalExpense remains the selected-period movement.
 export async function getRunningExpense(siteId, end) {
   const { rows } = await pool.query(
-    `SELECT COALESCE(SUM(debit - credit), 0)::numeric AS total
-       FROM ledger_entries
-      WHERE site_id = $1 AND entry_date < $2::date
-        AND (debit <> 0 OR credit <> 0)
-        AND source_key NOT IN (
+    `SELECT (COALESCE(SUM(le.debit - le.credit), 0) +
+       COALESCE((SELECT SUM(t.tds_amount) FROM (${OPERATING_TDS_SQL}) t
+          WHERE t.site_id = $1 AND t.entry_date < $2::date), 0))::numeric AS total
+       FROM ledger_entries le
+      WHERE le.site_id = $1 AND le.entry_date < $2::date
+        AND (le.debit <> 0 OR le.credit <> 0)
+        AND le.source_key NOT IN (
           'firm_transactions', 'personal_ledger', 'plot_payments',
-          'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments'
+          'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements'
         )
-        AND ledger_type <> 'person'`,
+        AND le.ledger_type <> 'person'
+        AND ${excludeLinkedTdsSettlement('le')}`,
     [siteId, end]
   );
   return roundMoney(rows[0].total);
@@ -676,7 +696,7 @@ export async function getImprestDistribution(siteId, start, end) {
  * Cumulative-to-date profit from the three inputs it depends on. Expected Profit uses the
  * full sold-land book profit; posted farmer payments attributable to those sold parcels
  * already sit inside runningExpense, so that overlap is added back once. Current Profit
- * is cash-basis. Shared by getAllKpis and the Sites Profit page so the two never drift.
+ * uses posted receipts and gross operating costs. Shared by getAllKpis and the Sites Profit page so the two never drift.
  */
 export function profitFrom(plotIncoming, landProfitDetail, runningExpense) {
   const expectedProfit = plotIncoming.finalSaleValue
@@ -716,10 +736,14 @@ export async function getLandProfitByFarmer(siteId, end) {
           AND LOWER(TRIM(COALESCE(d.status, ''))) IN ('open', 'completed')
         GROUP BY d.farmer_id
      ), paid AS (
-       SELECT fp.farmer_id, COALESCE(SUM(le.debit - le.credit), 0)::numeric AS paid
+       SELECT fp.farmer_id, (COALESCE(SUM(le.debit - le.credit), 0) +
+         COALESCE((SELECT SUM(t.tds_amount) FROM (${OPERATING_TDS_SQL}) t
+           JOIN farmer_payments held_fp ON t.source_key = 'farmer_payments' AND held_fp.id = t.source_id
+          WHERE t.site_id = $1 AND t.entry_date < $2::date AND held_fp.farmer_id = fp.farmer_id), 0))::numeric AS paid
          FROM ledger_entries le
          JOIN farmer_payments fp ON le.source_key = 'farmer_payments' AND fp.id = le.source_id
         WHERE le.site_id = $1 AND le.entry_date < $2::date
+          AND ${excludeLinkedTdsSettlement('le')}
         GROUP BY fp.farmer_id
      )
      SELECT f.id AS farmer_id, f.name,
@@ -793,6 +817,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     runningExpense,
     landRevenue,
     partnerProfitPaid,
+    tds,
   ] = await Promise.all([
     getRevenue(siteId, start, end, excludeOldPlots),
     getExpenseBreakdown(siteId, start, end),
@@ -810,6 +835,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     getRunningExpense(siteId, end),
     getLandRevenue(siteId, start, end),
     getPartnerProfitPaid(siteId, end, pool),
+    getTdsSummary(siteId, { asOf: tdsCutoff(end), dateFrom: start, dateTo: tdsCutoff(end) }, pool),
   ]);
 
   const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);
@@ -821,7 +847,14 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
 
   return {
     siteBalance: siteBalanceDetail.siteBalance,
-    siteBalanceDetail,
+    siteBalanceDetail: {
+      ...siteBalanceDetail,
+      tdsPayable: tds.payable,
+      tdsWithCa: tds.with_ca,
+      tdsReserve: tds.reserve,
+      availableBalance: roundMoney(siteBalanceDetail.siteBalance - tds.reserve),
+    },
+    tds,
     plotIncoming,
     landProfitDetail,
     registryPaymentDetail: registryPayments,

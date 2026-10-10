@@ -17,8 +17,11 @@ test('dashboard Land Profit uses prices of sold portions only', async (t) => {
         sale_amount numeric, purchase_cost numeric, other_cost numeric, deal_date date, status text);
       CREATE TABLE land_deal_payments(id integer PRIMARY KEY, land_deal_id integer);
       CREATE TABLE farmer_payments(id integer PRIMARY KEY, farmer_id integer);
-      CREATE TABLE ledger_entries(site_id integer, entry_date date, source_key text, source_id integer,
+      CREATE TABLE ledger_entries(id int GENERATED ALWAYS AS IDENTITY, ledger_type text DEFAULT 'site', site_id integer, entry_date date, source_key text, source_id integer,
         credit numeric DEFAULT 0, debit numeric DEFAULT 0, bucket text);
+      CREATE TABLE tds_settlements(id int, existing_entry_id int);
+      CREATE TABLE tds_accounting_deductions(id int, site_id int, deduction_date date, source_table text,
+        source_id int, commission_payment_id int, tds_amount numeric, gross_amount numeric, accounting_state text);
       INSERT INTO farmers VALUES (1,1,1000000),(2,1,5000000),(3,2,9000000);
       INSERT INTO farmer_payments VALUES (1,1),(2,2);
       INSERT INTO ledger_entries(site_id,entry_date,source_key,source_id,debit,bucket) VALUES

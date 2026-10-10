@@ -12,7 +12,8 @@ import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
 import { installmentModel } from '../models/Installment.model.js';
 import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
-import { attachDayBookTds } from '../services/daybookTds.service.js';
+import { attachDayBookTds, attachDayBookTdsSettlements, excludeSourceLinkedTdsSettlement } from '../services/daybookTds.service.js';
+import { attachTransactionParticulars } from '../services/transactionParticulars.service.js';
 import { withPaymentTds, tdsUpdateSet } from '../services/paymentTds.service.js';
 import { commissionTdsModule, getTdsWorkflow, parsePaymentTds } from '../services/tdsWorkflow.service.js';
 import { resolveTdsDeductee, resolvePaymentDeductee } from '../services/tdsDeductee.service.js';
@@ -675,7 +676,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
          LEFT JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
          LEFT JOIN plots p ON pcm.plot_id = p.id
         WHERE cfe.site_id = $1 AND cfe.date = $2
-          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'vendor_inventory_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries', 'partner_profit_payments')
+          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'vendor_inventory_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements')
           AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
           AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'
           AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))`,
@@ -1072,6 +1073,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // read_only: these are managed in their own module pages — Day Book only
   // displays them so its totals tie to the Remaining cards + Balance Sheet.
   const MODULE_LEDGER_META = {
+    tds_settlements: { prefix: 'tds', entry_type: 'TDS SETTLEMENT', source: 'tds_settlement', category: 'TDS SETTLEMENT' },
     partner_profit_payments: { prefix: 'ppp', entry_type: 'PARTNER PROFIT PAYMENT', source: 'partner_profit_payment', category: 'PARTNER PROFIT' },
     plot_installment_payments: { prefix: 'pip', entry_type: 'PLOT INSTALLMENT', source: 'plot_installment', category: 'PLOT PAYMENT' },
     vendor_payments:           { prefix: 'vp',  entry_type: 'VENDOR PAYMENT',   source: 'vendor_payment',   category: 'VENDOR' },
@@ -1125,7 +1127,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     });
 
   // Merge and sort ASC by id
-  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000, vip: 1000000, ppp: 1100000 };
+  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000, vip: 1000000, ppp: 1100000, tds: 1200000 };
   const sortId = (x) => {
     if (typeof x.id === 'string') {
       const [prefix, n] = x.id.split('_');
@@ -1168,6 +1170,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     }));
 
   await attachDayBookTds(allEntries, pool);
+  await attachDayBookTdsSettlements(allEntries, pool);
+  await attachTransactionParticulars(allEntries, pool);
 
   // ── Attach bank mappings (migration 089) ──
   // A Day Book row's money lives on exactly one cash_flow_entries mirror row:
@@ -1786,6 +1790,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
     day_book:                  'Direct Day Book Entry',
     personal_ledger:           'Personal Ledger',
     site_ledger:               'Site Ledger',
+    tds_settlements:           'TDS Settlements',
   };
 
   // Two-legged sources record given and returned as separate real
@@ -2531,6 +2536,9 @@ export const updateCashFlowEntryFromDayBook = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const existing = await cashFlowEntryModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Cash flow entry not found' });
+  if (existing.source_module === 'tds_settlements' || (await pool.query('SELECT 1 FROM tds_settlements WHERE existing_entry_id=$1', [existing.id])).rows.length) {
+    return res.status(409).json({ message: 'TDS settlements are immutable. View this payment in the TDS register.' });
+  }
 
   // Check if month is locked
   const cfMonth = await cashFlowMonthModel.findById(existing.cash_flow_month_id, pool);
@@ -2629,6 +2637,9 @@ export const deleteCashFlowEntryFromDayBook = asyncHandler(async (req, res) => {
   const cfId = parseInt(req.params.id);
   const existing = await cashFlowEntryModel.findById(cfId, pool);
   if (!existing) return res.status(404).json({ message: 'Cash flow entry not found' });
+  if (existing.source_module === 'tds_settlements' || (await pool.query('SELECT 1 FROM tds_settlements WHERE existing_entry_id=$1', [existing.id])).rows.length) {
+    return res.status(409).json({ message: 'TDS settlements are immutable. View this payment in the TDS register.' });
+  }
 
   // Check if month is locked
   const cfMonth = await cashFlowMonthModel.findById(existing.cash_flow_month_id, pool);
@@ -3066,11 +3077,11 @@ export const verifyData = asyncHandler(async (req, res) => {
  * GET /daybook/profit-summary?site_id=X
  * Returns profit breakdown:
  *   Earn   = plot + land-sale credits (money received from buyers)
- *   Expenses = farmer_payments + expenses + plot_commissions + plot_commission_payments + vendor_payments
+ *   Expenses = gross posted operating payouts (net money + active TDS), minus recoveries
  * Excludes: firm_transactions, day_book (personal ledger / cashflow), imprest
  *
  * Also returns ledger flow (non-profit entries: day_book, firm_transactions, direct cashflow)
- * and currentBalance = profit + ledgerCredit - ledgerDebit
+ * and currentBalance reads actual posted cash/bank custody from the shared ledger.
  *
  * Queries source tables directly (not cash_flow_entries) so numbers always match module pages.
  */
@@ -3111,15 +3122,15 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
   const expenseResult = await pool.query(
     `SELECT source_type, COALESCE(SUM(debit), 0)::numeric AS total_debit, COUNT(*)::int AS row_count
      FROM (
-       SELECT fp.amount AS debit, 'farmer_payments' AS source_type
+       SELECT fp.amount + COALESCE(fp.tds_amount, 0) AS debit, 'farmer_payments' AS source_type
        FROM farmer_payments fp
        JOIN farmers f ON f.id = fp.farmer_id
-       WHERE f.site_id = $1
+       WHERE ${excludeSourceLinkedTdsSettlement('farmer_payments', 'fp.id')} AND f.site_id = $1
          AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
        UNION ALL
-       SELECT ${reportPostedNet()} AS debit, 'expenses' AS source_type
+       SELECT ${reportPostedNet()} + CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN COALESCE(tds_amount, 0) ELSE 0 END AS debit, 'expenses' AS source_type
        FROM expenses
-       WHERE site_id = $1
+       WHERE ${excludeSourceLinkedTdsSettlement('expenses')} AND site_id = $1
        UNION ALL
        SELECT amount AS debit, 'plot_registry_payments' AS source_type
        FROM plot_registry_payments
@@ -3127,29 +3138,26 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
          AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
          AND source_plot_payment_id IS NULL
        UNION ALL
-       SELECT amount AS debit, 'commissions' AS source_type
-       FROM plot_commissions
-       WHERE site_id = $1
+       SELECT amount + COALESCE(tds_amount, 0) AS debit, 'commissions' AS source_type FROM plot_commissions
+       WHERE ${excludeSourceLinkedTdsSettlement('plot_commissions')} AND site_id = $1
          AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, by_note, cheque_status)
        UNION ALL
-       SELECT amount AS debit, 'commission_payments' AS source_type
-       FROM plot_commission_payments
-       WHERE site_id = $1
+       SELECT amount + COALESCE(tds_amount, 0) AS debit, 'commission_payments' AS source_type FROM plot_commission_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('plot_commission_payments')} AND site_id = $1
          AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
        UNION ALL
-       SELECT amount AS debit, 'vendor_payments' AS source_type
-       FROM vendor_payments
-       WHERE site_id = $1
+       SELECT amount + COALESCE(tds_amount, 0) AS debit, 'vendor_payments' AS source_type FROM vendor_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('vendor_payments')} AND site_id = $1
          AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
        UNION ALL
-       SELECT amount AS debit, 'vendor_inventory_payments' AS source_type
-       FROM vendor_inventory_payments
-       WHERE site_id = $1 AND source_vendor_payment_id IS NULL
+       SELECT amount + COALESCE(tds_amount, 0) AS debit, 'vendor_inventory_payments' AS source_type FROM vendor_inventory_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('vendor_inventory_payments')} AND site_id = $1 AND source_vendor_payment_id IS NULL
          AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
        UNION ALL
-       SELECT ${reportPostedNet()} AS debit, 'expenses' AS source_type
+       SELECT ${reportPostedNet()} + CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN COALESCE(tds_amount, 0) ELSE 0 END AS debit, 'expenses' AS source_type
        FROM day_book
        WHERE site_id = $1
+         AND ${excludeSourceLinkedTdsSettlement('day_book')}
          AND entry_type = 'EXPENSE'
          AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
      ) u
@@ -3272,7 +3280,7 @@ export const getProfitSummary = asyncHandler(async (req, res) => {
     personGiven,
     personReturned,
     personPending,
-    currentBalance: profit - personPending,
+    currentBalance: await loadSiteBalanceAsOf(siteId, '2100-01-01', pool),
   });
 });
 
@@ -3289,7 +3297,8 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
     `WITH first_date AS (
        SELECT LEAST(
          COALESCE((SELECT MIN(date) FROM plot_payments WHERE site_id = $1 AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
-         COALESCE((SELECT MIN(payment_date) FROM vendor_inventory_payments WHERE site_id = $1 AND source_vendor_payment_id IS NULL AND payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
+         COALESCE((SELECT MIN(payment_date) FROM vendor_inventory_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('vendor_inventory_payments')} AND site_id = $1 AND source_vendor_payment_id IS NULL AND payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
          COALESCE((SELECT MIN(e.date) FROM expenses e WHERE e.site_id = $1 AND e.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
          COALESCE((SELECT MIN(db.date) FROM day_book db WHERE db.site_id = $1 AND db.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now()),
          COALESCE((SELECT MIN(ldp.date) FROM land_deal_payments ldp JOIN land_deals ld ON ld.id = ldp.land_deal_id WHERE ld.site_id = $1 AND ldp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'), now())
@@ -3329,14 +3338,14 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
      exp AS (
        SELECT to_char(date, 'YYYY-MM') AS m, COALESCE(SUM(debit), 0)::numeric AS total
        FROM (
-         SELECT fp.date, fp.amount AS debit FROM farmer_payments fp
+         SELECT fp.date, fp.amount + COALESCE(fp.tds_amount, 0) AS debit FROM farmer_payments fp
          JOIN farmers f ON f.id = fp.farmer_id
-         WHERE f.site_id = $1
+         WHERE ${excludeSourceLinkedTdsSettlement('farmer_payments', 'fp.id')} AND f.site_id = $1
            AND fp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
            AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
          UNION ALL
-         SELECT date, ${reportPostedNet()} AS debit FROM expenses
-         WHERE site_id = $1
+         SELECT date, ${reportPostedNet()} + CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN COALESCE(tds_amount, 0) ELSE 0 END AS debit FROM expenses
+         WHERE ${excludeSourceLinkedTdsSettlement('expenses')} AND site_id = $1
            AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
          UNION ALL
          SELECT payment_date AS date, amount AS debit FROM plot_registry_payments
@@ -3345,28 +3354,29 @@ export const getProfitMonthly = asyncHandler(async (req, res) => {
            AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
            AND source_plot_payment_id IS NULL
          UNION ALL
-         SELECT date, amount AS debit FROM plot_commissions
-         WHERE site_id = $1
+         SELECT date, amount + COALESCE(tds_amount, 0) AS debit FROM plot_commissions
+       WHERE ${excludeSourceLinkedTdsSettlement('plot_commissions')} AND site_id = $1
            AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
            AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, by_note, cheque_status)
          UNION ALL
-         SELECT date, amount AS debit FROM plot_commission_payments
-         WHERE site_id = $1
+         SELECT date, amount + COALESCE(tds_amount, 0) AS debit FROM plot_commission_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('plot_commission_payments')} AND site_id = $1
            AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
            AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
          UNION ALL
-         SELECT payment_date AS date, amount AS debit FROM vendor_payments
-         WHERE site_id = $1
+         SELECT payment_date AS date, amount + COALESCE(tds_amount, 0) AS debit FROM vendor_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('vendor_payments')} AND site_id = $1
            AND payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
            AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
          UNION ALL
-         SELECT payment_date AS date, amount AS debit FROM vendor_inventory_payments
-         WHERE site_id = $1 AND source_vendor_payment_id IS NULL
+         SELECT payment_date AS date, amount + COALESCE(tds_amount, 0) AS debit FROM vendor_inventory_payments
+       WHERE ${excludeSourceLinkedTdsSettlement('vendor_inventory_payments')} AND site_id = $1 AND source_vendor_payment_id IS NULL
            AND payment_date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
            AND financial_transaction_posts(CASE WHEN amount < 0 THEN 'credit' ELSE 'debit' END, status, payment_mode, cheque_status)
          UNION ALL
-         SELECT date, ${reportPostedNet()} AS debit FROM day_book
-         WHERE site_id = $1 AND entry_type = 'EXPENSE'
+         SELECT date, ${reportPostedNet()} + CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN COALESCE(tds_amount, 0) ELSE 0 END AS debit FROM day_book
+         WHERE site_id = $1 AND ${excludeSourceLinkedTdsSettlement('day_book')}
+         AND entry_type = 'EXPENSE'
            AND farmer_payment_id IS NULL AND commission_id IS NULL AND vendor_payment_id IS NULL
            AND date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
        ) u

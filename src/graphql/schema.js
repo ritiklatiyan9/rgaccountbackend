@@ -270,6 +270,17 @@ const RegistryPaymentDetailType = new GraphQLObjectType({
   },
 });
 
+const TdsSummaryType = new GraphQLObjectType({
+  name: 'TdsSummary',
+  fields: {
+    deducted: { type: GraphQLFloat }, deposited: { type: GraphQLFloat },
+    payable: { type: GraphQLFloat }, with_ca: { type: GraphQLFloat },
+    reserve: { type: GraphQLFloat }, overdue: { type: GraphQLFloat },
+    pending: { type: GraphQLFloat }, legacy_deposited: { type: GraphQLFloat },
+    as_of: { type: GraphQLString },
+  },
+});
+
 const SiteBalanceDetailType = new GraphQLObjectType({
   name: 'SiteBalanceDetail',
   fields: {
@@ -286,6 +297,10 @@ const SiteBalanceDetailType = new GraphQLObjectType({
     periodMoneyIn:        { type: new GraphQLNonNull(GraphQLFloat) },
     periodMoneyOut:       { type: new GraphQLNonNull(GraphQLFloat) },
     periodNet:            { type: new GraphQLNonNull(GraphQLFloat) },
+    tdsPayable: { type: GraphQLFloat },
+    tdsWithCa: { type: GraphQLFloat },
+    tdsReserve: { type: GraphQLFloat },
+    availableBalance: { type: GraphQLFloat },
   },
 });
 
@@ -297,6 +312,7 @@ const KpiCardsType = new GraphQLObjectType({
     // of re-deriving it from revenue/expense/outstanding components.
     siteBalance:           { type: new GraphQLNonNull(GraphQLFloat) },
     siteBalanceDetail:     { type: new GraphQLNonNull(SiteBalanceDetailType) },
+    tds:                   { type: TdsSummaryType },
     plotIncoming:          { type: new GraphQLNonNull(PlotIncomingType) },
     landProfitDetail:      { type: new GraphQLNonNull(LandProfitDetailType) },
     registryPaymentDetail: { type: new GraphQLNonNull(RegistryPaymentDetailType) },

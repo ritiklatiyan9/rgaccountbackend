@@ -44,7 +44,7 @@ export const durableDocumentUrl = (document) => {
 export const moduleShareProjection = (bundle) => ({
   rendererVersion: 1, moduleKey: bundle.moduleKey, moduleLabel: bundle.moduleLabel,
   siteId: bundle.siteId, entityId: bundle.entityId, entityType: bundle.entityType,
-  scope: bundle.scope, entryVisibility: bundle.entryVisibility, label: bundle.label, sheets: bundle.sheets || [], summary: bundle.summary || {},
+  scope: bundle.scope, viewFilters: bundle.viewFilters || null, entryVisibility: bundle.entryVisibility, label: bundle.label, sheets: bundle.sheets || [], summary: bundle.summary || {},
   documents: (bundle.documents || []).map((document) => ({
     id: document.id, name: document.name, sourceModule: document.sourceModule, sourceId: document.sourceId,
     sourceFingerprint: document.sourceFingerprint || null, linkVersion: document.linkVersion || null,
@@ -137,6 +137,8 @@ export const buildModuleShareXlsx = (bundle) => {
     ['Report detail', 'Value'], ['Scope', bundle.entryVisibility?.canViewAll === false ? `Entries created by User ${bundle.entryVisibility.creatorId}` : 'All authorized entries'], ['Generated', formatDate(bundle.generatedAt || new Date())],
     ['Records', Number(bundle.summary?.record_count ?? (bundle.sheets || []).reduce((sum, sheet) => sum + sheet.rows.length, 0))],
     ['Linked documents', (bundle.documents || []).length],
+    ...(bundle.viewFilters ? [['Report view', 'Same filters as the module; all matching rows across all pages'],
+      ...Object.entries(bundle.viewFilters).filter(([, value]) => value !== '' && value !== 'all').map(([key, value]) => [key.replace(/_/g, ' '), value])] : []),
     ['Document access', 'Use the Documents tab to open originals. CA access is managed in Google Drive settings.'],
   ]);
   summary['!cols'] = [{ wch: 30 }, { wch: 86 }];
@@ -175,8 +177,8 @@ export const buildModuleShareXlsx = (bundle) => {
 
 export const renderModuleShareHtml = (bundle, { preview = true } = {}) => {
   const limit = preview ? 100 : Infinity;
-  const table = (headers, rows) => `<table style="width:100%;border-collapse:collapse;margin:12px 0 24px"><thead><tr>${headers.map((value) => `<th style="padding:9px;text-align:left;background:#17324d;color:white">${esc(value)}</th>`).join('')}</tr></thead><tbody>${rows.map((row, index) => `<tr style="background:${index % 2 ? '#f1f5f9' : 'white'}">${row.map((value) => `<td style="padding:8px;border-bottom:1px solid #dce3eb;vertical-align:top">${value}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
-  const sections = (bundle.sheets || []).map((sheet) => `<h2 style="font-size:16px;color:#17324d">${esc(sheet.name)}</h2>${sheet.rows.length > limit ? `<p style="color:#64748b">Showing 100 of ${sheet.rows.length} rows. Excel includes all ${sheet.rows.length}.</p>` : ''}${table(sheet.columns.map((column) => column.label || column.key), sheet.rows.slice(0, limit).map((row) => sheet.columns.map(({ key, type }) => {
+  const table = (headers, rows) => `<div style="overflow-x:auto;max-width:100%;margin:12px 0 24px" tabindex="0" aria-label="Scroll to view all columns"><table style="width:100%;border-collapse:collapse"><thead><tr>${headers.map((value) => `<th style="min-width:110px;padding:9px;text-align:left;background:#17324d;color:white">${esc(value)}</th>`).join('')}</tr></thead><tbody>${rows.map((row, index) => `<tr style="background:${index % 2 ? '#f1f5f9' : 'white'}">${row.map((value) => `<td style="padding:8px;border-bottom:1px solid #dce3eb;vertical-align:top">${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  const sections = (bundle.sheets || []).map((sheet) => `<h2 style="font-size:16px;color:#17324d">${esc(sheet.name)}</h2><p style="color:#64748b">${sheet.rows.length} rows · ${sheet.columns.length} columns${sheet.columns.length > 8 ? ' · Scroll horizontally to view every column' : ''}</p>${sheet.rows.length > limit ? `<p style="color:#64748b">Showing 100 of ${sheet.rows.length} rows. Excel includes all ${sheet.rows.length}.</p>` : ''}${table(sheet.columns.map((column) => column.label || column.key), sheet.rows.slice(0, limit).map((row) => sheet.columns.map(({ key, type }) => {
     const value = row[key];
     return esc(value == null ? '' : moneyTypes.has(type) ? Number(value).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : type === 'datetime' ? formatDateTime(value) : isDateType(type) ? formatDate(value) : value);
   })))}`).join('');
@@ -185,5 +187,7 @@ export const renderModuleShareHtml = (bundle, { preview = true } = {}) => {
     const url = durableDocumentUrl(document);
     return [esc(document.name), esc(document.sourceModule), url ? `<a href="${esc(url)}" style="color:#1763ad">Open original document</a>` : esc(document.unavailable || 'Link unavailable')];
   }));
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(bundle.moduleLabel)} — ${esc(bundle.label)}</title></head><body style="font-family:Arial,sans-serif;color:#243449;font-size:12px;margin:28px"><div style="padding:22px;background:#17324d;color:white"><p style="margin:0 0 8px">DEFENCE GARDEN ACCOUNTS</p><h1 style="margin:0;font-size:24px">${esc(bundle.moduleLabel)}</h1><p>${esc(bundle.label)}</p></div><p style="color:#64748b">Generated ${esc(formatDate(bundle.generatedAt || new Date()))} · ${esc(bundle.scope || 'overall')}</p>${sections}<h2 style="font-size:16px;color:#17324d">Documents</h2>${docs}</body></html>`;
+  const view = bundle.viewFilters ? `<p style="color:#64748b">Module filters · All matching records across all pages</p><p>${Object.entries(bundle.viewFilters)
+    .filter(([, value]) => value !== '' && value !== 'all').map(([key, value]) => `${esc(key.replace(/_/g, ' '))}: ${esc(value)}`).join(' · ')}</p>` : '';
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(bundle.moduleLabel)} — ${esc(bundle.label)}</title></head><body style="font-family:Arial,sans-serif;color:#243449;font-size:12px;margin:28px"><div style="padding:22px;background:#17324d;color:white"><p style="margin:0 0 8px">DEFENCE GARDEN ACCOUNTS</p><h1 style="margin:0;font-size:24px">${esc(bundle.moduleLabel)}</h1><p>${esc(bundle.label)}</p></div><p style="color:#64748b">Generated ${esc(formatDate(bundle.generatedAt || new Date()))} · ${esc(bundle.viewFilters ? 'Current module view' : bundle.scope || 'overall')}</p>${view}${sections}<h2 style="font-size:16px;color:#17324d">Documents</h2>${docs}</body></html>`;
 };
