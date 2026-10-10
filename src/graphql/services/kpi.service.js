@@ -799,7 +799,16 @@ export async function getProfitKpis(siteId, end, excludeOldPlots = false) {
   };
 }
 
-export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
+export async function getAllKpis(siteId, start, end, excludeOldPlots = false, requestedFields = null) {
+  // Non-GraphQL callers retain the complete report. Dashboard reads execute
+  // only the queries needed for selected fields and their financial formulas.
+  const needs = (...fields) => !requestedFields || fields.some(field => requestedFields.has(field));
+  const profitFields = ['expectedProfit', 'currentProfit', 'currentProfitMargin'];
+  const periodProfitFields = ['totalRevenue', 'netProfit', 'profitMargin', 'breakdown'];
+  const needsRegistry = needs('registryPaymentDetail') || !requestedFields
+    || [...requestedFields].some(field => field.startsWith('registryPayments') || field.startsWith('registryRo'));
+  const needsTds = needs('tds', 'siteBalanceDetail.tdsPayable', 'siteBalanceDetail.tdsWithCa',
+    'siteBalanceDetail.tdsReserve', 'siteBalanceDetail.availableBalance');
   const [
     revenue,
     expData,
@@ -819,23 +828,27 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false) {
     partnerProfitPaid,
     tds,
   ] = await Promise.all([
-    getRevenue(siteId, start, end, excludeOldPlots),
-    getExpenseBreakdown(siteId, start, end),
-    getSiteCashflow(siteId, start, end),
-    getOutstanding(siteId, start, end),
-    getPersonalLedgerCredit(siteId, start, end),
-    getImprestGiven(siteId, start, end),
-    getImprestDistribution(siteId, start, end),
-    getRegistryPayments(siteId, start, end),
-    getImprestPairs(siteId, start, end),
-    getSiteBalanceDetail(siteId, start, end),
-    getMiscIncome(siteId, start, end),
-    getPlotIncoming(siteId, end, excludeOldPlots),
-    getLandProfitDetail(siteId, end),
-    getRunningExpense(siteId, end),
-    getLandRevenue(siteId, start, end),
-    getPartnerProfitPaid(siteId, end, pool),
-    getTdsSummary(siteId, { asOf: tdsCutoff(end), dateFrom: start, dateTo: tdsCutoff(end) }, pool),
+    needs(...periodProfitFields) ? getRevenue(siteId, start, end, excludeOldPlots) : 0,
+    needs('totalExpense', 'netProfit', 'profitMargin', 'breakdown')
+      ? getExpenseBreakdown(siteId, start, end) : { total: 0, breakdown: {} },
+    needs('cashflow', 'cashflowDetail') ? getSiteCashflow(siteId, start, end) : {},
+    needs('outstanding', 'outstandingDetail') ? getOutstanding(siteId, start, end) : {},
+    needs('personalLedgerCredit') ? getPersonalLedgerCredit(siteId, start, end) : 0,
+    needs('imprestGiven') ? getImprestGiven(siteId, start, end) : 0,
+    needs('imprestDistribution') ? getImprestDistribution(siteId, start, end) : [],
+    needsRegistry ? getRegistryPayments(siteId, start, end) : {},
+    needs('imprestPairs') ? getImprestPairs(siteId, start, end) : [],
+    needs('siteBalance', 'siteBalanceDetail') ? getSiteBalanceDetail(siteId, start, end) : {},
+    needs('miscIncome', 'miscIncomeDetail', 'breakdown') ? getMiscIncome(siteId, start, end) : {},
+    needs('plotIncoming', ...profitFields) ? getPlotIncoming(siteId, end, excludeOldPlots)
+      : { finalSaleValue: 0, received: 0 },
+    needs('landProfitDetail', ...profitFields) ? getLandProfitDetail(siteId, end)
+      : { bookProfit: 0, purchaseCostAlreadyExpensed: 0, received: 0 },
+    needs('runningExpense', ...profitFields) ? getRunningExpense(siteId, end) : 0,
+    needs(...periodProfitFields) ? getLandRevenue(siteId, start, end) : { credit: 0 },
+    needs('partnerProfitPaid') ? getPartnerProfitPaid(siteId, end, pool) : 0,
+    needsTds ? getTdsSummary(siteId, { asOf: tdsCutoff(end), dateFrom: start, dateTo: tdsCutoff(end) }, pool)
+      : { payable: 0, with_ca: 0, reserve: 0 },
   ]);
 
   const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);

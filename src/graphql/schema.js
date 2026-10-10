@@ -9,7 +9,9 @@ import {
 } from 'graphql';
 import { getAllKpis } from './services/kpi.service.js';
 import { verifyFinancialIntegrity } from './services/consistency.service.js';
-import { getRevenueVsExpense, getProfitTrend, getExpenseByCategory } from './services/charts.service.js';
+import { getRevenueVsExpense, getExpenseByCategory } from './services/charts.service.js';
+import { readDashboardCache } from './services/dashboardCache.js';
+import { selectedFields } from './selectedFields.js';
 import { getExpensesPageData, getExpensesBreakdown } from './services/expenses.service.js';
 import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
 import { getFinanceForecast } from './services/forecast.service.js';
@@ -688,6 +690,11 @@ function cacheKey(prefix, siteId, start, end) {
   return `dashboard:${prefix}:${siteId}:${start}:${end}`;
 }
 
+function readChart(siteId, range, resolution, excludeOldPlots) {
+  const key = cacheKey(`chart-rve-${resolution}${excludeOldPlots ? '-new' : ''}`, siteId, range.start, range.end);
+  return readDashboardCache(key, () => getRevenueVsExpense(siteId, range.start, range.end, resolution, excludeOldPlots));
+}
+
 // Keeps only real positive ids, sorted and de-duplicated so the cache key for
 // [3, 1] and [1, 3, 3] is the same entry.
 const positiveIntList = (values) => {
@@ -978,39 +985,19 @@ const QueryType = new GraphQLObjectType({
         range:  { type: new GraphQLNonNull(DateRangeInput) },
         excludeOldPlots: { type: GraphQLBoolean },
       },
-      async resolve(_, { siteId, range, excludeOldPlots = false }, ctx) {
+      async resolve(_, { siteId, range, excludeOldPlots = false }, ctx, info) {
         const id = requireModuleRead(ctx, 'dashboard', siteId);
-
-        // Redis cache — was completely UNCACHED before despite running 9
-        // heavy parallel queries on every Dashboard load. This is the
-        // single biggest perf win on the dashboard. Mutations on any of
-        // the 6 source modules already call clearCacheByPrefixes(['dashboard:'])
-        // (see e.g. cashflow.controller.js), so cached values stay fresh.
-        // v7 aligns final plot sale value with Plot Payments > Pricing,
-        // in addition to cumulative receipt reconciliation and the land-cost overlap
-        // guard alongside the exact Admin
-        // custody snapshot. Versioning prevents an older payload from failing
-        // the new non-null GraphQL contract.
-        const key = cacheKey(`kpi-cards-v8-partner-payments${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
-
-        if (cacheEnabled()) {
-          const cached = await cacheGet(key);
-          if (cached) return cached;
-        }
-
-        const result = await getAllKpis(id, range.start, range.end, excludeOldPlots);
-
-        // Transform breakdown object → array for GraphQL
-        const breakdownArr = Object.entries(result.breakdown).map(([mod, v]) => ({
-          module: mod,
-          debit: v.debit || 0,
-          credit: v.credit || 0,
-          count: v.count || 0,
-        }));
-
-        const payload = { ...result, breakdown: breakdownArr };
-        if (cacheEnabled()) await cacheSet(key, payload, CACHE_TTL);
-        return payload;
+        const fields = selectedFields(info);
+        // Partial reports must not share a key with a different selection.
+        const selection = [...fields].sort().join(',');
+        const key = cacheKey(`kpi-cards-v9${excludeOldPlots ? '-new' : ''}:${selection}`, id, range.start, range.end);
+        return readDashboardCache(key, async () => {
+          const result = await getAllKpis(id, range.start, range.end, excludeOldPlots, fields);
+          const toArray = breakdown => Object.entries(breakdown).map(([module, value]) => ({
+            module, debit: value.debit || 0, credit: value.credit || 0, count: value.count || 0,
+          }));
+          return { ...result, breakdown: toArray(result.breakdown) };
+        });
       },
     },
 
@@ -1040,16 +1027,7 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, range, resolution = 'MONTH', excludeOldPlots = false }, ctx) {
         const id = requireModuleRead(ctx, 'dashboard', siteId);
-        const key = cacheKey(`chart-rve-${resolution}${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
-
-        if (cacheEnabled()) {
-          const cached = await cacheGet(key);
-          if (cached) return cached;
-        }
-
-        const data = await getRevenueVsExpense(id, range.start, range.end, resolution, excludeOldPlots);
-        if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
-        return data;
+        return readChart(id, range, resolution, excludeOldPlots);
       },
     },
 
@@ -1063,16 +1041,8 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, range, resolution = 'MONTH', excludeOldPlots = false }, ctx) {
         const id = requireModuleRead(ctx, 'dashboard', siteId);
-        const key = cacheKey(`chart-profit-${resolution}${excludeOldPlots ? '-new' : ''}`, id, range.start, range.end);
-
-        if (cacheEnabled()) {
-          const cached = await cacheGet(key);
-          if (cached) return cached;
-        }
-
-        const data = await getProfitTrend(id, range.start, range.end, resolution, excludeOldPlots);
-        if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
-        return data;
+        const data = await readChart(id, range, resolution, excludeOldPlots);
+        return data.map(row => ({ date: row.date, label: row.label, value: row.revenue - row.expense }));
       },
     },
 
