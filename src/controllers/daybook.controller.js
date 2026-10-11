@@ -1,3 +1,4 @@
+import { vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { dayBookModel } from '../models/DayBook.model.js';
@@ -1949,6 +1950,7 @@ export const updateDayBookEntry = asyncHandler(async (req, res) => {
   if (branch !== undefined) data.branch = branch ? branch.trim().toUpperCase() : null;
   if (voucher_url !== undefined) data.voucher_url = voucher_url || null;
 
+  Object.assign(data, vaultAssignmentFor('day_book') || {});
   const updated = Object.keys(data).length > 0
     ? await dayBookModel.update(id, data, pool)
     : await dayBookModel.findById(id, pool);
@@ -1991,6 +1993,7 @@ export const updateExpenseFromDayBook = asyncHandler(async (req, res) => {
   if (branch !== undefined) data.branch = branch ? branch.trim().toUpperCase() : null;
   if (category !== undefined) data.category = category ? category.trim().toUpperCase() : null;
 
+  Object.assign(data, vaultAssignmentFor('expenses') || {});
   const updated = Object.keys(data).length > 0
     ? await expenseModel.update(id, data, pool)
     : await expenseModel.findById(id, pool);
@@ -2250,7 +2253,7 @@ export const updateFarmerPaymentFromDayBook = asyncHandler(async (req, res) => {
     interest_rate, interest_amount, by_note, from_entity, to_entity,
     account_no, branch, category, voucher_url, assigned_admin_id, cheque_no,
     cash_amount, bank_amount, transaction_type,
-  ].some((value) => value !== undefined);
+  ].some((value) => value !== undefined) || !!vaultAssignmentFor('farmer_payments');
   if (!hasRequestedUpdate) return res.status(400).json({ message: 'Nothing to update' });
 
   const client = await pool.connect();

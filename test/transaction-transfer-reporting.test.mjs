@@ -29,7 +29,7 @@ test('transfer offsets reconcile module summaries and the dated site balance', {
   try {
     await db.exec(`
       CREATE TABLE ledger_entries (
-        site_id integer, entry_date date, source_key text, source_id integer,
+        id serial, site_id integer, entry_date date, source_key text, source_id integer,
         debit numeric DEFAULT 0, credit numeric DEFAULT 0,
         bucket text DEFAULT 'bank', ledger_type text DEFAULT 'site', plot_tag text DEFAULT ''
       );
@@ -39,7 +39,8 @@ test('transfer offsets reconcile module summaries and the dated site balance', {
       CREATE TABLE farmers(id integer PRIMARY KEY, site_id integer, name text, created_by integer, created_at timestamptz);
       CREATE TABLE farmer_payments(id integer PRIMARY KEY, farmer_id integer, amount numeric,
         cash_amount numeric DEFAULT 0, bank_amount numeric DEFAULT 0, interest_amount numeric DEFAULT 0,
-        status text DEFAULT 'approved', payment_mode text DEFAULT 'BANK', cheque_status text, date date);
+        status text DEFAULT 'approved', payment_mode text DEFAULT 'BANK', cheque_status text, date date,
+        created_by integer DEFAULT 1);
       CREATE TABLE plots(id integer PRIMARY KEY, site_id integer, sale_price numeric,
         status text DEFAULT 'BOOKED', plot_tag text DEFAULT '', created_at timestamptz);
       CREATE TABLE plot_payments(id integer, plot_id integer, site_id integer, amount numeric,
@@ -69,10 +70,24 @@ test('transfer offsets reconcile module summaries and the dated site balance', {
       CREATE TABLE firms(id integer, site_id integer);
       CREATE TABLE firm_transactions(firm_id integer, debit numeric DEFAULT 0, credit numeric DEFAULT 0,
         status text DEFAULT 'approved', payment_mode text DEFAULT 'BANK', cheque_status text);
-      CREATE TABLE cash_flow_entries(site_id integer, date date, source_module text, source_id integer,
+      CREATE TABLE cash_flow_entries(id serial PRIMARY KEY, site_id integer, date date, source_module text, source_id integer,
         debit numeric DEFAULT 0, credit numeric DEFAULT 0, status text DEFAULT 'approved',
         cash_type text DEFAULT 'bank', cheque_status text, cash_flow_month_id integer,
         from_firm_id integer, to_firm_id integer, is_firm_transaction boolean DEFAULT false);
+      -- Current reporting reads withholding and historical settlement links
+      -- even when a transfer has no TDS. Empty relations preserve this test's
+      -- original no-withholding scenario while matching migration 198.
+      CREATE TABLE tds_settlements(id integer PRIMARY KEY, existing_entry_id integer);
+      CREATE TABLE tds_accounting_deductions(id integer PRIMARY KEY, site_id integer,
+        deduction_date date, source_table text, source_id integer, commission_payment_id integer,
+        tds_amount numeric, gross_amount numeric, accounting_state text);
+      ALTER TABLE farmer_payments ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;
+      ALTER TABLE expenses ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;
+      ALTER TABLE plot_commissions ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;
+      ALTER TABLE plot_commission_payments ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;
+      ALTER TABLE vendor_payments ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;
+      ALTER TABLE vendor_inventory_payments ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;
+      ALTER TABLE day_book ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;
       CREATE FUNCTION ledger_bucket(text) RETURNS text LANGUAGE SQL AS
         'SELECT CASE WHEN UPPER(COALESCE($1, ''CASH'')) = ''CASH'' THEN ''cash'' ELSE ''bank'' END';
       INSERT INTO farmers VALUES (1,1,'Farmer',1,'2026-01-01');

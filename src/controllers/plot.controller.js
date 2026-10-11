@@ -1,3 +1,4 @@
+import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet, vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
 import { isDirectPlotStatusChange, validatePlotApprover } from '../services/plotApproval.service.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
@@ -711,10 +712,10 @@ export const createPayment = asyncHandler(async (req, res) => {
      INSERT INTO plot_payments (
        plot_id, site_id, date, payment_from, payment_type, bank_details, bank_name,
        branch, narration, amount, created_by, voucher_url, assigned_admin_id, status,
-       cheque_no, cheque_status, buyer_name, booked_by, transaction_time, received_by
+       cheque_no, cheque_status, buyer_name, booked_by, transaction_time, received_by${vaultInsertColumns('plot_payments')}
      )
      SELECT $1, plot.site_id, $2::date, $3, $4, $5, $6, $7, $8, $9::numeric,
-            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by, $16::time, $17
+            $10, $11, $12, 'pending', $13, $14, plot.buyer_name, plot.booking_by, $16::time, $17${vaultInsertValues('plot_payments')}
        FROM plot
      RETURNING *`,
     [
@@ -909,6 +910,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
     updateData.branch = null;
   }
 
+  Object.assign(updateData, vaultAssignmentFor('plot_payments') || {});
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
   updateData.status = 'pending';

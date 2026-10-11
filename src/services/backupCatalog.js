@@ -111,7 +111,7 @@ export function selectBackupTables(schema, moduleIds = []) {
   if (!names.size) throw backupFailure('The selected modules have no database tables.');
   // These modules also use polymorphic reference_id/source_table links that
   // PostgreSQL cannot express as foreign keys. Keep the finance graph together.
-  const finance = new Set(['plots','registry','farmers','commissions','expenses','daybook','cashflow','firms','vendors','imprest','wallet','banking','transfers','tds','misc_income','partner_finance','inventory','construction','documents','audit','document_imprest']);
+  const finance = new Set(['plots','registry','farmers','commissions','expenses','daybook','cashflow','firms','vendors','imprest','wallet','loyalty_vault','banking','transfers','tds','misc_income','partner_finance','inventory','construction','documents','audit','document_imprest']);
   let changed = true;
   while (changed) {
     changed = false;

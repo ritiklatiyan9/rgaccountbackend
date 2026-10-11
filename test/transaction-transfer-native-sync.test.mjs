@@ -46,7 +46,7 @@ test('real accounting CHECK constraints and native mirror functions accept balan
     await db.exec(`
       CREATE TABLE sites(id int PRIMARY KEY);
       CREATE TABLE users(id int PRIMARY KEY,role text,name text);
-      CREATE TABLE members(id int PRIMARY KEY,full_name text,phone text);
+      CREATE TABLE members(id int PRIMARY KEY,site_id int,full_name text,phone text);
       CREATE TABLE site_partner_shares(site_id int,member_id int,share_pct numeric);
       CREATE TABLE land_partner_shares(farmer_id int,member_id int,share_pct numeric);
       CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
@@ -65,7 +65,7 @@ test('real accounting CHECK constraints and native mirror functions accept balan
       CREATE TABLE bank_accounts(id int PRIMARY KEY,site_id int,name text,is_active boolean DEFAULT true);
       CREATE TABLE partner_profit_payments(id serial PRIMARY KEY,site_id int,member_id int,date date,amount numeric CHECK(amount>0),payment_mode text,bank_account_id int,bank_reference text,remarks text,voucher_url text,customer_signature_url text,authority_signature_url text,status text DEFAULT 'approved',request_id uuid,created_by int,transaction_time time,created_at timestamptz DEFAULT now(),UNIQUE(site_id,created_by,request_id));
       CREATE TABLE plot_money_transfers(id uuid PRIMARY KEY,source_payment_id int,amount numeric);
-      INSERT INTO sites VALUES(1); INSERT INTO users VALUES(1,'admin','Admin'); INSERT INTO members(id,full_name) VALUES(1,'Agent'); INSERT INTO site_partner_shares VALUES(1,1,50);
+      INSERT INTO sites VALUES(1); INSERT INTO users VALUES(1,'admin','Admin'); INSERT INTO members(id,site_id,full_name) VALUES(1,1,'Agent'); INSERT INTO site_partner_shares VALUES(1,1,50);
       INSERT INTO farmers VALUES(1,1,'Farmer'); INSERT INTO plots VALUES(1,1,'A1','Buyer','Dealer','BOOKED');
       INSERT INTO land_deals VALUES(1,1,'L1','Land buyer','open');
       INSERT INTO plot_commissions_v2 VALUES(1,1,1,NULL,NULL,1,100000,'Pending',NULL);
@@ -175,6 +175,18 @@ test('real accounting CHECK constraints and native mirror functions accept balan
     await t.test('TDS commission uses the real native ledger mirror and blocks allocation transfers', async () => {
       await db.exec("ALTER TABLE members ADD COLUMN pan_no text, ADD COLUMN aadhar_no text; INSERT INTO plot_commissions_v2(id,site_id,plot_id,agent_id,total_commission,status) VALUES(99,1,1,1,100000,'Pending')");
       await upTdsRegister(pool); await upCommissionTds(pool);
+      // The current payment controller also writes the taxpayer snapshot
+      // introduced by migration 191. Keep this focused native-sync fixture
+      // aligned with those columns without enabling unrelated module triggers.
+      await db.exec(`ALTER TABLE plot_commission_payments
+        ADD COLUMN tds_member_id integer, ADD COLUMN tds_deductee_name varchar(200),
+        ADD COLUMN tds_pan varchar(10), ADD COLUMN tds_aadhaar varchar(12)`);
+      // October 2026 commission payments use the renamed section. Apply the
+      // real compatibility block from migration 198 to the legacy TDS guard.
+      const settlements = await read('src/migrations/198_tds_financial_settlements.js');
+      const sections = settlements.match(/DO \$\$ DECLARE tab TEXT; fn RECORD; BEGIN[\s\S]*?END \$\$;/);
+      assert.ok(sections, 'migration 198 defines current commission section compatibility');
+      await db.exec(sections[0]);
       await db.exec(`INSERT INTO application_settings VALUES(1,'tds_workflow','{"plot_commission":{"enabled":true,"rate":2,"section":"194H"}}')`);
       const result = await invoke(createPlotCommissionPayment, { master_id: 99, date: '2026-10-01', amount: 100000, payment_mode: 'BANK', tds_applicable: true });
       const id = result.payment.id;

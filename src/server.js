@@ -12,6 +12,7 @@ import { up as migrateTdsDeducteeMapping } from './migrations/191_tds_deductee_m
 import { up as migrateDataStorage } from './migrations/193_data_storage.js';
 import { up as migrateExistingVoucherGaps } from './migrations/196_existing_voucher_gaps_filled.js';
 import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_financial_settlements.js';
+import { up as migrateLoyaltyVault } from './migrations/199_loyalty_vault.js';
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
@@ -40,6 +41,7 @@ connectDB().then(async () => {
   await migrateGoogleDriveJobs(pool);
   await migrateTdsDeducteeMapping(pool);
   await migrateTdsFinancialSettlements(pool);
+  await migrateLoyaltyVault(pool);
   await migrateDataStorage(pool);
   await migrateExistingVoucherGaps(pool);
   await migrateImprestApprovalIndexes(pool);

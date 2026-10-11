@@ -1,3 +1,4 @@
+import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 // Land Sale + Land Profit — the SELL side of Lands Payments.
 //
@@ -398,8 +399,8 @@ export const createPayment = asyncHandler(async (req, res) => {
     `INSERT INTO land_deal_payments (
        land_deal_id, site_id, date, amount, payment_mode, bank_name, bank_account_no,
        bank_reference, bank_ifsc, cheque_no, cheque_status, remarks, voucher_url,
-       status, assigned_admin_id, created_by, transaction_time
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14,$15,$16::time)
+       status, assigned_admin_id, created_by, transaction_time${vaultInsertColumns('land_deal_payments')}
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14,$15,$16::time${vaultInsertValues('land_deal_payments')})
      RETURNING *`,
     [dealId, deal.site_id, data.date, data.amount, data.payment_mode, data.bank_name,
       data.bank_account_no, data.bank_reference, data.bank_ifsc, data.cheque_no,
@@ -423,7 +424,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
     `UPDATE land_deal_payments SET
        date=$2, amount=$3, payment_mode=$4, bank_name=$5, bank_account_no=$6, bank_reference=$7,
        bank_ifsc=$8, cheque_no=$9, cheque_status=$10, remarks=$11, voucher_url=$12,
-       assigned_admin_id=$13, transaction_time=$14::time, status='pending', approved_by=NULL, approved_at=NULL, updated_at=NOW()
+       assigned_admin_id=$13, transaction_time=$14::time, status='pending', approved_by=NULL, approved_at=NULL, updated_at=NOW()${vaultUpdateSet('land_deal_payments')}
      WHERE id=$1 RETURNING *`,
     [paymentId, data.date, data.amount, data.payment_mode, data.bank_name, data.bank_account_no,
       data.bank_reference, data.bank_ifsc, data.cheque_no,

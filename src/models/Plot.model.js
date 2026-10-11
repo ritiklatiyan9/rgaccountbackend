@@ -1,3 +1,4 @@
+import { withLoyaltyVault } from '../services/loyaltyVaultContext.service.js';
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
 import { chequeReadySql } from '../utils/chequeWorkflow.js';
 import MasterModel from './MasterModel.js';
@@ -289,6 +290,7 @@ class PlotPaymentModel extends MasterModel {
    * plot. These identities are intentionally not accepted from payment forms.
    */
   async updateWithPlotIdentity(id, data, pool) {
+    data = withLoyaltyVault('plot_payments', data);
     const keys = Object.keys(data);
     const values = Object.values(data);
     const setClause = [

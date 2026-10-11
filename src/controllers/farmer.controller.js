@@ -1,3 +1,4 @@
+import { vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { tdsInsertColumns, tdsInsertValues, withPaymentTds } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -514,7 +515,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
     bank_reference, bank_ifsc, voucher_url, cheque_no, assigned_admin_id,
     transaction_type: req.body.transaction_type,
   };
-  const hasRequestedUpdate = Object.values(requestedFields).some((value) => value !== undefined);
+  const hasRequestedUpdate = Object.values(requestedFields).some((value) => value !== undefined) || !!vaultAssignmentFor('farmer_payments');
   if (!hasRequestedUpdate) {
     return res.status(400).json({ message: 'Nothing to update' });
   }

@@ -1,3 +1,4 @@
+import { vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { expenseModel } from '../models/Expense.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
@@ -296,6 +297,7 @@ export const updateExpense = asyncHandler(async (req, res) => {
     }
   }
 
+  Object.assign(data, vaultAssignmentFor('expenses') || {});
   if (Object.keys(data).length === 0) {
     return res.status(400).json({ message: 'Nothing to update' });
   }

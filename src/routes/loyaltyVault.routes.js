@@ -1,0 +1,20 @@
+import { Router } from 'express';
+import authMiddleware from '../middlewares/auth.middleware.js';
+import { summary,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer } from '../controllers/loyaltyVault.controller.js';
+const router=Router();
+router.use(authMiddleware);
+router.get('/',summary);
+router.get('/holders',holders);
+router.get('/assignment',assignment);
+router.get('/history',history);
+router.get('/history/:id',historyDetail);
+router.get('/transfers',transfers);
+router.post('/transfers',createTransfer);
+router.post('/transfers/:id/accept',resolveTransfer('accept'));
+router.post('/transfers/:id/reject',resolveTransfer('reject'));
+router.post('/transfers/:id/cancel',resolveTransfer('cancel'));
+router.use((error,req,res,next)=>{
+  if(['42P01','42883','42703'].includes(error.code)) return res.status(503).json({message:'Loyalty Vault setup is pending. Run migration 199.',code:'LOYALTY_VAULT_NOT_READY'});
+  next(error);
+});
+export default router;

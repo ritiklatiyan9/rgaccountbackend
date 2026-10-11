@@ -310,6 +310,38 @@ test('backup database integration (actual PostgreSQL engine)', async t => {
     assert.equal((await target.query('SELECT count(*)::text AS total FROM application_settings')).rows[0].total, '0');
   });
 
+  await t.test('Vault module backups retain financial source links, reservations and immutable custody history', async t => {
+    const source = await createDatabase(t);
+    const target = await createDatabase(t, { seeded: false });
+    const custodySchema = `CREATE TABLE loyalty_vault_accounts (
+        holder_key TEXT PRIMARY KEY, user_id BIGINT REFERENCES users(id),
+        balance NUMERIC(15,2), reserved_balance NUMERIC(15,2)
+      );
+      CREATE TABLE loyalty_vault_entries (
+        id BIGSERIAL PRIMARY KEY, holder_key TEXT REFERENCES loyalty_vault_accounts(holder_key),
+        source_table TEXT, source_id BIGINT, amount NUMERIC(15,2)
+      );
+      CREATE TRIGGER vault_history_guard BEFORE UPDATE OR DELETE ON loyalty_vault_entries
+        FOR EACH ROW EXECUTE FUNCTION block_ledger_changes();`;
+    await source.sql.exec(custodySchema);
+    await target.sql.exec(custodySchema);
+    await source.sql.exec(`INSERT INTO loyalty_vault_accounts VALUES('user:1',1,200000.25,50000.10);
+      INSERT INTO loyalty_vault_entries(holder_key,source_table,source_id,amount)
+        VALUES('user:1','plot_payments',1,200000.25)`);
+    const backup = await snapshot(source.db, { modules: ['loyalty_vault'] });
+    const names = backup.payload.tables.map(table => table.name);
+    for (const name of ['loyalty_vault_accounts', 'loyalty_vault_entries', 'plot_payments', 'day_book', 'bank_accounts', 'users']) {
+      assert.ok(names.includes(name), `Custody restoration requires ${name}`);
+    }
+    await restore(target.db, backup);
+    assert.deepEqual((await target.query('SELECT balance::text,reserved_balance::text FROM loyalty_vault_accounts')).rows[0],
+      { balance: '200000.25', reserved_balance: '50000.10' });
+    assert.equal((await target.query('SELECT count(*)::text AS total FROM loyalty_vault_entries')).rows[0].total, '1');
+    assert.equal((await target.query('SELECT count(*)::text AS total FROM day_book')).rows[0].total, '1', 'Restoring custody does not replay source mirrors');
+    await assert.rejects(target.query("DELETE FROM loyalty_vault_entries WHERE holder_key='user:1'"), /append only/);
+    assert.equal((await restore(target.db, backup)).inserted, 0, 'Retrying custody restoration must not duplicate money');
+  });
+
   await t.test('handcrafted module scopes and contradictory full-backup module labels are rejected without writes', async t => {
     const target = await createDatabase(t);
     const before = await snapshot(target.db);

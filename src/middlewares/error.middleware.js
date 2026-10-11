@@ -4,7 +4,8 @@ const errorMiddleware = (err, req, res, next) => {
   const isMissingImprestOwner = err.constraint === 'imprest_debit_owner_required';
   const isInsufficientSiteCash = err.constraint === 'imprest_site_cash_funding';
   const isImprestConflict = isInsufficientImprest || isMissingImprestOwner || isInsufficientSiteCash;
-  const statusCode = (['tds_workflow', 'project_unit_profile', 'plot_money_transfer_protected', 'transaction_transfer_protected', 'cheque_clearance_before_approval'].includes(err.constraint) ? 409 : 0) || Number(err.statusCode)
+  const vaultAccess = ['loyalty_vault_assignment_access', 'loyalty_vault_holder_scope'].includes(err.constraint);
+  const statusCode = (err.constraint === 'loyalty_vault_holder_funds' ? 409 : vaultAccess ? 403 : 0) || (['tds_workflow', 'project_unit_profile', 'plot_money_transfer_protected', 'transaction_transfer_protected', 'cheque_clearance_before_approval'].includes(err.constraint) ? 409 : 0) || Number(err.statusCode)
     || (err.code === 'LIMIT_FILE_SIZE' ? 413 : isImprestConflict ? 409 : 500);
   const message = err.code === 'LIMIT_FILE_SIZE'
     ? 'The uploaded file exceeds the 10 MB limit.'

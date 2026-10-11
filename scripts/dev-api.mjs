@@ -14,6 +14,8 @@ import { up as migrateTdsFinancialSettlements } from '../src/migrations/198_tds_
 import { up as migrateImprestApprovalIndexes } from '../src/migrations/197_imprest_approval_activity_indexes.js';
 import { up as migrateImprestCashGuard } from '../src/migrations/195_imprest_cash_funding_guard.js';
 import { up as migrateExistingVoucherGaps } from '../src/migrations/196_existing_voucher_gaps_filled.js';
+import { up as migrateLoyaltyVault } from '../src/migrations/199_loyalty_vault.js';
+await migrateLoyaltyVault(pool);
 await migrateMemberSiteSharing(pool);
 await migrateMemberIdentityLinking(pool);
 await migrateMemberIdentityConsolidation(pool);

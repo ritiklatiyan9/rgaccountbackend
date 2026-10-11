@@ -1,3 +1,4 @@
+import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { getTdsWorkflow, commissionTdsModule, parsePaymentTds } from '../services/tdsWorkflow.service.js';
@@ -772,7 +773,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
          payment_mode, bank_name, transaction_id, remarks, status,
          voucher_number, voucher_url, assigned_admin_id, created_by,
          cheque_no, cheque_status, transaction_time, tds_amount, tds_rate, tds_mode, tds_section,
-         tds_member_id, tds_deductee_name, tds_pan, tds_aadhaar
+         tds_member_id, tds_deductee_name, tds_pan, tds_aadhaar${vaultInsertColumns('plot_commission_payments')}
        )
        SELECT
          m.site_id, $1, $2::date, $3::numeric,
@@ -780,7 +781,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
          $4::text, $5::text, $6::text, $7::text, 'pending',
          $8::text, $9::text, $10::int, $11::int,
          $12::text, $13::text, $14::time, $15::numeric, $16::numeric, $17::text, $18::text,
-         $19::int, $20::text, $21::text, $22::text
+         $19::int, $20::text, $21::text, $22::text${vaultInsertValues('plot_commission_payments')}
        FROM master m
        RETURNING *
      )
@@ -993,7 +994,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
 
   const result = await pool.query(
     `UPDATE plot_commission_payments
-        SET ${fields.join(', ')}
+        SET ${fields.join(', ')}${vaultUpdateSet('plot_commission_payments')}
       WHERE id = $${values.length}
       RETURNING *`,
     values

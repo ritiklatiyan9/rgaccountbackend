@@ -1,3 +1,4 @@
+import { withLoyaltyVault, vaultInsertColumns, vaultInsertValues, vaultUpdateSet } from './loyaltyVaultContext.service.js';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
@@ -122,16 +123,16 @@ export function paymentTdsMiddleware(req, res, next) {
 }
 export function withPaymentTds(table, data) {
   const draft = context.getStore();
-  return draft?.table === table ? { ...data, ...draft.fields } : data;
+  return withLoyaltyVault(table, draft?.table === table ? { ...data, ...draft.fields } : data);
 }
 // The controllers with fixed SQL use the same validated snapshot as MasterModel.
 // Values are escaped by pg, not concatenated from raw request input.
-export const tdsInsertColumns = table => context.getStore()?.table === table ? `, ${fields.join(', ')}` : '';
+export const tdsInsertColumns = table => (context.getStore()?.table === table ? `, ${fields.join(', ')}` : '') + vaultInsertColumns(table);
 export const tdsInsertValues = table => {
   const draft = context.getStore();
-  return draft?.table === table ? ', ' + fields.map(key => draft.fields[key] == null ? 'NULL' : pg.escapeLiteral(String(draft.fields[key]))).join(', ') : '';
+  return (draft?.table === table ? ', ' + fields.map(key => draft.fields[key] == null ? 'NULL' : pg.escapeLiteral(String(draft.fields[key]))).join(', ') : '') + vaultInsertValues(table);
 };
 export const tdsUpdateSet = table => {
   const draft = context.getStore();
-  return draft?.table === table ? ', ' + fields.map(key => `${key}=${draft.fields[key] == null ? 'NULL' : pg.escapeLiteral(String(draft.fields[key]))}`).join(', ') : '';
+  return (draft?.table === table ? ', ' + fields.map(key => `${key}=${draft.fields[key] == null ? 'NULL' : pg.escapeLiteral(String(draft.fields[key]))}`).join(', ') : '') + vaultUpdateSet(table);
 };
