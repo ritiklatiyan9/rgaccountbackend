@@ -8,6 +8,10 @@ Choose an account user or a known client in the **Loyalty Vault** field when rec
 
 A posted credit increases the holder's balance. A posted debit decreases it. A negative balance records money paid on behalf of the company and owed to that holder. Posting follows the existing application policy for approval, rejection and cheque clearance. Registry mappings refer to an existing plot receipt, so assign its original Plot Payment. Legacy commission records and internal bookkeeping movements do not create additional custody.
 
+The main Vault user table lists Super Admin, Admin and Sub-admin accounts. Known clients remain available in the transaction holder dropdown and custody history. Pending assignments appear in separate incoming/outgoing amounts and the Status column, even when no posted custody account exists yet. These amounts are excluded from available transfers. A cleared credit can be posted while its review is still pending, following the existing credit-first financial policy; the transaction table shows both posting and review status.
+
+Click a user to open `/loyalty-vault/users/:id`. The details page includes their account profile, posted and pending balances, original assigned transactions, immutable custody history and transfer history. Transaction rows open a Sheet with source details. Receipt actions load the existing canonical source receipt, under its original module and site permissions, and preserve the same receipt identity and print history. Opening the viewer does not record a print.
+
 Transactions created before this feature retain their existing accounting. There is no inferred opening balance. Assign custody explicitly through the source transaction when a historical amount must be tracked.
 
 Editing an amount or holder, clearing an assignment, rejecting a transaction, or deleting its source appends a compensating movement. Posted history is immutable. An ordinary edit that omits the holder fields preserves the assignment.
@@ -39,7 +43,9 @@ Migration `199_loyalty_vault` adds assignment columns to native transaction tabl
 
 Account locks use a consistent holder order. Transfer reservations and decisions are atomic. History and transfer queries paginate their results. Full backups and financial module backups include Vault records and their related source records.
 
-The API is mounted at `/loyalty-vault`. Native payment requests carry `loyalty_vault_holder_type` (`user` or `member`) and `loyalty_vault_holder_id`. Supplying both as `null` clears custody. The server records the authenticated assignment actor; client-supplied actor IDs are never trusted.
+The API is mounted at `/loyalty-vault`. `/users/:id` supplies account details and pending totals; `/transactions` supplies paginated assigned source transactions, with holder, site, search and status filters. Status values are `posted`, `pending_clearance`, `pending_approval`, `rejected` and `bounced`; `pending` filters both pending states. Pending reads use the indexed native assignment columns and canonical financial records, without writing ledger movements. Administrators can view organization accounts; Sub-admins can view only their own balances and transaction details.
+
+Native payment requests carry `loyalty_vault_holder_type` (`user` or `member`) and `loyalty_vault_holder_id`. Supplying both as `null` clears custody. The server records the authenticated assignment actor; client-supplied actor IDs are never trusted.
 
 ## Local verification
 

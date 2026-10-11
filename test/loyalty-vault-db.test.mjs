@@ -39,11 +39,11 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         created_at timestamptz DEFAULT now(),entry_transfer_id uuid,is_imprest_internal boolean,is_firm_transaction boolean,to_firm_id integer);
       CREATE TABLE cash_flow_months(id integer PRIMARY KEY,site_id integer);
       CREATE TABLE farmers(id integer PRIMARY KEY,site_id integer);INSERT INTO farmers VALUES(1,10);
-      CREATE TABLE plots(id integer PRIMARY KEY,site_id integer);CREATE TABLE plot_installments(id integer PRIMARY KEY,plot_id integer);
+      CREATE TABLE plots(id integer PRIMARY KEY,site_id integer,plot_no text,buyer_name text,block text);CREATE TABLE plot_installments(id integer PRIMARY KEY,plot_id integer);
       CREATE TABLE firms(id integer PRIMARY KEY,site_id integer);INSERT INTO firms VALUES(1,10);
       ${postingPolicySql}`);
     for(const table of [...LOYALTY_VAULT_SOURCE_TABLES].filter(table=>table!=='cash_flow_entries'))await query(`CREATE TABLE ${table}(id integer PRIMARY KEY,site_id integer,created_by integer,status text DEFAULT 'pending',payment_mode text DEFAULT 'BANK',payment_type text,cheque_status text,
-      entry_type text,created_at timestamptz DEFAULT now(),farmer_id integer,firm_id integer,installment_id integer,cash_amount numeric,
+      entry_type text,created_at timestamptz DEFAULT now(),farmer_id integer,firm_id integer,plot_id integer,installment_id integer,cash_amount numeric,
       cash_flow_entry_id integer,expense_id integer,farmer_payment_id integer,commission_id integer,firm_transaction_id integer,plot_payment_id integer,vendor_payment_id integer,imprest_allocation_id integer,
       entry_transfer_id uuid,money_transfer_id uuid,is_firm_to_firm_transfer boolean,transfer_group_id uuid,is_financial_projection boolean,source_vendor_payment_id integer,is_imprest_internal boolean)`);
     await query("INSERT INTO cash_flow_entries(id,site_id,created_by,credit,cash_type,status,created_at) VALUES(1,10,1,500,'CASH','approved','2020-01-01')");
@@ -197,6 +197,54 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
       assert.deepEqual(source,{loyalty_vault_holder_type:'user',loyalty_vault_holder_id:2,loyalty_vault_assigned_by:2});
       assert.equal(Number((await amount('user:2')).balance),Number(before.balance)+7);
       assert.equal((await query('SELECT credit::text,debit::text FROM cash_flow_entries WHERE id=$1',[cashId])).rows[0].credit,'7');
+    });
+    await t.test('pending original payments are visible without funding custody, then clear exactly once',async()=>{
+      const originalQuery=pool.query;pool.query=query;
+      const invoke=(handler,extra={})=>new Promise((resolve,reject)=>handler({user:admin,query:{},params:{},...extra},
+        {set(){return this;},json(body){resolve(body);}},reject));
+      try {
+        await query("INSERT INTO users VALUES(7,'Pending cheque holder','admin',1,true)");
+        await query("INSERT INTO plots VALUES(3,10,'A3','ALICE BUYER','A'),(4,10,'A3','OTHER BUYER','A')");
+        await query("INSERT INTO plot_payments(id,plot_id,site_id,created_by,payment_mode,cheque_status,loyalty_vault_holder_type,loyalty_vault_holder_id,loyalty_vault_assigned_by) VALUES(5001,3,10,2,'CHEQUE','PENDING','user',7,2)");
+        const cashId=await entry({source_module:'plot_payments',source_id:5001,credit:150000,cash_type:'CHEQUE',cheque_status:'PENDING',loyalty_vault_holder_type:null,loyalty_vault_holder_id:null});
+        const scope={holder_type:'user',holder_id:'7'};
+        const profile=await invoke(controller.userDetail,{params:{id:'7'}});
+        assert.equal(profile.user.pending_credit,'150000');assert.equal(profile.user.balance,'0');assert.equal(profile.user.available_balance,'0');
+        const listed=(await invoke(controller.holders)).holders.find(row=>row.holder_id===7&&row.holder_type==='user');
+        assert.equal(listed.pending_count,1);assert.equal(listed.pending_credit,'150000');assert.equal(listed.available_balance,'0');
+        const before=await entries(),pending=await invoke(controller.assignedTransactions,{query:{...scope,status:'pending',limit:'1'}});
+        assert.equal(pending.total,1);assert.equal(pending.transactions[0].source_id,5001);assert.equal(pending.transactions[0].status,'pending_clearance');
+        assert.equal(pending.transactions[0].posted_amount,'0');assert.equal(pending.transactions[0].pending_credit,'150000');
+        assert.equal(pending.transactions[0].plot_no,'A3');assert.equal(pending.transactions[0].buyer_name,'ALICE BUYER');assert.equal(pending.transactions[0].source_details.plot_id,3);
+        assert.equal(pending.transactions[0].created_by_name,'Administrator');assert.equal(await entries(),before);
+        const beyond=await invoke(controller.assignedTransactions,{query:{...scope,page:'99'}});assert.equal(beyond.total,1);assert.equal(beyond.transactions.length,0);
+        await assert.rejects(createVaultTransfer(admin,req('1',{type:'user',id:7},2),db),/available/);
+        await assert.rejects(invoke(controller.userDetail,{user:actor,params:{id:'7'}}),errorStatus(403));
+        assert.equal((await invoke(controller.assignedTransactions,{user:actor,query:scope})).total,0);
+        await assert.rejects(invoke(controller.userDetail,{params:{id:'4'}}),errorStatus(404));
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,q:'Client deposit'}})).total,1);
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,q:'ALICE BUYER'}})).total,1);
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,q:'A3'}})).total,1);
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,q:'OTHER BUYER'}})).total,0);
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,q:'%'}})).total,0);
+        await query("UPDATE plot_payments SET cheque_status='CLEARED',status='approved' WHERE id=5001");
+        await query("UPDATE cash_flow_entries SET cheque_status='CLEARED',status='approved' WHERE id=$1",[cashId]);
+        assert.equal((await amount('user:7')).balance,'150000.00');assert.equal(await entries(),before+1);
+        const movement=(await invoke(controller.history,{query:scope})).entries[0];
+        assert.equal(movement.plot_no,'A3');assert.equal(movement.buyer_name,'ALICE BUYER');assert.equal(movement.source_details.plot_id,3);
+        const movementDetail=(await invoke(controller.historyDetail,{params:{id:movement.id}})).entry;assert.equal(movementDetail.plot_no,'A3');
+        const cleared=await invoke(controller.userDetail,{params:{id:'7'}});assert.equal(Number(cleared.user.pending_credit),0);assert.equal(cleared.user.pending_count,0);
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,status:'posted'}})).total,1);
+        await query("UPDATE plot_payments SET cheque_status='CLEARED' WHERE id=5001");assert.equal(await entries(),before+1);
+        const debit=await entry({credit:0,debit:20,loyalty_vault_holder_id:7});
+        const approval=await invoke(controller.assignedTransactions,{query:{...scope,status:'pending_approval'}});assert.equal(approval.total,1);assert.equal(approval.transactions[0].pending_debit,'20');
+        await query("UPDATE cash_flow_entries SET status='rejected' WHERE id=$1",[debit]);
+        assert.equal((await invoke(controller.userDetail,{params:{id:'7'}})).user.pending_count,0);
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,status:'rejected'}})).total,1);
+        await query("UPDATE plot_payments SET cheque_status='BOUNCED' WHERE id=5001");
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,status:'bounced'}})).total,1);
+        assert.equal((await amount('user:7')).balance,'0.00');
+      } finally {pool.query=originalQuery;}
     });
   }finally{await pg.close();}
 });

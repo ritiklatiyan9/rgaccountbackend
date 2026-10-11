@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import authMiddleware from '../middlewares/auth.middleware.js';
-import { summary,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer } from '../controllers/loyaltyVault.controller.js';
+import { summary,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer,userDetail,assignedTransactions } from '../controllers/loyaltyVault.controller.js';
 const router=Router();
 router.use(authMiddleware);
 router.get('/',summary);
 router.get('/holders',holders);
+router.get('/users/:id',userDetail);
+router.get('/transactions',assignedTransactions);
 router.get('/assignment',assignment);
 router.get('/history',history);
 router.get('/history/:id',historyDetail);

@@ -4,6 +4,12 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { vaultUser, isVaultAdmin, accessibleSite, holder, validateHolder, createVaultTransfer, resolveVaultTransfer } from '../services/loyaltyVault.service.js';
 import { walletError, positiveId, pagination, historyDate, uuid } from '../services/wallet.service.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../services/loyaltyVaultContext.service.js';
+import { vaultTransactionsCte, vaultTransactionScope, pendingVaultTotals, publicVaultTransaction } from '../services/loyaltyVaultTransactions.service.js';
+
+const sumPending = (rows,field) => {
+  const paise=rows.reduce((sum,row)=>{const [whole,fraction='']=String(row[field]||'0').split('.');return sum+BigInt(whole)*100n+BigInt(fraction.padEnd(2,'0').slice(0,2));},0n);
+  return `${paise/100n}.${String(paise%100n).padStart(2,'0')}`;
+};
 
 export const summary = asyncHandler(async(req,res)=>{
   const actor=await vaultUser(req.user); await accessibleSite(actor,req.query.site_id);
@@ -19,6 +25,8 @@ export const summary = asyncHandler(async(req,res)=>{
     now() AS refreshed_at FROM loyalty_vault_settings s LEFT JOIN loyalty_vault_accounts w ON w.holder_key='user:'||$1::text AND w.organization_id=$2 LIMIT 1`,[actor.id,actor.organization_id,isVaultAdmin(actor)]);
   if(!rows[0]) throw walletError('Loyalty Vault setup is pending.',503);
   const {pending_incoming,pending_outgoing,...vault}=rows[0];
+  const awaiting=await pendingVaultTotals(actor,pool);
+  Object.assign(vault,{pending_credit:sumPending(awaiting,'pending_credit'),pending_debit:sumPending(awaiting,'pending_debit'),pending_assignment_count:awaiting.reduce((n,row)=>n+row.pending_count,0)});
   res.set('Cache-Control','no-store').json({vault,pending_incoming,pending_outgoing});
 });
 export const holders = asyncHandler(async(req,res)=>{
@@ -35,13 +43,57 @@ export const holders = asyncHandler(async(req,res)=>{
       ($4::boolean OR (h.holder_type='user' AND h.holder_id=$1)) AS can_transfer_from,
       a.updated_at FROM holders h LEFT JOIN loyalty_vault_accounts a ON a.holder_key=h.holder_type||':'||h.holder_id::text AND a.organization_id=$2
       LEFT JOIN sites s ON s.id=h.site_id ORDER BY h.holder_type DESC,h.name,h.holder_id`,[actor.id,actor.organization_id,siteId,isVaultAdmin(actor)]);
-  res.set('Cache-Control','no-store').json({holders:rows});
+  const awaiting=new Map((await pendingVaultTotals(actor,pool)).map(row=>[`${row.holder_type}:${row.holder_id}`,row]));
+  res.set('Cache-Control','no-store').json({holders:rows.map(row=>({...row,
+    pending_credit:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_credit||'0.00',
+    pending_debit:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_debit||'0.00',
+    pending_count:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_count||0}))});
+});
+
+export const userDetail = asyncHandler(async(req,res)=>{
+  const actor=await vaultUser(req.user),id=positiveId(req.params.id);
+  if(!isVaultAdmin(actor)&&id!==actor.id) throw walletError('You can view only your own Vault details.',403);
+  const {rows}=await pool.query(`${vaultTransactionsCte}, pending AS (
+    SELECT COALESCE(sum(unposted_credit),0)::text AS pending_credit,COALESCE(sum(unposted_debit),0)::text AS pending_debit,count(*)::int AS pending_count
+    FROM assigned_transactions WHERE organization_id=$2 AND holder_type='user' AND holder_id=$1 AND status IN ('pending_clearance','pending_approval')
+  ) SELECT u.id,u.name,to_jsonb(u)->>'email' AS email,u.role,u.is_active,to_jsonb(u)->>'phone' AS phone,
+    COALESCE(a.balance,0)::text AS balance,COALESCE(a.reserved_balance,0)::text AS reserved_balance,
+    (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text AS available_balance,a.updated_at,pending.*
+    FROM users u CROSS JOIN pending LEFT JOIN loyalty_vault_accounts a ON a.holder_key='user:'||u.id::text AND a.organization_id=$2
+    WHERE u.id=$1 AND u.organization_id=$2 AND (u.role IN ('super_admin','admin','sub_admin') OR a.holder_key IS NOT NULL)`,[id,actor.organization_id]);
+  if(!rows[0]) throw walletError('Vault user not found.',404);
+  res.set('Cache-Control','no-store').json({user:{...rows[0],holder_type:'user',holder_id:id}});
+});
+
+export const assignedTransactions = asyncHandler(async(req,res)=>{
+  const actor=await vaultUser(req.user),siteId=await accessibleSite(actor,req.query.site_id),{page,limit,offset}=pagination(req.query);
+  const scope=vaultTransactionScope(actor),params=[...scope.params],clauses=[scope.clause];
+  if(req.query.holder_type||req.query.holder_id){const selected=holder(req.query.holder_type,req.query.holder_id);
+    await validateHolder(actor,selected,pool,siteId,true);params.push(selected.type,selected.id);clauses.push(`holder_type=$${params.length-1} AND holder_id=$${params.length}`);}
+  if(siteId){params.push(siteId);clauses.push(`site_id=$${params.length}`);}
+  const status=req.query.status||'all';
+  if(!['all','pending','posted','pending_clearance','pending_approval','rejected','bounced'].includes(status))throw walletError('Unknown transaction status.');
+  if(status==='pending')clauses.push("status IN ('pending_clearance','pending_approval')");
+  else if(status!=='all'){params.push(status);clauses.push(`status=$${params.length}`);}
+  const q=String(req.query.q||'').trim();if(q.length>200)throw walletError('Keep search within 200 characters.');
+  if(q){params.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);clauses.push(`concat_ws(' ',holder_name,site_name,plot_no,buyer_name,source_table,source_id::text,cash->>'particular',source->>'remarks',source->>'cheque_no') ILIKE $${params.length} ESCAPE '\\'`);}
+  const where=clauses.join(' AND ');
+  const {rows}=await pool.query(`${vaultTransactionsCte} SELECT *,count(*) OVER()::int AS total FROM assigned_transactions WHERE ${where}
+    ORDER BY cash_flow_entry_id DESC LIMIT $${params.length+1} OFFSET $${params.length+2}`,[...params,limit,offset]);
+  const total=rows.length?Number(rows[0].total):offset?Number((await pool.query(`${vaultTransactionsCte} SELECT count(*)::int AS total FROM assigned_transactions WHERE ${where}`,params)).rows[0].total):0;
+  res.set('Cache-Control','no-store').json({transactions:rows.map(publicVaultTransaction),total,page,limit});
 });
 const historyJoins=`FROM loyalty_vault_entries e LEFT JOIN users u ON e.holder_type='user' AND u.id=e.holder_id
   LEFT JOIN members m ON e.holder_type='member' AND m.id=e.holder_id LEFT JOIN sites s ON s.id=e.site_id
-  LEFT JOIN users actor ON actor.id=e.actor_id LEFT JOIN loyalty_vault_transfers t ON t.id=e.transfer_id`;
+  LEFT JOIN users actor ON actor.id=e.actor_id LEFT JOIN loyalty_vault_transfers t ON t.id=e.transfer_id
+  LEFT JOIN plot_payments vault_pp ON e.source_table='plot_payments' AND vault_pp.id=e.source_id
+  LEFT JOIN plot_installment_payments vault_pip ON e.source_table='plot_installment_payments' AND vault_pip.id=e.source_id
+  LEFT JOIN plot_installments vault_pi ON vault_pi.id=NULLIF(to_jsonb(vault_pip)->>'installment_id','')::integer
+  LEFT JOIN plots vault_plot ON vault_plot.id=COALESCE(NULLIF(to_jsonb(vault_pp)->>'plot_id','')::integer,NULLIF(to_jsonb(vault_pip)->>'plot_id','')::integer,vault_pi.plot_id) AND vault_plot.site_id=e.site_id`;
 const historySelect=`e.*,COALESCE(e.details->>'holder_name',u.name,m.full_name,'Former holder') AS holder_name,s.name AS site_name,actor.name AS actor_name,
-  e.details AS source_details,e.details->>'transaction_date' AS transaction_date,e.details->>'payment_mode' AS payment_mode,t.status AS transfer_status`;
+  to_jsonb(vault_plot)->>'plot_no' AS plot_no,COALESCE(NULLIF(BTRIM(to_jsonb(vault_plot)->>'buyer_name'),''),NULLIF(BTRIM(to_jsonb(vault_pp)->>'buyer_name'),'')) AS buyer_name,
+  e.details||jsonb_strip_nulls(jsonb_build_object('plot_id',vault_plot.id,'plot_no',to_jsonb(vault_plot)->>'plot_no','buyer_name',to_jsonb(vault_plot)->>'buyer_name','plot_block',to_jsonb(vault_plot)->>'block','site_id',e.site_id)) AS source_details,
+  e.details->>'transaction_date' AS transaction_date,e.details->>'payment_mode' AS payment_mode,t.status AS transfer_status`;
 export const history = asyncHandler(async(req,res)=>{
   const actor=await vaultUser(req.user),siteId=await accessibleSite(actor,req.query.site_id),{page,limit,offset}=pagination(req.query);
   const params=[actor.organization_id],clauses=['e.organization_id=$1'];
@@ -93,6 +145,7 @@ export const transfers = asyncHandler(async(req,res)=>{
   const direction=req.query.direction||'all';if(!['all','incoming','outgoing'].includes(direction)) throw walletError('Unknown transfer direction.');
   if(direction==='incoming') clauses.push('t.recipient_id=$2');else if(direction==='outgoing') clauses.push('t.sender_id=$2');else if(!isVaultAdmin(actor)) clauses.push('(t.sender_id=$2 OR t.recipient_id=$2)');
   if(siteId){params.push(siteId);clauses.push(`(t.site_id=$${params.length} OR t.site_id IS NULL)`);}
+  if(req.query.holder_id){params.push(positiveId(req.query.holder_id));clauses.push(`((t.from_holder_type='user' AND t.from_holder_id=$${params.length}) OR t.to_holder_id=$${params.length})`);}
   if(req.query.status&&req.query.status!=='all'){if(!['pending','accepted','rejected','cancelled'].includes(req.query.status)) throw walletError('Unknown transfer status.');params.push(req.query.status);clauses.push(`t.status=$${params.length}`);}
   const where=clauses.join(' AND '),total=Number((await pool.query(`SELECT count(*)::int AS total FROM loyalty_vault_transfers t WHERE ${where}`,params)).rows[0].total);
   const {rows}=await pool.query(`SELECT t.*,COALESCE(owner.name,m.full_name) AS from_name,recipient.name AS to_name,sender.name AS sender_name,resolver.name AS resolved_by_name,s.name AS site_name,

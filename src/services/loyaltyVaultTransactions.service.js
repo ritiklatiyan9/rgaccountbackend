@@ -1,0 +1,103 @@
+import { LOYALTY_VAULT_SOURCE_TABLES } from './loyaltyVaultContext.service.js';
+import { isVaultAdmin } from './loyaltyVault.service.js';
+
+// Read the original assigned payments, including instruments that cannot post
+// yet. These queries never create custody movements or change financial totals.
+const sources = [...LOYALTY_VAULT_SOURCE_TABLES].map(table => {
+  const direct = table === 'cash_flow_entries';
+  return `SELECT c.id AS cash_flow_entry_id,'${table}'::text AS source_table,t.id AS source_id,
+    t.loyalty_vault_holder_type AS holder_type,t.loyalty_vault_holder_id AS holder_id,
+    COALESCE(c.site_id,loyalty_vault_source_site('${table}',to_jsonb(t))) AS site_id,
+    to_jsonb(t) AS source,to_jsonb(c) AS cash
+    FROM ${table} t ${direct ? 'JOIN cash_flow_entries c ON c.id=t.id' : `JOIN cash_flow_entries c ON c.source_module='${table}' AND c.source_id=t.id`}
+    WHERE t.loyalty_vault_holder_type IS NOT NULL
+    ${direct ? `AND COALESCE(NULLIF(c.source_module,''),'cash_flow_entries')='cash_flow_entries'
+      AND NOT EXISTS(SELECT 1 FROM firm_transactions f WHERE f.cash_flow_entry_id=c.id)` : ''}`;
+}).join('\nUNION ALL\n');
+
+export const vaultTransactionsCte = `WITH assigned_sources AS (${sources}), eligible_sources AS (
+  SELECT a.*,s.organization_id,s.name AS site_name,
+    COALESCE(u.name,m.full_name,'Former holder') AS holder_name,
+    creator.name AS created_by_name,assigner.name AS assigned_by_name,
+    vault_plot.id AS plot_id,to_jsonb(vault_plot)->>'plot_no' AS plot_no,
+    to_jsonb(vault_plot)->>'block' AS plot_block,
+    COALESCE(NULLIF(BTRIM(to_jsonb(vault_plot)->>'buyer_name'),''),NULLIF(BTRIM(source->>'buyer_name'),'')) AS buyer_name,
+    UPPER(COALESCE(NULLIF(TRIM(source->>'payment_mode'),''),NULLIF(TRIM(source->>'payment_type'),''),
+      NULLIF(TRIM(source->>'by_note'),''),NULLIF(TRIM(cash->>'cash_type'),''),'CASH')) AS payment_mode,
+    COALESCE(source->>'status',cash->>'status','approved') AS source_status,
+    NULLIF(UPPER(TRIM(COALESCE(source->>'cheque_status',cash->>'cheque_status'))),'') AS cheque_status,
+    GREATEST(COALESCE((cash->>'credit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'debit')::numeric,0),0) AS credit,
+    GREATEST(COALESCE((cash->>'debit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'credit')::numeric,0),0) AS debit
+  FROM assigned_sources a JOIN sites s ON s.id=a.site_id
+    LEFT JOIN users u ON a.holder_type='user' AND u.id=a.holder_id
+    LEFT JOIN members m ON a.holder_type='member' AND m.id=a.holder_id
+    LEFT JOIN users creator ON creator.id=NULLIF(COALESCE(source->>'created_by',cash->>'created_by'),'')::integer
+    LEFT JOIN users assigner ON assigner.id=NULLIF(source->>'loyalty_vault_assigned_by','')::integer
+    LEFT JOIN plot_installments vault_installment ON a.source_table='plot_installment_payments' AND vault_installment.id=NULLIF(source->>'installment_id','')::integer
+    LEFT JOIN plots vault_plot ON a.source_table IN ('plot_payments','plot_installment_payments')
+      AND vault_plot.id=COALESCE(NULLIF(source->>'plot_id','')::integer,vault_installment.plot_id) AND vault_plot.site_id=a.site_id
+  WHERE NOT COALESCE((source->>'is_imprest_internal')::boolean,false)
+    AND NULLIF(source->>'entry_transfer_id','') IS NULL AND NULLIF(source->>'money_transfer_id','') IS NULL
+    AND NOT COALESCE((source->>'is_firm_to_firm_transfer')::boolean,false) AND NULLIF(source->>'transfer_group_id','') IS NULL
+    AND NOT (source_table='cash_flow_entries' AND COALESCE((source->>'is_firm_transaction')::boolean,false) AND NULLIF(source->>'to_firm_id','') IS NOT NULL)
+    AND NOT (source_table='vendor_inventory_payments' AND NULLIF(source->>'source_vendor_payment_id','') IS NOT NULL)
+    AND NOT (source_table='day_book' AND (UPPER(COALESCE(source->>'entry_type',''))='IMPREST'
+      OR COALESCE((source->>'is_financial_projection')::boolean,false)
+      OR EXISTS(SELECT 1 FROM unnest(ARRAY['expense_id','farmer_payment_id','commission_id','cash_flow_entry_id','firm_transaction_id','plot_payment_id','vendor_payment_id','imprest_allocation_id']) field WHERE NULLIF(source->>field,'') IS NOT NULL)))
+), posting AS (
+  SELECT e.*,
+    CASE WHEN financial_transaction_posts('credit',source_status,payment_mode,cheque_status) THEN credit ELSE 0 END AS posted_credit,
+    CASE WHEN financial_transaction_posts('debit',source_status,payment_mode,cheque_status) THEN debit ELSE 0 END AS posted_debit
+  FROM eligible_sources e
+), assigned_transactions AS (
+  SELECT p.*,posted_credit-posted_debit AS posted_amount,
+    credit-posted_credit AS unposted_credit,debit-posted_debit AS unposted_debit,
+    CASE WHEN LOWER(TRIM(source_status)) IN ('rejected','cancelled','deleted','void','voided') THEN 'rejected'
+      WHEN cheque_status IN ('BOUNCED','RETURNED','REJECTED','CANCELLED') THEN 'bounced'
+      WHEN (credit>posted_credit OR debit>posted_debit) AND cheque_status IS NOT NULL AND cheque_status<>'CLEARED' THEN 'pending_clearance'
+      WHEN credit>posted_credit OR debit>posted_debit THEN 'pending_approval'
+      ELSE 'posted' END AS status
+  FROM posting p
+)`;
+
+export const vaultTransactionScope = actor => ({
+  clause: 'organization_id=$1 AND ($2::boolean OR (holder_type=\'user\' AND holder_id=$3))',
+  params: [actor.organization_id,isVaultAdmin(actor),actor.id],
+});
+
+export async function pendingVaultTotals(actor, database, selected = null) {
+  const scope = vaultTransactionScope(actor);
+  if (selected) {
+    scope.clause += ' AND holder_type=$4 AND holder_id=$5';
+    scope.params.push(selected.type,selected.id);
+  }
+  const { rows } = await database.query(`${vaultTransactionsCte}
+    SELECT holder_type,holder_id,sum(credit-posted_credit)::text AS pending_credit,
+      sum(debit-posted_debit)::text AS pending_debit,count(*)::int AS pending_count
+    FROM assigned_transactions WHERE ${scope.clause} AND status IN ('pending_clearance','pending_approval')
+    GROUP BY holder_type,holder_id`,scope.params);
+  return rows;
+}
+
+export function publicVaultTransaction(row) {
+  const s=row.source,c=row.cash;
+  return {
+    id: row.cash_flow_entry_id, source_table: row.source_table, source_id: row.source_id,
+    holder_type: row.holder_type, holder_id: row.holder_id, holder_name: row.holder_name,
+    plot_no: row.plot_no,buyer_name: row.buyer_name,plot_block: row.plot_block,
+    site_id: row.site_id, site_name: row.site_name, status: row.status, source_status: row.source_status,
+    cheque_status: row.cheque_status, payment_mode: row.payment_mode,
+    credit: String(row.credit), debit: String(row.debit), posted_amount: String(row.posted_amount),
+    pending_credit: ['pending_clearance','pending_approval'].includes(row.status) ? String(row.unposted_credit) : '0',
+    pending_debit: ['pending_clearance','pending_approval'].includes(row.status) ? String(row.unposted_debit) : '0',
+    transaction_date: c.date, transaction_time: s.transaction_time || c.transaction_time,
+    created_at: s.created_at || c.created_at, created_by: s.created_by || c.created_by,
+    created_by_name: row.created_by_name,assigned_by: s.loyalty_vault_assigned_by,assigned_by_name: row.assigned_by_name,
+    description: c.particular || s.particular || s.description || s.narration || 'Assigned transaction',
+    remarks: s.remarks || s.remark || s.note || c.remarks || '',
+    reference: s.cheque_no || s.reference_no || s.bank_reference || s.transaction_id || '',
+    source_details: { plot_id: row.plot_id || s.plot_id,plot_no: row.plot_no,buyer_name: row.buyer_name,plot_block: row.plot_block,
+      parent_id: s.farmer_id || s.land_deal_id || s.firm_id || s.cash_flow_month_id || s.commitment_id || s.order_id,
+      site_id: row.site_id, source_available: true },
+  };
+}
