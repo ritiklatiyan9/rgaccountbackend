@@ -956,7 +956,7 @@ export const complianceCalendar = asyncHandler(async (req, res) => {
   }
   const selectedSite = (alias) => siteParam ? `AND ${alias}.site_id=$${siteParam}` : '';
   const [items, cases, notices, inspections, licences] = await Promise.all([
-    pool.query(`SELECT i.id,'COMPLIANCE' AS event_type,i.title,i.current_due_date AS event_date,i.metadata->>'event_time' AS event_time,i.status,i.risk_level,i.site_id,s.name AS site_name,
+    pool.query(`SELECT i.id,'COMPLIANCE' AS event_type,i.title,i.current_due_date AS event_date,i.metadata->>'event_time' AS event_time,i.metadata->'repeat_monthly' AS repeat_monthly,i.status,i.risk_level,i.site_id,s.name AS site_name,
       (SELECT COUNT(*)::int FROM event_reminders r WHERE r.organization_id=i.organization_id AND r.event_type='COMPLIANCE' AND r.source_id=i.id AND r.status IN ('PENDING','PROCESSING','FAILED')) AS reminder_count,
       ${calendarSyncStatusSql('i', 'COMPLIANCE')} AS calendar_sync_status
       FROM compliance_items i LEFT JOIN sites s ON s.id=i.site_id WHERE i.organization_id=$1 AND i.deleted_at IS NULL AND i.current_due_date BETWEEN $2 AND $3 ${itemScope} ${selectedSite('i')}`, params),
@@ -1246,8 +1246,11 @@ export async function generateTemplateItems({
   const { rows } = await db.query(`SELECT * FROM compliance_templates WHERE id=$1 AND organization_id=$2 AND is_active=TRUE AND deleted_at IS NULL`, [templateId, req.user.organization_id]);
   const template = rows[0];
   if (!template) throw Object.assign(new Error('Active template not found'), { statusCode: 404 });
+  const configuredEnd = parseDate(template.end_date);
+  const requestedEnd = parseDate(endDate);
+  const recurrenceEnd = configuredEnd && (!requestedEnd || configuredEnd < requestedEnd) ? configuredEnd : requestedEnd;
   const occurrences = buildOccurrences({
-    frequency: template.frequency, startDate, endDate,
+    frequency: template.frequency, startDate, endDate: recurrenceEnd,
     dueDateRule: template.due_date_rule, eventDate, throughDate,
   });
   const defaults = calendarTemplateDefaults(template);

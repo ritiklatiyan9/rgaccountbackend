@@ -11,7 +11,9 @@ import crypto from 'crypto';
 const STATE_TTL_MS = 10 * 60 * 1000;
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
 
-const stateSecret = () => String(process.env.CALENDAR_TOKEN_ENC_KEY || '');
+// Match the token cipher's whitespace handling so the same key works on a
+// hosted environment and in a local .env file.
+const stateSecret = () => String(process.env.CALENDAR_TOKEN_ENC_KEY || '').trim();
 
 export const signOAuthState = ({ orgId, userId, origin, kind = 'calendar' }) => {
   const payload = Buffer.from(JSON.stringify({
@@ -26,7 +28,11 @@ export const verifyOAuthState = (state) => {
   if (!payload || !sig) return null;
   const expected = crypto.createHmac('sha256', stateSecret()).update(payload).digest('base64url');
   const a = Buffer.from(sig); const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    // Let an already-started, ten-minute flow finish after this normalization.
+    const legacy = Buffer.from(crypto.createHmac('sha256', String(process.env.CALENDAR_TOKEN_ENC_KEY || '')).update(payload).digest('base64url'));
+    if (a.length !== legacy.length || !crypto.timingSafeEqual(a, legacy)) return null;
+  }
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!data.o || !data.e || Date.now() > data.e) return null;
