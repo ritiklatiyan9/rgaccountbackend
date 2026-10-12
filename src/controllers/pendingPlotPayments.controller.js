@@ -14,7 +14,8 @@ export const pendingPlotPayments = asyncHandler(async (req, res) => {
   const { rows: plots } = await pool.query(
     `SELECT p.id, p.plot_no, p.block, p.buyer_name, p.booking_by,
             TO_CHAR(p.booking_date, 'YYYY-MM-DD') AS booking_date,
-            p.sale_price, p.status, p.plot_tag,
+            p.sale_price, p.status, p.plot_tag, p.full_payment_due,
+            TO_CHAR(p.full_payment_due_date, 'YYYY-MM-DD') AS full_payment_due_date,
             COALESCE(NULLIF(BTRIM(plot_buyer.phone), ''), NULLIF(BTRIM(plot_buyer.alt_phone), '')) AS buyer_phone,
             broker_contact.phone AS broker_phone
        FROM plots p
@@ -47,6 +48,20 @@ export const pendingPlotPayments = asyncHandler(async (req, res) => {
   res.json({ ...buildPendingPaymentReport({ plots, installments: schedule.rows, receipts: received.rows,
     ...filters, broker: String(req.query.broker || ''), search: String(req.query.search || ''),
   }), receipt_scope: visibility.creatorId == null ? 'all' : 'creator' });
+});
+
+export const setFullPaymentDue = asyncHandler(async (req, res) => {
+  if (typeof req.body.full_payment_due !== 'boolean') {
+    return res.status(400).json({ message: 'full_payment_due must be true or false.' });
+  }
+  const { rows } = await pool.query(
+    `UPDATE plots SET full_payment_due = $2,
+      full_payment_due_date = CASE WHEN $2 THEN COALESCE(full_payment_due_date, (NOW() AT TIME ZONE 'Asia/Kolkata')::date) ELSE NULL END
+      WHERE id = $1 RETURNING id, full_payment_due, TO_CHAR(full_payment_due_date, 'YYYY-MM-DD') AS full_payment_due_date`,
+    [Number(req.params.id), req.body.full_payment_due]
+  );
+  if (!rows[0]) return res.status(404).json({ message: 'Plot not found.' });
+  res.json({ plot: rows[0] });
 });
 
 /** Creates a reviewed percentage plan in the existing installment tables, so

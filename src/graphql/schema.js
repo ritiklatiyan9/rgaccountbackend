@@ -566,6 +566,7 @@ const PlotType = new GraphQLObjectType({
     discount_rate:       { type: GraphQLFloat },
     plc_charges:         { type: GraphQLFloat },
     installments_enabled: { type: GraphQLBoolean },
+    full_payment_due:    { type: GraphQLBoolean },
     interest_enabled:    { type: GraphQLBoolean },
     interest_rate:       { type: GraphQLFloat },
     interest_type:       { type: GraphQLString },

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import pool from '../src/config/db.js';
-import { pendingPlotPayments, createPercentagePaymentPlan } from '../src/controllers/pendingPlotPayments.controller.js';
+import { pendingPlotPayments, createPercentagePaymentPlan, setFullPaymentDue } from '../src/controllers/pendingPlotPayments.controller.js';
 import { addBookingMonths, buildPercentagePlan, buildPendingPaymentReport, validatePendingFilters } from '../src/services/pendingPlotPayments.service.js';
 
 const plot = { id: 1, plot_no: 'A2', buyer_name: 'Customer A', buyer_phone: '9876543210',
@@ -79,6 +79,22 @@ test('missing and partial schedules expose unscheduled balances without inventin
   assert.equal(partial.needs_plan[0].has_schedule, true);
 });
 
+test('full payment makes the entire remaining balance due once until receipts settle it', () => {
+  const fullPlot = { ...plot, full_payment_due: true, full_payment_due_date: '2026-09-07' };
+  const due = report({ plots: [fullPlot] });
+  assert.equal(due.rows.length, 1);
+  assert.equal(due.rows[0].installment_name, 'Full payment');
+  assert.equal(due.rows[0].required_percent, 100);
+  assert.equal(due.rows[0].pending_amount, 800000);
+  assert.equal(due.summary.pending_today, 800000);
+  assert.equal(due.needs_plan.length, 0);
+  assert.equal(report({ plots: [fullPlot], installments: [] }).summary.pending_today, 800000);
+  assert.equal(report({ plots: [fullPlot], receipts: [{ plot_id: 1, amount: 1000000 }] }).rows.length, 0);
+  assert.equal(report({ plots: [fullPlot], receipts: [{ plot_id: 1, amount: 1000000 }, { plot_id: 1, amount: -100000 }] }).summary.pending_today, 100000);
+  assert.equal(report({ plots: [fullPlot], today: '2026-09-08' }).rows[0].payment_status, 'overdue');
+  assert.equal(report().rows.length, 3);
+});
+
 test('calendar months clamp month ends, respect leap years and cross years', () => {
   assert.equal(addBookingMonths('2026-01-31', 1), '2026-02-28');
   assert.equal(addBookingMonths('2024-01-31', 1), '2024-02-29');
@@ -106,6 +122,21 @@ test('invalid dates and ambiguous cumulative schedules are rejected before writi
 const invoke = (handler, req) => new Promise((resolve, reject) => {
   let status = 200;
   handler(req, { status(code) { status = code; return this; }, json(data) { resolve({ status, data }); } }, reject);
+});
+
+test('full payment setting accepts a boolean and saves its initial due date', async (t) => {
+  const calls = [];
+  t.mock.method(pool, 'query', async (sql, params) => {
+    calls.push({ sql, params });
+    return { rows: [{ id: 1, full_payment_due: params[1] }] };
+  });
+  assert.equal((await invoke(setFullPaymentDue, { params: { id: '1' }, body: { full_payment_due: 'true' } })).status, 400);
+  assert.equal(calls.length, 0);
+  assert.equal((await invoke(setFullPaymentDue, { params: { id: '1' }, body: { full_payment_due: true } })).status, 200);
+  assert.deepEqual(calls[0].params, [1, true]);
+  assert.match(calls[0].sql, /COALESCE\(full_payment_due_date/);
+  assert.equal((await invoke(setFullPaymentDue, { params: { id: '1' }, body: { full_payment_due: false } })).status, 200);
+  assert.deepEqual(calls[1].params, [1, false]);
 });
 
 test('read API scopes receipts to the site, posting rules, today and creator visibility', async (t) => {

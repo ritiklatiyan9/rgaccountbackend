@@ -117,6 +117,20 @@ export function buildPendingPaymentReport({
       broker: String(plot.booking_by || '').trim(), broker_phone: plot.broker_phone || '',
       booking_date: plot.booking_date, total_plot_value: value, payment_received: totalReceived,
     };
+    if (plot.full_payment_due) {
+      const remaining = round(Math.max(value - totalReceived, 0));
+      if (remaining > 0) {
+        const dueDate = plot.full_payment_due_date || today;
+        rows.push({ ...common, installment_id: `full-${id}`,
+          installment_name: 'Full payment', full_payment_due: true,
+          required_percent: 100, required_amount: value,
+          installment_amount: value, installment_received: totalReceived,
+          pending_amount: remaining, due_date: dueDate,
+          payment_status: dueDate < today ? 'overdue' : dueDate === today ? 'due_today' : 'upcoming',
+        });
+      }
+      continue;
+    }
     const scheduled = round(schedule.reduce((sum, row) => sum + Number(row.amount), 0));
     if (value > totalReceived && (schedule.length === 0 || scheduled < value)) {
       needsPlan.push({ ...common, has_schedule: schedule.length > 0,
@@ -143,7 +157,8 @@ export function buildPendingPaymentReport({
     }
   }
   rows.sort((a, b) => a.due_date.localeCompare(b.due_date)
-    || String(a.plot_no).localeCompare(String(b.plot_no), undefined, { numeric: true }) || a.installment_id - b.installment_id);
+    || String(a.plot_no).localeCompare(String(b.plot_no), undefined, { numeric: true })
+    || String(a.installment_id).localeCompare(String(b.installment_id), undefined, { numeric: true }));
   const current = rows.filter((row) => row.due_date <= today);
   const period = rows.filter((row) => row.due_date >= dateFrom && row.due_date <= dateTo);
   const upcoming = period.filter((row) => row.due_date > today);

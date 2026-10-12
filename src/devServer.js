@@ -13,6 +13,7 @@ import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_finan
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { up as migrateImprestCashGuard } from './migrations/195_imprest_cash_funding_guard.js';
 import { up as migrateExistingVoucherGaps } from './migrations/196_existing_voucher_gaps_filled.js';
+import { up as migratePlotFullPaymentDue } from './migrations/201_plot_full_payment_due.js';
 
 // Local previews serve the application without starting production reminder
 // schedulers. They use the same authentication, permissions and database.
@@ -29,6 +30,7 @@ connectDB().then(async () => {
   await migrateImprestCashGuard(pool);
   await migrateImprestApprovalIndexes(pool);
   await migrateExistingVoucherGaps(pool);
+  await migratePlotFullPaymentDue(pool);
   server.listen(port, '127.0.0.1', () => {
     console.log(`Local API ready at http://127.0.0.1:${port}`);
   });

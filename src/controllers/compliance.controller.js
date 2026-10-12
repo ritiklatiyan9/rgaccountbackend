@@ -1,6 +1,7 @@
 import { calendarSyncStatusSql } from '../services/googleCalendarStatus.service.js';
 import crypto from 'crypto';
 import { normalizeOptionalEventTime } from '../services/complianceEventTime.service.js';
+import { monthlyCalendarRule, calendarTemplateDefaults } from '../services/calendarRepeat.service.js';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import permissionModel from '../models/Permission.model.js';
@@ -478,9 +479,30 @@ export const createComplianceItem = asyncHandler(async (req, res) => {
   payload.updated_by = req.user.id;
 
   const checklist = jsonArray(req.body.checklist);
+  const monthlyRule = monthlyCalendarRule(req.body.repeat_monthly, payload.current_due_date, req.body.repeat_until);
+  if (monthlyRule && !siteId) return res.status(400).json({ message: 'Choose a site for a repeating event' });
+  if (monthlyRule && payload.template_id) return res.status(400).json({ message: 'This event already belongs to a template' });
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    if (monthlyRule) {
+      const defaults = { title: payload.title, priority: payload.priority || 'MEDIUM',
+        metadata: { ...payload.metadata, repeat_monthly: true } };
+      const { rows: templates } = await client.query(`INSERT INTO compliance_templates
+        (organization_id,name,category,compliance_type,description,applicable_site_ids,frequency,start_date,end_date,
+         due_date_rule,default_risk,default_reminder_days,required_checklist,calendar_event_defaults,created_by,updated_by)
+        VALUES ($1,$2,$3,$4,$5,$6,'MONTHLY',$7,$8,$9,$10,$11,$12,$13,$14,$14) RETURNING id`,
+      [orgId, `${payload.title.slice(0, 190)} · ${payload.compliance_code}`, payload.category || 'OTHER',
+        payload.compliance_type || 'OTHER', payload.description || null, JSON.stringify([siteId]), monthlyRule.startDate,
+        monthlyRule.endDate, monthlyRule.dueDateRule, payload.risk_level || 'MEDIUM', payload.reminder_days,
+        JSON.stringify(checklist), defaults, req.user.id]);
+      payload.template_id = templates[0].id;
+      payload.frequency = 'MONTHLY';
+      payload.generated_key = `template:${payload.template_id}:site:${siteId}:period:${monthlyRule.startDate}`;
+      payload.metadata = { ...defaults.metadata, calendar_series_id: payload.template_id };
+      defaults.metadata = payload.metadata;
+      await client.query('UPDATE compliance_templates SET calendar_event_defaults=$1 WHERE id=$2 AND organization_id=$3', [defaults, payload.template_id, orgId]);
+    }
     const fields = Object.keys(payload);
     const values = Object.values(payload);
     const { rows } = await client.query(
@@ -514,9 +536,12 @@ export const createComplianceItem = asyncHandler(async (req, res) => {
       [orgId, item.id, item.status, req.user.id, 'Compliance item created']
     );
     await writeComplianceAudit(client, req, { action: 'CREATE', entityType: 'COMPLIANCE', entityId: item.id, siteId, newValue: item });
+    const repeated = monthlyRule ? await generateTemplateItems({ req, templateId: payload.template_id, siteIds: [siteId],
+      startDate: monthlyRule.startDate, endDate: monthlyRule.endDate, throughDate: monthlyRule.throughDate, db: client }) : null;
     await client.query('COMMIT');
     queueCalendarSync(orgId, 'COMPLIANCE', item.id);
-    res.status(201).json({ item });
+    for (const repeatedId of repeated?.itemIds || []) queueCalendarSync(orgId, 'COMPLIANCE', repeatedId);
+    res.status(201).json({ item, ...(repeated ? { repeating: { frequency: 'MONTHLY', generated: repeated.generated + 1, template_id: payload.template_id } } : {}) });
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505') return res.status(409).json({ message: 'Compliance code already exists' });
@@ -1225,6 +1250,8 @@ export async function generateTemplateItems({
     frequency: template.frequency, startDate, endDate,
     dueDateRule: template.due_date_rule, eventDate, throughDate,
   });
+  const defaults = calendarTemplateDefaults(template);
+  const itemIds = [];
   let generated = 0, skipped = 0;
   for (const siteId of siteIds) {
     const accessible = await assertComplianceSiteAccess(req, { status: () => ({ json: () => {} }) }, siteId, { required: true, db });
@@ -1236,18 +1263,19 @@ export async function generateTemplateItems({
           (organization_id,site_id,template_id,authority_id,compliance_code,title,description,
            category,subcategory,compliance_type,state,district,frequency,original_due_date,current_due_date,
            reminder_days,reviewing_manager_id,approving_authority_id,risk_level,priority,approval_required,
-           generated_key,created_by,updated_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$18,$19,$20,$21,$21)
+           generated_key,created_by,updated_by,metadata)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$22,$19,$20,$21,$21,$23)
          ON CONFLICT (organization_id,generated_key) WHERE generated_key IS NOT NULL AND deleted_at IS NULL DO NOTHING
          RETURNING *`,
         [req.user.organization_id, siteId, template.id, template.authority_id, codeFor('CMP'),
-          template.name, template.description, template.category, template.subcategory, template.compliance_type,
+          defaults.title, template.description, template.category, template.subcategory, template.compliance_type,
           template.applicable_state, template.applicable_district, template.frequency, occurrence.dueDate,
           template.default_reminder_days, template.default_reviewer_id, template.default_approver_id,
-          template.default_risk, template.approval_required, generatedKey, req.user.id]
+          template.default_risk, template.approval_required, generatedKey, req.user.id, defaults.priority, defaults.metadata]
       );
       if (!insert.rows[0]) { skipped += 1; continue; }
       generated += 1;
+      itemIds.push(insert.rows[0].id);
       for (let index = 0; index < (template.required_checklist || []).length; index += 1) {
         const row = template.required_checklist[index];
         if (!text(row.title, 300)) continue;
@@ -1261,7 +1289,7 @@ export async function generateTemplateItems({
       }
     }
   }
-  return { generated, skipped, occurrences: occurrences.length };
+  return { generated, skipped, occurrences: occurrences.length, itemIds };
 }
 
 export const applyTemplate = asyncHandler(async (req, res) => {

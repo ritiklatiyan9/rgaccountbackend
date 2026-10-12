@@ -15,7 +15,7 @@ import {
   sendPaymentReminderSms, paymentReminderSmsLog,
 } from '../controllers/installment.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
-import { pendingPlotPayments, createPercentagePaymentPlan } from '../controllers/pendingPlotPayments.controller.js';
+import { pendingPlotPayments, createPercentagePaymentPlan, setFullPaymentDue } from '../controllers/pendingPlotPayments.controller.js';
 import { projectPaymentReport } from '../controllers/projectPaymentReport.controller.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
@@ -80,6 +80,7 @@ router.delete('/payments/:id', requireRole('admin', 'sub_admin'), requirePermiss
 router.get('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, plotReadCache, listInstallments);
 router.post('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, createInstallments);
 router.put('/:id/installments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, replaceInstallments);
+router.put('/:id/full-payment', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, setFullPaymentDue);
 router.post('/:id/payment-plan', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), accessByParamPlot, bustPlotCache, createPercentagePaymentPlan);
 router.put('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamInstallment, bustPlotCache, updateInstallment);
 router.delete('/installments/:instId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), accessByParamInstallment, bustPlotCache, deleteInstallment);

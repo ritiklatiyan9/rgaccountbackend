@@ -1,5 +1,8 @@
 import pool from '../config/db.js';
 import { buildOccurrences } from './complianceEngine.service.js';
+import { calendarTemplateDefaults } from './calendarRepeat.service.js';
+import { queueCalendarSync } from './googleCalendarSync.service.js';
+import { queueReminderReconciliation } from './eventReminder.service.js';
 import { mailerEnabled, sendComplianceReminderEmail } from '../utils/mailer.js';
 import { enqueueSms, isSmsQueueConfigured } from '../utils/sqs.js';
 import { isWhatsAppConfigured, sendWATemplate } from '../utils/notify.js';
@@ -9,7 +12,7 @@ let timer = null;
 
 const codeFor = () => `CMP-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(16).slice(2, 6).toUpperCase()}`;
 
-async function generateRecurringItems(client) {
+export async function generateRecurringItems(client, pendingSync = []) {
   const { rows: templates } = await client.query(
     `SELECT t.*
        FROM compliance_templates t
@@ -20,6 +23,7 @@ async function generateRecurringItems(client) {
   let generated = 0;
   const through = new Date(Date.now() + 366 * 86400000).toISOString().slice(0, 10);
   for (const template of templates) {
+    const defaults = calendarTemplateDefaults(template);
     let occurrences;
     try {
       occurrences = buildOccurrences({
@@ -47,21 +51,22 @@ async function generateRecurringItems(client) {
             (organization_id,site_id,template_id,authority_id,compliance_code,title,description,
              category,subcategory,compliance_type,state,district,frequency,original_due_date,current_due_date,
              reminder_days,reviewing_manager_id,approving_authority_id,risk_level,priority,approval_required,
-             generated_key,created_by,updated_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$18,$19,$20,$21,$21)
+             generated_key,created_by,updated_by,metadata)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$22,$19,$20,$21,$21,$23)
            ON CONFLICT (organization_id,generated_key)
              WHERE generated_key IS NOT NULL AND deleted_at IS NULL
            DO NOTHING RETURNING id`,
           [template.organization_id, siteId, template.id, template.authority_id, codeFor(),
-            template.name, template.description, template.category, template.subcategory,
+            defaults.title, template.description, template.category, template.subcategory,
             template.compliance_type, template.applicable_state, template.applicable_district,
             template.frequency, occurrence.dueDate, template.default_reminder_days,
             template.default_reviewer_id, template.default_approver_id, template.default_risk,
-            template.approval_required, generatedKey, template.updated_by || template.created_by]
+            template.approval_required, generatedKey, template.updated_by || template.created_by, defaults.priority, defaults.metadata]
         );
         const itemId = rows[0]?.id;
         if (!itemId) continue;
         generated += 1;
+        pendingSync.push({ organizationId: template.organization_id, itemId });
         for (let index = 0; index < (template.required_checklist || []).length; index += 1) {
           const row = template.required_checklist[index];
           if (!String(row?.title || '').trim()) continue;
@@ -355,10 +360,11 @@ async function processNotificationQueue(client, max = 300) {
 
 export async function runComplianceScheduler() {
   const client = await pool.connect();
+  const pendingSync = [];
   try {
     await client.query('BEGIN');
     await client.query(`SELECT pg_advisory_xact_lock(hashtext('compliance_scheduler_hourly'))`);
-    const generated = await generateRecurringItems(client);
+    const generated = await generateRecurringItems(client, pendingSync);
     const overdue = await refreshOverdueAndRisk(client);
     const events = await dueNotifications(client);
     let queued = 0;
@@ -369,6 +375,10 @@ export async function runComplianceScheduler() {
       }
     }
     await client.query('COMMIT');
+    for (const { organizationId, itemId } of pendingSync) {
+      queueCalendarSync(organizationId, 'COMPLIANCE', itemId);
+      queueReminderReconciliation(organizationId, 'COMPLIANCE', itemId);
+    }
     const { delivered, retried } = await processNotificationQueue(client);
     if (generated || overdue || queued || delivered) {
       console.log(`[compliance] generated=${generated} overdue=${overdue} queued=${queued} delivered=${delivered}`);
