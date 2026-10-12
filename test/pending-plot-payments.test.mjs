@@ -43,6 +43,78 @@ test('advance receipts, fully paid plots and refunds update the projection witho
   assert.equal(refunded.summary.pending_today, 100000);
 });
 
+test('installment details retain paid milestones and plot status without adding them to collection totals', () => {
+  const result = report({ plots: [{ ...plot, approval_status: 'pending' }], receipts: [{ plot_id: 1, amount: 300000 }] });
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.installments.length, 3);
+  assert.equal(result.installments[0].payment_status, 'paid');
+  assert.equal(result.installments[0].pending_amount, 0);
+  assert.equal(result.installments[0].installment_received, 250000);
+  assert.equal(result.installments[2].payment_status, 'upcoming');
+  assert.ok(result.installments.every((row) => row.status === 'BOOKED' && row.approval_status === 'pending'));
+  assert.equal(result.summary.due_by_date, 700000);
+});
+
+test('paid dates follow dated plot receipts through complete and partial installment targets', () => {
+  const result = report({ receipts: [
+    { plot_id: 1, amount: 200000, receipt_date: '2026-06-10' },
+    { plot_id: 1, amount: 100000, receipt_date: '2026-07-10' },
+    { plot_id: 1, amount: 250000, receipt_date: '2026-08-10' },
+  ] });
+  assert.deepEqual(result.installments.map((row) => row.paid_date), ['2026-07-10', '2026-08-10', '2026-08-10']);
+  assert.deepEqual(result.installments.map((row) => row.installment_received), [250000, 250000, 50000]);
+  assert.equal(result.summary.due_by_date, 450000);
+  assert.ok(report().installments.every((row) => row.paid_date === null));
+});
+
+test('linked payments keep their dates and refunds never become installment paid dates', () => {
+  const receipts = [
+    { plot_id: 1, amount: 350000, receipt_date: '2026-07-01' },
+    { plot_id: 1, installment_id: 2, amount: 100000, receipt_date: '2026-08-01' },
+  ];
+  const result = report({ receipts });
+  assert.deepEqual(result.installments.map((row) => row.paid_date), ['2026-07-01', '2026-08-01', null]);
+  const reversed = report({ receipts: [...receipts,
+    { plot_id: 1, installment_id: 2, amount: -100000, receipt_date: '2026-09-01' },
+  ] });
+  assert.deepEqual(reversed.installments.map((row) => row.paid_date), ['2026-07-01', '2026-07-01', null]);
+  const refunded = report({ receipts: [
+    { plot_id: 1, amount: 200000, receipt_date: '2026-06-10' },
+    { plot_id: 1, amount: 100000, receipt_date: '2026-07-10' },
+    { plot_id: 1, amount: -100000, receipt_date: '2026-08-10' },
+  ] });
+  assert.deepEqual(refunded.installments.map((row) => row.paid_date), ['2026-06-10', null, null]);
+  const fullyReversed = report({ receipts: [
+    { plot_id: 1, amount: 300000, receipt_date: '2026-06-10' },
+    { plot_id: 1, amount: -300000, receipt_date: '2026-07-10' },
+  ] });
+  assert.ok(fullyReversed.installments.every((row) => row.paid_date === null));
+});
+
+test('later overpayments do not overwrite installment paid dates and full-payment rows use posted receipts', () => {
+  const result = report({ receipts: [
+    { plot_id: 1, amount: 600000, receipt_date: '2026-06-10' },
+    { plot_id: 1, amount: 500000, receipt_date: '2026-07-10' },
+    { plot_id: 1, amount: 100000, receipt_date: '2026-08-10' },
+  ] });
+  assert.deepEqual(result.installments.map((row) => row.paid_date), ['2026-06-10', '2026-06-10', '2026-07-10']);
+  const full = report({ plots: [{ ...plot, full_payment_due: true }], receipts: [
+    { plot_id: 1, amount: 200000, receipt_date: '2026-06-10' },
+    { plot_id: 1, installment_id: 2, amount: 100000, receipt_date: '2026-07-10' },
+  ] });
+  assert.equal(full.rows[0].paid_date, '2026-07-10');
+  assert.equal(full.rows[0].pending_amount, 700000);
+});
+
+test('Company plots with an explicit payment schedule are included while bare company inventory is excluded', () => {
+  const company = { ...plot, status: 'COMPANY' };
+  const result = report({ plots: [company, { ...company, id: 2 }], receipts: [] });
+  assert.equal(result.summary.pending_today, 500000);
+  assert.ok(result.rows.every((row) => row.status === 'COMPANY' && row.plot_id === 1));
+  assert.equal(result.needs_plan.length, 0);
+  assert.equal(report({ plots: [company], installments: [] }).needs_plan.length, 0);
+});
+
 test('legacy direct payments remain assigned and are not counted twice with plot receipts', () => {
   const result = report({ receipts: [{ plot_id: 1, amount: 200000 }, { plot_id: 1, installment_id: 2, amount: 100000 }] });
   assert.equal(result.rows[0].payment_received, 300000);
@@ -156,12 +228,16 @@ test('read API scopes receipts to the site, posting rules, today and creator vis
   assert.equal(receipts.params[1], 7);
   assert.match(receipts.sql, /date BETWEEN DATE '1900-01-01' AND \$3::date/);
   assert.match(receipts.sql, /payment_date BETWEEN DATE '1900-01-01' AND \$3::date/);
+  assert.match(receipts.sql, /date AS receipt_date/);
+  assert.match(receipts.sql, /payment_date AS receipt_date/);
+  assert.match(receipts.sql, /GROUP BY plot_id, installment_id, receipt_date/);
   assert.equal((receipts.sql.match(/financial_transaction_posts/g) || []).length, 2);
   assert.equal(response.data.receipt_scope, 'creator');
   assert.equal(response.data.rows[0].buyer_phone, '9876543210');
   assert.equal(response.data.rows[0].broker_phone, '9123456780');
   assert.match(calls[0].sql, /PLOT_BUYER_MEMBER_JOIN|buyer_link/);
   assert.match(calls[0].sql, /COUNT\(\*\) = 1/);
+  assert.match(calls[0].sql, /p\.status, p\.approval_status/);
   assert.ok(calls.every(({ sql }) => !/\b(?:INSERT|UPDATE|DELETE)\b/.test(sql)));
 });
 

@@ -14,7 +14,7 @@ export const pendingPlotPayments = asyncHandler(async (req, res) => {
   const { rows: plots } = await pool.query(
     `SELECT p.id, p.plot_no, p.block, p.buyer_name, p.booking_by,
             TO_CHAR(p.booking_date, 'YYYY-MM-DD') AS booking_date,
-            p.sale_price, p.status, p.plot_tag, p.full_payment_due,
+            p.sale_price, p.status, p.approval_status, p.plot_tag, p.full_payment_due,
             TO_CHAR(p.full_payment_due_date, 'YYYY-MM-DD') AS full_payment_due_date,
             COALESCE(NULLIF(BTRIM(plot_buyer.phone), ''), NULLIF(BTRIM(plot_buyer.alt_phone), '')) AS buyer_phone,
             broker_contact.phone AS broker_phone
@@ -33,17 +33,17 @@ export const pendingPlotPayments = asyncHandler(async (req, res) => {
   const [schedule, received] = ids.length ? await Promise.all([
     pool.query(`SELECT id, plot_id, installment_name, amount, TO_CHAR(due_date, 'YYYY-MM-DD') AS due_date, sort_order
                   FROM plot_installments WHERE plot_id = ANY($1::int[]) ORDER BY plot_id, sort_order, due_date, id`, [ids]),
-    pool.query(`SELECT plot_id, installment_id, SUM(amount) AS amount FROM (
-                  SELECT plot_id, NULL::int AS installment_id, amount FROM plot_payments
+    pool.query(`SELECT plot_id, installment_id, TO_CHAR(receipt_date, 'YYYY-MM-DD') AS receipt_date, SUM(amount) AS amount FROM (
+                  SELECT plot_id, NULL::int AS installment_id, date AS receipt_date, amount FROM plot_payments
                    WHERE plot_id = ANY($1::int[]) AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
                      AND date BETWEEN DATE '1900-01-01' AND $3::date
                      AND financial_transaction_posts('credit', status, payment_type, cheque_status)
                   UNION ALL
-                  SELECT plot_id, installment_id, amount FROM plot_installment_payments
+                  SELECT plot_id, installment_id, payment_date AS receipt_date, amount FROM plot_installment_payments
                    WHERE plot_id = ANY($1::int[]) AND ($2::text IS NULL OR created_by = ANY(string_to_array($2::text, ',')::int[]))
                      AND payment_date BETWEEN DATE '1900-01-01' AND $3::date
                      AND financial_transaction_posts('credit', status, payment_mode, cheque_status)
-                ) posted GROUP BY plot_id, installment_id`, [ids, visibility.creatorId, today]),
+                ) posted GROUP BY plot_id, installment_id, receipt_date ORDER BY receipt_date`, [ids, visibility.creatorId, today]),
   ]) : [{ rows: [] }, { rows: [] }];
   res.json({ ...buildPendingPaymentReport({ plots, installments: schedule.rows, receipts: received.rows,
     ...filters, broker: String(req.query.broker || ''), search: String(req.query.search || ''),

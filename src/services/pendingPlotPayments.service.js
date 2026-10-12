@@ -78,6 +78,65 @@ const groupByPlot = (rows) => {
   return grouped;
 };
 
+// Match the final allocation to dated receipt amounts. Refunds offset the
+// newest amounts within their receipt bucket; they never supply a paid date.
+// A later overpayment also cannot change the date of an already funded target.
+const receiptDateCursor = (receipts) => {
+  const lots = [];
+  let debt = 0;
+  const dated = receipts.map((receipt) => ({ amount: Math.round(round(receipt.amount) * 100),
+    date: validPlanDate(receipt.receipt_date) ? receipt.receipt_date : '' }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  for (const receipt of dated) {
+    if (receipt.amount > 0) {
+      const offset = Math.min(debt, receipt.amount);
+      debt -= offset;
+      if (receipt.amount > offset) lots.push({ ...receipt, amount: receipt.amount - offset });
+    } else {
+      let refund = -receipt.amount;
+      while (refund > 0 && lots.length) {
+        const last = lots.at(-1);
+        const offset = Math.min(last.amount, refund);
+        last.amount -= offset;
+        refund -= offset;
+        if (last.amount === 0) lots.pop();
+      }
+      debt += refund;
+    }
+  }
+  let index = 0;
+  return (amount) => {
+    let remaining = Math.round(round(amount) * 100);
+    let date = null;
+    while (remaining > 0 && index < lots.length) {
+      const lot = lots[index];
+      const applied = Math.min(lot.amount, remaining);
+      if (applied > 0) date = lot.date || null;
+      lot.amount -= applied;
+      remaining -= applied;
+      if (lot.amount === 0) index += 1;
+    }
+    return date;
+  };
+};
+
+const installmentPaidDates = (allocated, receipts) => {
+  const genericDate = receiptDateCursor(receipts.filter((row) => row.installment_id == null));
+  const directReceipts = new Map();
+  for (const receipt of receipts) {
+    if (receipt.installment_id == null) continue;
+    const id = String(receipt.installment_id);
+    if (!directReceipts.has(id)) directReceipts.set(id, []);
+    directReceipts.get(id).push(receipt);
+  }
+  return new Map(allocated.map((installment) => {
+    const id = String(installment.id);
+    const directDate = receiptDateCursor(directReceipts.get(id) || [])(installment.direct_paid);
+    const waterfallDate = genericDate(installment.waterfall_paid);
+    return [id, [directDate, waterfallDate].filter(Boolean).sort().at(-1) || null];
+  }));
+};
+
 /** Read-only projection using receipts already posted as of today. Each row is
  * one installment's unpaid portion, so summing a period cannot repeat arrears. */
 export function buildPendingPaymentReport({
@@ -86,7 +145,8 @@ export function buildPendingPaymentReport({
   validatePendingFilters({ today, dateFrom, dateTo, asOf });
   const instByPlot = groupByPlot(installments);
   const payByPlot = groupByPlot(receipts);
-  const active = plots.filter((plot) => !['COMPANY', 'AVAILABLE', 'CANCEL', 'CANCELLED', 'TRANSFERRED'].includes(String(plot.status || '').toUpperCase())
+  const active = plots.filter((plot) => !['AVAILABLE', 'CANCEL', 'CANCELLED', 'TRANSFERRED'].includes(String(plot.status || '').toUpperCase())
+    && (String(plot.status || '').toUpperCase() !== 'COMPANY' || plot.full_payment_due || instByPlot.has(String(plot.id)))
     && String(plot.plot_tag || '').trim().toUpperCase() !== 'OLD');
   const brokers = [...new Set(active.map((plot) => String(plot.booking_by || '').trim()).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
@@ -95,15 +155,17 @@ export function buildPendingPaymentReport({
     ? !String(plot.booking_by || '').trim() : String(plot.booking_by || '').trim() === broker))
     && (!term || [plot.plot_no, plot.block, plot.buyer_name, plot.booking_by].some((value) => String(value || '').toLowerCase().includes(term))));
   const rows = [];
+  const allInstallments = [];
   const needsPlan = [];
   for (const plot of scoped) {
     const id = String(plot.id);
+    const plotReceipts = payByPlot.get(id) || [];
     const schedule = [...(instByPlot.get(id) || [])].sort((a, b) => Number(a.sort_order) - Number(b.sort_order)
       || a.due_date.localeCompare(b.due_date) || Number(a.id) - Number(b.id));
     let genericPaid = 0;
     let totalReceived = 0;
     const directPaidByInstallment = {};
-    for (const receipt of payByPlot.get(id) || []) {
+    for (const receipt of plotReceipts) {
       const amount = round(receipt.amount);
       totalReceived += amount;
       if (receipt.installment_id == null) genericPaid += amount;
@@ -112,7 +174,7 @@ export function buildPendingPaymentReport({
     totalReceived = round(totalReceived);
     const value = round(plot.sale_price);
     const common = {
-      plot_id: plot.id, plot_no: plot.plot_no, block: plot.block,
+      plot_id: plot.id, plot_no: plot.plot_no, block: plot.block, status: plot.status, approval_status: plot.approval_status,
       customer_name: plot.buyer_name || '', buyer_phone: plot.buyer_phone || '',
       broker: String(plot.booking_by || '').trim(), broker_phone: plot.broker_phone || '',
       booking_date: plot.booking_date, total_plot_value: value, payment_received: totalReceived,
@@ -121,13 +183,17 @@ export function buildPendingPaymentReport({
       const remaining = round(Math.max(value - totalReceived, 0));
       if (remaining > 0) {
         const dueDate = plot.full_payment_due_date || today;
-        rows.push({ ...common, installment_id: `full-${id}`,
+        const paidDate = installmentPaidDates([{ id: `full-${id}`, direct_paid: 0, waterfall_paid: Math.min(Math.max(totalReceived, 0), value) }],
+          plotReceipts.map((receipt) => ({ ...receipt, installment_id: null }))).get(`full-${id}`) || null;
+        const row = { ...common, installment_id: `full-${id}`,
           installment_name: 'Full payment', full_payment_due: true,
           required_percent: 100, required_amount: value,
           installment_amount: value, installment_received: totalReceived,
-          pending_amount: remaining, due_date: dueDate,
+          pending_amount: remaining, due_date: dueDate, paid_date: paidDate,
           payment_status: dueDate < today ? 'overdue' : dueDate === today ? 'due_today' : 'upcoming',
-        });
+        };
+        rows.push(row);
+        allInstallments.push(row);
       }
       continue;
     }
@@ -141,19 +207,21 @@ export function buildPendingPaymentReport({
     const allocated = allocateInstallmentPayments(schedule, {
       genericPaid, directPaidByInstallment, asOf: `${today}T00:00:00Z`,
     }).installments;
+    const paidDates = installmentPaidDates(allocated, plotReceipts);
     let cumulative = 0;
     for (const installment of allocated) {
       cumulative = round(cumulative + Number(installment.amount));
       const remaining = round(installment.remaining);
-      if (remaining <= 0) continue;
-      rows.push({ ...common, installment_id: installment.id,
+      const row = { ...common, installment_id: installment.id, sort_order: installment.sort_order,
         installment_name: installment.installment_name,
         required_percent: value > 0 ? round(cumulative / value * 100) : null,
         required_amount: cumulative, installment_amount: round(installment.amount),
         installment_received: round(installment.paid), pending_amount: remaining,
-        due_date: installment.due_date,
-        payment_status: installment.due_date < today ? 'overdue' : installment.due_date === today ? 'due_today' : 'upcoming',
-      });
+        due_date: installment.due_date, paid_date: paidDates.get(String(installment.id)) || null,
+        payment_status: remaining <= 0 ? 'paid' : installment.due_date < today ? 'overdue' : installment.due_date === today ? 'due_today' : 'upcoming',
+      };
+      allInstallments.push(row);
+      if (remaining > 0) rows.push(row);
     }
   }
   rows.sort((a, b) => a.due_date.localeCompare(b.due_date)
@@ -166,7 +234,7 @@ export function buildPendingPaymentReport({
   const sum = (list) => round(list.reduce((amount, row) => amount + row.pending_amount, 0));
   return {
     today, date_from: dateFrom, date_to: dateTo, as_of: asOf, brokers,
-    rows, needs_plan: needsPlan,
+    rows, installments: allInstallments, needs_plan: needsPlan,
     summary: {
       pending_today: sum(current), pending_plot_count: new Set(current.map((row) => row.plot_id)).size,
       expected_in_period: sum(period), upcoming_in_period: sum(upcoming),
