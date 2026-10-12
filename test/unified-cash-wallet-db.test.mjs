@@ -5,11 +5,12 @@ import { up as walletUp } from '../src/migrations/185_cash_wallets.js';
 import { up as detailsUp } from '../src/migrations/186_wallet_receipt_details.js';
 import { up as vaultUp } from '../src/migrations/199_loyalty_vault.js';
 import { up } from '../src/migrations/203_unified_cash_wallet.js';
+import { up as indexUp } from '../src/migrations/204_cash_wallet_read_indexes.js';
 import { postingPolicySql } from '../src/migrations/171_cheque_clearance_before_approval.js';
 import { createWalletTransfer,resolveWalletTransfer } from '../src/services/wallet.service.js';
 import { createVaultTransfer,resolveVaultTransfer } from '../src/services/loyaltyVault.service.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../src/services/loyaltyVaultContext.service.js';
-import { vaultTransactionsCte } from '../src/services/loyaltyVaultTransactions.service.js';
+import { vaultTransactionsCte, vaultPendingTransactionsCte } from '../src/services/loyaltyVaultTransactions.service.js';
 import pool from '../src/config/db.js';
 import * as controller from '../src/controllers/loyaltyVault.controller.js';
 
@@ -59,6 +60,15 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
     const beforeLegacy=JSON.stringify((await query('SELECT * FROM wallet_entries ORDER BY id')).rows);
     const beforeSettings=(await query('SELECT tracking_started_at FROM wallet_settings')).rows[0].tracking_started_at;
     await up(db);
+    await t.test('read indexes are repeatable and do not change financial records or balances', async () => {
+      const funds = JSON.stringify((await query('SELECT * FROM loyalty_vault_accounts ORDER BY holder_key')).rows);
+      const history = await count();
+      await indexUp(db); await indexUp(db);
+      assert.equal(JSON.stringify((await query('SELECT * FROM loyalty_vault_accounts ORDER BY holder_key')).rows), funds);
+      assert.equal(await count(), history);
+      assert.equal(JSON.stringify((await query('SELECT * FROM cash_flow_entries ORDER BY id')).rows), beforeSource);
+      assert.equal((await query("SELECT count(*)::int AS n FROM pg_indexes WHERE indexname='cash_wallet_recent_sources'")).rows[0].n, 1);
+    });
     await t.test('consolidation deduplicates overlap, reverses bank custody, imports transfers and reserves once',async()=>{
       assert.deepEqual(await balance(1),{balance:'1100.00',reserved_balance:'50.00'});
       assert.deepEqual(await balance(2),{balance:'100.00',reserved_balance:'0.00'});
@@ -121,6 +131,25 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
       const row=(await query(`${vaultTransactionsCte} SELECT credit::text,debit::text FROM assigned_transactions WHERE cash_flow_entry_id=$1`,[split])).rows[0];assert.equal(row.credit,'12');assert.equal(row.debit,'0');
       const entries=await count();await entry({credit:100,is_imprest_internal:true});await entry({credit:100,entry_transfer_id:randomUUID()});await entry({source_module:'plot_payments_person',source_id:10});assert.equal(await count(),entries);
       const old=(await query('SELECT count(*)::int AS n FROM wallet_entries')).rows[0].n;await entry({credit:2});assert.equal((await query('SELECT count(*)::int AS n FROM wallet_entries')).rows[0].n,old);
+    });
+    await t.test('the lean pending read matches transaction history for receipts, debits, refunds and split cash', async () => {
+      await query('BEGIN');
+      try {
+        const incoming = await entry({ credit: 5, debit: 0, status: 'pending' });
+        const outgoing = await entry({ credit: 0, debit: 20, status: 'pending' });
+        const refund = await entry({ credit: -7, debit: 0, status: 'pending' });
+        await query("INSERT INTO farmer_payments(id,site_id,created_by,status,payment_mode,cash_amount) VALUES(93000,10,1,'pending','SPLIT',12)");
+        const split = await entry({ source_module: 'farmer_payments', source_id: 93000, credit: 50, debit: 0, status: 'pending' });
+        await query("INSERT INTO expenses(id,site_id,created_by,status,payment_mode) VALUES(94000,10,1,'pending','CASH')");
+        const olderMirror = await entry({ source_module: 'expenses', source_id: 94000, credit: 0, debit: 3, status: 'pending', created_at: '2020-01-01' });
+        const totals = async cte => (await query(`${cte} SELECT holder_type,holder_id,sum(unposted_credit)::text AS credit,sum(unposted_debit)::text AS debit,count(*)::int AS n
+          FROM assigned_transactions WHERE cash_flow_entry_id=ANY($1::int[]) AND status IN ('pending_clearance','pending_approval') GROUP BY holder_type,holder_id ORDER BY holder_type,holder_id`, [[incoming,outgoing,refund,split,olderMirror]])).rows;
+        const expected = await totals(vaultTransactionsCte);
+        assert.deepEqual(await totals(vaultPendingTransactionsCte), expected);
+        assert.equal(Number(expected[0].credit), 0);
+        assert.equal(Number(expected[0].debit), 42);
+        assert.equal(expected[0].n, 4);
+      } finally { await query('ROLLBACK'); }
     });
     await t.test('new transfer reservation, cancel/reject, insufficient acceptance and immutable history remain enforced',async()=>{
       const sent=await createVaultTransfer({id:1},request('10'),db);

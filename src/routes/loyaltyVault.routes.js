@@ -4,10 +4,18 @@ import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { summary,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer,userDetail,assignedTransactions } from '../controllers/loyaltyVault.controller.js';
 const router=Router();
+let ready = false;
+let readiness = null;
+function walletReady() {
+  if (ready) return Promise.resolve(true);
+  if (!readiness) readiness = pool.query("SELECT to_jsonb(s)->>'consolidated_at' AS consolidated_at FROM loyalty_vault_settings s LIMIT 1")
+    .then(({ rows }) => { ready = !!rows[0]?.consolidated_at; return ready; })
+    .finally(() => { readiness = null; });
+  return readiness;
+}
 router.use(authMiddleware);
 router.use(asyncHandler(async(req,res,next)=>{
-  const {rows}=await pool.query("SELECT to_jsonb(s)->>'consolidated_at' AS consolidated_at FROM loyalty_vault_settings s LIMIT 1");
-  if(!rows[0]?.consolidated_at) return res.status(503).json({message:'Cash Wallet setup is pending. Run migrate:unified-cash-wallet.',code:'WALLET_NOT_READY'});
+  if(!await walletReady()) return res.status(503).json({message:'Cash Wallet setup is pending. Run migrate:unified-cash-wallet.',code:'WALLET_NOT_READY'});
   next();
 }));
 router.get('/',summary);

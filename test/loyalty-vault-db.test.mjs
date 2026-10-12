@@ -214,7 +214,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
       assert.equal((await query('SELECT credit::text,debit::text FROM cash_flow_entries WHERE id=$1',[cashId])).rows[0].credit,'7');
     });
     await t.test('pending original payments are visible without funding custody, then clear exactly once',async()=>{
-      const originalQuery=pool.query;pool.query=query;
+      const originalQuery=pool.query,originalConnect=pool.connect;pool.query=query;pool.connect=db.connect;
       const invoke=(handler,extra={})=>new Promise((resolve,reject)=>handler({user:admin,query:{},params:{},...extra},
         {set(){return this;},json(body){resolve(body);}},reject));
       try {
@@ -269,7 +269,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         await query("UPDATE plot_payments SET cheque_status='BOUNCED' WHERE id=5001");
         assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,status:'bounced'}})).total,1);
         assert.equal((await amount('user:7')).balance,'0.00');
-      } finally {pool.query=originalQuery;}
+      } finally {pool.query=originalQuery;pool.connect=originalConnect;}
     });
   }finally{await pg.close();}
 });

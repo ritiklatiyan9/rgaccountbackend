@@ -33,3 +33,23 @@ Canonical endpoints are `GET /wallet`, `/holders`, `/users/:id`, `/transactions`
 Native payment requests accept `cash_deposit_holder_type` (`user` or `member`) and `cash_deposit_holder_id`, or multipart `X-Cash-Deposit-Holder-Type` and `X-Cash-Deposit-Holder-ID`. Former loyalty field/header names remain accepted. The authenticated writer supplies the assignment audit actor; client actor IDs are discarded. Saved edit proposals normalize the same aliases when approval applies them.
 
 Run `npm run test:unified-cash-wallet` for isolated PGlite consolidation and invariant tests. The historical migration and transfer regression suites remain available as `npm run test:loyalty-vault` and `PGLITE_MODULE=@electric-sql/pglite npm run test:wallets`. These tests do not connect to the configured application database. Build the frontend before rollout.
+
+## Connection timeouts
+
+Wallet source reads materialize JSON and posting stages once, using native creator/date columns to filter before serializing historical rows. Concurrent summary and holder requests share only an in-flight pending-total read for the same organization and visibility. Completed totals are never cached.
+
+Expensive wallet reads run in a read-only transaction with a local database statement timeout (`WALLET_READ_TIMEOUT_MS`, default 8000 ms, maximum 30000 ms). Timeouts roll back and release the connection; a failed rollback discards it. This does not change financial writes or migration timeouts and works with Neon's transaction pooler.
+
+Database exhaustion returns HTTP 503 with `DATABASE_UNAVAILABLE` and `Retry-After`, including during authentication. JWT rejection and session revocation continue to return 401. The frontend preserves stored credentials when token refresh fails because of a database/network outage; it clears them only when the refresh endpoint explicitly rejects the session.
+
+After deploying this fix, restart the API process to clear old requests. For an already stalled process, cancelling only the known read-only wallet CTE queries releases their connections without changing balances or financial records. The fix requires a backend deployment; no wallet migration needs to be reapplied.
+
+## Indexed wallet reads
+
+Migration `204_cash_wallet_read_indexes` installs indexes for recent source IDs, project history and transfer inbox/holder filters, and refreshes financial table statistics once. It does not alter financial records, balances or approvals; it is included in server startup and available as `npm run migrate:wallet-read-indexes`.
+
+Transaction reads discover eligible wallet IDs from indexed assignments, existing tracking and the consolidation cutoff before loading source rows. Materialized candidate cash rows and parameterized source primary-key lookups prevent the planner from joining complete payment tables first. Pending totals skip posted receipts, approved payments and rejected records before serializing source metadata, while retaining the existing approval rules, refund signs and farmer split cash amounts.
+
+At most two expensive wallet reads run concurrently by default (`WALLET_READ_CONCURRENCY`, maximum 3), leaving shared pool capacity for authentication and other modules. The admission queue is bounded and times out after five seconds. Statement timeouts and rollback cleanup still bound each admitted read. Authentication proof is reused only within the authenticated request; transfer writes revalidate their actor in the transaction. Schema readiness is cached after successful setup, never as an authorization decision.
+
+The main page initially requests users only (`/wallet/holders?include_members=false`); known clients load when opening transfers or history filters. The header and page inbox share the same in-flight request and one visible-page poller, polling once per minute. Completed identical reads may be reused for five seconds, scoped to the signed-in user and session. Successful mutations and manual refresh invalidate cached reads, including responses that were started before the mutation. Failed reads remain retryable. Private responses are not reused across accounts or filters.

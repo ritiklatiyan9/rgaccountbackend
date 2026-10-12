@@ -18,7 +18,7 @@ export const createAuthStateLoader = (db) => {
     const pending = (async () => {
       try {
         const result = await db.query(
-        `SELECT u.id, u.token_version, u.is_active, u.organization_id,
+        `SELECT u.id, u.name, u.role, u.token_version, u.is_active, u.organization_id,
                 s.id AS session_id, s.logout_time AS session_logout_time
            FROM users u
            LEFT JOIN user_sessions s
@@ -40,12 +40,18 @@ export const createAuthStateLoader = (db) => {
 
 const loadAuthState = createAuthStateLoader(pool);
 
-const authMiddleware = async (req, res, next) => {
+export const createAuthMiddleware = ({ verify = verifyToken, loadState = loadAuthState } = {}) => async (req, res, next) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ message: 'No token provided' });
 
+  let decoded;
   try {
-    const decoded = verifyToken(token);
+    decoded = verify(token);
+  } catch {
+    return res.status(401).json({ message: 'Invalid or expired token' });
+  }
+
+  try {
     const sessionIdHeader = req.header('X-Session-ID');
     let sessionId = null;
     if (sessionIdHeader && decoded.role !== 'super_admin') {
@@ -55,7 +61,7 @@ const authMiddleware = async (req, res, next) => {
       }
     }
 
-    const dbUser = await loadAuthState(decoded.id, sessionId);
+    const dbUser = await loadState(decoded.id, sessionId);
     if (!dbUser || !dbUser.is_active) {
       return res.status(401).json({ message: 'Session expired. Please login again.' });
     }
@@ -80,10 +86,13 @@ const authMiddleware = async (req, res, next) => {
       // reuse a permission row already loaded by route middleware.
       permissionsByModule: new Map(),
     };
+    // Request-scoped DB proof. Wallet reads can reuse the active user/role
+    // check; transfer writes still revalidate their actor inside the transaction.
+    req.authenticatedUser = dbUser;
     next();
   } catch (err) {
-    res.status(401).json({ message: 'Invalid or expired token' });
+    next(err);
   }
 };
 
-export default authMiddleware;
+export default createAuthMiddleware();

@@ -1,28 +1,62 @@
 import { LOYALTY_VAULT_SOURCE_TABLES } from './loyaltyVaultContext.service.js';
 import { isVaultAdmin } from './loyaltyVault.service.js';
+import { walletReadQuery } from './walletRead.service.js';
 
 // Read canonical cash transactions, including pending approval. The legacy
 // migration-only mode is retained for archived migration verification.
-const sources = [...LOYALTY_VAULT_SOURCE_TABLES].map(table => {
+// OFFSET 0 preserves parameterized primary-key lookups. Without this fence
+// PostgreSQL joined full payment tables before filtering wallet candidate IDs.
+const sourceSql = (pendingOnly = false) => [...LOYALTY_VAULT_SOURCE_TABLES].map(table => {
   const direct = table === 'cash_flow_entries';
   return `SELECT c.id AS cash_flow_entry_id,'${table}'::text AS source_table,t.id AS source_id,
     selected.holder_type,selected.holder_id,
     COALESCE(c.site_id,loyalty_vault_source_site('${table}',to_jsonb(t))) AS site_id,
     to_jsonb(t) AS source,to_jsonb(c) AS cash
-    FROM ${table} t ${direct ? 'JOIN cash_flow_entries c ON c.id=t.id' : `JOIN cash_flow_entries c ON c.source_module='${table}' AND c.source_id=t.id`}
+    ${direct ? 'FROM wallet_cash_rows c CROSS JOIN LATERAL (SELECT c.*) t' : `FROM wallet_cash_rows c JOIN LATERAL (
+      SELECT native.* FROM ${table} native WHERE native.id=c.source_id OFFSET 0
+    ) t ON true`}
     CROSS JOIN wallet_mode w
     CROSS JOIN LATERAL (SELECT
       COALESCE(t.loyalty_vault_holder_type,CASE WHEN w.consolidated_at IS NOT NULL AND
-        (COALESCE(NULLIF(to_jsonb(t)->>'created_at','')::timestamptz,NULLIF(to_jsonb(c)->>'created_at','')::timestamptz)>=w.consolidated_at
+        (COALESCE(t.created_at,c.created_at)>=w.consolidated_at
           OR EXISTS(SELECT 1 FROM wallet_sources WHERE cash_flow_entry_id=c.id)
           OR EXISTS(SELECT 1 FROM loyalty_vault_sources WHERE cash_flow_entry_id=c.id)) THEN 'user' END) AS holder_type,
-      COALESCE(t.loyalty_vault_holder_id,NULLIF(COALESCE(to_jsonb(t)->>'created_by',to_jsonb(c)->>'created_by'),'')::integer) AS holder_id) selected
+      COALESCE(t.loyalty_vault_holder_id,t.created_by,c.created_by) AS holder_id) selected
     WHERE selected.holder_type IS NOT NULL AND selected.holder_id IS NOT NULL
+    ${pendingOnly ? `AND (w.consolidated_at IS NULL OR (
+      NOT financial_transaction_posts('debit',COALESCE(t.status,c.status),'CASH',NULL)
+      AND LOWER(TRIM(COALESCE(t.status,c.status,'approved'))) NOT IN ('rejected','cancelled','deleted','void','voided')
+      AND (c.debit>0 OR c.credit<0${table==='farmer_payments'?' OR t.cash_amount>0':''})
+    ))` : ''}
     ${direct ? `AND COALESCE(NULLIF(c.source_module,''),'cash_flow_entries')='cash_flow_entries'
-      AND NOT EXISTS(SELECT 1 FROM firm_transactions f WHERE f.cash_flow_entry_id=c.id)` : ''}`;
+      AND NOT EXISTS(SELECT 1 FROM firm_transactions f WHERE f.cash_flow_entry_id=c.id)` : `AND c.source_module='${table}'`}`;
 }).join('\nUNION ALL\n');
 
-export const vaultTransactionsCte = `WITH wallet_mode AS (SELECT NULLIF(to_jsonb(s)->>'consolidated_at','')::timestamptz AS consolidated_at FROM loyalty_vault_settings s LIMIT 1), assigned_sources AS (${sources}), eligible_sources AS (
+// Only these cash-flow IDs can belong to a wallet: tracked receipts, explicit
+// source assignments, or new entries after consolidation. Discover IDs using
+// indexed native columns before converting/joining any financial record.
+const assignedCandidateIds = [...LOYALTY_VAULT_SOURCE_TABLES].filter(table => table !== 'cash_flow_entries').map(table => `
+  SELECT c.id FROM ${table} t JOIN cash_flow_entries c ON c.source_module='${table}' AND c.source_id=t.id
+  WHERE t.loyalty_vault_holder_type IS NOT NULL AND t.loyalty_vault_holder_id IS NOT NULL
+  UNION SELECT c.id FROM ${table} t JOIN cash_flow_entries c ON c.source_module='${table}' AND c.source_id=t.id
+  WHERE t.created_at >= (SELECT consolidated_at FROM wallet_mode)`).join('\nUNION\n');
+const candidateCte = (pendingOnly = false) => `wallet_candidates AS MATERIALIZED (
+  SELECT cash_flow_entry_id AS id FROM wallet_sources
+  UNION SELECT cash_flow_entry_id FROM loyalty_vault_sources
+  UNION SELECT id FROM cash_flow_entries WHERE loyalty_vault_holder_type IS NOT NULL AND loyalty_vault_holder_id IS NOT NULL
+  UNION SELECT id FROM cash_flow_entries WHERE created_at >= (SELECT consolidated_at FROM wallet_mode)
+  UNION ${assignedCandidateIds}
+), wallet_cash_rows AS MATERIALIZED (
+  SELECT c.* FROM wallet_candidates candidate JOIN LATERAL (
+    SELECT cash.* FROM cash_flow_entries cash WHERE cash.id=candidate.id OFFSET 0
+  ) c ON true
+  ${pendingOnly ? `WHERE (SELECT consolidated_at FROM wallet_mode) IS NULL OR c.debit>0 OR c.credit<0 OR c.source_module='farmer_payments'` : ''}
+)`;
+
+// Materialize each stage once. Inlining the union expands JSON conversion,
+// creator fallback and posting rules repeatedly into every pending/status
+// predicate, tying up the shared pool on real production transaction volumes.
+const transactionsCte = (pendingOnly = false) => `WITH wallet_mode AS (SELECT NULLIF(to_jsonb(s)->>'consolidated_at','')::timestamptz AS consolidated_at FROM loyalty_vault_settings s LIMIT 1), ${candidateCte(pendingOnly)}, assigned_sources AS MATERIALIZED (${sourceSql(pendingOnly)}), eligible_sources AS MATERIALIZED (
   SELECT a.*,s.organization_id,s.name AS site_name,
     COALESCE(u.name,m.full_name,'Former holder') AS holder_name,
     creator.name AS created_by_name,assigner.name AS assigned_by_name,
@@ -59,7 +93,7 @@ export const vaultTransactionsCte = `WITH wallet_mode AS (SELECT NULLIF(to_jsonb
     AND NOT (source_table='day_book' AND (UPPER(COALESCE(source->>'entry_type',''))='IMPREST'
       OR COALESCE((source->>'is_financial_projection')::boolean,false)
       OR EXISTS(SELECT 1 FROM unnest(ARRAY['expense_id','farmer_payment_id','commission_id','cash_flow_entry_id','firm_transaction_id','plot_payment_id','vendor_payment_id','imprest_allocation_id']) field WHERE NULLIF(source->>field,'') IS NOT NULL)))
-), posting AS (
+), posting AS MATERIALIZED (
   SELECT e.*,
     CASE WHEN financial_transaction_posts('credit',source_status,payment_mode,cheque_status) THEN credit ELSE 0 END AS posted_credit,
     CASE WHEN financial_transaction_posts('debit',source_status,payment_mode,cheque_status) THEN debit ELSE 0 END AS posted_debit
@@ -76,18 +110,32 @@ export const vaultTransactionsCte = `WITH wallet_mode AS (SELECT NULLIF(to_jsonb
   FROM posting p
 )`;
 
+export const vaultTransactionsCte = transactionsCte();
+export const vaultPendingTransactionsCte = transactionsCte(true);
+
 export const vaultTransactionScope = actor => ({
   clause: 'organization_id=$1 AND ($2::boolean OR (holder_type=\'user\' AND holder_id=$3))',
   params: [actor.organization_id,isVaultAdmin(actor),actor.id],
 });
 
-export async function pendingVaultTotals(actor, database, selected = null) {
+const pendingReads = new WeakMap();
+export function pendingVaultTotals(actor, database, selected = null) {
+  let reads = pendingReads.get(database);
+  if (!reads) { reads = new Map(); pendingReads.set(database, reads); }
+  const key = JSON.stringify([actor.organization_id, isVaultAdmin(actor), actor.id, selected?.type, selected?.id]);
+  if (reads.has(key)) return reads.get(key);
+  const pending = loadPendingVaultTotals(actor, database, selected).finally(() => reads.delete(key));
+  reads.set(key, pending);
+  return pending;
+}
+
+async function loadPendingVaultTotals(actor, database, selected) {
   const scope = vaultTransactionScope(actor);
   if (selected) {
     scope.clause += ' AND holder_type=$4 AND holder_id=$5';
     scope.params.push(selected.type,selected.id);
   }
-  const { rows } = await database.query(`${vaultTransactionsCte}
+  const { rows } = await walletReadQuery(database, `${vaultPendingTransactionsCte}
     SELECT holder_type,holder_id,sum(credit-posted_credit)::text AS pending_credit,
       sum(debit-posted_debit)::text AS pending_debit,count(*)::int AS pending_count
     FROM assigned_transactions WHERE ${scope.clause} AND status IN ('pending_clearance','pending_approval')

@@ -1,5 +1,14 @@
+import { isDatabaseUnavailable } from '../utils/databaseError.js';
+
 const errorMiddleware = (err, req, res, next) => {
   console.error(err.stack);
+  if (isDatabaseUnavailable(err)) {
+    res.set('Retry-After', '5');
+    return res.status(503).json({
+      message: 'The database is temporarily busy. Please try again in a few seconds.',
+      code: 'DATABASE_UNAVAILABLE',
+    });
+  }
   const isInsufficientImprest = err.constraint === 'imprest_sufficient_balance';
   const isMissingImprestOwner = err.constraint === 'imprest_debit_owner_required';
   const isInsufficientSiteCash = err.constraint === 'imprest_site_cash_funding';
