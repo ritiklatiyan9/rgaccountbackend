@@ -211,6 +211,49 @@ function moduleVisibility(user, allowed, moduleKey) {
   return { include: true, scoped: true };
 }
 
+const APPROVAL_PARTY_TARGETS = {
+  farmer_payment: 'farmer_payment', cash_flow_entry: 'cashflow_entry',
+  firm_transaction: 'firm_transaction', plot_payment: 'plot_payment', expense: 'expense',
+  plot_commission_payment: 'commission_payment', plot_registry_payment: 'registry_payment',
+  vendor_payment: 'vendor_payment', vendor_inventory_payment: 'vendor_inventory_payment',
+  land_deal_payment: 'land_deal_payment', misc_income_entry: 'misc_income_entry',
+};
+
+function approvalPartyReference(entry) {
+  let target = APPROVAL_PARTY_TARGETS[entry.source], id = entry.id;
+  if (String(entry.source).startsWith('daybook')) {
+    // Accounting mirrors retain their original transaction's client link.
+    const native = [
+      ['expense_id', 'expense'], ['farmer_payment_id', 'farmer_payment'],
+      ['cash_flow_entry_id', 'cashflow_entry'], ['firm_transaction_id', 'firm_transaction'],
+      ['plot_payment_id', 'plot_payment'], ['vendor_payment_id', 'vendor_payment'],
+    ].find(([field]) => entry[field]);
+    if (native) { target = native[1]; id = entry[native[0]]; }
+    else target = 'daybook';
+  }
+  return target && Number.isSafeInteger(Number(id)) && Number(id) > 0
+    && Number.isSafeInteger(Number(entry.site_id)) && Number(entry.site_id) > 0
+    ? { target, source_id: Number(id), site_id: Number(entry.site_id) } : null;
+}
+
+async function attachApprovalClientLinks(entries) {
+  const references = entries.map(approvalPartyReference).filter(Boolean);
+  if (!references.length || !await hasRelation('transaction_party_links')) return;
+  // Enrich only the rows already admitted by approval/site/assignment access.
+  const requested = [...new Map(references.map(ref => [`${ref.target}:${ref.source_id}:${ref.site_id}`, ref])).values()];
+  const { rows } = await pool.query(`SELECT l.source_key,l.source_id,l.site_id,l.member_id,m.full_name,m.phone
+    FROM transaction_party_links l
+    JOIN jsonb_to_recordset($1::jsonb) AS requested(target text,source_id integer,site_id integer)
+      ON l.source_key=requested.target AND l.source_id=requested.source_id AND l.site_id=requested.site_id
+    JOIN members m ON m.id=l.member_id AND m.site_id=l.site_id`, [JSON.stringify(requested)]);
+  const links = new Map(rows.map(row => [`${row.source_key}:${row.source_id}:${row.site_id}`, row]));
+  for (const entry of entries) {
+    const ref = approvalPartyReference(entry);
+    const link = ref && links.get(`${ref.target}:${ref.source_id}:${ref.site_id}`);
+    if (link) Object.assign(entry, { linked_client_name: link.full_name, linked_client_id: link.member_id, linked_client_phone: link.phone });
+  }
+}
+
 /**
  * GET /approvals/pending
  * List all pending entries across all modules.
@@ -828,6 +871,8 @@ export const listAllPending = asyncHandler(async (req, res) => {
       }));
     }
   }
+
+  await attachApprovalClientLinks(results);
 
   // Sort combined results by date DESC
   results.sort((a, b) => {
@@ -1644,6 +1689,8 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
   const fullQuery = unionParts.join('\nUNION ALL\n') + '\nORDER BY created_at DESC';
 
   const result = await pool.query(fullQuery, allParams);
+
+  await attachApprovalClientLinks(result.rows);
 
   // Count by status
   const statusCounts = { PENDING: 0, CLEARED: 0, BOUNCED: 0, RETURNED: 0 };
