@@ -714,7 +714,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   await assertCommissionSite(req.user, master.site_id);
   const workflow = await getTdsWorkflow(master.site_id);
   const tds = parsePaymentTds(req.body, workflow[commissionTdsModule(master)]);
-  const deductee = tds.tds_amount > 0 ? await resolvePaymentDeductee(req.body, master.site_id, null, { memberId: master.agent_id, force: true }) : await resolveTdsDeductee(req.body, master.site_id);
+  const deductee = tds.tds_amount > 0 ? await resolvePaymentDeductee(req.body, master.site_id, null, { memberId: master.agent_id }) : await resolveTdsDeductee(req.body, master.site_id);
   const numericAmount = tds.amount;
   const grossAmount = numericAmount + tds.tds_amount;
   const mode = payment_mode || 'CASH';
@@ -920,7 +920,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   const master = (await pool.query('SELECT * FROM plot_commissions_v2 WHERE id=$1', [existing.plot_commission_id])).rows[0];
   const workflow = await getTdsWorkflow(existing.site_id);
   const tds = parsePaymentTds(req.body, workflow[commissionTdsModule(master)], existing);
-  const deductee = tds.tds_amount > 0 ? await resolvePaymentDeductee(req.body, existing.site_id, existing, { memberId: master.agent_id, force: true }) : await resolveTdsDeductee(req.body, existing.site_id, existing);
+  const deductee = tds.tds_amount > 0 ? await resolvePaymentDeductee(req.body, existing.site_id, existing, { memberId: master.agent_id }) : await resolveTdsDeductee(req.body, existing.site_id, existing);
   const { date, amount, payment_mode, bank_name, transaction_id, cheque_no, remarks, voucher_url, assigned_admin_id } = req.body;
 
   if (date !== undefined && !isValidLedgerDate(date)) {

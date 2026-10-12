@@ -251,5 +251,23 @@ test('native payment modules withhold atomically and share the TDS register', { 
       await attachDayBookTds(mirror,pool);
       assert.equal(Number(mirror[0].tds_amount),6000); assert.equal(mirror[0].tds_module,'plot_commission');
     });
+    await t.test('every native module stores the linked Client in both source and register despite stale default KYC', async () => {
+      for (const [module, path, details] of [
+        ['expense','/expenses',{}], ['imprest_expense','/imprest/expense',{}], ['daybook','/daybook',{}],
+        ['farmer_payment','/farmers/1/payments',{farmer_id:1}], ['cashflow','/cashflow/entries',{cash_flow_month_id:1}],
+        ['firm_transaction','/firms/transactions',{firm_id:1}], ['vendor_payment','/vendors/commitments/1/payments',{commitment_id:1}],
+        ['vendor_inventory_payment','/vendors/inventory/1/payments',{order_id:1}], ['misc_income','/misc-income',{direction:'debit'}],
+        ['partner_profit_payment','/sites/1/profit-payments',{member_id:1}], ['legacy_commission','/commissions',{particular:'Agent'}],
+      ]) {
+        const source = TDS_SOURCES[module];
+        const handler = (req,res,next) => new MasterModel(source.table).create({ ...(module === 'farmer_payment' ? {} : {site_id:1}), date:base.date, payment_date:base.date, status:'pending', created_by:1, payment_mode:'CASH', [source.amount || 'amount']:req.body[source.amount || 'amount'], ...details }, pool).then(row => res.json(row),next);
+        const result = await invoke(handler, { ...base, ...details, debit:100000, credit:0, related_member_id:3, tds_member_id:1, tds_deductee_name:'Stale default', tds_pan:'FGHIJ1234K' }, { originalUrl:path,method:'POST' },true);
+        assert.equal(result.body.tds_member_id,3,module); assert.equal(result.body.tds_deductee_name,'Selected Seller',module);
+        assert.equal(result.body.tds_pan,'KLMNO1234P',module); assert.equal(result.body.tds_aadhaar,'234567890123',module);
+        const row = (await pg.query('SELECT * FROM tds_deductions WHERE source_table=$1 AND source_id=$2',[source.table,result.body.id])).rows[0];
+        assert.equal(row.member_id,3,module); assert.equal(row.deductee_name,'Selected Seller',module); assert.equal(row.pan,'KLMNO1234P',module);
+        assert.equal(Number(row.gross_amount),100000,module); assert.equal(Number(row.tds_amount),2000,module);
+      }
+    });
   } finally { await pg.close(); }
 });

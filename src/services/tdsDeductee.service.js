@@ -3,11 +3,13 @@ import pool from '../config/db.js';
 const fail = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 export const TDS_DEDUCTEE_FIELDS = ['tds_member_id', 'tds_deductee_name', 'tds_pan', 'tds_aadhaar'];
 
-export async function resolvePaymentDeductee(body, siteId, existing, { memberId, name, force = false } = {}, db = pool) {
+export async function resolvePaymentDeductee(body, siteId, existing, { memberId, name } = {}, db = pool) {
   // Historical payments retain the taxpayer snapshot already captured on
   // their source; changing the Client's KYC later must not rewrite it.
-  if (Number(existing?.tds_amount || 0) > 0) return resolveTdsDeductee(body, siteId, existing, db);
-  const selected = force && memberId ? memberId : body.tds_member_id || body.related_member_id || memberId;
+  if (Number(existing?.tds_amount || 0) > 0) {
+    return resolveTdsDeductee(body.related_member_id ? { ...body, tds_member_id: body.related_member_id } : body, siteId, existing, db);
+  }
+  const selected = body.related_member_id || body.tds_member_id || memberId;
   const partyName = String(name || body.tds_deductee_name || '').trim();
   let inferred;
   if (!selected && partyName) {

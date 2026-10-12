@@ -29,12 +29,19 @@ test('a payment copies its module party KYC without any duplicate TDS form input
   const result = await resolvePaymentDeductee({}, 2, null, { memberId: 5, name: 'Legacy farmer name' }, clientDb);
   assert.deepEqual(result, { tds_member_id: 5, tds_deductee_name: 'Client 5', tds_pan: 'ABCDE1234F', tds_aadhaar: '123456789012' });
 });
-test('an explicitly linked Land Purchase Client overrides the farmer default; commissions use the agent', async () => {
-  const linked = await resolvePaymentDeductee({ related_member_id: 6 }, 2, null, { memberId: 5 }, clientDb);
+test('the linked Client overrides stale form KYC and module defaults, including commissions', async () => {
+  const linked = await resolvePaymentDeductee({ related_member_id: 6, tds_member_id: 5, tds_pan: 'FGHIJ1234K' }, 2, null, { memberId: 5 }, clientDb);
   assert.equal(linked.tds_member_id, 6);
-  const agent = await resolvePaymentDeductee({ tds_member_id: 6, related_member_id: 6 }, 2, null, { memberId: 5, force: true }, clientDb);
-  assert.equal(agent.tds_member_id, 5);
-  assert.equal(agent.tds_deductee_name, 'Client 5');
+  assert.equal(linked.tds_deductee_name, 'Client 6');
+  assert.equal(linked.tds_pan, 'ABCDE1234F');
+  const selected = await resolvePaymentDeductee({ tds_member_id: 6 }, 2, null, { memberId: 5 }, clientDb);
+  assert.equal(selected.tds_member_id, 6);
+});
+
+test('changing a linked Client on an existing payment replaces its saved taxpayer details', async () => {
+  const original = { tds_amount: 1000, tds_member_id: 5, tds_deductee_name: 'Arun', tds_pan: 'FGHIJ1234K', tds_aadhaar: '234567890123' };
+  const result = await resolvePaymentDeductee({ ...original, related_member_id: 6 }, 2, original, { memberId: 5 }, clientDb);
+  assert.deepEqual(result, { tds_member_id: 6, tds_deductee_name: 'Client 6', tds_pan: 'ABCDE1234F', tds_aadhaar: '123456789012' });
 });
 test('legacy module names resolve only to unique site Clients', async () => {
   const db = { query: async (sql, args) => sql.startsWith('SELECT id FROM') ? (assert.deepEqual(args, [2, 'Agent']), { rows: [{ id: 5 }] }) : clientDb.query(sql, args) };
@@ -46,6 +53,6 @@ test('legacy module names resolve only to unique site Clients', async () => {
 test('module autofill never refreshes historical TDS snapshots on a note edit', async () => {
   const original = { tds_amount: 2000, tds_member_id: 5, tds_deductee_name: 'Original Agent', tds_pan: 'ABCDE1234F', tds_aadhaar: '123456789012' };
   const db = { query: async () => { throw new Error('No lookup for existing snapshots'); } };
-  const result = await resolvePaymentDeductee({ remarks: 'Proof attached' }, 2, original, { memberId: 6, force: true }, db);
+  const result = await resolvePaymentDeductee({ remarks: 'Proof attached' }, 2, original, { memberId: 6 }, db);
   assert.deepEqual(result, Object.fromEntries(Object.entries(original).filter(([key]) => key !== 'tds_amount')));
 });

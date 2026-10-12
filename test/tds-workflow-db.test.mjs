@@ -150,16 +150,32 @@ test('commission TDS database lifecycle', { skip: !process.env.PGLITE_MODULE }, 
         assert.equal(result.code,201);
         assert.equal(Number(result.body.payment.amount),net);
         assert.equal(Number(result.body.payment.tds_amount),held);
-        assert.equal(result.body.payment.tds_member_id,1, 'Commission agent overrides a stale linked buyer mapping');
+        assert.equal(result.body.payment.tds_member_id,2, 'Selected TDS Client overrides the commission agent');
         ids.push(result.body.payment.id);
         await query("UPDATE plot_commission_payments SET status='approved' WHERE id=$1",[result.body.payment.id]);
       }
       const rows=(await list()).filter(row=>ids.includes(row.commission_payment_id));
+      assert.ok(rows.every(row => row.member_id === 2 && row.deductee_name === 'Plot Buyer' && row.pan === 'FGHIJ1234K' && row.aadhaar === '234567890123'));
       assert.equal(rows.reduce((sum,row)=>sum+Number(row.gross_amount),0),666667);
       assert.equal(rows.reduce((sum,row)=>sum+Number(row.net_amount),0),646667);
       assert.equal(rows.reduce((sum,row)=>sum+Number(row.tds_amount),0),20000);
       assert.equal(Number((await query('SELECT sum(amount) AS net FROM cash_movements WHERE source_id=ANY($1::int[])',[ids])).rows[0].net),646667);
       assert.equal((await query('SELECT status FROM plot_commissions_v2 WHERE id=5')).rows[0].status,'Completed');
+    });
+    await t.test('linked Client wins over stale agent KYC on create and edit in every commission module', async () => {
+      await query("UPDATE application_settings SET setting_value=jsonb_set(jsonb_set(setting_value,'{land_purchase_commission,enabled}','true'),'{land_sale_commission,enabled}','true')");
+      for (const [masterId, plotId, farmerId, landDealId, module] of [[6,1,null,null,'plot_commission'], [7,null,1,null,'land_purchase_commission'], [8,null,null,1,'land_sale_commission']]) {
+        await query("INSERT INTO plot_commissions_v2 VALUES($1,1,$2,$3,$4,1,100000,'Pending',now())", [masterId, plotId, farmerId, landDealId]);
+        const { body } = await invoke(createPlotCommissionPayment, { master_id: masterId, date: '2026-10-12', amount: 50000, payment_mode: 'CASH', tds_applicable: true, related_member_id: 2, tds_member_id: 1, tds_deductee_name: 'Agent', tds_pan: 'ABCDE1234F' });
+        assert.equal(body.payment.tds_member_id, 2, module);
+        assert.equal(body.payment.tds_deductee_name, 'Plot Buyer', module);
+        let row = (await list()).find(row => row.commission_payment_id === body.payment.id);
+        assert.equal(row.member_id, 2); assert.equal(row.pan, 'FGHIJ1234K'); assert.equal(row.aadhaar, '234567890123');
+        await invoke(updatePlotCommissionPayment, { amount: 50000, tds_applicable: true, related_member_id: 1, tds_member_id: 2 }, { params: { id: body.payment.id } });
+        row = (await list()).find(row => row.commission_payment_id === body.payment.id);
+        assert.equal(row.member_id, 1); assert.equal(row.deductee_name, 'Agent'); assert.equal(row.pan, 'ABCDE1234F');
+        assert.equal(Number(row.gross_amount), 50000); assert.equal(Number(row.net_amount), 49000); assert.equal(Number(row.tds_amount), 1000);
+      }
     });
   } finally { await pg.close(); }
 });
