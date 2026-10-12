@@ -45,6 +45,8 @@ Account locks use a consistent holder order. Transfer reservations and decisions
 
 The API is mounted at `/loyalty-vault`. `/users/:id` supplies account details and pending totals; `/transactions` supplies paginated assigned source transactions, with holder, site, search and status filters. Status values are `posted`, `pending_clearance`, `pending_approval`, `rejected` and `bounced`; `pending` filters both pending states. Pending reads use the indexed native assignment columns and canonical financial records, without writing ledger movements. Administrators can view organization accounts; Sub-admins can view only their own balances and transaction details.
 
+Date filters offer all dates, a chosen day, calendar month, calendar year, or a custom range. `/transactions`, `/history`, and `/transfers` accept inclusive `from` and `to` dates (`YYYY-MM-DD`), including open-ended ranges. Assigned transactions use their original transaction date; custody movements use their recorded date and transfers use their requested date, with timestamp boundaries in IST. Filtering happens before pagination and counting. Date filters affect the record lists; custody balances and pending handovers continue to show their current values.
+
 Native payment requests carry `loyalty_vault_holder_type` (`user` or `member`) and `loyalty_vault_holder_id`. Supplying both as `null` clears custody. The server records the authenticated assignment actor; client-supplied actor IDs are never trusted.
 
 ## Local verification

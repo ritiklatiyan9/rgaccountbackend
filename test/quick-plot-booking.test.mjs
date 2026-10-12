@@ -13,6 +13,7 @@ function fixture({ status = 'COMPANY', member = { id: 8, full_name: ' New Buyer 
       if (sql === 'BEGIN') pending = structuredClone(committed);
       else if (sql === 'COMMIT') committed = pending;
       else if (sql === 'ROLLBACK') pending = undefined;
+      else if (sql.includes('to_regclass')) return { rows: [{ requests_table: null }] };
       else if (sql.startsWith('SELECT * FROM plots')) {
         assert.match(sql, /FOR UPDATE/);
         return { rows: pending.plot ? [pending.plot] : [] };

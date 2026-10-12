@@ -3,6 +3,7 @@ import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.s
 import { chequeReadySql } from '../utils/chequeWorkflow.js';
 import MasterModel from './MasterModel.js';
 import { PLOT_BUYER_MEMBER_JOIN, PLOT_BUYER_KYC_JOIN, PLOT_BUYER_KYC_STATUS } from '../services/plotMemberLinks.service.js';
+import { assertNoWebsitePlotHold } from '../services/websitePlotHold.service.js';
 
 // Plot payments are credits: pending rows count immediately, but cheque rows
 // require clearance and approval. The sane-date guard stays aligned with the ledger.
@@ -17,10 +18,11 @@ class PlotModel extends MasterModel {
     super('plots');
   }
 
-  // Both direct plot edits and approved edit requests use this model. A saved
-  // REGISTRY status must have a registry workspace before its transaction commits.
+  // Direct status edits, installment booking and approved edit requests share
+  // the website reservation lock. REGISTRY also creates its workspace before
+  // the caller's transaction commits.
   async update(id, data, db) {
-    if (String(data.status || '').trim().toUpperCase() !== 'REGISTRY') {
+    if (!Object.hasOwn(data, 'status')) {
       return super.update(id, data, db);
     }
     // pg Pool owns a new transaction; a caller-supplied Client is already
@@ -29,8 +31,11 @@ class PlotModel extends MasterModel {
     const client = ownsTransaction ? await db.connect() : db;
     try {
       if (ownsTransaction) await client.query('BEGIN');
+      const { rows } = await client.query('SELECT id FROM plots WHERE id=$1 FOR UPDATE', [id]);
+      if (!rows[0]) { if (ownsTransaction) await client.query('COMMIT'); return null; }
+      await assertNoWebsitePlotHold(client, id);
       const plot = await super.update(id, data, client);
-      if (plot) await ensurePlotRegistryWorkspace(client, id, data.approval_requested_by ?? null);
+      if (plot && String(data.status || '').trim().toUpperCase() === 'REGISTRY') await ensurePlotRegistryWorkspace(client, id, data.approval_requested_by ?? null);
       if (ownsTransaction) await client.query('COMMIT');
       return plot;
     } catch (error) {

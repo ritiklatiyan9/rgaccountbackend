@@ -183,7 +183,8 @@
     "migrate:tds-settlements": "node src/migrations/198_tds_financial_settlements.js",
     "test:tds-settlements": "PGLITE_MODULE=@electric-sql/pglite node --test test/tds-settlements.test.mjs test/tds-reporting-db.test.mjs test/tds-settlement-invariants-db.test.mjs",
     "migrate:loyalty-vault": "node src/migrations/199_loyalty_vault.js",
-    "test:loyalty-vault": "PGLITE_MODULE=@electric-sql/pglite node --test test/loyalty-vault*.test.mjs"
+    "test:loyalty-vault": "PGLITE_MODULE=@electric-sql/pglite node --test test/loyalty-vault*.test.mjs",
+    "test:website-holds": "node --test test/website-plot-hold.test.mjs test/quick-plot-booking.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

@@ -11,6 +11,17 @@ const sumPending = (rows,field) => {
   return `${paise/100n}.${String(paise%100n).padStart(2,'0')}`;
 };
 
+const addDateFilters = (query,params,clauses,column,timestamp=false) => {
+  const from=query.from?historyDate(query.from):null,to=query.to?historyDate(query.to):null;
+  if(from&&to&&from>to) throw walletError('Start date must precede end date.');
+  if(from){params.push(from);clauses.push(timestamp
+    ? `${column}>=($${params.length}::date::timestamp AT TIME ZONE 'Asia/Kolkata')`
+    : `${column}>=$${params.length}::date`);}
+  if(to){params.push(to);clauses.push(timestamp
+    ? `${column}<(($${params.length}::date+1)::timestamp AT TIME ZONE 'Asia/Kolkata')`
+    : `${column}<=$${params.length}::date`);}
+};
+
 export const summary = asyncHandler(async(req,res)=>{
   const actor=await vaultUser(req.user); await accessibleSite(actor,req.query.site_id);
   const {rows}=await pool.query(`SELECT COALESCE(w.balance,0)::text AS balance,COALESCE(w.reserved_balance,0)::text AS reserved_balance,
@@ -71,6 +82,7 @@ export const assignedTransactions = asyncHandler(async(req,res)=>{
   if(req.query.holder_type||req.query.holder_id){const selected=holder(req.query.holder_type,req.query.holder_id);
     await validateHolder(actor,selected,pool,siteId,true);params.push(selected.type,selected.id);clauses.push(`holder_type=$${params.length-1} AND holder_id=$${params.length}`);}
   if(siteId){params.push(siteId);clauses.push(`site_id=$${params.length}`);}
+  addDateFilters(req.query,params,clauses,"NULLIF(cash->>'date','')::date");
   const status=req.query.status||'all';
   if(!['all','pending','posted','pending_clearance','pending_approval','rejected','bounced'].includes(status))throw walletError('Unknown transaction status.');
   if(status==='pending')clauses.push("status IN ('pending_clearance','pending_approval')");
@@ -104,9 +116,7 @@ export const history = asyncHandler(async(req,res)=>{
     if(!['credit','debit','adjustment','reversal','transfer_in','transfer_out'].includes(req.query.type)) throw walletError('Unknown vault history type.');
     params.push(req.query.type);clauses.push(`e.kind=$${params.length}`);
   }
-  if(req.query.from){params.push(historyDate(req.query.from));clauses.push(`e.created_at>=($${params.length}::date::timestamp AT TIME ZONE 'Asia/Kolkata')`);}
-  if(req.query.to){params.push(historyDate(req.query.to));clauses.push(`e.created_at<(($${params.length}::date+1)::timestamp AT TIME ZONE 'Asia/Kolkata')`);}
-  if(req.query.from&&req.query.to&&req.query.from>req.query.to) throw walletError('Start date must precede end date.');
+  addDateFilters(req.query,params,clauses,'e.created_at',true);
   const q=String(req.query.q||'').trim();if(q.length>200) throw walletError('Keep search within 200 characters.');
   if(q){params.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);clauses.push(`concat_ws(' ',e.description,e.source_table,e.source_id::text,e.transfer_id::text,u.name,m.full_name,s.name,actor.name,e.details->>'remarks',e.details->>'reference') ILIKE $${params.length} ESCAPE '\\'`);}
   const where=clauses.join(' AND ');
@@ -147,6 +157,7 @@ export const transfers = asyncHandler(async(req,res)=>{
   if(siteId){params.push(siteId);clauses.push(`(t.site_id=$${params.length} OR t.site_id IS NULL)`);}
   if(req.query.holder_id){params.push(positiveId(req.query.holder_id));clauses.push(`((t.from_holder_type='user' AND t.from_holder_id=$${params.length}) OR t.to_holder_id=$${params.length})`);}
   if(req.query.status&&req.query.status!=='all'){if(!['pending','accepted','rejected','cancelled'].includes(req.query.status)) throw walletError('Unknown transfer status.');params.push(req.query.status);clauses.push(`t.status=$${params.length}`);}
+  addDateFilters(req.query,params,clauses,'t.created_at',true);
   const where=clauses.join(' AND '),total=Number((await pool.query(`SELECT count(*)::int AS total FROM loyalty_vault_transfers t WHERE ${where}`,params)).rows[0].total);
   const {rows}=await pool.query(`SELECT t.*,COALESCE(owner.name,m.full_name) AS from_name,recipient.name AS to_name,sender.name AS sender_name,resolver.name AS resolved_by_name,s.name AS site_name,
     (t.recipient_id=$2 AND t.status='pending') AS can_accept,(t.sender_id=$2 AND t.status='pending') AS can_cancel

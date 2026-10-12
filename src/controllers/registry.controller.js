@@ -9,6 +9,7 @@ import { registryMetresFromGaz, registryPaymentFromMetres } from '../utils/regis
 import pool from '../config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { assertRegistryWebsitePlotNotHeld } from '../services/websitePlotHold.service.js';
 
 // ══════════════════════════════════════════════════
 //  REGISTRY ENDPOINTS
@@ -1121,6 +1122,7 @@ export const approveRegistryNoc = asyncHandler(async (req, res) => {
       });
     }
 
+    await assertRegistryWebsitePlotNotHeld(client, registry);
     const approvalResult = await client.query(
       `UPDATE plot_registries
           SET noc_approved_at = NOW(), noc_approved_by = $2, updated_at = NOW()

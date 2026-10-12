@@ -1,4 +1,5 @@
 import { validatePlotApprover } from './plotApproval.service.js';
+import { assertNoWebsitePlotHold } from './websitePlotHold.service.js';
 const bookingError = (status, code, message) => Object.assign(new Error(message), { status, statusCode: status, code });
 
 /** Keep the COMPANY → BOOKED transition and its first payment indivisible.
@@ -15,6 +16,7 @@ export async function withCompanyPlotBooking({ pool, plotId, memberId, date, sav
     if (String(plot.status || '').trim().toUpperCase() !== 'COMPANY') {
       throw bookingError(409, 'PLOT_BOOKING_CHANGED', 'This plot is no longer available for booking. Select the plot again to review its current buyer.');
     }
+    await assertNoWebsitePlotHold(client, plot.id);
     const { rows: [member] } = await client.query(
       `SELECT id, full_name FROM members
         WHERE id = $1 AND site_id = $2 AND status = 'ACTIVE' FOR SHARE`,
@@ -62,6 +64,7 @@ export async function completeDeferredChequeBooking(db, payment) {
   if (!plot || String(plot.status).toUpperCase() !== 'COMPANY') {
     throw bookingError(409, 'PLOT_BOOKING_CHANGED', 'This cheque was for an available plot that has since changed. Review its buyer before clearing the cheque.');
   }
+  await assertNoWebsitePlotHold(db, plot.id);
   const { rows: [member] } = await db.query(
     `SELECT id, full_name FROM members WHERE id = $1 AND site_id = $2 AND status = 'ACTIVE' FOR SHARE`,
     [payment.pending_booking_member_id, plot.site_id],

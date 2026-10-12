@@ -184,6 +184,21 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         await resolveVaultTransfer({id:3},pending.transfer.id,'reject',{},db);
         await query("INSERT INTO loyalty_vault_entries(organization_id,holder_key,holder_type,holder_id,amount,balance_after,kind,site_id,created_at) VALUES(1,'user:1','user',1,1,0,'adjustment',10,'2026-09-30T18:29:59Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-09-30T18:30:00Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-10-01T18:29:59Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-10-01T18:30:00Z')");
         const filtered=(await invoke(controller.history,{query:{type:'adjustment',from:'2026-10-01',to:'2026-10-01',limit:'1',page:'2'}})).body;assert.equal(filtered.total,2);assert.equal(new Date(filtered.entries[0].created_at).toISOString(),'2026-09-30T18:30:00.000Z');
+        await assert.rejects(invoke(controller.history,{query:{from:'2026-10-02',to:'2026-10-01'}}),errorStatus(400));
+        await query('BEGIN');
+        try {
+          const ids=listing.transfers.slice(0,4).map(row=>row.id);assert.equal(ids.length,4);
+          await query("UPDATE loyalty_vault_transfers SET created_at='2040-01-01T00:00:00Z'");
+          const timestamps=['2040-04-30T18:29:59Z','2040-04-30T18:30:00Z','2040-05-01T18:29:59Z','2040-05-01T18:30:00Z'];
+          for(let i=0;i<ids.length;i++)await query('UPDATE loyalty_vault_transfers SET created_at=$2 WHERE id=$1',[ids[i],timestamps[i]]);
+          const transfers=(await invoke(controller.transfers,{user:admin,query:{from:'2040-05-01',to:'2040-05-01',limit:'1',page:'2'}})).body;
+          assert.equal(transfers.total,2);assert.equal(transfers.transfers.length,1);assert.equal(transfers.transfers[0].id,ids[1]);
+          assert.equal((await invoke(controller.transfers,{user:admin,query:{from:'2040-05-01'}})).body.total,3);
+          const outside=(await invoke(controller.transfers,{user:admin,query:{from:'2040-05-01',to:'2040-05-01',page:'99'}})).body;
+          assert.equal(outside.total,2);assert.equal(outside.transfers.length,0);
+          await assert.rejects(invoke(controller.transfers,{user:admin,query:{from:'2040-05-02',to:'2040-05-01'}}),errorStatus(400));
+          await assert.rejects(invoke(controller.transfers,{user:admin,query:{to:'2040-02-30'}}),errorStatus(400));
+        } finally {await query('ROLLBACK');}
       } finally {pool.query=originalQuery;pool.connect=originalConnect;}
     });
     await t.test('a custody-only approved proposal updates the native owner and reconciles its existing financial entry',async()=>{
@@ -206,7 +221,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         await query("INSERT INTO users VALUES(7,'Pending cheque holder','admin',1,true)");
         await query("INSERT INTO plots VALUES(3,10,'A3','ALICE BUYER','A'),(4,10,'A3','OTHER BUYER','A')");
         await query("INSERT INTO plot_payments(id,plot_id,site_id,created_by,payment_mode,cheque_status,loyalty_vault_holder_type,loyalty_vault_holder_id,loyalty_vault_assigned_by) VALUES(5001,3,10,2,'CHEQUE','PENDING','user',7,2)");
-        const cashId=await entry({source_module:'plot_payments',source_id:5001,credit:150000,cash_type:'CHEQUE',cheque_status:'PENDING',loyalty_vault_holder_type:null,loyalty_vault_holder_id:null});
+        const cashId=await entry({source_module:'plot_payments',source_id:5001,date:'2024-02-29',credit:150000,cash_type:'CHEQUE',cheque_status:'PENDING',loyalty_vault_holder_type:null,loyalty_vault_holder_id:null});
         const scope={holder_type:'user',holder_id:'7'};
         const profile=await invoke(controller.userDetail,{params:{id:'7'}});
         assert.equal(profile.user.pending_credit,'150000');assert.equal(profile.user.balance,'0');assert.equal(profile.user.available_balance,'0');
@@ -218,6 +233,16 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         assert.equal(pending.transactions[0].plot_no,'A3');assert.equal(pending.transactions[0].buyer_name,'ALICE BUYER');assert.equal(pending.transactions[0].source_details.plot_id,3);
         assert.equal(pending.transactions[0].created_by_name,'Administrator');assert.equal(await entries(),before);
         const beyond=await invoke(controller.assignedTransactions,{query:{...scope,page:'99'}});assert.equal(beyond.total,1);assert.equal(beyond.transactions.length,0);
+        for(const dates of [{from:'2024-02-29',to:'2024-02-29'},{from:'2024-02-01',to:'2024-02-29'},{from:'2024-01-01',to:'2024-12-31'},{to:'2024-02-29'},{from:'2024-02-29'}]){
+          const dated=await invoke(controller.assignedTransactions,{query:{...scope,...dates,status:'pending',q:'ALICE BUYER',site_id:'10'}});
+          assert.equal(dated.total,1);assert.equal(dated.transactions[0].source_id,5001);
+        }
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,from:'2024-03-01'}})).total,0);
+        assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,to:'2024-02-28'}})).total,0);
+        const datedBeyond=await invoke(controller.assignedTransactions,{query:{...scope,from:'2024-02-29',to:'2024-02-29',page:'99'}});
+        assert.equal(datedBeyond.total,1);assert.equal(datedBeyond.transactions.length,0);
+        await assert.rejects(invoke(controller.assignedTransactions,{query:{...scope,from:'2024-03-01',to:'2024-02-29'}}),errorStatus(400));
+        await assert.rejects(invoke(controller.assignedTransactions,{query:{...scope,from:'2023-02-29'}}),errorStatus(400));
         await assert.rejects(createVaultTransfer(admin,req('1',{type:'user',id:7},2),db),/available/);
         await assert.rejects(invoke(controller.userDetail,{user:actor,params:{id:'7'}}),errorStatus(403));
         assert.equal((await invoke(controller.assignedTransactions,{user:actor,query:scope})).total,0);
