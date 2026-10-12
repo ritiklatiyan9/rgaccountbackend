@@ -175,7 +175,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         await query("UPDATE users SET is_active=true WHERE id=3");
         const restricted=(await invoke(controller.history)).body;assert.ok(restricted.entries.every(e=>e.holder_key==='user:1'));
         const search=(await invoke(controller.history,{query:{q:'Client deposit'}})).body;assert.ok(search.total>0);
-        const absent=(await invoke(controller.assignment,{query:{source_table:'cash_flow_entries',source_id:1}})).body.assignment;assert.equal(absent.loyalty_vault_holder_type,null);assert.equal(absent.loyalty_vault_holder_id,null);
+        const absent=(await invoke(controller.assignment,{query:{source_table:'cash_flow_entries',source_id:1}})).body.assignment;assert.equal(absent.loyalty_vault_holder_type,'user');assert.equal(absent.loyalty_vault_holder_id,1);
         await assert.rejects(invoke(controller.assignment,{query:{source_table:'users',source_id:1}}),errorStatus(400));
         const listing=(await invoke(controller.transfers,{user:admin})).body;assert.ok(listing.total>0);
         const pending=await createVaultTransfer(admin,req('5',{type:'user',id:2},3),db);

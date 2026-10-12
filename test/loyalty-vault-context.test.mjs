@@ -37,3 +37,13 @@ test('concurrent requests retain independent custody selections',async()=>{
   })));
   assert.deepEqual(outputs,[1,2,3]);
 });
+test('Cash Deposit To aliases capture native requests and saved approval drafts with the authenticated actor',async()=>{
+  const selection={cash_deposit_holder_type:'user',cash_deposit_holder_id:3,cash_deposit_assigned_by:999};
+  const expected={amount:20,loyalty_vault_holder_type:'user',loyalty_vault_holder_id:3,loyalty_vault_assigned_by:9};
+  assert.deepEqual(await run(request(selection),()=>withLoyaltyVault('expenses',{amount:20,...selection})),expected);
+  const multipart=await run(request({}, {'X-Cash-Deposit-Holder-Type':'member','X-Cash-Deposit-Holder-ID':'15'}),()=>withLoyaltyVault('expenses',{}));
+  assert.equal(multipart.loyalty_vault_holder_type,'member');assert.equal(multipart.loyalty_vault_holder_id,15);
+  const approved=await runLoyaltyVaultAssignment({id:7},selection,()=>withLoyaltyVault('expenses',{}));
+  assert.equal(approved.loyalty_vault_holder_id,3);assert.equal(approved.loyalty_vault_assigned_by,7);
+  await assert.rejects(run(request({cash_deposit_holder_type:'user'}),()=>true),error=>error.statusCode===400);
+});

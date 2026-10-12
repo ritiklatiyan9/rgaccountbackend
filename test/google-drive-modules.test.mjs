@@ -176,15 +176,22 @@ test('multiple vouchers and bills are deduplicated before CA link creation', asy
   assert.equal(h.calls.links[0].documents.length, 3);
 });
 
-test('wallet is always personal and site constrained, including for administrators', async () => {
+test('cash wallet export uses the consolidated history and scopes transfers to the holder and organization', async () => {
   const h = harness();
   const bundle = await build(h, 'wallet');
-  const query = h.calls.queries.find(({ sql }) => sql.includes('FROM wallet_entries'));
-  assert.match(query.sql, /e\.user_id=\$4::int/);
-  assert.match(query.sql, /details->>'site_id'/);
-  assert.deepEqual(query.values, [2, 8, null, 8]);
+  const query = h.calls.queries.find(({ sql }) => sql.includes('FROM loyalty_vault_entries'));
+  assert.match(query.sql, /e\.holder_key='user:'\|\|\$4::int::text/);
+  assert.match(query.sql, /e\.site_id=\$1/);
+  assert.match(query.sql, /e\.organization_id=\$5::int/);
+  assert.deepEqual(query.values, [2, 8, null, 8, 3]);
   assert.deepEqual(bundle.entryVisibility, { canViewAll: false, creatorId: 8 });
-  assert.equal(query.sql.includes('balance_after'), false);
+  assert.match(query.sql, /balance_after/);
+  const transfers = h.calls.queries.find(({ sql }) => sql.includes('FROM loyalty_vault_transfers t'));
+  assert.match(transfers.sql, /t\.from_holder_type='user' AND t\.from_holder_id=\$4::int/);
+  assert.match(transfers.sql, /OR t\.recipient_id=\$4::int/);
+  assert.match(transfers.sql, /t\.organization_id=\$5::int/);
+  assert.match(transfers.sql, /COALESCE\(t\.site_id,\$1::int\)=\$1/);
+  assert.deepEqual(transfers.values, [2, 8, null, 8, 3]);
 });
 
 test('balance sheet is unpaginated and restricted exports exclude sitewide imprest and quality totals', async () => {

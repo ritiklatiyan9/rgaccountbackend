@@ -15,7 +15,9 @@ import { up as migrateImprestApprovalIndexes } from '../src/migrations/197_impre
 import { up as migrateImprestCashGuard } from '../src/migrations/195_imprest_cash_funding_guard.js';
 import { up as migrateExistingVoucherGaps } from '../src/migrations/196_existing_voucher_gaps_filled.js';
 import { up as migrateLoyaltyVault } from '../src/migrations/199_loyalty_vault.js';
+import { up as migrateUnifiedCashWallet } from '../src/migrations/203_unified_cash_wallet.js';
 await migrateLoyaltyVault(pool);
+await migrateUnifiedCashWallet(pool);
 await migrateMemberSiteSharing(pool);
 await migrateMemberIdentityLinking(pool);
 await migrateMemberIdentityConsolidation(pool);

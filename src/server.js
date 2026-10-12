@@ -13,6 +13,7 @@ import { up as migrateDataStorage } from './migrations/193_data_storage.js';
 import { up as migrateExistingVoucherGaps } from './migrations/196_existing_voucher_gaps_filled.js';
 import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_financial_settlements.js';
 import { up as migrateLoyaltyVault } from './migrations/199_loyalty_vault.js';
+import { up as migrateUnifiedCashWallet } from './migrations/203_unified_cash_wallet.js';
 import { up as migratePlotFullPaymentDue } from './migrations/201_plot_full_payment_due.js';
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { initSocket } from './config/socket.js';
@@ -43,6 +44,7 @@ connectDB().then(async () => {
   await migrateTdsDeducteeMapping(pool);
   await migrateTdsFinancialSettlements(pool);
   await migrateLoyaltyVault(pool);
+  await migrateUnifiedCashWallet(pool);
   await migratePlotFullPaymentDue(pool);
   await migrateDataStorage(pool);
   await migrateExistingVoucherGaps(pool);

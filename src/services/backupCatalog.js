@@ -103,6 +103,8 @@ export function orderedBackupViews(views) {
 // Table-level closure in BOTH directions includes children and accounting
 // mirrors. Related records may be older than the selected monthly label.
 export function selectBackupTables(schema, moduleIds = []) {
+  // Existing saved backup selections use this stable legacy identifier.
+  if (Array.isArray(moduleIds)) moduleIds = [...new Set(moduleIds.map(id => id === 'loyalty_vault' ? 'wallet' : id))];
   if (!Array.isArray(moduleIds) || moduleIds.some(id => !BACKUP_MODULES.some(m => m.id === id))) {
     throw backupFailure('Choose valid backup modules.');
   }
@@ -130,7 +132,7 @@ export function selectBackupTables(schema, moduleIds = []) {
 
 export function summarizeModules(tables) {
   return BACKUP_MODULES.map(m => {
-    const entries = tables.filter(t => (t.module || moduleForTable(t.name)) === m.id);
+    const entries = tables.filter(t => (t.module === 'loyalty_vault' ? 'wallet' : t.module || moduleForTable(t.name)) === m.id);
     return { ...m, tables: entries.map(t => t.name), rowCount: entries.reduce((n,t) => n + (t.rows?.length ?? t.rowCount ?? 0),0) };
   }).filter(m => m.tables.length);
 }

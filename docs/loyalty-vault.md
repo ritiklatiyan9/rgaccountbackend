@@ -1,56 +1,47 @@
-# Loyalty Vault
+# Cash Wallet
 
-Loyalty Vault attributes existing company transactions to the person holding or paying the money. It is a custody ledger, with balances in rupees. It supports cash and bank payment modes and is separate from the physical Cash Wallet.
+Cash Wallet is the single module for monitoring physical cash held by account users and known clients. It combines the former Cash Wallet and Loyalty Vault. `/wallet` is the canonical screen and API; former `/loyalty-vault` links remain compatible. Internal `loyalty_vault_*` table names are retained for migration and backup compatibility.
 
-## Recording custody
+## Recording cash
 
-Choose an account user or a known client in the **Loyalty Vault** field when recording a credit or debit. The client list comes from the selected project's existing member records. Leave the field at company custody when no person should hold the money in Vault.
+A new CASH transaction defaults to its original transaction maker. Choose **Cash deposit to** when another holder receives a credit, or **Cash paid from** for a debit. The selector is hidden for bank, cheque, UPI and other noncash instruments. Farmer split payments track only their cash component.
 
-A posted credit increases the holder's balance. A posted debit decreases it. A negative balance records money paid on behalf of the company and owed to that holder. Posting follows the existing application policy for approval, rejection and cheque clearance. Registry mappings refer to an existing plot receipt, so assign its original Plot Payment. Legacy commission records and internal bookkeeping movements do not create additional custody.
+Posted credits increase the holder's cash balance; posted debits decrease it. Existing financial approval rules are preserved: CASH receipts follow the application's credit-first posting policy, and pending debit payments affect the cash balance only when they post. Rejection, deletion or a correction appends the appropriate reversal or adjustment. Pending payments remain separately visible and cannot fund transfers.
 
-The main Vault user table lists Super Admin, Admin and Sub-admin accounts. Known clients remain available in the transaction holder dropdown and custody history. Pending assignments appear in separate incoming/outgoing amounts and the Status column, even when no posted custody account exists yet. These amounts are excluded from available transfers. A cleared credit can be posted while its review is still pending, following the existing credit-first financial policy; the transaction table shows both posting and review status.
+Ordinary edits preserve the selected holder. Clearing the selection restores the original transaction maker, rather than the editor. Registry mappings use the original Plot Payment; internal transfers, financial projections and bookkeeping mirrors do not create additional wallet funds. A negative balance can result when a payment or correction exceeds the cash held; it cannot fund a transfer.
 
-Click a user to open `/loyalty-vault/users/:id`. The details page includes their account profile, posted and pending balances, original assigned transactions, immutable custody history and transfer history. Transaction rows open a Sheet with source details. Receipt actions load the existing canonical source receipt, under its original module and site permissions, and preserve the same receipt identity and print history. Opening the viewer does not record a print.
+The user table lists Super Admin, Admin and Sub-admin accounts. Known clients are available in the deposit selector and the cash history filters. Open `/wallet/users/:id` to see the user's profile, cash transactions, immutable movements and transfer history. Source receipts retain their existing permissions, identities and print history.
 
-Transactions created before this feature retain their existing accounting. There is no inferred opening balance. Assign custody explicitly through the source transaction when a historical amount must be tracked.
+## Transfers and approvals
 
-Editing an amount or holder, clearing an assignment, rejecting a transaction, or deleting its source appends a compensating movement. Posted history is immutable. An ordinary edit that omits the holder fields preserves the assignment.
+Pending transfers reserve the sending holder's available cash. The recipient receives no balance until accepting the request. Acceptance debits the sending holder and credits the recipient atomically. Only the designated recipient can accept or reject; the request sender can cancel while pending. Rejection and cancellation release the reservation. Retrying an unchanged request or decision cannot post it twice.
 
-## Transfers
+Sub-admins send from their own wallet; administrators can manage holders within their organization, including cash held by known clients. A transfer recipient must be an active account user who can sign in and accept. Project access, organization isolation and existing role restrictions remain enforced. Inactive holders with cash remain available to administrators for recovery, but cannot receive new deposits or transfers.
 
-Send a transfer from an available balance to an active account user. Known clients can hold assigned money; an administrator can initiate a transfer from a known client's custody. The receiving account user accepts or rejects the request because acceptance needs a signed-in identity.
+Incoming cash requests appear in the approval bell, Cash Wallet notifications and the wallet inbox. Transfers change the person holding the cash without creating company income, expense or bank postings.
 
-Pending requests reserve the sender's amount. The recipient receives no balance until acceptance. Acceptance debits the sending holder and credits the recipient in one database transaction. Rejection or cancellation releases the reservation. Repeating a request with the same request key or repeating an accepted decision cannot post the movement twice.
+## Consolidation and history
 
-The header's approval bell, **All notifications**, and the Vault transfer list show incoming requests. Only the designated recipient can accept or reject. The request sender can cancel while it is pending.
+Migration `203_unified_cash_wallet` uses the existing holder ledger as the canonical wallet. It reconciles overlapping source receipts once, imports legacy transfer movements and pending requests, and rebuilds pending reservations. It reverses previously assigned noncash balances with append-only corrections. Original financial records and legacy wallet history remain intact; old wallet writes are disabled after consolidation.
 
-Sub-admins can initiate transfers from their own custody. Administrators can manage holders in their organization. Client assignment and source history remain constrained by project access.
+The cash transaction list includes CASH transactions only. Immutable history also retains archived noncash assignments and their consolidation reversals so balance changes can be audited. Source edits continue to reconcile atomically through deferred database triggers.
 
-Disabled account holders remain available to administrators for recovery of existing custody. They cannot receive new assignments or transfers. A client with outstanding custody, reservations or a live custody assignment cannot be deleted. Recorded holder names survive later changes and deletion of settled, unassigned clients.
+Previously unassigned historical company transactions are not treated as inferred opening cash. Already tracked Cash Wallet receipts and explicit historical holder assignments are preserved. New transactions default to their original maker from the consolidation cutoff onward. Existing source receipts and wallet totals are not added together twice.
 
-## Accounting invariants
+## API and backups
 
-- Source transaction amounts remain the financial source of truth.
-- Vault assignment and transfers create no company credit/debit, bank entry, operating expense, or revenue.
-- Dashboard KPI queries and the existing `ledger_entries` view do not sum Vault tables.
-- Cash Wallet balances remain separate; combining Cash Wallet and Vault totals would count overlapping custody twice.
-- Internal transfers and presentation mirrors do not mint Vault custody.
-- Corrections can produce a negative custody balance after money has moved. The history remains visible and unfunded transfers cannot be accepted.
+The canonical API exposes `/wallet`, `/holders`, `/users/:id`, `/transactions`, `/assignment`, `/history`, `/history/:id` and `/transfers`, with transfer acceptance, rejection and cancellation actions. The old `/loyalty-vault` mount is an alias. Balances use PostgreSQL `NUMERIC(15,2)` and transfers validate exact decimal money.
 
-## Database and API
+Payment requests accept `cash_deposit_holder_type` (`user` or `member`) and `cash_deposit_holder_id`, or the equivalent `X-Cash-Deposit-Holder-Type` and `X-Cash-Deposit-Holder-ID` headers. Legacy assignment fields and headers remain supported. Null holder fields restore the maker default. Assignment actors always come from the authenticated request, including approved edit proposals.
 
-Migration `199_loyalty_vault` adds assignment columns to native transaction tables, indexed account balances, an append-only movement history, source reconciliation records and transfer requests. Source reconciliation runs inside the financial transaction using deferred triggers. Balances use PostgreSQL `NUMERIC(15,2)`; transfer input is validated as exact decimal money.
+Date filters support all dates, day, month, year and custom ranges. Transaction filters use the source transaction date; movements and transfers use their recorded timestamps with IST boundaries. Filters apply before pagination and do not alter current balances.
 
-Account locks use a consistent holder order. Transfer reservations and decisions are atomic. History and transfer queries paginate their results. Full backups and financial module backups include Vault records and their related source records.
+Cash Wallet backups group canonical and retained legacy tables together. Saved `loyalty_vault` backup selections remain accepted. Personal wallet Drive exports use the canonical ledger and transfer records with user, organization and project restrictions.
 
-The API is mounted at `/loyalty-vault`. `/users/:id` supplies account details and pending totals; `/transactions` supplies paginated assigned source transactions, with holder, site, search and status filters. Status values are `posted`, `pending_clearance`, `pending_approval`, `rejected` and `bounced`; `pending` filters both pending states. Pending reads use the indexed native assignment columns and canonical financial records, without writing ledger movements. Administrators can view organization accounts; Sub-admins can view only their own balances and transaction details.
+## Rollout and verification
 
-Date filters offer all dates, a chosen day, calendar month, calendar year, or a custom range. `/transactions`, `/history`, and `/transfers` accept inclusive `from` and `to` dates (`YYYY-MM-DD`), including open-ended ranges. Assigned transactions use their original transaction date; custody movements use their recorded date and transfers use their requested date, with timestamp boundaries in IST. Filtering happens before pagination and counting. Date filters affect the record lists; custody balances and pending handovers continue to show their current values.
+Deploy the backend and frontend together. On an existing installation with migrations 185, 186 and 199 already installed, run `npm run migrate:unified-cash-wallet` from the backend. A fresh installation needs those prerequisites first. The normal startup migration chain installs 199 before 203. Migration 203 is transactional and repeatable; old migration definitions must be followed by 203 if reapplied.
 
-Native payment requests carry `loyalty_vault_holder_type` (`user` or `member`) and `loyalty_vault_holder_id`. Supplying both as `null` clears custody. The server records the authenticated assignment actor; client-supplied actor IDs are never trusted.
+The local frontend at port 5174 currently targets the hosted API. Its new cash behavior requires the updated hosted backend and migration. Before the new API is available, the UI displays a readiness error and unavailable balances instead of interpreting an old wallet response as zero cash. No hosted migration is performed by the isolated tests.
 
-## Local verification
-
-Run the Loyalty Vault test script with the isolated PGlite database, and build the frontend before enabling the feature. Apply only the Vault migration when adding it to an existing installation; starting the complete migration chain also runs unrelated historical migrations.
-
-The local frontend at port `5174` must use the backend containing these changes. A frontend that still targets the deployed API will not have the new Vault endpoints until that backend is deployed.
+Run `npm run test:unified-cash-wallet`, `npm run test:loyalty-vault`, and the focused frontend wallet/entry tests, then build the frontend. PGlite tests cover deduplication, imported approvals, reservations, reruns, cash-only posting, creator defaults, corrections, source mirrors and retained audit history.

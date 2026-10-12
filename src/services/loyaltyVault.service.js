@@ -5,9 +5,9 @@ export { walletUser as vaultUser };
 export const isVaultAdmin = actor => ['admin','super_admin'].includes(actor.role);
 export const holderKey = (type, id) => `${type}:${id}`;
 export function holder(type, id) {
-  if (!['user','member'].includes(type)) throw walletError('Choose a valid vault holder.');
+  if (!['user','member'].includes(type)) throw walletError('Choose a valid cash deposit recipient.');
   const parsed = positiveId(id);
-  if(parsed>2147483647) throw walletError('Choose a valid vault holder.');
+  if(parsed>2147483647) throw walletError('Choose a valid cash deposit recipient.');
   return { type, id: parsed, key: holderKey(type, parsed) };
 }
 export async function accessibleSite(actor, value, db = pool) {
@@ -25,7 +25,7 @@ export async function validateHolder(actor, selected, db = pool, siteId = null, 
        AND ($3::int IS NULL OR m.site_id=$3) AND ($4::boolean OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=$5 AND site_id=m.site_id))`;
   const args = selected.type === 'user' ? [selected.id,actor.organization_id,allowRetired&&isVaultAdmin(actor)] : [selected.id,actor.organization_id,siteId,isVaultAdmin(actor),actor.id];
   const { rows } = await db.query(sql,args);
-  if (!rows.length) throw walletError('Choose a vault holder in your accessible organization and site.',403);
+  if (!rows.length) throw walletError('Choose a cash holder in your accessible organization and site.',403);
   return rows[0];
 }
 function note(value) {
@@ -54,7 +54,7 @@ export async function createVaultTransfer(user,data,database=pool) {
   const amount=walletAmount(data.amount), key=uuid(data.idempotency_key,'Request key'), memo=note(data.note);
   return transaction(database,async db=>{
     const actor=await walletUser(user,db), siteId=await accessibleSite(actor,data.site_id,db);
-    if (!isVaultAdmin(actor) && (from.type!=='user'||from.id!==actor.id)) throw walletError('You can transfer only your own vault custody.',403);
+    if (!isVaultAdmin(actor) && (from.type!=='user'||from.id!==actor.id)) throw walletError('You can transfer only your own cash custody.',403);
     await validateHolder(actor,from,db,siteId,true); await validateHolder(actor,to,db);
     await lockAccounts(db,actor,[from,to]);
     const previous=(await db.query('SELECT * FROM loyalty_vault_transfers WHERE sender_id=$1 AND idempotency_key=$2',[actor.id,key])).rows[0];
@@ -64,7 +64,7 @@ export async function createVaultTransfer(user,data,database=pool) {
     }
     const reserved=await db.query(`UPDATE loyalty_vault_accounts SET reserved_balance=reserved_balance+$2::numeric,updated_at=now()
       WHERE holder_key=$1 AND organization_id=$3 AND balance-reserved_balance >= $2::numeric RETURNING holder_key`,[from.key,amount,actor.organization_id]);
-    if(!reserved.rows.length) throw walletError('Insufficient available vault balance. Pending transfers reserve their amounts.',409);
+    if(!reserved.rows.length) throw walletError('Insufficient available cash balance. Pending transfers reserve their amounts.',409);
     const transfer=(await db.query(`INSERT INTO loyalty_vault_transfers(id,organization_id,site_id,from_holder_type,from_holder_id,to_holder_id,sender_id,recipient_id,amount,note,idempotency_key)
       VALUES($1,$2,$3,$4,$5,$6,$7,$6,$8,$9,$10) RETURNING *`,[randomUUID(),actor.organization_id,siteId,from.type,from.id,to.id,actor.id,amount,memo,key])).rows[0];
     return {transfer,replayed:false};
@@ -87,8 +87,8 @@ export async function resolveVaultTransfer(user,transferId,action,data={},databa
       const funds=await db.query('SELECT holder_key FROM loyalty_vault_accounts WHERE holder_key=$1 AND balance >= $2::numeric AND reserved_balance >= $2::numeric',[from.key,transfer.amount]);
       if(!funds.rows.length) throw walletError('The source balance changed. Ask the sender to cancel or restore enough funds.',409);
       const details={from_holder_type:from.type,from_holder_id:from.id,to_holder_type:to.type,to_holder_id:to.id,note:transfer.note};
-      await db.query("SELECT loyalty_vault_apply_delta($1,$2,-$3::numeric,'transfer_out',$4,NULL,NULL,NULL,$5,$6,$7,$8)",[from.key,actor.organization_id,transfer.amount,'Vault handover accepted',transfer.site_id,actor.id,id,details]);
-      await db.query("SELECT loyalty_vault_apply_delta($1,$2,$3::numeric,'transfer_in',$4,NULL,NULL,NULL,$5,$6,$7,$8)",[to.key,actor.organization_id,transfer.amount,'Vault handover received',transfer.site_id,actor.id,id,details]);
+      await db.query("SELECT loyalty_vault_apply_delta($1,$2,-$3::numeric,'transfer_out',$4,NULL,NULL,NULL,$5,$6,$7,$8)",[from.key,actor.organization_id,transfer.amount,'Cash handover accepted',transfer.site_id,actor.id,id,details]);
+      await db.query("SELECT loyalty_vault_apply_delta($1,$2,$3::numeric,'transfer_in',$4,NULL,NULL,NULL,$5,$6,$7,$8)",[to.key,actor.organization_id,transfer.amount,'Cash handover received',transfer.site_id,actor.id,id,details]);
     }
     await db.query('UPDATE loyalty_vault_accounts SET reserved_balance=reserved_balance-$2::numeric,updated_at=now() WHERE holder_key=$1',[from.key,transfer.amount]);
     const resolved=(await db.query('UPDATE loyalty_vault_transfers SET status=$2,resolved_at=now(),resolved_by=$3,resolution_note=$4 WHERE id=$1 RETURNING *',[id,state,actor.id,memo])).rows[0];

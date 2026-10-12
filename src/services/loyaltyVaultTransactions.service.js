@@ -1,21 +1,28 @@
 import { LOYALTY_VAULT_SOURCE_TABLES } from './loyaltyVaultContext.service.js';
 import { isVaultAdmin } from './loyaltyVault.service.js';
 
-// Read the original assigned payments, including instruments that cannot post
-// yet. These queries never create custody movements or change financial totals.
+// Read canonical cash transactions, including pending approval. The legacy
+// migration-only mode is retained for archived migration verification.
 const sources = [...LOYALTY_VAULT_SOURCE_TABLES].map(table => {
   const direct = table === 'cash_flow_entries';
   return `SELECT c.id AS cash_flow_entry_id,'${table}'::text AS source_table,t.id AS source_id,
-    t.loyalty_vault_holder_type AS holder_type,t.loyalty_vault_holder_id AS holder_id,
+    selected.holder_type,selected.holder_id,
     COALESCE(c.site_id,loyalty_vault_source_site('${table}',to_jsonb(t))) AS site_id,
     to_jsonb(t) AS source,to_jsonb(c) AS cash
     FROM ${table} t ${direct ? 'JOIN cash_flow_entries c ON c.id=t.id' : `JOIN cash_flow_entries c ON c.source_module='${table}' AND c.source_id=t.id`}
-    WHERE t.loyalty_vault_holder_type IS NOT NULL
+    CROSS JOIN wallet_mode w
+    CROSS JOIN LATERAL (SELECT
+      COALESCE(t.loyalty_vault_holder_type,CASE WHEN w.consolidated_at IS NOT NULL AND
+        (COALESCE(NULLIF(to_jsonb(t)->>'created_at','')::timestamptz,NULLIF(to_jsonb(c)->>'created_at','')::timestamptz)>=w.consolidated_at
+          OR EXISTS(SELECT 1 FROM wallet_sources WHERE cash_flow_entry_id=c.id)
+          OR EXISTS(SELECT 1 FROM loyalty_vault_sources WHERE cash_flow_entry_id=c.id)) THEN 'user' END) AS holder_type,
+      COALESCE(t.loyalty_vault_holder_id,NULLIF(COALESCE(to_jsonb(t)->>'created_by',to_jsonb(c)->>'created_by'),'')::integer) AS holder_id) selected
+    WHERE selected.holder_type IS NOT NULL AND selected.holder_id IS NOT NULL
     ${direct ? `AND COALESCE(NULLIF(c.source_module,''),'cash_flow_entries')='cash_flow_entries'
       AND NOT EXISTS(SELECT 1 FROM firm_transactions f WHERE f.cash_flow_entry_id=c.id)` : ''}`;
 }).join('\nUNION ALL\n');
 
-export const vaultTransactionsCte = `WITH assigned_sources AS (${sources}), eligible_sources AS (
+export const vaultTransactionsCte = `WITH wallet_mode AS (SELECT NULLIF(to_jsonb(s)->>'consolidated_at','')::timestamptz AS consolidated_at FROM loyalty_vault_settings s LIMIT 1), assigned_sources AS (${sources}), eligible_sources AS (
   SELECT a.*,s.organization_id,s.name AS site_name,
     COALESCE(u.name,m.full_name,'Former holder') AS holder_name,
     creator.name AS created_by_name,assigner.name AS assigned_by_name,
@@ -26,8 +33,12 @@ export const vaultTransactionsCte = `WITH assigned_sources AS (${sources}), elig
       NULLIF(TRIM(source->>'by_note'),''),NULLIF(TRIM(cash->>'cash_type'),''),'CASH')) AS payment_mode,
     COALESCE(source->>'status',cash->>'status','approved') AS source_status,
     NULLIF(UPPER(TRIM(COALESCE(source->>'cheque_status',cash->>'cheque_status'))),'') AS cheque_status,
-    GREATEST(COALESCE((cash->>'credit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'debit')::numeric,0),0) AS credit,
-    GREATEST(COALESCE((cash->>'debit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'credit')::numeric,0),0) AS debit
+    CASE WHEN (SELECT consolidated_at FROM wallet_mode) IS NOT NULL AND source_table='farmer_payments' AND UPPER(TRIM(source->>'payment_mode'))='SPLIT'
+      THEN GREATEST(-COALESCE((source->>'cash_amount')::numeric,0),0)
+      ELSE GREATEST(COALESCE((cash->>'credit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'debit')::numeric,0),0) END AS credit,
+    CASE WHEN (SELECT consolidated_at FROM wallet_mode) IS NOT NULL AND source_table='farmer_payments' AND UPPER(TRIM(source->>'payment_mode'))='SPLIT'
+      THEN GREATEST(COALESCE((source->>'cash_amount')::numeric,0),0)
+      ELSE GREATEST(COALESCE((cash->>'debit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'credit')::numeric,0),0) END AS debit
   FROM assigned_sources a JOIN sites s ON s.id=a.site_id
     LEFT JOIN users u ON a.holder_type='user' AND u.id=a.holder_id
     LEFT JOIN members m ON a.holder_type='member' AND m.id=a.holder_id
@@ -36,7 +47,11 @@ export const vaultTransactionsCte = `WITH assigned_sources AS (${sources}), elig
     LEFT JOIN plot_installments vault_installment ON a.source_table='plot_installment_payments' AND vault_installment.id=NULLIF(source->>'installment_id','')::integer
     LEFT JOIN plots vault_plot ON a.source_table IN ('plot_payments','plot_installment_payments')
       AND vault_plot.id=COALESCE(NULLIF(source->>'plot_id','')::integer,vault_installment.plot_id) AND vault_plot.site_id=a.site_id
-  WHERE NOT COALESCE((source->>'is_imprest_internal')::boolean,false)
+  WHERE (a.holder_type<>'user' OR (u.organization_id=s.organization_id
+    AND (u.role IN ('admin','super_admin','sub_admin') OR NULLIF(source->>'loyalty_vault_holder_type','') IS NOT NULL
+      OR EXISTS(SELECT 1 FROM loyalty_vault_sources prior WHERE prior.cash_flow_entry_id=a.cash_flow_entry_id AND prior.holder_key='user:'||a.holder_id::text)
+      OR EXISTS(SELECT 1 FROM wallet_sources prior WHERE prior.cash_flow_entry_id=a.cash_flow_entry_id AND prior.user_id=a.holder_id))))
+    AND NOT COALESCE((source->>'is_imprest_internal')::boolean,false)
     AND NULLIF(source->>'entry_transfer_id','') IS NULL AND NULLIF(source->>'money_transfer_id','') IS NULL
     AND NOT COALESCE((source->>'is_firm_to_firm_transfer')::boolean,false) AND NULLIF(source->>'transfer_group_id','') IS NULL
     AND NOT (source_table='cash_flow_entries' AND COALESCE((source->>'is_firm_transaction')::boolean,false) AND NULLIF(source->>'to_firm_id','') IS NOT NULL)
@@ -49,6 +64,7 @@ export const vaultTransactionsCte = `WITH assigned_sources AS (${sources}), elig
     CASE WHEN financial_transaction_posts('credit',source_status,payment_mode,cheque_status) THEN credit ELSE 0 END AS posted_credit,
     CASE WHEN financial_transaction_posts('debit',source_status,payment_mode,cheque_status) THEN debit ELSE 0 END AS posted_debit
   FROM eligible_sources e
+  WHERE (SELECT consolidated_at FROM wallet_mode) IS NULL OR payment_mode='CASH' OR (source_table='farmer_payments' AND payment_mode='SPLIT')
 ), assigned_transactions AS (
   SELECT p.*,posted_credit-posted_debit AS posted_amount,
     credit-posted_credit AS unposted_credit,debit-posted_debit AS unposted_debit,
@@ -86,7 +102,7 @@ export function publicVaultTransaction(row) {
     holder_type: row.holder_type, holder_id: row.holder_id, holder_name: row.holder_name,
     plot_no: row.plot_no,buyer_name: row.buyer_name,plot_block: row.plot_block,
     site_id: row.site_id, site_name: row.site_name, status: row.status, source_status: row.source_status,
-    cheque_status: row.cheque_status, payment_mode: row.payment_mode,
+    cheque_status: row.cheque_status, payment_mode: row.payment_mode==='SPLIT'?'CASH':row.payment_mode, source_payment_mode: row.payment_mode,
     credit: String(row.credit), debit: String(row.debit), posted_amount: String(row.posted_amount),
     pending_credit: ['pending_clearance','pending_approval'].includes(row.status) ? String(row.unposted_credit) : '0',
     pending_debit: ['pending_clearance','pending_approval'].includes(row.status) ? String(row.unposted_debit) : '0',
