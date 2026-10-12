@@ -6,9 +6,9 @@ import { DEFAULT_TIME_ZONE, getEventPreferences, isValidTimeZone } from './event
 
 /**
  * Best-effort push of compliance events to the organization's connected
- * Google Calendar. One Google account is connected per organization; the
- * configured notify emails ride along as attendees so Google delivers the
- * invite to their phones. Sync is never allowed to fail the primary request —
+ * Google calendars. Each connected account has its own remote event mapping.
+ * Events sync directly without attendees or invitation emails. Sync is never
+ * allowed to fail the primary request —
  * call sites go through queueCalendarSync, which swallows and logs.
  */
 
@@ -55,7 +55,7 @@ const nextDay = (dateStr) => {
 };
 
 /** Pure event-body builder — exercised directly by the sanity check script. */
-export const buildEventBody = (eventType, row, attendeeEmails = [], options = {}) => {
+export const buildEventBody = (eventType, row, _attendeeEmails = [], options = {}) => {
   const cfg = SOURCES[eventType];
   const label = EVENT_LABELS[eventType];
   const title = row[cfg.titleField] || label;
@@ -88,7 +88,7 @@ export const buildEventBody = (eventType, row, attendeeEmails = [], options = {}
     description: descriptionLines.join('\n'),
     start,
     end,
-    attendees: attendeeEmails.map((email) => ({ email })),
+    attendees: [],
     reminders: {
       useDefault: false,
       overrides: timed && options.nativeReminder !== false
@@ -99,14 +99,14 @@ export const buildEventBody = (eventType, row, attendeeEmails = [], options = {}
   };
 };
 
-/** Returns an authenticated calendar client for the org, or null if not connected. */
-const orgCalendar = async (orgId) => {
+/** Authenticate one account without touching another connection. */
+const orgCalendar = async (orgId, connectionId) => {
   if (!isConfigured()) return null;
   const { rows } = await pool.query(
-    `SELECT id, access_token_enc, refresh_token_enc, token_expiry, notify_attendees
+    `SELECT id, access_token_enc, refresh_token_enc, token_expiry
        FROM google_calendar_connections
-      WHERE organization_id=$1 AND status='active' LIMIT 1`,
-    [orgId],
+      WHERE organization_id=$1 AND id=$2 AND status='active' LIMIT 1`,
+    [orgId, connectionId],
   );
   const connection = rows[0];
   if (!connection) return null;
@@ -128,17 +128,15 @@ const orgCalendar = async (orgId) => {
   });
   return {
     calendar: google.calendar({ version: 'v3', auth }),
-    // Admin switch: when off, events sync without attendees and Google
-    // sends no invite/update emails.
-    notifyAttendees: connection.notify_attendees !== false,
+    connectionId: connection.id,
   };
 };
 
-const deleteLinkedEvent = async (calendar, orgId, eventType, sourceId, sendUpdates = 'all') => {
+const deleteLinkedEvent = async (calendar, orgId, connectionId, eventType, sourceId, sendUpdates = 'none') => {
   const { rows } = await pool.query(
     `SELECT id, google_event_id FROM google_calendar_event_links
-      WHERE organization_id=$1 AND event_type=$2 AND source_id=$3 LIMIT 1`,
-    [orgId, eventType, sourceId],
+      WHERE organization_id=$1 AND event_type=$2 AND source_id=$3 AND connection_id=$4 LIMIT 1`,
+    [orgId, eventType, sourceId, connectionId],
   );
   if (!rows[0]) return;
   if (rows[0].google_event_id) {
@@ -162,17 +160,17 @@ const writeSyncAudit = (organizationId, siteId, eventType, sourceId, action, met
  * Reconcile one internal event with Google Calendar: upsert while the source
  * row is live and dated, cancel when it is deleted or loses its date.
  */
-export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
+const syncConnectionEvent = async (orgId, eventType, sourceId, connectionId) => {
   const cfg = SOURCES[eventType];
   if (!cfg) throw new Error(`Unknown calendar event type: ${eventType}`);
   const lockClient = await pool.connect();
-  const lockKey = `gcal:${orgId}:${eventType}:${sourceId}`;
+  const lockKey = `gcal:${orgId}:${connectionId}:${eventType}:${sourceId}`;
   await lockClient.query('SELECT pg_advisory_lock(hashtext($1))', [lockKey]);
   try {
-    const connection = await orgCalendar(orgId);
+    const connection = await orgCalendar(orgId, connectionId);
     if (!connection) return { status: 'DISCONNECTED' };
-    const { calendar, notifyAttendees } = connection;
-    const sendUpdates = notifyAttendees ? 'all' : 'none';
+    const { calendar } = connection;
+    const sendUpdates = 'none';
 
     const { rows } = await pool.query(
     `SELECT * FROM ${cfg.table} WHERE id=$1 AND organization_id=$2 LIMIT 1`,
@@ -180,7 +178,7 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
   );
     const row = rows[0];
     if (!row || row.deleted_at || !row[cfg.dateField]) {
-      await deleteLinkedEvent(calendar, orgId, eventType, sourceId, sendUpdates);
+      await deleteLinkedEvent(calendar, orgId, connectionId, eventType, sourceId, sendUpdates);
       await writeSyncAudit(orgId, row?.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_EVENT_DELETED');
       return { status: 'DELETED' };
     }
@@ -191,17 +189,13 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
     };
     const preferences = await getEventPreferences(eventFacade);
     if (preferences.calendar_enabled === false) {
-      await deleteLinkedEvent(calendar, orgId, eventType, sourceId, sendUpdates);
+      await deleteLinkedEvent(calendar, orgId, connectionId, eventType, sourceId, sendUpdates);
       await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_DISABLED');
       return { status: 'DISABLED' };
     }
 
-    const { rows: emailRows } = await pool.query(
-    'SELECT email FROM google_calendar_notify_emails WHERE organization_id=$1 ORDER BY email',
-    [orgId],
-  );
     const erpEventKey = `${orgId}:${eventType}:${sourceId}`;
-    const body = buildEventBody(eventType, row, notifyAttendees ? emailRows.map((r) => r.email) : [], {
+    const body = buildEventBody(eventType, row, [], {
       timeZone: preferences.timezone,
       nativeReminder: true,
       erpEventKey,
@@ -209,18 +203,18 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
 
     const { rows: linkRows } = await pool.query(
     `SELECT id, google_event_id FROM google_calendar_event_links
-      WHERE organization_id=$1 AND event_type=$2 AND source_id=$3 LIMIT 1`,
-    [orgId, eventType, sourceId],
+      WHERE organization_id=$1 AND event_type=$2 AND source_id=$3 AND connection_id=$4 LIMIT 1`,
+    [orgId, eventType, sourceId, connectionId],
   );
     let link = linkRows[0];
     await pool.query(
       `INSERT INTO google_calendar_event_links
-        (organization_id,event_type,source_id,google_event_id,sync_status,last_attempt_at,sync_attempt_count)
-       VALUES ($1,$2,$3,NULL,'PROCESSING',NOW(),1)
-       ON CONFLICT (organization_id,event_type,source_id) DO UPDATE SET
+        (organization_id,event_type,source_id,connection_id,google_event_id,sync_status,last_attempt_at,sync_attempt_count)
+       VALUES ($1,$2,$3,$4,NULL,'PROCESSING',NOW(),1)
+       ON CONFLICT (connection_id,event_type,source_id) DO UPDATE SET
          sync_status='PROCESSING',last_attempt_at=NOW(),sync_attempt_count=google_calendar_event_links.sync_attempt_count+1,
          failure_reason=NULL,updated_at=NOW()`,
-      [orgId, eventType, sourceId],
+      [orgId, eventType, sourceId, connectionId],
     );
 
     if (link?.google_event_id) {
@@ -233,7 +227,7 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
           failure_reason=NULL,google_html_link=$2,remote_updated_at=$3,updated_at=NOW() WHERE id=$1`,
         [link.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null],
       );
-      await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { operation: 'updated', googleEventId: link.google_event_id });
+      await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { connectionId, operation: 'updated', googleEventId: link.google_event_id });
       console.log(`[gcal] updated ${eventType}#${sourceId} (org ${orgId}) → ${link.google_event_id}`);
       return { status: 'SYNCED', googleEventId: link.google_event_id, operation: 'updated' };
     } catch (err) {
@@ -260,10 +254,10 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
       await pool.query(
         `UPDATE google_calendar_event_links SET google_event_id=$1,sync_status='SYNCED',last_synced_at=NOW(),
           failure_reason=NULL,google_html_link=$2,remote_updated_at=$3,updated_at=NOW()
-         WHERE organization_id=$4 AND event_type=$5 AND source_id=$6`,
-        [data.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null, orgId, eventType, sourceId],
+         WHERE organization_id=$4 AND event_type=$5 AND source_id=$6 AND connection_id=$7`,
+        [data.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null, orgId, eventType, sourceId, connectionId],
       );
-      await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { operation: 'recovered', googleEventId: data.id });
+      await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { connectionId, operation: 'recovered', googleEventId: data.id });
       return { status: 'SYNCED', googleEventId: data.id, operation: 'recovered' };
     }
 
@@ -301,10 +295,10 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
       await pool.query(
         `UPDATE google_calendar_event_links SET google_event_id=$1,sync_status='SYNCED',last_synced_at=NOW(),
           failure_reason=NULL,google_html_link=$2,remote_updated_at=$3,updated_at=NOW()
-         WHERE organization_id=$4 AND event_type=$5 AND source_id=$6`,
-        [data.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null, orgId, eventType, sourceId],
+         WHERE organization_id=$4 AND event_type=$5 AND source_id=$6 AND connection_id=$7`,
+        [data.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null, orgId, eventType, sourceId, connectionId],
       );
-      await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { operation: 'legacy_recovered', googleEventId: data.id });
+      await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { connectionId, operation: 'legacy_recovered', googleEventId: data.id });
       return { status: 'SYNCED', googleEventId: data.id, operation: 'legacy_recovered' };
     }
 
@@ -314,23 +308,23 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
     await pool.query(
       `UPDATE google_calendar_event_links SET google_event_id=$1,sync_status='SYNCED',last_synced_at=NOW(),
         failure_reason=NULL,google_html_link=$2,remote_updated_at=$3,updated_at=NOW()
-       WHERE organization_id=$4 AND event_type=$5 AND source_id=$6`,
-      [data.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null, orgId, eventType, sourceId],
+       WHERE organization_id=$4 AND event_type=$5 AND source_id=$6 AND connection_id=$7`,
+      [data.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null, orgId, eventType, sourceId, connectionId],
     );
-    await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { operation: 'created', googleEventId: data.id });
+    await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { connectionId, operation: 'created', googleEventId: data.id });
     console.log(`[gcal] created ${eventType}#${sourceId} (org ${orgId}) → ${data.id}`);
     return { status: 'SYNCED', googleEventId: data.id, operation: 'created' };
   } catch (error) {
     await pool.query(
       `UPDATE google_calendar_event_links SET sync_status='FAILED',failure_reason=$1,updated_at=NOW()
-        WHERE organization_id=$2 AND event_type=$3 AND source_id=$4`,
-      [String(error.message || error).slice(0, 2000), orgId, eventType, sourceId],
+        WHERE organization_id=$2 AND event_type=$3 AND source_id=$4 AND connection_id=$5`,
+      [String(error.message || error).slice(0, 2000), orgId, eventType, sourceId, connectionId],
     ).catch(() => {});
-    await writeSyncAudit(orgId, null, eventType, sourceId, 'GOOGLE_CALENDAR_SYNC_FAILED', {}, String(error.message || error).slice(0, 2000));
+    await writeSyncAudit(orgId, null, eventType, sourceId, 'GOOGLE_CALENDAR_SYNC_FAILED', { connectionId }, String(error.message || error).slice(0, 2000));
     if (String(error.message || '').includes('invalid_grant')) {
       await pool.query(
-        `UPDATE google_calendar_connections SET status='reauthorization_required',updated_at=NOW() WHERE organization_id=$1`,
-        [orgId],
+        `UPDATE google_calendar_connections SET status='reauthorization_required',updated_at=NOW() WHERE organization_id=$1 AND id=$2`,
+        [orgId, connectionId],
       ).catch(() => {});
     }
     throw error;
@@ -340,9 +334,30 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId) => {
   }
 };
 
+/** Sync each active account independently so one failed token cannot stop
+ * the other calendars. A supplied connection id targets one account. */
+export const syncComplianceEvent = async (orgId, eventType, sourceId, connectionId = null) => {
+  if (!SOURCES[eventType]) throw new Error(`Unknown calendar event type: ${eventType}`);
+  if (!isConfigured()) return { status: 'DISCONNECTED', accounts: [] };
+  const { rows } = await pool.query(`SELECT id,status FROM google_calendar_connections
+    WHERE organization_id=$1 AND status IN ('active','reauthorization_required') AND ($2::bigint IS NULL OR id=$2) ORDER BY id`, [orgId, connectionId]);
+  if (!rows.length) return { status: 'DISCONNECTED', accounts: [] };
+  const accounts = [];
+  for (const account of rows) {
+    if (account.status === 'reauthorization_required') { accounts.push({ connectionId: account.id, status: 'FAILED', error: 'Reconnect this Google account in Calendar settings' }); continue; }
+    try { accounts.push({ connectionId: account.id, ...await syncConnectionEvent(orgId, eventType, sourceId, account.id) }); }
+    catch (error) { accounts.push({ connectionId: account.id, status: 'FAILED', error: error.message }); }
+  }
+  const first = accounts.find(account => account.status === 'SYNCED') || accounts[0];
+  const status = accounts.some(account => account.status === 'FAILED') ? 'FAILED' : first.status;
+  return { ...first, status, accounts };
+};
+
 /** Fire-and-forget hook for controllers — never throws into the request path. */
 export const queueCalendarSync = (orgId, eventType, sourceId) => {
-  syncComplianceEvent(orgId, eventType, sourceId).catch((err) => {
+  syncComplianceEvent(orgId, eventType, sourceId).then(result => {
+    if (result.status === 'FAILED') console.error(`[gcal] some accounts could not sync ${eventType}#${sourceId} (org ${orgId})`);
+  }).catch((err) => {
     console.error(`[gcal] sync ${eventType}#${sourceId} (org ${orgId}) failed:`, err.message);
   });
 };
@@ -352,8 +367,8 @@ export const queueCalendarSync = (orgId, eventType, sourceId) => {
  * successful connect so existing records appear without waiting to be edited.
  * Sequential on purpose — one org's backfill stays far below API rate limits.
  */
-export const backfillOrgEvents = async (orgId) => {
-  let synced = 0;
+export const backfillOrgEvents = async (orgId, connectionId = null) => {
+  let synced = 0, failed = 0;
   for (const [eventType, cfg] of Object.entries(SOURCES)) {
     const { rows } = await pool.query(
       `SELECT id FROM ${cfg.table}
@@ -362,13 +377,15 @@ export const backfillOrgEvents = async (orgId) => {
     );
     for (const row of rows) {
       try {
-        await syncComplianceEvent(orgId, eventType, row.id);
-        synced += 1;
+        const result = await syncComplianceEvent(orgId, eventType, row.id, connectionId);
+        synced += result.accounts.filter(account => account.status === 'SYNCED').length;
+        failed += result.accounts.filter(account => account.status === 'FAILED').length;
       } catch (err) {
+        failed += 1;
         console.error(`[gcal] backfill ${eventType}#${row.id} (org ${orgId}) failed:`, err.message);
       }
     }
   }
   console.log(`[gcal] backfill complete for org ${orgId}: ${synced} events synced`);
-  return synced;
+  return { synced, failed };
 };

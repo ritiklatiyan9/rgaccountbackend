@@ -7,10 +7,7 @@ import {
   oauthCallback,
   disconnect,
   getStatus,
-  setNotifyAttendees,
   syncFutureEvents,
-  addNotifyEmail,
-  removeNotifyEmail,
 } from '../controllers/googleCalendar.controller.js';
 
 const router = express.Router();
@@ -26,8 +23,5 @@ router.get('/google-calendar/status', authMiddleware, attachOrgContext, getStatu
 router.get('/google-calendar/connect', authMiddleware, attachOrgContext, requireRole('admin'), getConnectUrl);
 router.post('/google-calendar/disconnect', authMiddleware, attachOrgContext, requireRole('admin'), disconnect);
 router.post('/google-calendar/sync', authMiddleware, attachOrgContext, requireRole('admin'), syncFutureEvents);
-router.post('/google-calendar/notifications', authMiddleware, attachOrgContext, requireRole('admin'), setNotifyAttendees);
-router.post('/google-calendar/emails', authMiddleware, attachOrgContext, requireRole('admin'), addNotifyEmail);
-router.delete('/google-calendar/emails/:id', authMiddleware, attachOrgContext, requireRole('admin'), removeNotifyEmail);
 
 export default router;

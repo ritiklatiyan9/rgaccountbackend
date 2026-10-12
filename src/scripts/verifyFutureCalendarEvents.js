@@ -11,7 +11,7 @@ const remoteStatus = (error) => error?.code ?? error?.response?.status;
 
 async function run() {
   const { rows: connections } = await pool.query(
-    `SELECT organization_id,access_token_enc,refresh_token_enc,token_expiry
+    `SELECT id,google_account_email,organization_id,access_token_enc,refresh_token_enc,token_expiry
        FROM google_calendar_connections WHERE status='active'`,
   );
   const report = [];
@@ -25,8 +25,8 @@ async function run() {
     const calendar = google.calendar({ version: 'v3', auth });
     const { rows: links } = await pool.query(
       `SELECT * FROM google_calendar_event_links
-        WHERE organization_id=$1 AND google_event_id IS NOT NULL ORDER BY event_type,source_id`,
-      [connection.organization_id],
+        WHERE organization_id=$1 AND connection_id=$2 AND google_event_id IS NOT NULL ORDER BY event_type,source_id`,
+      [connection.organization_id, connection.id],
     );
     for (const link of links) {
       const config = SOURCES[link.event_type];
@@ -39,12 +39,12 @@ async function run() {
       if (!source) continue;
       let operation = 'verified';
       if (repair) {
-        const result = await syncComplianceEvent(connection.organization_id, link.event_type, link.source_id);
+        const result = await syncComplianceEvent(connection.organization_id, link.event_type, link.source_id, connection.id);
         operation = result?.operation || result?.status?.toLowerCase() || 'verified';
       }
       const currentLink = (await pool.query(
-        `SELECT * FROM google_calendar_event_links WHERE organization_id=$1 AND event_type=$2 AND source_id=$3`,
-        [connection.organization_id, link.event_type, link.source_id],
+        `SELECT * FROM google_calendar_event_links WHERE organization_id=$1 AND event_type=$2 AND source_id=$3 AND connection_id=$4`,
+        [connection.organization_id, link.event_type, link.source_id, connection.id],
       )).rows[0];
       let remote;
       try {

@@ -128,17 +128,12 @@ export async function resolveEventReminderRecipients(event, preferences, db = po
         ))`,
     [event.organization_id, userIds, event.site_id || null],
   ) : { rows: [] };
-  const configured = await db.query(
-    `SELECT LOWER(BTRIM(email)) AS email FROM google_calendar_notify_emails
-      WHERE organization_id=$1 ORDER BY email LIMIT $2`,
-    [event.organization_id, MAX_RECIPIENTS],
-  );
   const byEmail = new Map();
   for (const user of users.rows) {
     const email = normalizeEmail(user.email);
     if (email) byEmail.set(email, { email, name: user.name, userId: user.id });
   }
-  const externalEmails = [...(preferences.additional_emails || []), ...configured.rows.map((row) => row.email)];
+  const externalEmails = [...(preferences.additional_emails || [])];
   for (const candidate of externalEmails) {
     const email = normalizeEmail(candidate);
     if (email && !byEmail.has(email)) byEmail.set(email, { email, name: null, userId: null });

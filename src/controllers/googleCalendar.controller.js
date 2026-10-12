@@ -6,11 +6,14 @@ import { buildOAuthClient, backfillOrgEvents } from '../services/googleCalendarS
 import { handleDriveOAuthCallback } from './googleDrive.controller.js';
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
-const settingsPage = (origin) => `${origin}/settings?tab=google-calendar`;
+const settingsPage = (origin) => `${origin}/settings/calendar`;
 
-// ponytail: single front end here (no tenant subdomains) — the callback
-// always returns to the configured FRONTEND_URL.
-const originFor = () => FRONTEND_URL;
+// A local settings session uses the registered hosted Google callback, then
+// returns to its own app. Never accept an arbitrary return address.
+const originFor = req => {
+  const origin = req.get?.('Origin') || req.headers?.origin;
+  return [FRONTEND_URL, 'http://127.0.0.1:5174', 'http://localhost:5174'].includes(origin) ? origin : FRONTEND_URL;
+};
 // openid+email are only used to learn which Google account was connected;
 // calendar.events is the least-privilege calendar scope (no calendar list/settings access).
 const SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/calendar.events'];
@@ -33,9 +36,18 @@ export const getConnectUrl = asyncHandler(async (req, res) => {
   if (!isConfigured()) {
     return res.status(503).json({ message: 'Google Calendar integration is not configured on this server' });
   }
+  let loginHint;
+  if (req.query.connection_id != null) {
+    const id = Number(req.query.connection_id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ message: 'Choose a valid calendar account' });
+    const { rows } = await pool.query('SELECT google_account_email FROM google_calendar_connections WHERE id=$1 AND organization_id=$2', [id, req.user.organization_id]);
+    if (!rows[0]) return res.status(404).json({ message: 'Calendar account not found' });
+    loginHint = rows[0].google_account_email;
+  }
   const url = buildOAuthClient().generateAuthUrl({
+    ...(loginHint ? { login_hint: loginHint } : {}),
     access_type: 'offline',
-    prompt: 'consent', // guarantees a refresh_token even on reconnect
+    prompt: 'select_account consent',
     scope: SCOPES,
     state: signOAuthState({ orgId: req.user.organization_id, userId: req.user.id, origin: originFor(req), kind: 'calendar' }),
   });
@@ -46,17 +58,17 @@ export const oauthCallback = asyncHandler(async (req, res) => {
   // Until the state is verified the tenant host is unknown, so early failures
   // land on the configured front end rather than a caller-supplied one.
   let origin = FRONTEND_URL;
-  const fail = (reason) => res.redirect(`${settingsPage(origin)}&google=error&reason=${encodeURIComponent(reason)}`);
+  const fail = (reason) => res.redirect(`${settingsPage(origin)}?google=error&reason=${encodeURIComponent(reason)}`);
   // Google Drive shares this OAuth client and redirect URI; the signed state's
   // kind says which integration started the flow. Verify it first because
   // Google echoes the state on error redirects too.
   const state = verifyOAuthState(req.query.state);
   if (state?.kind === 'drive') return handleDriveOAuthCallback(req, res, state);
   if (state && state.kind !== 'calendar') return fail('invalid_state');
+  if (state) origin = state.origin;
   if (!isConfigured()) return fail('not_configured');
   if (req.query.error) return fail(String(req.query.error));
   if (!state) return fail('invalid_state');
-  origin = state.origin;
   if (!req.query.code) return fail('missing_code');
 
   let tokens;
@@ -67,15 +79,16 @@ export const oauthCallback = asyncHandler(async (req, res) => {
     return fail('token_exchange_failed');
   }
   if (!tokens.refresh_token) return fail('no_refresh_token');
-  const email = emailFromIdToken(tokens.id_token);
+  const email = String(emailFromIdToken(tokens.id_token) || '').trim().toLowerCase();
   if (!email) return fail('no_account_email');
 
+  let connectionId;
   try {
-    await pool.query(
+    const { rows } = await pool.query(
       `INSERT INTO google_calendar_connections
-         (organization_id, google_account_email, access_token_enc, refresh_token_enc, token_expiry, scope, connected_by, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'active')
-       ON CONFLICT (organization_id) DO UPDATE SET
+         (organization_id, google_account_email, access_token_enc, refresh_token_enc, token_expiry, scope, connected_by, status, notify_attendees)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'active',FALSE)
+       ON CONFLICT (organization_id,LOWER(google_account_email)) DO UPDATE SET
          google_account_email=EXCLUDED.google_account_email,
          access_token_enc=EXCLUDED.access_token_enc,
          refresh_token_enc=EXCLUDED.refresh_token_enc,
@@ -83,10 +96,12 @@ export const oauthCallback = asyncHandler(async (req, res) => {
          scope=EXCLUDED.scope,
          connected_by=EXCLUDED.connected_by,
          status='active',
-         updated_at=NOW()`,
+         notify_attendees=FALSE,
+         updated_at=NOW() RETURNING id`,
       [state.orgId, email, encrypt(tokens.access_token), encrypt(tokens.refresh_token),
         tokens.expiry_date ? new Date(tokens.expiry_date) : null, tokens.scope || SCOPES.join(' '), state.userId],
     );
+    connectionId = rows[0].id;
   } catch (err) {
     // A user on Google's redirect should land back in Settings with a toast,
     // not on a raw JSON error page (e.g. a malformed CALENDAR_TOKEN_ENC_KEY).
@@ -95,125 +110,63 @@ export const oauthCallback = asyncHandler(async (req, res) => {
   }
   // Existing future-dated events appear on the calendar without waiting to be
   // edited. Fire-and-forget: the admin's redirect must not wait on N API calls.
-  backfillOrgEvents(state.orgId).catch((err) => {
+  backfillOrgEvents(state.orgId, connectionId).catch((err) => {
     console.error(`[gcal] backfill (org ${state.orgId}) failed:`, err.message);
   });
-  res.redirect(`${settingsPage(origin)}&google=connected`);
+  res.redirect(`${settingsPage(origin)}?google=connected`);
 });
+
+const selectedConnectionId = req => req.body?.connection_id == null ? null : Number(req.body.connection_id);
+const validConnectionId = id => id == null || (Number.isSafeInteger(id) && id > 0);
 
 export const disconnect = asyncHandler(async (req, res) => {
-  const orgId = req.user.organization_id;
-  const { rows } = await pool.query(
-    `SELECT id, google_account_email, refresh_token_enc FROM google_calendar_connections
-      WHERE organization_id=$1 AND status='active' LIMIT 1`,
-    [orgId],
-  );
-  if (!rows[0]) return res.status(404).json({ message: 'No Google Calendar connection to disconnect' });
-  // Google revokes the whole (account × OAuth client) grant, which would also
-  // kill a Drive connection on the same account — only revoke when Drive is
-  // not using it. 42P01 = Drive migration not run yet = no sibling.
+  const orgId = req.user.organization_id, requestedId = selectedConnectionId(req);
+  if (!validConnectionId(requestedId)) return res.status(400).json({ message: 'Choose a valid calendar account' });
+  const { rows } = await pool.query(`SELECT id,google_account_email,refresh_token_enc FROM google_calendar_connections
+    WHERE organization_id=$1 AND status IN ('active','reauthorization_required') AND ($2::bigint IS NULL OR id=$2) ORDER BY id`, [orgId, requestedId]);
+  if (!rows.length) return res.status(404).json({ message: 'Calendar account not found' });
+  if (rows.length > 1) return res.status(400).json({ message: 'Choose which calendar account to disconnect' });
+  const account = rows[0];
+  // Revoking a Google grant affects every token for that Google account.
+  // Keep a grant that is still used by Drive or another calendar connection.
   let driveActive = false;
   try {
-    const sibling = await pool.query(
-      `SELECT 1 FROM google_drive_connections
-        WHERE organization_id=$1 AND status='active' AND google_account_email=$2 LIMIT 1`,
-      [orgId, rows[0].google_account_email],
-    );
+    const sibling = await pool.query(`SELECT 1 FROM google_drive_connections
+      WHERE organization_id=$1 AND status='active' AND google_account_email=$2 LIMIT 1`, [orgId, account.google_account_email]);
     driveActive = sibling.rowCount > 0;
-  } catch (err) {
-    if (err.code !== '42P01') throw err;
+  } catch (error) { if (error.code !== '42P01') throw error; }
+  const siblingCalendar = await pool.query(`SELECT 1 FROM google_calendar_connections
+    WHERE id<>$1 AND status='active' AND LOWER(google_account_email)=LOWER($2) LIMIT 1`, [account.id, account.google_account_email]);
+  if (!driveActive && !siblingCalendar.rowCount) {
+    try { await buildOAuthClient().revokeToken(decrypt(account.refresh_token_enc)); }
+    catch (error) { console.error('[gcal] token revoke failed (continuing):', error.message); }
   }
-  if (!driveActive) {
-    try {
-      await buildOAuthClient().revokeToken(decrypt(rows[0].refresh_token_enc));
-    } catch (err) {
-      console.error('[gcal] token revoke failed (continuing):', err.message);
-    }
-  }
-  await pool.query(
-    `UPDATE google_calendar_connections SET status='revoked', updated_at=NOW() WHERE id=$1`,
-    [rows[0].id],
-  );
-  // Preserve the canonical ERP ↔ Google mapping. A reconnect can update the
-  // same remote ids in place; deleting these rows would make duplicates much
-  // more likely and would erase the sync audit trail.
-  await pool.query(
-    `UPDATE google_calendar_event_links SET sync_status='DISCONNECTED',updated_at=NOW()
-      WHERE organization_id=$1`,
-    [orgId],
-  );
-  res.json({ success: true });
+  await pool.query("UPDATE google_calendar_connections SET status='revoked',updated_at=NOW() WHERE id=$1 AND organization_id=$2", [account.id, orgId]);
+  // Preserve each account's canonical mapping for a later reconnect.
+  await pool.query(`UPDATE google_calendar_event_links SET sync_status='DISCONNECTED',updated_at=NOW()
+    WHERE organization_id=$1 AND connection_id=$2`, [orgId, account.id]);
+  res.json({ success: true, connection_id: account.id });
 });
 
-// Rewrites linked future events in place. This lets admins apply presentation
-// changes such as an updated summary without disconnecting their account.
 export const syncFutureEvents = asyncHandler(async (req, res) => {
   if (!isConfigured()) return res.status(503).json({ message: 'Google Calendar integration is not configured on this server' });
-  const { rowCount } = await pool.query(
-    `SELECT 1 FROM google_calendar_connections
-      WHERE organization_id=$1 AND status='active' LIMIT 1`,
-    [req.user.organization_id],
-  );
-  if (!rowCount) return res.status(404).json({ message: 'No active Google Calendar connection found' });
-  const synced = await backfillOrgEvents(req.user.organization_id);
-  res.json({ success: true, synced });
+  const id = selectedConnectionId(req);
+  if (!validConnectionId(id)) return res.status(400).json({ message: 'Choose a valid calendar account' });
+  const { rows } = await pool.query(`SELECT id FROM google_calendar_connections
+    WHERE organization_id=$1 AND status='active' AND ($2::bigint IS NULL OR id=$2)`, [req.user.organization_id, id]);
+  if (!rows.length) return res.status(404).json({ message: 'No active calendar account found' });
+  const result = await backfillOrgEvents(req.user.organization_id, id);
+  res.json({ success: result.failed === 0, ...result, accounts: rows.length });
 });
 
 export const getStatus = asyncHandler(async (req, res) => {
-  const orgId = req.user.organization_id;
-  const [connection, emails] = await Promise.all([
-    pool.query(
-      `SELECT google_account_email, status, created_at, updated_at, notify_attendees
-         FROM google_calendar_connections
-        WHERE organization_id=$1 ORDER BY updated_at DESC LIMIT 1`,
-      [orgId],
-    ),
-    pool.query(
-      'SELECT id, email FROM google_calendar_notify_emails WHERE organization_id=$1 ORDER BY email',
-      [orgId],
-    ),
-  ]);
-  res.json({
-    configured: isConfigured(),
-    connection: connection.rows[0]?.status === 'active' ? connection.rows[0] : null,
-    connection_status: connection.rows[0]?.status || 'disconnected',
-    emails: emails.rows,
+  const { rows } = await pool.query(`SELECT id,google_account_email,status,created_at,updated_at
+    FROM google_calendar_connections WHERE organization_id=$1 ORDER BY created_at,id`, [req.user.organization_id]);
+  const accounts = rows.filter(account => ['active','reauthorization_required'].includes(account.status));
+  const firstActive = accounts.find(account => account.status === 'active');
+  res.set('Cache-Control', 'no-store').json({
+    configured: isConfigured(), connections: accounts,
+    connection: firstActive || null,
+    connection_status: firstActive ? 'active' : rows.at(-1)?.status || 'disconnected',
   });
-});
-
-/** Admin switch: send (or stop sending) invite emails to the notify list.
- * Events keep syncing to the connected calendar either way. */
-export const setNotifyAttendees = asyncHandler(async (req, res) => {
-  const enabled = req.body.enabled === true;
-  const { rowCount } = await pool.query(
-    `UPDATE google_calendar_connections
-        SET notify_attendees=$1, updated_at=NOW()
-      WHERE organization_id=$2 AND status='active'`,
-    [enabled, req.user.organization_id],
-  );
-  if (!rowCount) return res.status(404).json({ message: 'No active Google Calendar connection found' });
-  res.json({ success: true, notify_attendees: enabled });
-});
-
-export const addNotifyEmail = asyncHandler(async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  if (!/^\S+@\S+\.\S+$/.test(email) || email.length > 255) {
-    return res.status(400).json({ message: 'A valid email address is required' });
-  }
-  const { rows } = await pool.query(
-    `INSERT INTO google_calendar_notify_emails (organization_id, email, added_by)
-     VALUES ($1,$2,$3) ON CONFLICT (organization_id, email) DO NOTHING RETURNING id, email`,
-    [req.user.organization_id, email, req.user.id],
-  );
-  if (!rows[0]) return res.status(409).json({ message: 'This email is already on the list' });
-  res.status(201).json({ email: rows[0] });
-});
-
-export const removeNotifyEmail = asyncHandler(async (req, res) => {
-  const { rowCount } = await pool.query(
-    'DELETE FROM google_calendar_notify_emails WHERE id=$1 AND organization_id=$2',
-    [Number(req.params.id) || 0, req.user.organization_id],
-  );
-  if (!rowCount) return res.status(404).json({ message: 'Email not found' });
-  res.json({ success: true });
 });

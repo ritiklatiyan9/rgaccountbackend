@@ -1,3 +1,4 @@
+import { summarizeCalendarSync } from '../services/googleCalendarStatus.service.js';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import permissionModel from '../models/Permission.model.js';
@@ -42,10 +43,12 @@ export const getEventReminderState = asyncHandler(async (req, res) => {
       [event.organization_id, event.event_type, event.id],
     ),
     pool.query(
-      `SELECT google_event_id,sync_status,last_synced_at,last_attempt_at,sync_attempt_count,
-              failure_reason,google_html_link,remote_updated_at,updated_at
-         FROM google_calendar_event_links
-        WHERE organization_id=$1 AND event_type=$2 AND source_id=$3 LIMIT 1`,
+      `SELECT c.id AS connection_id,c.google_account_email,c.status AS connection_status,
+          g.google_event_id,g.sync_status,g.last_synced_at,g.last_attempt_at,g.sync_attempt_count,
+          g.failure_reason,g.google_html_link,g.remote_updated_at,g.updated_at
+         FROM google_calendar_connections c LEFT JOIN google_calendar_event_links g
+           ON g.connection_id=c.id AND g.organization_id=c.organization_id AND g.event_type=$2 AND g.source_id=$3
+        WHERE c.organization_id=$1 AND c.status IN ('active','reauthorization_required') ORDER BY c.id`,
       [event.organization_id, event.event_type, event.id],
     ),
   ]);
@@ -55,7 +58,11 @@ export const getEventReminderState = asyncHandler(async (req, res) => {
     preferences,
     recipients,
     reminders: reminders.rows,
-    calendar: calendar.rows[0] || { sync_status: preferences.calendar_enabled ? 'PENDING' : 'DISABLED' },
+    calendars: calendar.rows,
+    calendar: { ...(calendar.rows[0] || {}),
+      sync_status: preferences.calendar_enabled ? summarizeCalendarSync(calendar.rows) : 'DISABLED',
+      last_synced_at: calendar.rows.length && calendar.rows.every(account => account.sync_status === 'SYNCED' && account.last_synced_at)
+        ? new Date(Math.min(...calendar.rows.map(account => new Date(account.last_synced_at).getTime()))) : null },
   });
 });
 
@@ -90,7 +97,9 @@ export const retryEventReminders = asyncHandler(async (req, res) => {
 export const retryEventCalendarSync = asyncHandler(async (req, res) => {
   const event = await scopedEvent(req, 'update');
   if (!event) return res.status(404).json({ message: 'Calendar event not found or unavailable' });
-  await syncComplianceEvent(event.organization_id, event.event_type, event.id);
+  const result = await syncComplianceEvent(event.organization_id, event.event_type, event.id);
+  if (result.status === 'FAILED') return res.status(502).json({ message: 'Some calendar accounts could not sync. Reconnect any expired accounts in Calendar settings, then retry.' });
+  if (result.status === 'DISCONNECTED') return res.status(409).json({ message: 'Connect a Gmail account in Calendar settings, then retry.' });
   res.json({ success: true });
 });
 
