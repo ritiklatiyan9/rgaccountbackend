@@ -99,6 +99,37 @@ const getDefaultPermissions = (module) => {
 };
 
 class PermissionModel {
+    /** Read a set of module grants without one pool checkout per module. */
+    async getPermissions(userId, requestedModules, db = pool) {
+        const modules = [...new Set(requestedModules)];
+        if (!modules.length) return new Map();
+        const read = () => db.query(
+            'SELECT * FROM user_permissions WHERE user_id = $1 AND module = ANY($2::text[])',
+            [userId, modules]
+        );
+        let { rows } = await read();
+        const found = new Set(rows.map(row => row.module));
+        const missing = modules.filter(module => ALL_MODULES.includes(module) && !found.has(module));
+        if (missing.length) {
+            // Match getPermission's auto-seeding, but preserve administrator
+            // changes if another request inserts a missing grant concurrently.
+            await db.query(
+                `INSERT INTO user_permissions
+                   (user_id, module, can_read, can_write, can_update, can_delete, can_restore, can_view_all)
+                 SELECT $1, x.module, x.can_read, x.can_write, x.can_update, x.can_delete, x.can_restore, x.can_view_all
+                 FROM jsonb_to_recordset($2::jsonb) AS x(module text, can_read boolean,
+                   can_write boolean, can_update boolean, can_delete boolean,
+                   can_restore boolean, can_view_all boolean)
+                 ON CONFLICT (user_id, module) DO NOTHING`,
+                [userId, JSON.stringify(missing.map(module => ({ module, ...getDefaultPermissions(module) })))]
+            );
+            // Re-read actual grants: ON CONFLICT may have retained a concurrent
+            // explicit revocation rather than our defaults.
+            ({ rows } = await read());
+        }
+        return new Map(rows.map(row => [row.module, row]));
+    }
+
     /** Get all permissions for a user */
     async getByUserId(userId) {
         await this.ensureDefaults(userId);

@@ -4,6 +4,7 @@ import { encrypt, decrypt } from '../utils/tokenCrypto.js';
 import { signOAuthState, verifyOAuthState } from '../utils/googleOAuthState.js';
 import { buildOAuthClient, backfillOrgEvents } from '../services/googleCalendarSync.service.js';
 import { handleDriveOAuthCallback } from './googleDrive.controller.js';
+import { calendarSyncError } from '../services/googleCalendarError.service.js';
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
 const settingsPage = (origin) => `${origin}/settings/calendar`;
@@ -160,9 +161,41 @@ export const syncFutureEvents = asyncHandler(async (req, res) => {
 });
 
 export const getStatus = asyncHandler(async (req, res) => {
-  const { rows } = await pool.query(`SELECT id,google_account_email,status,created_at,updated_at
-    FROM google_calendar_connections WHERE organization_id=$1 ORDER BY created_at,id`, [req.user.organization_id]);
-  const accounts = rows.filter(account => ['active','reauthorization_required'].includes(account.status));
+  const { rows } = await pool.query(`WITH future_events AS (
+      SELECT organization_id,id AS source_id,'COMPLIANCE' AS event_type FROM compliance_items
+        WHERE organization_id=$1 AND deleted_at IS NULL AND current_due_date>=CURRENT_DATE
+      UNION ALL SELECT organization_id,id,'LEGAL_HEARING' FROM legal_cases
+        WHERE organization_id=$1 AND deleted_at IS NULL AND next_hearing_date>=CURRENT_DATE
+      UNION ALL SELECT organization_id,id,'NOTICE_REPLY' FROM legal_notices
+        WHERE organization_id=$1 AND deleted_at IS NULL AND reply_due_date>=CURRENT_DATE
+      UNION ALL SELECT organization_id,id,'INSPECTION' FROM compliance_inspections
+        WHERE organization_id=$1 AND deleted_at IS NULL AND scheduled_at>=CURRENT_DATE
+      UNION ALL SELECT organization_id,id,'LICENCE_EXPIRY' FROM compliance_licences
+        WHERE organization_id=$1 AND deleted_at IS NULL AND expiry_date>=CURRENT_DATE
+    ) SELECT c.id,c.google_account_email,c.status,c.created_at,c.updated_at,
+      totals.synced,totals.failed,totals.pending,totals.last_synced_at,latest.failure_reason
+    FROM google_calendar_connections c
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) FILTER (WHERE g.sync_status='SYNCED')::int AS synced,
+        COUNT(*) FILTER (WHERE g.sync_status='FAILED')::int AS failed,
+        COUNT(*) FILTER (WHERE g.sync_status IN ('PENDING','PROCESSING'))::int AS pending,
+        MAX(g.last_synced_at) AS last_synced_at
+      FROM google_calendar_event_links g JOIN future_events e
+        ON e.organization_id=g.organization_id AND e.event_type=g.event_type AND e.source_id=g.source_id
+      WHERE g.connection_id=c.id AND g.organization_id=c.organization_id
+    ) totals ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT g.failure_reason FROM google_calendar_event_links g JOIN future_events e
+        ON e.organization_id=g.organization_id AND e.event_type=g.event_type AND e.source_id=g.source_id
+      WHERE g.connection_id=c.id AND g.organization_id=c.organization_id AND g.sync_status='FAILED'
+      ORDER BY g.updated_at DESC,g.id DESC LIMIT 1
+    ) latest ON TRUE
+    WHERE c.organization_id=$1 ORDER BY c.created_at,c.id`, [req.user.organization_id]);
+  const accounts = rows.filter(account => ['active','reauthorization_required'].includes(account.status)).map(({ failure_reason, ...account }) => ({
+    ...account,
+    sync_error: account.status === 'reauthorization_required' ? calendarSyncError('invalid_grant')
+      : account.failed ? calendarSyncError(failure_reason) : null,
+  }));
   const firstActive = accounts.find(account => account.status === 'active');
   res.set('Cache-Control', 'no-store').json({
     configured: isConfigured(), connections: accounts,

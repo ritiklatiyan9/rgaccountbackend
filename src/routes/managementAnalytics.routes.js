@@ -7,6 +7,7 @@ import createRateLimiter from '../middlewares/rateLimit.middleware.js';
 import {
   getOverview, getClients, getClientMap, getPaymentBehaviour,
   getRegistryAnalytics, getExpenseAnalytics, getVendorAnalytics, getConstructionAnalytics, getLandAnalytics,
+  parseScope, assertSiteAccess,
 } from '../controllers/managementAnalytics.controller.js';
 import { streamAssistant, generateInsights, chartInsight, runGeocode } from '../controllers/managementAnalyticsAi.controller.js';
 import {
@@ -18,7 +19,14 @@ const router = express.Router();
 // Whole-site aggregates: sub-admins are scoped by user_sites inside the controllers (not by created_by).
 router.use(authMiddleware, requireRole('admin', 'sub_admin'), requirePermission('management_analytics', 'read'));
 
-const cache = cacheResponse({ ttlSeconds: 120, namespace: 'management-analytics' });
+const cache = cacheResponse({ ttlSeconds: 120, namespace: 'management-analytics',
+  authorizeHit: async (req, res) => {
+    const scope = parseScope(req, res, 'query');
+    if (!scope) return false;
+    await assertSiteAccess(req.user, scope.siteId);
+    return true;
+  },
+});
 const aiLimiter = createRateLimiter({ windowMs: 60_000, max: 24, keyPrefix: 'mgmt-ai:' });
 const messagingLimiter = createRateLimiter({ windowMs: 60_000, max: 10, keyPrefix: 'mgmt-messaging:' });
 

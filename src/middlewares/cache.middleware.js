@@ -11,17 +11,22 @@ const sortQueryEntries = (queryObj = {}) => (
   Object.entries(queryObj)
     .filter(([k]) => k !== 'nocache')
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(',') : String(v)}`)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(Array.isArray(v) ? v.join(',') : String(v))}`)
     .join('&')
 );
 
-const buildKey = (req, namespace = 'api') => {
+export const buildCacheKey = (req, namespace = 'api') => {
   const userPart = req.user?.id ? `u:${req.user.id}` : 'u:anon';
+  const permissions = req.user?.permissionsByModule instanceof Map
+    ? [...req.user.permissionsByModule].map(([module, row]) => [module, row?.can_read === true, row?.can_view_all === true])
+      .sort(([a], [b]) => a.localeCompare(b)) : [];
+  const scope = encodeURIComponent(JSON.stringify([req.user?.role, req.user?.organization_id,
+    req.user?.version, req.sessionId, req.authenticatedUser?.token_version, permissions]));
   const queryPart = sortQueryEntries(req.query || {});
-  return `${namespace}|${userPart}|${req.path}|${queryPart}`;
+  return `${namespace}|${userPart}|scope:${scope}|${req.path}|${queryPart}`;
 };
 
-export const cacheResponse = ({ ttlSeconds, namespace = 'api', shouldCache } = {}) => {
+export const cacheResponse = ({ ttlSeconds, namespace = 'api', shouldCache, authorizeHit } = {}) => {
   const ttl = ttlSeconds ?? getDefaultTTL();
   return async (req, res, next) => {
     if (!cacheEnabled() || req.method !== 'GET') return next();
@@ -32,17 +37,26 @@ export const cacheResponse = ({ ttlSeconds, namespace = 'api', shouldCache } = {
 
     if (noCacheRequested) return next();
 
-    const key = buildKey(req, namespace);
+    const key = buildCacheKey(req, namespace);
     const requestGeneration = getCacheGeneration();
 
+    let cached;
     try {
-      const cached = await cacheGet(key);
-      if (cached) {
-        res.setHeader('X-Cache', 'HIT');
-        return res.status(cached.statusCode).json(cached.payload);
-      }
+      cached = await cacheGet(key);
     } catch {
       // Redis read failure — proceed without cache
+    }
+
+    if (cached && requestGeneration === getCacheGeneration()) {
+      // Some routes enforce site/record access in the controller. A cache hit
+      // must recheck that boundary before returning private data.
+      if (authorizeHit) {
+        try {
+          if (!(await authorizeHit(req, res))) return;
+        } catch (error) { return next(error); }
+      }
+      res.setHeader('X-Cache', 'HIT');
+      return res.status(cached.statusCode).json(cached.payload);
     }
 
     const originalJson = res.json.bind(res);
@@ -71,7 +85,7 @@ export const invalidateCacheOnSuccess = (prefixes = []) => {
         // Balance Sheet, Dashboard or Management Analytics (plots and land deals also
         // change expected value without creating a ledger row). Invalidate them
         // centrally so a new module cannot accidentally leave stale KPIs.
-        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|', 'site-profit|', 'dashboard:', 'management-analytics|'])];
+        const effectivePrefixes = [...new Set([...prefixes, 'balance-sheet|', 'site-profit|', 'dashboard:', 'management-analytics|', 'reports|'])];
         clearCacheByPrefixes(effectivePrefixes).catch(() => {});
       }
     });

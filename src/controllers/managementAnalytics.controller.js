@@ -6,6 +6,7 @@
 import pool from '../config/db.js';
 import { CLIENT_MAP_SQL, buildClientMap } from '../services/clientMapAnalytics.service.js';
 import { loadClientMapAddresses } from '../services/clientMapAddresses.service.js';
+import { CLIENT_DEMOGRAPHICS_SCOPE, loadClientDemographics } from '../services/clientDemographicsRead.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { cleanText } from '../services/openRouterStream.service.js';
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
@@ -105,7 +106,7 @@ const PLOT_PAID_CTE = `plot_paid AS (
          COUNT(*) FILTER (WHERE amt > 0)::int AS payments
     FROM pay GROUP BY plot_id)`;
 const APPROVED_PP = `financial_transaction_posts('credit', pp.status, pp.payment_type, pp.cheque_status)`;
-const CLIENT = `m.site_id = $1 AND UPPER(COALESCE(m.member_type, '')) = 'CLIENT' AND LOWER(COALESCE(m.status, 'active')) <> 'deleted'`;
+const CLIENT = CLIENT_DEMOGRAPHICS_SCOPE;
 const FILLED = (col) => `COUNT(*) FILTER (WHERE NULLIF(TRIM(${col}), '') IS NOT NULL)::int`;
 const REG_PAY_CTE = `reg_pay AS (
   SELECT prp.registry_id,
@@ -350,19 +351,8 @@ export const getOverview = asyncHandler(async (req, res) => {
 });
 
 // ── Clients ─────────────────────────────────────────────────────────────────
-const bucket = (siteId, expr, limit = 12) => q(
-  `SELECT COALESCE(NULLIF(UPPER(TRIM(${expr})), ''), 'UNSPECIFIED') AS label, COUNT(*)::int AS count
-     FROM members m WHERE ${CLIENT} GROUP BY 1 ORDER BY 2 DESC LIMIT $2::int`, [siteId, limit]);
-
-const AGE_BAND = `CASE WHEN m.date_of_birth IS NULL THEN NULL
-  WHEN EXTRACT(YEAR FROM age(m.date_of_birth)) < 30 THEN 'Under 30'
-  WHEN EXTRACT(YEAR FROM age(m.date_of_birth)) < 40 THEN '30-39'
-  WHEN EXTRACT(YEAR FROM age(m.date_of_birth)) < 50 THEN '40-49'
-  WHEN EXTRACT(YEAR FROM age(m.date_of_birth)) < 60 THEN '50-59' ELSE '60+' END`;
-
 const clientsData = async (siteId) => {
-  const [total, byType, comp, kyc, occ, city, state, gender, age, qual, team, newByMonth, topClients, agents, linked] = await Promise.all([
-    q(`SELECT COUNT(*)::int AS total FROM members m WHERE ${CLIENT}`, [siteId]),
+  const [byType, comp, kyc, demographics, newByMonth, topClients, agents, linked] = await Promise.all([
     q(`SELECT COALESCE(NULLIF(UPPER(TRIM(member_type)),''),'UNSPECIFIED') AS member_type, COUNT(*)::int AS count
          FROM members WHERE site_id = $1 AND LOWER(COALESCE(status,'active')) <> 'deleted' GROUP BY 1 ORDER BY 2 DESC`, [siteId]),
     q(`SELECT COUNT(*)::int AS total, ${FILLED('m.phone')} AS phone, ${FILLED('m.email')} AS email, ${FILLED('m.address')} AS address,
@@ -370,8 +360,7 @@ const clientsData = async (siteId) => {
               COUNT(m.date_of_birth)::int AS dob, COUNT(m.latitude)::int AS geo
          FROM members m WHERE ${CLIENT}`, [siteId]),
     q(`SELECT COUNT(DISTINCT client_member_id)::int AS verified FROM kyc_cases WHERE site_id = $1 AND UPPER(status) = 'VERIFIED'`, [siteId]),
-    bucket(siteId, 'm.occupation'), bucket(siteId, 'm.city'), bucket(siteId, 'm.state', 8), bucket(siteId, 'm.gender', 6),
-    bucket(siteId, AGE_BAND, 8), bucket(siteId, 'm.qualification', 8), bucket(siteId, 'm.team'),
+    loadClientDemographics(siteId, pool),
     q(`SELECT to_char(g.m, 'YYYY-MM') AS month, to_char(g.m, 'Mon YY') AS label, COUNT(m.id)::int AS count
          FROM generate_series(date_trunc('month', CURRENT_DATE) - INTERVAL '11 months', date_trunc('month', CURRENT_DATE), INTERVAL '1 month') AS g(m)
          LEFT JOIN members m ON ${CLIENT} AND date_trunc('month', m.created_at) = g.m
@@ -408,14 +397,16 @@ const clientsData = async (siteId) => {
   const c = comp[0]; const t = num(c.total);
   return {
     site_id: siteId,
-    total: num(total[0].total),
+    total: t,
     by_type: byType,
     completeness: {
       phone_pct: pct(c.phone, t), email_pct: pct(c.email, t), address_pct: pct(c.address, t), city_pct: pct(c.city, t), pincode_pct: pct(c.pincode, t),
       occupation_pct: pct(c.occupation, t), dob_pct: pct(c.dob, t), kyc_pct: pct(kyc[0].verified, t), geo_pct: pct(c.geo, t),
       missing_address: t - num(c.address), missing_occupation: t - num(c.occupation),
     },
-    by_occupation: occ, by_city: city, by_state: state, by_gender: gender, by_age_band: age, by_qualification: qual, by_team: team,
+    by_occupation: demographics.occupation, by_city: demographics.city, by_state: demographics.state,
+    by_gender: demographics.gender, by_age_band: demographics.age,
+    by_qualification: demographics.qualification, by_team: demographics.team,
     new_by_month: newByMonth,
     buyers: rowsNum(linked, ['linked_members', 'plots_linked', 'plots_unlinked'])[0],
     top_clients: rowsNum(topClients, ['plots', 'total_paid', 'outstanding']),

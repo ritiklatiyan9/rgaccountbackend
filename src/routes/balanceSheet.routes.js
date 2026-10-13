@@ -32,6 +32,7 @@ router.get(
   '/',
   requireRole('admin', 'sub_admin'),
   requirePermission('balance_sheet', 'read'),
+  requireRegistrySiteAccess({ entity: 'site', source: 'query', key: 'site_id' }),
   // Avoid retaining multi-megabyte full-history payloads in the in-process
   // cache. Small/date-filtered statements still benefit from the 30s cache.
   cacheResponse({

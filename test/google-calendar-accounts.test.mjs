@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { PGlite } from '@electric-sql/pglite';
 import { up } from '../src/migrations/200_google_calendar_multiple_accounts.js';
 import { calendarSyncStatusSql, summarizeCalendarSync } from '../src/services/googleCalendarStatus.service.js';
+import { calendarSyncError } from '../src/services/googleCalendarError.service.js';
 
 const script = relative => readFileSync(new URL(relative, import.meta.url), 'utf8')
   .replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
@@ -35,6 +36,10 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
       INSERT INTO google_drive_connections(organization_id,status,google_account_email) VALUES(1,'active','first@example.test');
       CREATE TABLE compliance_items(id int PRIMARY KEY,organization_id int,site_id int,title text,current_due_date date,deleted_at timestamptz);
       INSERT INTO compliance_items VALUES(10,1,1,'Filing','2040-10-12',NULL);
+      CREATE TABLE legal_cases(id int,organization_id int,next_hearing_date timestamptz,deleted_at timestamptz);
+      CREATE TABLE legal_notices(id int,organization_id int,reply_due_date date,deleted_at timestamptz);
+      CREATE TABLE compliance_inspections(id int,organization_id int,scheduled_at timestamptz,deleted_at timestamptz);
+      CREATE TABLE compliance_licences(id int,organization_id int,expiry_date date,deleted_at timestamptz);
       CREATE TABLE compliance_audit_log(organization_id int,site_id int,action text,entity_type text,entity_id bigint,new_value jsonb,reason text);
     `);
     await up(database); await up(database);
@@ -51,7 +56,7 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
     const context = { pool:database,asyncHandler:fn=>fn,console:{log(){},error(){}},Buffer,process:{env:configured},
       encrypt:value=>`enc:${value}`,decrypt:value=>value.slice(4),buildOAuthClient:()=>oauth,
       signOAuthState:value=>JSON.stringify(value),verifyOAuthState:()=>({orgId:1,userId:1,origin:'http://127.0.0.1:5174',kind:'calendar'}),
-      backfillOrgEvents:async (org,id)=>{backfills.push([org,id]);return {synced:1,failed:0};},handleDriveOAuthCallback:()=>{} };
+      backfillOrgEvents:async (org,id)=>{backfills.push([org,id]);return {synced:1,failed:0};},handleDriveOAuthCallback:()=>{}, calendarSyncError };
     vm.createContext(context);
     vm.runInContext(`${script('../src/controllers/googleCalendar.controller.js')}\nthis.handlers={getConnectUrl,oauthCallback,getStatus,disconnect,syncFutureEvents};`,context);
     const invoke = async (name, extra={}) => {
@@ -87,7 +92,7 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
     }})};
     const syncContext={pool:database,google,process:{env:configured},console:{log(){},error(){}},encrypt:context.encrypt,decrypt:context.decrypt,
       complianceEventInstant:()=>null,DEFAULT_TIME_ZONE:'Asia/Kolkata',isValidTimeZone:()=>true,
-      getEventPreferences:async()=>({calendar_enabled:true,timezone:'Asia/Kolkata'})};
+      getEventPreferences:async()=>({calendar_enabled:true,timezone:'Asia/Kolkata'}), calendarSyncError };
     vm.createContext(syncContext);
     vm.runInContext(`${script('../src/services/googleCalendarSync.service.js')}\nthis.sync=syncComplianceEvent;this.body=buildEventBody;`,syncContext);
     const result=await syncContext.sync(1,'COMPLIANCE',10);assert.equal(result.status,'SYNCED');assert.equal(result.accounts.length,2);
@@ -100,6 +105,22 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
     expireFirst=true;const partial=await syncContext.sync(1,'COMPLIANCE',10);assert.equal(partial.status,'FAILED');assert.equal(partial.accounts[1].status,'SYNCED');
     assert.equal((await query('SELECT status FROM google_calendar_connections WHERE id=1')).rows[0].status,'reauthorization_required');
     assert.equal((await query('SELECT status FROM google_calendar_connections WHERE id=$1',[second.id])).rows[0].status,'active');
+    const failedStatus = await invoke('getStatus');
+    assert.equal(failedStatus.body.connections[0].failed, 1);
+    assert.equal(failedStatus.body.connections[0].sync_error.code, 'RECONNECT_REQUIRED');
+    assert.equal(failedStatus.body.connections[1].synced, 1);
+    assert.equal(failedStatus.body.connections[1].sync_error, null);
+    assert.doesNotMatch(JSON.stringify(failedStatus.body), /access_token|refresh_token|enc:/);
+    await query(`INSERT INTO compliance_items VALUES(11,1,1,'Old filing','2000-01-01',NULL);
+      INSERT INTO google_calendar_event_links(organization_id,connection_id,event_type,source_id,sync_status,failure_reason)
+      VALUES(1,1,'COMPLIANCE',11,'FAILED','Old provider failure')`);
+    assert.equal((await invoke('getStatus')).body.connections[0].failed, 1, 'historical failures must not block the current calendar status');
+    await query('DELETE FROM google_calendar_event_links WHERE source_id=11');
+    await query(`UPDATE google_calendar_event_links SET sync_status='FAILED',failure_reason=$1 WHERE connection_id=$2`, ['Google Calendar API has not been used in project 652880497016 before or it is disabled.', second.id]);
+    const disabledStatus = await invoke('getStatus');
+    assert.equal(disabledStatus.body.connections[1].sync_error.code, 'API_DISABLED');
+    assert.equal(disabledStatus.body.connections[1].sync_error.setup_url, 'https://console.cloud.google.com/apis/library/calendar-json.googleapis.com?project=652880497016');
+    await syncContext.sync(1, 'COMPLIANCE', 10, second.id);
     assert.equal((await query(`SELECT ${calendarSyncStatusSql('s','COMPLIANCE')} AS status FROM compliance_items s WHERE id=10`)).rows[0].status,'FAILED');
     assert.equal((await syncContext.sync(1,'COMPLIANCE',10,2)).status,'DISCONNECTED','another organization account must never sync');
     await invoke('disconnect',{body:{connection_id:1}});assert.equal(revocations.length,0,'disconnect must preserve a shared Drive grant');
@@ -121,4 +142,23 @@ test('combined calendar status reports missing or failed accounts accurately',()
   assert.equal(summarizeCalendarSync([{sync_status:'SYNCED'},{sync_status:'FAILED'}]),'FAILED');
   assert.equal(summarizeCalendarSync([{sync_status:'SYNCED'},{connection_status:'reauthorization_required'}]),'FAILED');
   assert.equal(summarizeCalendarSync([{sync_status:'SYNCED'},{sync_status:'SYNCED'}]),'SYNCED');
+});
+
+test('failed calendar advisory-lock acquisition returns its checked-out client', async () => {
+  const failure = Object.assign(new Error('lock timed out'), { code: '55P03' });
+  let releases = 0, calendarCalls = 0;
+  const database = { query: async () => ({ rows: [] }), connect: async () => ({
+    async query(sql) {
+      if (sql.includes('pg_advisory_lock')) throw failure;
+      return { rows: [] };
+    },
+    release() { releases += 1; },
+  }) };
+  const context = { pool: database, google: { calendar() { calendarCalls += 1; } },
+    process: { env: {} }, console: { log() {}, error() {} },
+    DEFAULT_TIME_ZONE: 'Asia/Kolkata' };
+  vm.createContext(context);
+  vm.runInContext(`${script('../src/services/googleCalendarSync.service.js')}\nthis.run=syncConnectionEvent;`, context);
+  await assert.rejects(context.run(1, 'COMPLIANCE', 10, 1), error => error === failure);
+  assert.equal(releases, 1); assert.equal(calendarCalls, 0);
 });

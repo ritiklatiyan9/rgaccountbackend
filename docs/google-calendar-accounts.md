@@ -10,6 +10,12 @@ Event writes always use empty attendees and `sendUpdates: none`. The invitation 
 
 One account's token failure does not prevent delivery to other accounts. Its connection is marked for reauthorization, while calendar summaries report failures or unsynced accounts rather than selecting an arbitrary mapping.
 
+Enable **Google Calendar API** in the Google Cloud project that owns `GOOGLE_CLIENT_ID`. OAuth connection alone does not enable the API: Google accepts login but rejects every event write while the API is disabled. Calendar settings show per-account sync counts and an API setup link for this error. After enabling it, use **Refresh future events** for each connected account (or **Refresh all calendars**). A sync failure also appears on the dashboard. SMTP login failures affect the separate ERP email channel; Calendar popup alerts do not depend on SMTP.
+
+Timed events, including compliance events with an optional IST time, receive a native Google Calendar popup 30 minutes before start. All-day events retain their date-only representation and receive popups one day before and at the start of the event day, interpreted in the Google calendar's timezone. Google overrides are offsets before event start, so these all-day popups differ from the ERP email schedule at 09:00. The calendar verification script checks both kinds against the actual event payload.
+
+Run `npm run verify:calendar-events -- --organization-id=1` to read back mappings, dates, timezones, reminders and duplicate keys from Google. Run `npm run repair:calendar-events -- --organization-id=1` to resync that organization's mapped future events. Repair requires an explicit organization ID; verification also reports failed mappings that have no Google event ID yet.
+
 Deploy the backend changes to the host named by `GOOGLE_REDIRECT_URI` before connecting additional accounts. The registered hosted callback can return to the configured frontend or the local settings app at `http://127.0.0.1:5174` / `http://localhost:5174`. Other return origins are rejected.
 
 Local Calendar OAuth must use the same Google client and calendar encryption key as its hosted callback. OAuth state normalizes key whitespace just as the token cipher does; existing ten-minute signed states remain valid during the update.

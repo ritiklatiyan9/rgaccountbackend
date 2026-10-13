@@ -8,6 +8,7 @@ import {
   getEventPreferences, reconcileEventReminders, resolveEventReminderRecipients, saveEventPreferences,
 } from '../services/eventReminder.service.js';
 import { syncComplianceEvent } from '../services/googleCalendarSync.service.js';
+import { calendarSyncError } from '../services/googleCalendarError.service.js';
 
 const legalTypes = new Set(['LEGAL_HEARING', 'NOTICE_REPLY']);
 
@@ -98,7 +99,10 @@ export const retryEventCalendarSync = asyncHandler(async (req, res) => {
   const event = await scopedEvent(req, 'update');
   if (!event) return res.status(404).json({ message: 'Calendar event not found or unavailable' });
   const result = await syncComplianceEvent(event.organization_id, event.event_type, event.id);
-  if (result.status === 'FAILED') return res.status(502).json({ message: 'Some calendar accounts could not sync. Reconnect any expired accounts in Calendar settings, then retry.' });
+  if (result.status === 'FAILED') {
+    const errors = result.accounts.filter(account => account.status === 'FAILED').map(account => ({ connection_id: account.connectionId, ...(account.syncError || calendarSyncError(account.error)) }));
+    return res.status(502).json({ message: errors[0]?.message || 'Some calendar accounts could not sync.', errors });
+  }
   if (result.status === 'DISCONNECTED') return res.status(409).json({ message: 'Connect a Gmail account in Calendar settings, then retry.' });
   res.json({ success: true });
 });

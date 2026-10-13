@@ -29,16 +29,24 @@ export async function attachDayBookTds(entries, db = pool) {
     if (!groups.has(source.table)) groups.set(source.table, new Set());
     groups.get(source.table).add(Number(source.id));
   }
+  if (!groups.size) return entries;
   const snapshots = new Map();
-  await Promise.all([...groups].map(async ([table, ids]) => {
+  const params = [];
+  const queries = [...groups].map(([table, ids]) => {
     const commission = table === 'plot_commission_payments';
     const select = fields.map(field => field === 'tds_module' && commission
       ? `CASE WHEN master.plot_id IS NOT NULL THEN 'plot_commission' WHEN master.farmer_id IS NOT NULL THEN 'land_purchase_commission' ELSE 'land_sale_commission' END AS tds_module`
       : `to_jsonb(s)->>'${field}' AS ${field}`).join(', ');
     const payoutField = payoutFields.get(table) || 'debit';
-    const { rows } = await db.query(`SELECT s.id, COALESCE((to_jsonb(s)->>'${payoutField}')::numeric, 0) AS net_amount, ${select} FROM ${table} s ${commission ? 'LEFT JOIN plot_commissions_v2 master ON master.id=s.plot_commission_id' : ''} WHERE s.id=ANY($1::int[])`, [[...ids]]);
-    for (const row of rows) snapshots.set(`${table}:${row.id}`, row);
-  }));
+    params.push([...ids]);
+    return `SELECT '${table}'::text AS source_table, s.id, COALESCE((to_jsonb(s)->>'${payoutField}')::numeric, 0) AS net_amount,
+      ${select} FROM ${table} s ${commission ? 'LEFT JOIN plot_commissions_v2 master ON master.id=s.plot_commission_id' : ''}
+      WHERE s.id=ANY($${params.length}::int[])`;
+  });
+  // The owner table list is server-owned and the IDs came from the already
+  // authorized statement. One UNION avoids a checkout for every source type.
+  const { rows } = await db.query(queries.join('\nUNION ALL\n'), params);
+  for (const row of rows) snapshots.set(`${row.source_table}:${row.id}`, row);
   for (const entry of entries) {
     const source = sourceOf(entry);
     const snapshot = source && snapshots.get(`${source.table}:${source.id}`);

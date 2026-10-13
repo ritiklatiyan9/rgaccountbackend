@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   calculateReminderSchedule, deterministicMessageId, eventLocalDate,
-  normalizeEmail, zonedDateTimeToUtc,
+  isValidTimeZone, normalizeEmail, zonedDateTimeToUtc,
 } from '../src/services/eventReminder.service.js';
 import { buildEventBody } from '../src/services/googleCalendarSync.service.js';
 
@@ -38,6 +38,15 @@ test('recipient email normalization rejects malformed input', () => {
   assert.equal(normalizeEmail('not-an-email'), null);
 });
 
+test('missing timezones do not silently select the server timezone', () => {
+  assert.equal(isValidTimeZone(undefined), false);
+  assert.equal(isValidTimeZone(null), false);
+  assert.equal(isValidTimeZone(''), false);
+  assert.equal(isValidTimeZone('   '), false);
+  assert.equal(isValidTimeZone('Asia/Kolkata'), true);
+  assert.equal(isValidTimeZone('invalid/zone'), false);
+});
+
 test('Google timed events use event-level native popup overrides', () => {
   const body = buildEventBody('INSPECTION', {
     inspection_type: 'Registry appointment', scheduled_at: '2026-08-23T06:00:00.000Z',
@@ -47,11 +56,27 @@ test('Google timed events use event-level native popup overrides', () => {
   assert.equal(body.start.timeZone, 'Asia/Kolkata');
 });
 
-test('Google all-day events never receive a 30-minute override', () => {
+test('Google all-day events receive day-before and event-day alerts without a 30-minute override', () => {
   const body = buildEventBody('COMPLIANCE', { title: 'Filing', current_due_date: '2026-08-23' });
-  assert.deepEqual(body.reminders, { useDefault: false, overrides: [] });
+  assert.deepEqual(body.reminders, { useDefault: false, overrides: [{ method: 'popup', minutes: 1440 }, { method: 'popup', minutes: 0 }] });
   assert.deepEqual(body.start, { date: '2026-08-23' });
   assert.deepEqual(body.end, { date: '2026-08-24' });
+});
+
+test('Google compliance events with an optional time use a 30-minute alert in IST', () => {
+  const body = buildEventBody('COMPLIANCE', {
+    title: 'Project review', current_due_date: '2026-10-13', metadata: { event_time: '14:30' },
+  });
+  assert.equal(body.start.dateTime, '2026-10-13T09:00:00.000Z');
+  assert.equal(body.start.timeZone, 'Asia/Kolkata');
+  assert.deepEqual(body.reminders.overrides, [{ method: 'popup', minutes: 30 }]);
+});
+
+test('explicitly disabling native reminders leaves timed and all-day events without alerts', () => {
+  for (const [type, row] of [
+    ['COMPLIANCE', { title: 'Filing', current_due_date: '2026-10-13' }],
+    ['INSPECTION', { inspection_type: 'Inspection', scheduled_at: '2026-10-13T09:00:00Z' }],
+  ]) assert.deepEqual(buildEventBody(type, row, [], { nativeReminder: false }).reminders, { useDefault: false, overrides: [] });
 });
 
 test('email Message-ID is stable per reminder recipient and changes across recipients', () => {

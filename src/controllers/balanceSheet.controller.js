@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import balanceSheetModel from '../models/BalanceSheet.model.js';
 import pool from '../config/db.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { getCacheGeneration } from '../config/cache.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const VALID_SCOPES = new Set(['all', 'cash', 'bank']);
@@ -115,7 +116,8 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     plotId,
     creatorId: entryVisibility.creatorId,
   };
-  const reportKey = JSON.stringify(reportArgs);
+  const reportKey = JSON.stringify([getCacheGeneration(), req.user.id, req.sessionId,
+    req.user.role, req.user.organization_id, reportArgs]);
 
   const [siteResult, report, orderStateResult] = await Promise.all([
     pool.query('SELECT id, name, code, address, city, state FROM sites WHERE id = $1', [siteId]),

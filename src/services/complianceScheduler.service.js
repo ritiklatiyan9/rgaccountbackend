@@ -9,6 +9,8 @@ import { isWhatsAppConfigured, sendWATemplate } from '../utils/notify.js';
 
 const HOUR_MS = 60 * 60 * 1000;
 let timer = null;
+let startupTimer = null;
+let running = false;
 
 const codeFor = () => `CMP-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(16).slice(2, 6).toUpperCase()}`;
 
@@ -287,12 +289,13 @@ async function queueNotification(client, event, channel) {
   return Boolean(insert.rows[0]?.id);
 }
 
-async function processNotificationQueue(client, max = 300) {
+export async function processNotificationQueue(database = pool, max = 300, deliver = dispatchChannel) {
   let delivered = 0;
   let retried = 0;
   for (let index = 0; index < max; index += 1) {
-    await client.query('BEGIN');
-    const { rows: claimed } = await client.query(
+    // Claim and enrich in one atomic statement. The pool releases its client
+    // before delivery waits on SMTP/SMS, including for a 300-item batch.
+    const { rows: claimed } = await database.query(
       `WITH candidate AS (
          SELECT id FROM compliance_notification_log
           WHERE (
@@ -304,40 +307,32 @@ async function processNotificationQueue(client, max = 300) {
           ORDER BY CASE WHEN status='PENDING' THEN 0 ELSE 1 END,created_at
           FOR UPDATE SKIP LOCKED
           LIMIT 1
-       )
-       UPDATE compliance_notification_log n
+       ), claimed AS (
+         UPDATE compliance_notification_log n
           SET status='PROCESSING',attempt_count=attempt_count+1,last_attempt_at=NOW()
          FROM candidate
         WHERE n.id=candidate.id
-       RETURNING n.*`
-    );
-    const claimedRow = claimed[0];
-    if (!claimedRow) {
-      await client.query('COMMIT');
-      break;
-    }
-    const { rows: enriched } = await client.query(
-      `SELECT n.*,u.id AS active_recipient_id,u.name AS recipient_name,u.email AS recipient_email,u.phone AS recipient_phone,
+         RETURNING n.*
+       )
+       SELECT n.*,u.id AS active_recipient_id,u.name AS recipient_name,u.email AS recipient_email,u.phone AS recipient_phone,
               s.name AS site_name
-         FROM compliance_notification_log n
+         FROM claimed n
          LEFT JOIN users u ON u.id=n.recipient_user_id AND u.organization_id=n.organization_id AND u.is_active=TRUE
-         LEFT JOIN sites s ON s.id=n.site_id AND s.organization_id=n.organization_id
-        WHERE n.id=$1`,
-      [claimedRow.id]
+         LEFT JOIN sites s ON s.id=n.site_id AND s.organization_id=n.organization_id`
     );
-    await client.query('COMMIT');
-    const row = enriched[0];
+    const row = claimed[0];
+    if (!row) break;
     if (row.attempt_count > 1) retried += 1;
     if (!row.active_recipient_id) {
-      await pool.query(
+      await database.query(
         `UPDATE compliance_notification_log SET status='SKIPPED',failure_reason='Recipient is inactive or missing' WHERE id=$1 AND status='PROCESSING'`,
         [row.id]
       );
       continue;
     }
     try {
-      const result = await dispatchChannel(row, row.channel, row.message);
-      await pool.query(
+      const result = await deliver(row, row.channel, row.message);
+      await database.query(
         `UPDATE compliance_notification_log
             SET status=$1,
                 sent_at=CASE WHEN $1='DELIVERED' THEN NOW() ELSE sent_at END,
@@ -347,7 +342,7 @@ async function processNotificationQueue(client, max = 300) {
       );
       if (result.delivered) delivered += 1;
     } catch (error) {
-      await pool.query(
+      await database.query(
         `UPDATE compliance_notification_log
             SET status='FAILED',failure_reason=$1
           WHERE id=$2 AND status='PROCESSING'`,
@@ -359,9 +354,12 @@ async function processNotificationQueue(client, max = 300) {
 }
 
 export async function runComplianceScheduler() {
-  const client = await pool.connect();
+  if (running) return { skipped: true };
+  running = true;
+  let client, discard;
   const pendingSync = [];
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
     await client.query(`SELECT pg_advisory_xact_lock(hashtext('compliance_scheduler_hourly'))`);
     const generated = await generateRecurringItems(client, pendingSync);
@@ -375,21 +373,26 @@ export async function runComplianceScheduler() {
       }
     }
     await client.query('COMMIT');
+    client.release();
+    client = null;
     for (const { organizationId, itemId } of pendingSync) {
       queueCalendarSync(organizationId, 'COMPLIANCE', itemId);
       queueReminderReconciliation(organizationId, 'COMPLIANCE', itemId);
     }
-    const { delivered, retried } = await processNotificationQueue(client);
+    const { delivered, retried } = await processNotificationQueue();
     if (generated || overdue || queued || delivered) {
       console.log(`[compliance] generated=${generated} overdue=${overdue} queued=${queued} delivered=${delivered}`);
     }
     return { generated, overdue, queued, delivered, retried };
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (cleanupError) { discard = cleanupError; }
+    }
     console.error('[compliance] scheduler failed:', error.message);
     throw error;
   } finally {
-    client.release();
+    client?.release(discard);
+    running = false;
   }
 }
 
@@ -398,11 +401,14 @@ export function startComplianceScheduler() {
   const tick = () => runComplianceScheduler().catch(() => {});
   timer = setInterval(tick, HOUR_MS);
   timer.unref?.();
-  setTimeout(tick, 30_000).unref?.();
+  startupTimer = setTimeout(tick, 30_000);
+  startupTimer.unref?.();
   console.log('[compliance] hourly scheduler started');
 }
 
 export function stopComplianceScheduler() {
   if (timer) clearInterval(timer);
+  if (startupTimer) clearTimeout(startupTimer);
   timer = null;
+  startupTimer = null;
 }

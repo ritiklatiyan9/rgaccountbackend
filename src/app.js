@@ -5,6 +5,8 @@ import morgan from 'morgan';
 import { createHandler } from 'graphql-http/lib/use/express';
 import { schema as graphqlSchema } from './graphql/schema.js';
 import pool from './config/db.js';
+import { getDatabasePoolStats } from './config/db.js';
+import { requestPerformance } from './utils/requestPerformance.js';
 import authMiddleware from './middlewares/auth.middleware.js';
 import errorMiddleware from './middlewares/error.middleware.js';
 import auditRequestMiddleware from './middlewares/audit.middleware.js';
@@ -13,6 +15,8 @@ import { transactionTimeMiddleware } from './services/transactionTime.service.js
 import backupMaintenanceMiddleware from './middlewares/backupMaintenance.middleware.js';
 
 const app = express();
+
+app.use(requestPerformance({ poolStats: getDatabasePoolStats }));
 
 app.use(helmet());
 // Document URLs are bearer capabilities. Keep their tokens out of access logs.

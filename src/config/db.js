@@ -1,6 +1,6 @@
 import 'dotenv/config';
-import pkg from 'pg';
-const { Pool } = pkg;
+import { BoundedPool, boundedInteger, databasePoolStats } from './boundedPool.js';
+import { instrumentDatabaseClient } from '../utils/requestPerformance.js';
 
 const sslOption = process.env.DB_SSL === 'true' || (process.env.DB_HOST && process.env.DB_HOST.includes('neon'))
   ? { rejectUnauthorized: false }
@@ -11,12 +11,9 @@ const dbPort = process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : undefin
 const dbName = process.env.DB_NAME;
 const dbUser = process.env.DB_USER;
 const dbPassword = process.env.DB_PASSWORD != null ? String(process.env.DB_PASSWORD) : '';
-const configuredPoolMax = Number.parseInt(process.env.DB_POOL_MAX || '10', 10);
-const poolMax = Number.isInteger(configuredPoolMax) && configuredPoolMax > 0
-  ? Math.min(configuredPoolMax, 20)
-  : 10;
+const poolMax = boundedInteger(process.env.DB_POOL_MAX, 10, 20);
 
-const pool = new Pool({
+const pool = new BoundedPool({
   host: dbHost,
   port: dbPort,
   database: dbName,
@@ -28,9 +25,14 @@ const pool = new Pool({
   // queries concurrently and exhausting database memory; deployments can tune
   // it with DB_POOL_MAX (hard-capped at 20).
   max: poolMax,
+  maxWaiting: boundedInteger(process.env.DB_POOL_MAX_WAITING, 64, 1024),
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
+  connectionTimeoutMillis: boundedInteger(process.env.DB_CONNECTION_TIMEOUT_MS, 10000, 30000),
 });
+
+// Safe operational metrics: never include connection options or credentials.
+export const getDatabasePoolStats = () => databasePoolStats(pool);
+pool.on('connect', instrumentDatabaseClient);
 
 // PostgreSQL can close an idle connection during a restart or network outage.
 // pg removes that client from the pool; handling its error keeps the API alive

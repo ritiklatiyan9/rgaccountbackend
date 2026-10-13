@@ -1,9 +1,10 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { REPORTS, reportList } from '../services/reportDefinitions.js';
+import { loadReportRows } from '../services/reportRead.service.js';
 
 /**
- * Generic report engine. Every module report is the same four queries driven by
+ * Generic report engine. Every module report uses two queries driven by
  * a declarative definition (services/reportDefinitions.js):
  *   totals → KPIs, trend by month/day, breakdown by dimension, detail rows.
  *
@@ -49,48 +50,17 @@ export const buildReport = async (moduleKey, siteId, from, to, { rowLimit = 500,
   // A module may offer alternate groupings; `dimension` only selects a declared one, never reaches SQL.
   const dim = (def.dimensions || []).find((d) => d.key === dimension) || def.dimension;
   const { where, params } = scope(def, siteId, from, to);
-  // Headcount reports have no money column — NULL needs a type or SUM() is ambiguous.
-  const amount = def.amount || 'NULL::numeric';
   // Day-level granularity for short ranges, month-level for long ones.
   const spanDays = Math.round((new Date(to) - new Date(from)) / 86400000);
   const bucket = spanDays <= 62 ? 'day' : 'month';
 
-  const [totals, trend, breakdown, rows] = await Promise.all([
-    pool.query(
-      `SELECT COUNT(*)::int AS record_count,
-              COALESCE(SUM(${amount}), 0)::numeric(18,2) AS total,
-              COALESCE(AVG(${amount}), 0)::numeric(18,2) AS average,
-              COALESCE(MAX(${amount}), 0)::numeric(18,2) AS largest,
-              MIN(${def.dateCol}) AS first_entry,
-              MAX(${def.dateCol}) AS last_entry
-         FROM ${def.from} WHERE ${where}`,
-      params
-    ),
-    pool.query(
-      `SELECT to_char(date_trunc('${bucket}', ${def.dateCol}), 'YYYY-MM-DD') AS bucket,
-              COUNT(*)::int AS count,
-              COALESCE(SUM(${amount}), 0)::numeric(18,2) AS total
-         FROM ${def.from} WHERE ${where}
-        GROUP BY 1 ORDER BY 1`,
-      params
-    ),
-    pool.query(
-      `SELECT ${dim.expr} AS label,
-              COUNT(*)::int AS count,
-              COALESCE(SUM(${amount}), 0)::numeric(18,2) AS total
-         FROM ${def.from} WHERE ${where}
-        GROUP BY 1 ORDER BY ${def.amount ? 'total' : 'count'} DESC NULLS LAST LIMIT 12`,
-      params
-    ),
-    pool.query(
-      `SELECT ${def.columns.map((c) => `${c.expr} AS "${c.key}"`).join(', ')}
-         FROM ${def.from} WHERE ${where}
-        ORDER BY ${def.dateCol} DESC NULLS LAST LIMIT $4`,
-      [...params, Math.min(rowLimit, MAX_ROWS)]
-    ),
-  ]);
+  const limit = Number.isFinite(Number(rowLimit))
+    ? Math.max(1, Math.min(Math.trunc(Number(rowLimit)), MAX_ROWS)) : 500;
+  const { totals, trend, breakdown, rows } = await loadReportRows(pool, {
+    def, dimension: dim, bucket, where, params, rowLimit: limit,
+  });
 
-  const t = totals.rows[0];
+  const t = totals;
   const kpis = [
     { key: 'records', label: 'Records', value: t.record_count, type: 'number' },
     ...(def.amount ? [
@@ -98,7 +68,7 @@ export const buildReport = async (moduleKey, siteId, from, to, { rowLimit = 500,
       { key: 'average', label: `Average ${def.amountLabel.toLowerCase()}`, value: Number(t.average), type: 'money' },
       { key: 'largest', label: 'Largest single', value: Number(t.largest), type: 'money' },
     ] : []),
-    { key: 'span', label: 'Active days', value: new Set(trend.rows.map((r) => r.bucket)).size, type: 'number' },
+    { key: 'span', label: 'Active days', value: new Set(trend.map((r) => r.bucket)).size, type: 'number' },
   ];
 
   return {
@@ -107,14 +77,14 @@ export const buildReport = async (moduleKey, siteId, from, to, { rowLimit = 500,
     description: def.description,
     range: { from, to, bucket },
     kpis,
-    trend: trend.rows.map((r) => ({ bucket: r.bucket, count: r.count, total: Number(r.total) })),
-    breakdown: breakdown.rows.map((r) => ({ label: r.label, count: r.count, total: Number(r.total) })),
+    trend: trend.map((r) => ({ bucket: r.bucket, count: r.count, total: Number(r.total) })),
+    breakdown: breakdown.map((r) => ({ label: r.label, count: r.count, total: Number(r.total) })),
     dimension_label: dim.label,
     dimension_key: dim.key || null,
     dimensions: (def.dimensions || []).map(({ key, label }) => ({ key, label })),
     columns: def.columns.map(({ key, label, type }) => ({ key, label, type: type || 'text' })),
-    rows: rows.rows,
-    row_limit_hit: rows.rows.length >= Math.min(rowLimit, MAX_ROWS),
+    rows,
+    row_limit_hit: rows.length >= limit,
     generated_at: new Date().toISOString(),
   };
 };
@@ -143,8 +113,17 @@ const parseRequest = async (req, res, source) => {
 /** GET /reports/modules — the picker, filtered to what this user may read. */
 export const listReportModules = asyncHandler(async (req, res) => {
   const all = reportList();
-  const allowed = [];
-  for (const r of all) if (await canRead(req, r.permission)) allowed.push(r);
+  if (req.user.role === 'admin' || req.user.role === 'super_admin') {
+    return res.json({ modules: all });
+  }
+  // Several report definitions share a permission. Read the current grants once
+  // instead of issuing a sequential permission query for each of the 16 reports.
+  const { rows } = await pool.query(
+    'SELECT module, can_read FROM user_permissions WHERE user_id = $1 AND module = ANY($2::text[])',
+    [req.user.id, [...new Set(all.map((report) => report.permission))]]
+  );
+  const readable = new Set(rows.filter((row) => row.can_read).map((row) => row.module));
+  const allowed = all.filter((report) => readable.has(report.permission));
   res.json({ modules: allowed });
 });
 

@@ -8,6 +8,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_RECIPIENTS = 50;
 
 export const isValidTimeZone = (value) => {
+  if (typeof value !== 'string' || !value.trim()) return false;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: value }).format();
     return true;

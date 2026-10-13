@@ -105,3 +105,24 @@ test('does not treat a name alone as a site identity or override an explicitly l
   const data = await getMemberLinks(db, { memberId: 1, user });
   assert.deepEqual(data.modules.find(module => module.key === 'plot_registry').record_ids.sort(), [201,203]);
 });
+
+test('all-sites links cap module queries at two and scan each site plot book once per request', async t => {
+  const db = await fixture(t);
+  await db.exec(`UPDATE members SET shared_profile_id='00000000-0000-0000-0000-000000000001' WHERE id=4;`);
+  let active = 0, peak = 0, plotScans = 0;
+  const instrumented = { async query(sql, params) {
+    active += 1; peak = Math.max(peak, active);
+    if (sql.includes('AS broker_member_ids')) plotScans += 1;
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      return await db.query(sql, params);
+    } finally { active -= 1; }
+  } };
+  const args = { memberId: 1, allSites: true, user: { role: 'admin', organization_id: 1 } };
+  const data = await getMemberLinks(instrumented, args);
+  assert.equal(peak, 2);
+  assert.equal(plotScans, 2, 'three registrations in two sites need only two plot scans');
+  assert.deepEqual(data.modules.find(module => module.key === 'plot_payments').record_ids.sort(), [101,102,104]);
+  await getMemberLinks(instrumented, args);
+  assert.equal(plotScans, 4, 'the next request rereads current financial records');
+});

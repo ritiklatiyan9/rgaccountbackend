@@ -2,6 +2,7 @@ import { assertMemberSiteAccess, normalizeMemberName, normalizeMemberPhone } fro
 import { findSiteRegistrationMatches } from './memberSiteRegistration.service.js';
 import { uniqueMemberNameMatch, memberTransactionMatch } from './memberLedgerIdentity.service.js';
 import { findMemberPlots, PLOT_BUYER_MEMBER_JOIN } from './plotMemberLinks.service.js';
+import { mapWithConcurrency } from '../utils/boundedWork.js';
 
 const admin = user => ['admin', 'super_admin'].includes(user.role);
 const fail = (message, statusCode) => { throw Object.assign(new Error(message), { statusCode }); };
@@ -71,13 +72,21 @@ export async function getMemberLinks(db, { memberId, siteId, user, permissions =
     const target = candidates.find(candidate => candidate.id === member.id) || candidates[0];
     return [{ id: site.id, name: site.name, member_id: target.id, kyc_status: target.kyc_status || null, registration_count: candidates.length }];
   });
-  const loadModules = async (registration) => Promise.all(MEMBER_LINK_MODULES.map(async definition => {
+  // Reuse the one site-wide plot scan for multiple registrations in this
+  // request. No results survive the request or cross permission boundaries.
+  const plotsBySite = new Map();
+  const loadPlots = (registrationSiteId) => {
+    const key = String(registrationSiteId);
+    if (!plotsBySite.has(key)) plotsBySite.set(key, findMemberPlots(registrationSiteId, db));
+    return plotsBySite.get(key);
+  };
+  const loadModules = async (registration) => mapWithConcurrency(MEMBER_LINK_MODULES, 2, async definition => {
     const permission = permissions.get(definition.permission);
     if (!admin(user) && permission?.can_read !== true) return null;
     const creator = !admin(user) && permission?.can_view_all !== true ? user.id : null;
     let rows;
     if (definition.plots) {
-      rows = (await findMemberPlots(registration.site_id, db)).get(String(registration.id)) || [];
+      rows = (await loadPlots(registration.site_id)).get(String(registration.id)) || [];
       if (creator !== null) {
         const { rows: visible } = await db.query('SELECT id FROM plots WHERE site_id=$1 AND id=ANY($2::int[]) AND created_by=$3', [registration.site_id, rows.map(row => row.id), creator]);
         rows = visible;
@@ -92,11 +101,14 @@ export async function getMemberLinks(db, { memberId, siteId, user, permissions =
       unit: definition.unit, count: recordKeys.length || ids.length, record_ids: ids,
       ...(recordKeys.length ? { record_keys: recordKeys } : {}),
       ...(definition.key === 'firm_transactions' ? { parent_ids: [...new Set(rows.map(row => Number(row.firm_id)))] } : {}) };
-  }));
+  });
   let modules;
   const scopedRegistrations = allSites ? registrations : registrations.filter(registration => Number(registration.site_id) === Number(selectedSiteId));
   if (allSites || scopedRegistrations.length > 1) {
-    const perRegistration = await Promise.all(scopedRegistrations.map(async registration => ({ registration, modules: await loadModules(registration) })));
+    // Serialise registrations so all-sites mode cannot multiply the two-query
+    // module budget by every shared registration.
+    const perRegistration = await mapWithConcurrency(scopedRegistrations, 1,
+      async registration => ({ registration, modules: await loadModules(registration) }));
     const grouped = new Map();
     for (const { registration, modules: localModules } of perRegistration) {
       for (const module of localModules.filter(item => item?.count > 0)) {

@@ -41,17 +41,22 @@ class ConversationModel extends MasterModel {
         u.id as user_id,
         u.name as user_name,
         u.photo as user_photo,
-        -- Get latest message for preview
-        (SELECT message_text FROM messages m WHERE m.conversation_id = c.id ORDER BY created_at DESC LIMIT 1) as last_message,
-        (SELECT created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY created_at DESC LIMIT 1) as last_message_time,
+        latest.message_text as last_message,
+        latest.created_at as last_message_time,
         -- Get unread count for this user
         (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != $1 AND m.is_read = FALSE) as unread_count
       FROM ${this.tableName} c
       JOIN users u ON (u.id = CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END)
       JOIN users participant_user ON participant_user.id = $1 AND participant_user.organization_id = u.organization_id
+      -- Read the latest message once for preview, timestamp and sorting.
+      LEFT JOIN LATERAL (
+        SELECT m.message_text, m.created_at
+        FROM messages m WHERE m.conversation_id = c.id
+        ORDER BY m.created_at DESC LIMIT 1
+      ) latest ON TRUE
       WHERE (c.user1_id = $1 OR c.user2_id = $1)
         AND (c.site_id = $2 OR c.site_id IS NULL)
-      ORDER BY COALESCE((SELECT created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY created_at DESC LIMIT 1), c.created_at) DESC
+      ORDER BY COALESCE(latest.created_at, c.created_at) DESC
     `;
         const result = await pool.query(query, [userId, siteId]);
         return result.rows;

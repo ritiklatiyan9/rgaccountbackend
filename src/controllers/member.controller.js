@@ -647,12 +647,8 @@ export const getMemberLinkedRecords = asyncHandler(async (req, res) => {
   if (!Number.isSafeInteger(memberId) || memberId <= 0 || (siteId !== null && (!Number.isSafeInteger(siteId) || siteId <= 0))) {
     return res.status(400).json({ message: 'A valid client and site are required.' });
   }
-  const permissions = new Map();
-  if (!['admin', 'super_admin'].includes(req.user.role)) {
-    await Promise.all([...new Set(MEMBER_LINK_MODULES.map(module => module.permission))].map(async module => {
-      permissions.set(module, await permissionModel.getPermission(req.user.id, module));
-    }));
-  }
+  const permissions = ['admin', 'super_admin'].includes(req.user.role) ? new Map()
+    : await permissionModel.getPermissions(req.user.id, MEMBER_LINK_MODULES.map(module => module.permission));
   res.json(await getMemberLinks(pool, { memberId, siteId, user: req.user, permissions, allSites: req.query.scope === 'all' }));
 });
 

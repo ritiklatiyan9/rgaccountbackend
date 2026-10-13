@@ -3,6 +3,7 @@ import pool from '../config/db.js';
 import { complianceEventInstant } from './complianceEventTime.service.js';
 import { encrypt, decrypt } from '../utils/tokenCrypto.js';
 import { DEFAULT_TIME_ZONE, getEventPreferences, isValidTimeZone } from './eventReminder.service.js';
+import { calendarSyncError } from './googleCalendarError.service.js';
 
 /**
  * Best-effort push of compliance events to the organization's connected
@@ -91,9 +92,9 @@ export const buildEventBody = (eventType, row, _attendeeEmails = [], options = {
     attendees: [],
     reminders: {
       useDefault: false,
-      overrides: timed && options.nativeReminder !== false
+      overrides: options.nativeReminder === false ? [] : timed
         ? [{ method: 'popup', minutes: 30 }]
-        : [],
+        : [{ method: 'popup', minutes: 1440 }, { method: 'popup', minutes: 0 }],
     },
     extendedProperties: options.erpEventKey ? { private: { erpEventKey: options.erpEventKey } } : undefined,
   };
@@ -165,8 +166,8 @@ const syncConnectionEvent = async (orgId, eventType, sourceId, connectionId) => 
   if (!cfg) throw new Error(`Unknown calendar event type: ${eventType}`);
   const lockClient = await pool.connect();
   const lockKey = `gcal:${orgId}:${connectionId}:${eventType}:${sourceId}`;
-  await lockClient.query('SELECT pg_advisory_lock(hashtext($1))', [lockKey]);
   try {
+    await lockClient.query('SELECT pg_advisory_lock(hashtext($1))', [lockKey]);
     const connection = await orgCalendar(orgId, connectionId);
     if (!connection) return { status: 'DISCONNECTED' };
     const { calendar } = connection;
@@ -183,8 +184,9 @@ const syncConnectionEvent = async (orgId, eventType, sourceId, connectionId) => 
       return { status: 'DELETED' };
     }
 
+    const complianceInstant = eventType === 'COMPLIANCE' ? complianceEventInstant(row) : null;
     const eventFacade = {
-      ...row, event_type: eventType, event_at: row[cfg.dateField], timed: cfg.timed,
+      ...row, event_type: eventType, event_at: complianceInstant || row[cfg.dateField], timed: cfg.timed || Boolean(complianceInstant),
       organization_id: orgId,
     };
     const preferences = await getEventPreferences(eventFacade);
@@ -344,9 +346,9 @@ export const syncComplianceEvent = async (orgId, eventType, sourceId, connection
   if (!rows.length) return { status: 'DISCONNECTED', accounts: [] };
   const accounts = [];
   for (const account of rows) {
-    if (account.status === 'reauthorization_required') { accounts.push({ connectionId: account.id, status: 'FAILED', error: 'Reconnect this Google account in Calendar settings' }); continue; }
+    if (account.status === 'reauthorization_required') { accounts.push({ connectionId: account.id, status: 'FAILED', error: 'Reconnect this Google account in Calendar settings', syncError: calendarSyncError('invalid_grant') }); continue; }
     try { accounts.push({ connectionId: account.id, ...await syncConnectionEvent(orgId, eventType, sourceId, account.id) }); }
-    catch (error) { accounts.push({ connectionId: account.id, status: 'FAILED', error: error.message }); }
+    catch (error) { accounts.push({ connectionId: account.id, status: 'FAILED', error: error.message, syncError: calendarSyncError(error) }); }
   }
   const first = accounts.find(account => account.status === 'SYNCED') || accounts[0];
   const status = accounts.some(account => account.status === 'FAILED') ? 'FAILED' : first.status;
@@ -369,6 +371,7 @@ export const queueCalendarSync = (orgId, eventType, sourceId) => {
  */
 export const backfillOrgEvents = async (orgId, connectionId = null) => {
   let synced = 0, failed = 0;
+  const errors = new Map();
   for (const [eventType, cfg] of Object.entries(SOURCES)) {
     const { rows } = await pool.query(
       `SELECT id FROM ${cfg.table}
@@ -380,12 +383,17 @@ export const backfillOrgEvents = async (orgId, connectionId = null) => {
         const result = await syncComplianceEvent(orgId, eventType, row.id, connectionId);
         synced += result.accounts.filter(account => account.status === 'SYNCED').length;
         failed += result.accounts.filter(account => account.status === 'FAILED').length;
+        for (const account of result.accounts.filter(account => account.status === 'FAILED')) {
+          errors.set(`${account.connectionId}:${account.syncError.code}`, { connection_id: account.connectionId, ...account.syncError });
+        }
       } catch (err) {
         failed += 1;
+        const detail = calendarSyncError(err);
+        errors.set(`${connectionId}:${detail.code}`, { connection_id: connectionId, ...detail });
         console.error(`[gcal] backfill ${eventType}#${row.id} (org ${orgId}) failed:`, err.message);
       }
     }
   }
   console.log(`[gcal] backfill complete for org ${orgId}: ${synced} events synced`);
-  return { synced, failed };
+  return { synced, failed, errors: [...errors.values()] };
 };
