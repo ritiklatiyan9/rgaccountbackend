@@ -34,7 +34,8 @@ export function decorateRegistryStage(row) {
   const roTotal = roSet ? Math.round((roCash + roBank) * 100) / 100 : null;
   const deed = n(row.registry_doc_count) > 0;
   const handedOver = n(row.handover_count) > 0;
-  const stage = handedOver ? 'green' : deed ? 'blue' : missing.length === 0 ? 'yellow' : 'red';
+  // A historical handover never proves that a deed is currently on file.
+  const stage = deed ? (handedOver ? 'green' : 'blue') : missing.length === 0 ? 'yellow' : 'red';
   return {
     ...row,
     ro_set: roSet,
@@ -45,7 +46,7 @@ export function decorateRegistryStage(row) {
     ro_diff: roSet ? Math.round((roTotal - n(row.registry_payment)) * 100) / 100 : null,
     noc_generated: Boolean(row.noc_generated_at),
     deed_uploaded: deed,
-    handed_over: handedOver,
+    handed_over: deed && handedOver,
     details_complete: missing.length === 0,
     missing_details: missing,
     stage,

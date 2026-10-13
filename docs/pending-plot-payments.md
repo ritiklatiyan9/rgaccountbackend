@@ -2,10 +2,11 @@
 
 Open **Project Payments → Pending Payments** (`/plot-payments/pending`).
 
-- Pending today includes unpaid installments due on or before the current date in Asia/Kolkata.
-- Upcoming shows unpaid installments after today, inside the selected period. Next 10 Days means tomorrow through today + 10 days, inclusive.
+- An installment is pending from the first day of its period (`pending_from`): installment 1 from the booking date, each later installment from the day after the previous due date, never later than its own due date. A token paid on booking day therefore leaves the rest of installment 1 pending from that day. Status is Pending until the due date, Due today on it and Overdue after it.
+- Pending today includes unpaid installments whose pending period has started on or before the current date in Asia/Kolkata.
+- Upcoming shows unpaid installments that become pending after today, inside the selected period. Next 10 Days means tomorrow through today + 10 days, inclusive.
 - Selected period includes unpaid installments with due dates between both selected boundaries.
-- Due by date includes all unpaid installments due on or before the selected future date, including current arrears.
+- Pending by date includes all unpaid installments pending on or before the selected future date, including current arrears.
 - Broker filters use the plot's Booking By field and affect the list and all summary amounts.
 - Queues show one row per plot in natural plot-number order (A1, A2, A3, A10), summing only that queue's unpaid installments. Pagination is by plot. Selecting a plot selects its listed installments for totals and printing.
 - The eye button opens all installments for the plot, including paid and future milestones, with target, received and pending amounts.

@@ -10,13 +10,15 @@ ALTER TABLE plots ADD COLUMN IF NOT EXISTS approval_requested_by INTEGER REFEREN
 ALTER TABLE plots ADD COLUMN IF NOT EXISTS approval_requested_at TIMESTAMPTZ;
 ALTER TABLE plots ADD COLUMN IF NOT EXISTS approved_by INTEGER REFERENCES users(id);
 ALTER TABLE plots ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+ALTER TABLE plots ADD COLUMN IF NOT EXISTS approval_original_data JSONB;
+ALTER TABLE plots ADD COLUMN IF NOT EXISTS approval_proposed_data JSONB;
 CREATE OR REPLACE FUNCTION queue_plot_status_approval() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
     NEW.approval_status := 'pending';
   ELSIF NEW.approval_requested_at IS DISTINCT FROM OLD.approval_requested_at
-    OR (to_jsonb(NEW) - ARRAY['approval_status','approved_by','approved_at','approval_requested_by','approval_requested_at','updated_at','plot_tag'])
-    IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['approval_status','approved_by','approved_at','approval_requested_by','approval_requested_at','updated_at','plot_tag']) THEN
+    OR (to_jsonb(NEW) - ARRAY['approval_status','approved_by','approved_at','approval_requested_by','approval_requested_at','updated_at','plot_tag','approval_original_data','approval_proposed_data'])
+    IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['approval_status','approved_by','approved_at','approval_requested_by','approval_requested_at','updated_at','plot_tag','approval_original_data','approval_proposed_data']) THEN
     NEW.approval_status := 'pending';
   ELSE
     RETURN NEW;
@@ -38,7 +40,7 @@ SELECT id, site_id, id AS plot_id, plot_no, buyer_name, scheme,
   status AS plot_status, approval_status AS status, assigned_admin_id,
   approval_requested_by AS created_by, approval_requested_at AS created_at,
   approval_requested_at::date AS date, approved_by, approved_at, updated_at,
-  0::numeric AS amount
+  0::numeric AS amount, approval_original_data, approval_proposed_data
 FROM plots;
 INSERT INTO app_schema_migrations(version) VALUES ('158_plot_status_approval') ON CONFLICT DO NOTHING;
 `;

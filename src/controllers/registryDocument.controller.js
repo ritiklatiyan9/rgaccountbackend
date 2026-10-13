@@ -4,6 +4,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
 import { uploadPlotDoc, getPlotDocUrl, deletePlotDoc } from '../utils/plotDocStorage.js';
+import { registryDocumentScopeSql } from '../utils/registryDocuments.js';
 
 const REGISTRY_CATEGORIES = ['REGISTRY', 'NOC'];
 
@@ -57,9 +58,8 @@ export const listRegistryDocumentPlots = asyncHandler(async (req, res) => {
                   FROM documents d
                   LEFT JOIN kyc_cases k ON k.id = d.kyc_case_id
                   LEFT JOIN bookings b ON b.id = k.booking_id
-                 WHERE (d.plot_id = p.id OR b.plot_id = p.id)
-                   AND COALESCE(d.uploaded_source, 'BOOKING') <> 'DMS'
-                   AND UPPER(COALESCE(d.category, '')) = ANY($2::text[])
+                 WHERE ${registryDocumentScopeSql('p.id')}
+                   AND UPPER(TRIM(COALESCE(d.category, ''))) = ANY($2::text[])
               )::int AS doc_count
          FROM plots p
         WHERE p.site_id = $1
@@ -102,9 +102,8 @@ export const getRegistryDocuments = asyncHandler(async (req, res) => {
        LEFT JOIN kyc_cases k ON k.id = d.kyc_case_id
        LEFT JOIN bookings b ON b.id = k.booking_id
        LEFT JOIN users u ON u.id = d.uploaded_by
-      WHERE (d.plot_id = $1 OR b.plot_id = $1)
-        AND COALESCE(d.uploaded_source, 'BOOKING') <> 'DMS'
-        AND UPPER(COALESCE(d.category, '')) = ANY($2::text[])
+      WHERE ${registryDocumentScopeSql('$1')}
+        AND UPPER(TRIM(COALESCE(d.category, ''))) = ANY($2::text[])
       ORDER BY d.created_at DESC, d.id DESC`,
       [plotId, REGISTRY_CATEGORIES]
     ),

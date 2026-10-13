@@ -2,6 +2,7 @@ import { normalizeRegistrySize } from '../utils/registrySize.js';
 import MasterModel from './MasterModel.js';
 import { registryCoverageSql, registryCashAllocationSql } from '../utils/registryCashAllocation.js';
 import { decorateRegistryStage } from '../utils/registryStage.js';
+import { registryDeedScopeSql } from '../utils/registryDocuments.js';
 import { PLOT_BUYER_MEMBER_JOIN } from '../services/plotMemberLinks.service.js';
 import { registryFarmerUsers } from '../utils/registryFarmerUsers.js';
 
@@ -62,6 +63,7 @@ class PlotRegistryModel extends MasterModel {
         COALESCE(agg.bank_paid, 0) AS bank_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
+        docs.last_deed_uploaded_at,
         ${handoverSelect}
         p.team AS plot_team,
         p.booking_by AS agent_name,
@@ -117,11 +119,9 @@ class PlotRegistryModel extends MasterModel {
           )
       ) agg ON TRUE
       LEFT JOIN LATERAL (
-        SELECT COUNT(*)::int AS registry_doc_count
+        SELECT COUNT(*)::int AS registry_doc_count, MAX(d.created_at) AS last_deed_uploaded_at
         FROM documents d
-        WHERE d.plot_id = pr.plot_id
-          AND UPPER(COALESCE(d.category, '')) = 'REGISTRY'
-          AND COALESCE(d.uploaded_source, 'BOOKING') <> 'DMS'
+        WHERE ${registryDeedScopeSql('p.id')}
       ) docs ON TRUE
       ${handoverJoin}
       WHERE pr.site_id = $1
@@ -152,6 +152,7 @@ class PlotRegistryModel extends MasterModel {
         COALESCE(agg.bank_paid, 0) AS bank_paid,
         COALESCE(agg.payment_count, 0) AS payment_count,
         COALESCE(docs.registry_doc_count, 0) AS registry_doc_count,
+        docs.last_deed_uploaded_at,
         ${hasHandovers ? 'COALESCE(ho.handover_count, 0) AS handover_count, ho.last_handover_at,' : '0 AS handover_count, NULL::timestamp AS last_handover_at,'}
         p.plot_tag,
         p.status AS plot_status,
@@ -197,11 +198,9 @@ class PlotRegistryModel extends MasterModel {
           )
       ) agg ON TRUE
       LEFT JOIN LATERAL (
-        SELECT COUNT(*)::int AS registry_doc_count
+        SELECT COUNT(*)::int AS registry_doc_count, MAX(d.created_at) AS last_deed_uploaded_at
         FROM documents d
-        WHERE d.plot_id = pr.plot_id
-          AND UPPER(COALESCE(d.category, '')) = 'REGISTRY'
-          AND COALESCE(d.uploaded_source, 'BOOKING') <> 'DMS'
+        WHERE ${registryDeedScopeSql('p.id')}
       ) docs ON TRUE
       ${hasHandovers ? `LEFT JOIN LATERAL (
         SELECT COUNT(*)::int AS handover_count, MAX(h.given_at) AS last_handover_at

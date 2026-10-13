@@ -60,7 +60,7 @@ test('status approval switch preserves other plot reviews', { skip: !process.env
         setting_value jsonb, UNIQUE(site_id, setting_key));
     `);
     await db.exec(originalApprovalSql);
-    await db.exec('ALTER TABLE plots ADD COLUMN approval_original_data jsonb, ADD COLUMN approval_proposed_data jsonb');
+    await db.exec('ALTER TABLE plots ADD COLUMN IF NOT EXISTS approval_original_data jsonb, ADD COLUMN IF NOT EXISTS approval_proposed_data jsonb');
     await db.exec(statusSettingSql);
     const row = async () => (await db.query('SELECT status, approval_status, approval_requested_at FROM plots WHERE id = 1')).rows[0];
 

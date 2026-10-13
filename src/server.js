@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
+import { up as migratePlotAreaChanges } from './migrations/205_plot_area_conversion_and_approval_changes.js';
+import { up as migratePlotBankRounding } from './migrations/206_plot_bank_target_rounding.js';
 import pool, { connectDB } from './config/db.js';
 import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
 import { up as migrateMemberIdentityLinking } from './migrations/192_member_identity_linking.js';
@@ -35,6 +37,8 @@ if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();
 
 connectDB().then(async () => {
+  await migratePlotAreaChanges(pool);
+  await migratePlotBankRounding(pool);
   // Direct node/nodemon starts must have the same required client schema as npm start.
   await migrateMemberSiteSharing(pool);
   await migrateMemberIdentityLinking(pool);

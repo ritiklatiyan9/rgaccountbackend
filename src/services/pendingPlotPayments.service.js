@@ -68,6 +68,24 @@ export function validatePendingFilters({ dateFrom, dateTo, asOf, today }) {
   if (asOf < today) throw invalid('The due-by date must be today or a future date.');
 }
 
+const addDays = (date, days) => {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+};
+
+/** An installment is pending from the first day of its period: the booking date
+ * for the earliest due date, otherwise the day after the previous due date.
+ * Never later than its own due date. */
+export function pendingFromDate(dueDate, scheduleDueDates, bookingDate) {
+  const previous = scheduleDueDates.filter((date) => date < dueDate).sort().at(-1);
+  const start = previous ? addDays(previous, 1) : validPlanDate(bookingDate) ? bookingDate : dueDate;
+  return start < dueDate ? start : dueDate;
+}
+
+const paymentStatus = (remaining, dueDate, pendingFrom, today) => remaining <= 0 ? 'paid'
+  : dueDate < today ? 'overdue' : dueDate === today ? 'due_today' : pendingFrom <= today ? 'pending' : 'upcoming';
+
 const groupByPlot = (rows) => {
   const grouped = new Map();
   for (const row of rows) {
@@ -183,14 +201,15 @@ export function buildPendingPaymentReport({
       const remaining = round(Math.max(value - totalReceived, 0));
       if (remaining > 0) {
         const dueDate = plot.full_payment_due_date || today;
+        const pendingFrom = pendingFromDate(dueDate, [], plot.booking_date);
         const paidDate = installmentPaidDates([{ id: `full-${id}`, direct_paid: 0, waterfall_paid: Math.min(Math.max(totalReceived, 0), value) }],
           plotReceipts.map((receipt) => ({ ...receipt, installment_id: null }))).get(`full-${id}`) || null;
         const row = { ...common, installment_id: `full-${id}`,
           installment_name: 'Full payment', full_payment_due: true,
           required_percent: 100, required_amount: value,
           installment_amount: value, installment_received: totalReceived,
-          pending_amount: remaining, due_date: dueDate, paid_date: paidDate,
-          payment_status: dueDate < today ? 'overdue' : dueDate === today ? 'due_today' : 'upcoming',
+          pending_amount: remaining, due_date: dueDate, pending_from: pendingFrom, paid_date: paidDate,
+          payment_status: paymentStatus(remaining, dueDate, pendingFrom, today),
         };
         rows.push(row);
         allInstallments.push(row);
@@ -208,17 +227,19 @@ export function buildPendingPaymentReport({
       genericPaid, directPaidByInstallment, asOf: `${today}T00:00:00Z`,
     }).installments;
     const paidDates = installmentPaidDates(allocated, plotReceipts);
+    const dueDates = schedule.map((row) => row.due_date);
     let cumulative = 0;
     for (const installment of allocated) {
       cumulative = round(cumulative + Number(installment.amount));
       const remaining = round(installment.remaining);
+      const pendingFrom = pendingFromDate(installment.due_date, dueDates, plot.booking_date);
       const row = { ...common, installment_id: installment.id, sort_order: installment.sort_order,
         installment_name: installment.installment_name,
         required_percent: value > 0 ? round(cumulative / value * 100) : null,
         required_amount: cumulative, installment_amount: round(installment.amount),
         installment_received: round(installment.paid), pending_amount: remaining,
-        due_date: installment.due_date, paid_date: paidDates.get(String(installment.id)) || null,
-        payment_status: remaining <= 0 ? 'paid' : installment.due_date < today ? 'overdue' : installment.due_date === today ? 'due_today' : 'upcoming',
+        due_date: installment.due_date, pending_from: pendingFrom, paid_date: paidDates.get(String(installment.id)) || null,
+        payment_status: paymentStatus(remaining, installment.due_date, pendingFrom, today),
       };
       allInstallments.push(row);
       if (remaining > 0) rows.push(row);
@@ -227,10 +248,11 @@ export function buildPendingPaymentReport({
   rows.sort((a, b) => a.due_date.localeCompare(b.due_date)
     || String(a.plot_no).localeCompare(String(b.plot_no), undefined, { numeric: true })
     || String(a.installment_id).localeCompare(String(b.installment_id), undefined, { numeric: true }));
-  const current = rows.filter((row) => row.due_date <= today);
+  // Pending queues follow pending_from; "Selected period" stays on due dates.
+  const current = rows.filter((row) => row.pending_from <= today);
   const period = rows.filter((row) => row.due_date >= dateFrom && row.due_date <= dateTo);
-  const upcoming = period.filter((row) => row.due_date > today);
-  const dueBy = rows.filter((row) => row.due_date <= asOf);
+  const upcoming = rows.filter((row) => row.pending_from > today && row.pending_from >= dateFrom && row.pending_from <= dateTo);
+  const dueBy = rows.filter((row) => row.pending_from <= asOf);
   const sum = (list) => round(list.reduce((amount, row) => amount + row.pending_amount, 0));
   return {
     today, date_from: dateFrom, date_to: dateTo, as_of: asOf, brokers,

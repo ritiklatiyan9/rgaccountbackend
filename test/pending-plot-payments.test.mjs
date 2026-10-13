@@ -16,12 +16,34 @@ const report = (overrides = {}) => buildPendingPaymentReport({
 
 test('25% is due on booking and the next cumulative target uses that date as its anchor', () => {
   assert.equal(report({ today: '2026-06-06' }).summary.pending_today, 0);
-  assert.equal(report({ today: '2026-09-06' }).summary.pending_today, 50000);
+  // Installment 2 is pending from the day after installment 1's due date.
+  assert.equal(report({ today: '2026-06-07' }).summary.pending_today, 50000);
+  const early = report({ today: '2026-06-08' });
+  assert.equal(early.summary.pending_today, 300000);
+  assert.equal(early.rows[1].payment_status, 'pending');
   const due = report();
   assert.equal(due.summary.pending_today, 300000);
   assert.deepEqual(due.rows.map((row) => row.required_percent), [25, 50, 100]);
+  assert.deepEqual(due.rows.map((row) => row.pending_from), ['2026-06-07', '2026-06-08', '2026-09-08']);
   assert.equal(due.rows[1].payment_status, 'due_today');
   assert.equal(report({ today: '2026-09-08' }).rows[1].payment_status, 'overdue');
+});
+
+test('a token paid on booking day leaves installment 1 pending from that first day, before its due date', () => {
+  const booked = { ...plot, booking_date: '2026-09-24', sale_price: '1306000' };
+  const result = buildPendingPaymentReport({ plots: [booked],
+    installments: [
+      { id: 1, plot_id: 1, amount: 653000, due_date: '2026-10-24', sort_order: 1 },
+      { id: 2, plot_id: 1, amount: 653000, due_date: '2026-11-24', sort_order: 2 },
+    ],
+    receipts: [{ plot_id: 1, amount: 10000, receipt_date: '2026-09-24' }],
+    today: '2026-10-13', dateFrom: '2026-10-14', dateTo: '2026-11-12', asOf: '2026-11-12' });
+  assert.deepEqual(result.rows.map((row) => [row.pending_from, row.payment_status]),
+    [['2026-09-24', 'pending'], ['2026-10-25', 'upcoming']]);
+  assert.equal(result.summary.pending_today, 643000);
+  assert.equal(result.summary.upcoming_in_period, 653000);
+  assert.equal(result.summary.expected_in_period, 643000);
+  assert.equal(result.summary.due_by_date, 1296000);
 });
 
 test('future period amounts are incremental; due-by includes arrears exactly once', () => {

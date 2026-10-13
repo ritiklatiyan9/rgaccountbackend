@@ -1,6 +1,8 @@
 // Local API for frontend development. Schedulers run only in src/server.js.
 import http from 'node:http';
 import app from '../src/app.js';
+import { up as migratePlotAreaChanges } from '../src/migrations/205_plot_area_conversion_and_approval_changes.js';
+import { up as migratePlotBankRounding } from '../src/migrations/206_plot_bank_target_rounding.js';
 import { initSocket } from '../src/config/socket.js';
 import { initCache } from '../src/config/cache.js';
 import { backupMaintenanceEnabled } from '../src/middlewares/backupMaintenance.middleware.js';
@@ -29,6 +31,8 @@ await migrateDataStorage(pool);
 await migrateImprestCashGuard(pool);
 await migrateImprestApprovalIndexes(pool);
 await migrateExistingVoucherGaps(pool);
+await migratePlotAreaChanges(pool);
+await migratePlotBankRounding(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

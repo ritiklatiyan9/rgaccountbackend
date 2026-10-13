@@ -32,7 +32,9 @@ test('registry list and detail agree on manual cash plus live linked bank', { sk
         co_applicant_relation text, co_applicant_phone text, co_applicant_aadhar text, co_applicant_pan text);
       CREATE TABLE users(id int PRIMARY KEY, name text);
       CREATE TABLE members(id int PRIMARY KEY, site_id int, full_name text);
-      CREATE TABLE documents(id int PRIMARY KEY, plot_id int, category text, uploaded_source text);
+      CREATE TABLE documents(id int PRIMARY KEY, plot_id int, category text, uploaded_source text, file_path text, created_at timestamp, kyc_case_id int);
+      CREATE TABLE bookings(id int PRIMARY KEY, plot_id int);
+      CREATE TABLE kyc_cases(id int PRIMARY KEY, booking_id int);
       CREATE TABLE plot_payments(id int PRIMARY KEY, plot_id int, amount numeric, payment_type text, status text, cheque_status text);
       CREATE TABLE plot_registry_payments(id int PRIMARY KEY, registry_id int, source_plot_payment_id int,
         amount numeric, payment_mode text, status text DEFAULT 'approved', cheque_status text, created_by int);

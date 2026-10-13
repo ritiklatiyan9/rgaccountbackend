@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import http from 'node:http';
 import app from './app.js';
+import { up as migratePlotAreaChanges } from './migrations/205_plot_area_conversion_and_approval_changes.js';
+import { up as migratePlotBankRounding } from './migrations/206_plot_bank_target_rounding.js';
 import pool, { connectDB } from './config/db.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
@@ -25,6 +27,8 @@ const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();
 connectDB().then(async () => {
+  await migratePlotAreaChanges(pool);
+  await migratePlotBankRounding(pool);
   await migrateMemberSiteSharing(pool);
   await migrateMemberIdentityLinking(pool);
   await migrateTdsDeducteeMapping(pool);
