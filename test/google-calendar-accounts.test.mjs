@@ -13,7 +13,7 @@ const script = relative => readFileSync(new URL(relative, import.meta.url), 'utf
 test('calendar accounts migrate, connect, sync and disconnect independently', async () => {
   const pg = new PGlite();
   const query = async (sql, params) => {
-    if (/SELECT pg_advisory_(?:un)?lock\(/.test(sql)) return { rows: [], rowCount: 1 };
+    if (/SELECT pg_advisory_(?:un)?(?:xact_)?lock\(/.test(sql) || ['BEGIN','ROLLBACK'].includes(sql) || sql.startsWith('SET LOCAL lock_timeout')) return { rows: [], rowCount: 1 };
     const result = params?.length ? await pg.query(sql, params) : (await pg.exec(sql)).at(-1);
     return { ...result, rows: result?.rows || [], rowCount: result?.rows?.length || result?.affectedRows || 0 };
   };
@@ -40,6 +40,7 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
       CREATE TABLE legal_notices(id int,organization_id int,reply_due_date date,deleted_at timestamptz);
       CREATE TABLE compliance_inspections(id int,organization_id int,scheduled_at timestamptz,deleted_at timestamptz);
       CREATE TABLE compliance_licences(id int,organization_id int,expiry_date date,deleted_at timestamptz);
+      CREATE TABLE event_reminder_preferences(organization_id int,event_type text,source_id bigint,calendar_enabled boolean);
       CREATE TABLE compliance_audit_log(organization_id int,site_id int,action text,entity_type text,entity_id bigint,new_value jsonb,reason text);
     `);
     await up(database); await up(database);
@@ -72,6 +73,7 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
     assert.equal((await query('SELECT count(*)::int AS n FROM google_calendar_connections WHERE organization_id=1')).rows[0].n,2,'reconnecting the same email must not duplicate it');
     await assert.rejects(query("INSERT INTO google_calendar_connections(organization_id,google_account_email,access_token_enc,refresh_token_enc) VALUES(1,'SECOND@example.test','x','x')"),error=>error.code==='23505');
     const status=await invoke('getStatus');assert.equal(status.body.connections.length,2);assert.equal(status.headers['Cache-Control'],'no-store');
+    assert.equal(status.body.connections[1].pending,1,'a future ERP date with no Google mapping must count as pending');
     assert.doesNotMatch(JSON.stringify(status.body),/access_token|refresh_token|enc:/);
     await invoke('getConnectUrl',{query:{connection_id:second.id}});assert.equal(authOptions.at(-1).prompt,'select_account consent');assert.equal(authOptions.at(-1).login_hint,'second@example.test');
     await invoke('getConnectUrl',{headers:{origin:'http://127.0.0.1:5174'}});assert.equal(JSON.parse(authOptions.at(-1).state).origin,'http://127.0.0.1:5174');
@@ -85,8 +87,9 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
     const calls=[],remote=new Map([['good1',new Map([['legacy-first',{}]])],['good2',new Map()]]);let expireFirst=false;
     class Auth { setCredentials(credentials){this.token=credentials.access_token;} on(){} }
     const google = {auth:{OAuth2:Auth},calendar:({auth})=>({events:{
+      async get(request){if(expireFirst&&auth.token==='good1')throw new Error('invalid_grant');assert.ok(remote.get(auth.token).has(request.eventId));return {data:remote.get(auth.token).get(request.eventId)};},
       async update(request){calls.push({token:auth.token,operation:'update',request});if(expireFirst&&auth.token==='good1')throw new Error('invalid_grant');assert.ok(remote.get(auth.token).has(request.eventId));remote.get(auth.token).set(request.eventId,request.requestBody);return {data:{id:request.eventId}};},
-      async list(request){calls.push({token:auth.token,operation:'list',request});return {data:{items:[]}};},
+      async list(request){calls.push({token:auth.token,operation:'list',request});return {data:{items:[...remote.get(auth.token)].map(([id,body])=>({id,...body})).filter(item=>request.privateExtendedProperty ? `erpEventKey=${item.extendedProperties?.private?.erpEventKey}`===request.privateExtendedProperty : item.summary===request.q)}};},
       async insert(request){calls.push({token:auth.token,operation:'insert',request});const id=`${auth.token}-${remote.get(auth.token).size+1}`;remote.get(auth.token).set(id,request.requestBody);return {data:{id}};},
       async delete(request){calls.push({token:auth.token,operation:'delete',request});assert.ok(remote.get(auth.token).has(request.eventId));remote.get(auth.token).delete(request.eventId);}
     }})};
@@ -102,6 +105,28 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
     assert.equal(calls.filter(call=>call.operation==='insert').length,1,'repeat sync updates each account without duplicate events');
     for(const call of calls.filter(call=>['update','insert','delete'].includes(call.operation))){assert.equal(call.request.sendUpdates,'none');if(call.request.requestBody)assert.equal(call.request.requestBody.attendees.length,0);}
     assert.equal(syncContext.body('COMPLIANCE',{title:'Filing',current_due_date:'2040-10-12'},['team@example.test']).attendees.length,0);
+    const legacyBody = syncContext.body('COMPLIANCE', { title: 'Filing', current_due_date: '2040-10-12' });
+    remote.get('good1').set('personal-event', { ...legacyBody, description: 'Personal appointment', created: '2025-08-18T13:36:18Z' });
+    remote.get('good1').set('legacy-a', { ...legacyBody, created: '2026-08-18T13:36:18Z' });
+    remote.get('good1').set('legacy-b', { ...legacyBody, created: '2026-08-18T13:37:17Z' });
+    await query(`INSERT INTO compliance_items VALUES(12,1,1,'Filing','2040-10-12',NULL),(13,1,1,'Filing','2040-10-12',NULL)`);
+    await syncContext.sync(1, 'COMPLIANCE', 12, 1);
+    await syncContext.sync(1, 'COMPLIANCE', 13, 1);
+    const duplicateLinks = (await query('SELECT source_id,google_event_id FROM google_calendar_event_links WHERE connection_id=1 ORDER BY source_id')).rows;
+    assert.deepEqual(duplicateLinks.map(link => link.google_event_id), ['legacy-first', 'legacy-a', 'legacy-b'], 'identical ERP events claim distinct existing legacy entries without inserting duplicates');
+    assert.equal(calls.filter(call=>call.operation==='insert').length,1);
+    assert.equal(remote.get('good1').get('personal-event').description, 'Personal appointment', 'unrelated personal events with the same title and date must remain untouched');
+    await query(`UPDATE google_calendar_event_links SET google_event_id='legacy-first' WHERE connection_id=1 AND source_id=13`);
+    await syncContext.sync(1, 'COMPLIANCE', 13, 1);
+    assert.equal((await query('SELECT google_event_id FROM google_calendar_event_links WHERE connection_id=1 AND source_id=13')).rows[0].google_event_id, 'legacy-b', 'an existing shared mapping recovers its own keyed event');
+    assert.equal(remote.get('good1').get('legacy-first').extendedProperties.private.erpEventKey, '1:COMPLIANCE:10', 'repair must not overwrite another record’s event');
+    await query(`INSERT INTO compliance_items VALUES(14,1,1,'Removed filing','2040-10-12',NOW());
+      INSERT INTO google_calendar_event_links(organization_id,connection_id,event_type,source_id,google_event_id)
+      VALUES(1,1,'COMPLIANCE',14,'legacy-first')`);
+    await syncContext.sync(1, 'COMPLIANCE', 14, 1);
+    assert.equal(remote.get('good1').has('legacy-first'), true, 'deleting a record with a historical shared mapping must retain the other record’s event');
+    await query('UPDATE compliance_items SET deleted_at=NOW() WHERE id IN (12,13)');
+    await syncContext.sync(1, 'COMPLIANCE', 12, 1); await syncContext.sync(1, 'COMPLIANCE', 13, 1);
     expireFirst=true;const partial=await syncContext.sync(1,'COMPLIANCE',10);assert.equal(partial.status,'FAILED');assert.equal(partial.accounts[1].status,'SYNCED');
     assert.equal((await query('SELECT status FROM google_calendar_connections WHERE id=1')).rows[0].status,'reauthorization_required');
     assert.equal((await query('SELECT status FROM google_calendar_connections WHERE id=$1',[second.id])).rows[0].status,'active');
@@ -131,7 +156,7 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
     await syncContext.sync(1,'COMPLIANCE',10,1);
     assert.equal((await query('SELECT google_event_id FROM google_calendar_event_links WHERE connection_id=1')).rows[0].google_event_id,'legacy-first');
     await query('UPDATE compliance_items SET deleted_at=NOW() WHERE id=10');
-    const deleted=await syncContext.sync(1,'COMPLIANCE',10);assert.equal(deleted.status,'DELETED');assert.equal(calls.filter(call=>call.operation==='delete').length,2);
+    const deleted=await syncContext.sync(1,'COMPLIANCE',10);assert.equal(deleted.status,'DELETED');assert.equal(calls.filter(call=>call.operation==='delete').length,4);
     assert.equal((await query('SELECT count(*)::int AS n FROM google_calendar_event_links')).rows[0].n,0);
   } finally {await pg.close();}
 });
@@ -149,7 +174,7 @@ test('failed calendar advisory-lock acquisition returns its checked-out client',
   let releases = 0, calendarCalls = 0;
   const database = { query: async () => ({ rows: [] }), connect: async () => ({
     async query(sql) {
-      if (sql.includes('pg_advisory_lock')) throw failure;
+      if (sql.includes('pg_advisory_xact_lock')) throw failure;
       return { rows: [] };
     },
     release() { releases += 1; },
@@ -161,4 +186,35 @@ test('failed calendar advisory-lock acquisition returns its checked-out client',
   vm.runInContext(`${script('../src/services/googleCalendarSync.service.js')}\nthis.run=syncConnectionEvent;`, context);
   await assert.rejects(context.run(1, 'COMPLIANCE', 10, 1), error => error === failure);
   assert.equal(releases, 1); assert.equal(calendarCalls, 0);
+});
+
+test('calendar locks remain inside a transaction and release before the client is reused', async () => {
+  let transaction = false, locked = false, releases = 0;
+  const context = { pool: { query: async () => ({ rows: [] }), connect: async () => ({
+    async query(sql) {
+      if (sql === 'BEGIN') { assert.equal(transaction, false); transaction = true; }
+      else if (sql.includes('pg_advisory_xact_lock')) { assert.equal(transaction, true); locked = true; }
+      else if (sql === 'ROLLBACK') { transaction = false; locked = false; }
+      else if (!sql.startsWith('SET LOCAL lock_timeout')) throw new Error(`Unexpected lock statement: ${sql}`);
+      return { rows: [] };
+    },
+    release(error) { assert.equal(error, undefined); assert.equal(transaction, false); assert.equal(locked, false); releases++; },
+  }) }, google: {}, process: { env: {} }, console: { log() {}, error() {} }, DEFAULT_TIME_ZONE: 'Asia/Kolkata' };
+  vm.createContext(context);
+  vm.runInContext(`${script('../src/services/googleCalendarSync.service.js')}\nthis.run=syncConnectionEvent;`, context);
+  for (const sourceId of [10, 11]) assert.equal((await context.run(1, 'COMPLIANCE', sourceId, 1)).status, 'DISCONNECTED');
+  assert.equal(releases, 2);
+});
+
+test('a failed lock rollback discards the client instead of returning it to the pool', async () => {
+  const cleanupFailure = new Error('Connection lost during rollback');
+  let discarded;
+  const context = { pool: { query: async () => ({ rows: [] }), connect: async () => ({
+    async query(sql) { if (sql === 'ROLLBACK') throw cleanupFailure; return { rows: [] }; },
+    release(error) { discarded = error; },
+  }) }, google: {}, process: { env: {} }, console: { log() {}, error() {} }, DEFAULT_TIME_ZONE: 'Asia/Kolkata' };
+  vm.createContext(context);
+  vm.runInContext(`${script('../src/services/googleCalendarSync.service.js')}\nthis.run=syncConnectionEvent;`, context);
+  await context.run(1, 'COMPLIANCE', 10, 1);
+  assert.equal(discarded, cleanupFailure);
 });

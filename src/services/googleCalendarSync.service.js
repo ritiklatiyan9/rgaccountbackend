@@ -142,7 +142,14 @@ const deleteLinkedEvent = async (calendar, orgId, connectionId, eventType, sourc
   if (!rows[0]) return;
   if (rows[0].google_event_id) {
     try {
-      await calendar.events.delete({ calendarId: 'primary', eventId: rows[0].google_event_id, sendUpdates });
+      const { data: remote } = await calendar.events.get({ calendarId: 'primary', eventId: rows[0].google_event_id });
+      const owner = remote.extendedProperties?.private?.erpEventKey;
+      const otherLinks = await pool.query(`SELECT 1 FROM google_calendar_event_links
+        WHERE organization_id=$1 AND connection_id=$2 AND google_event_id=$3 AND id<>$4 LIMIT 1`,
+      [orgId, connectionId, rows[0].google_event_id, rows[0].id]);
+      if ((!owner || owner === `${orgId}:${eventType}:${sourceId}`) && !otherLinks.rows.length) {
+        await calendar.events.delete({ calendarId: 'primary', eventId: rows[0].google_event_id, sendUpdates });
+      }
     } catch (err) {
       if (![404, 410].includes(err?.code ?? err?.response?.status)) throw err;
     }
@@ -165,9 +172,15 @@ const syncConnectionEvent = async (orgId, eventType, sourceId, connectionId) => 
   const cfg = SOURCES[eventType];
   if (!cfg) throw new Error(`Unknown calendar event type: ${eventType}`);
   const lockClient = await pool.connect();
-  const lockKey = `gcal:${orgId}:${connectionId}:${eventType}:${sourceId}`;
+  // Serialize recovery within an account so two same-title ERP records cannot
+  // claim the same unkeyed legacy Google event concurrently.
+  const lockKey = `gcal:${orgId}:${connectionId}`;
   try {
-    await lockClient.query('SELECT pg_advisory_lock(hashtext($1))', [lockKey]);
+    // Transaction locks stay on the same backend through transaction poolers
+    // and release automatically when this dedicated lock transaction ends.
+    await lockClient.query('BEGIN');
+    await lockClient.query("SET LOCAL lock_timeout = '15s'");
+    await lockClient.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
     const connection = await orgCalendar(orgId, connectionId);
     if (!connection) return { status: 'DISCONNECTED' };
     const { calendar } = connection;
@@ -220,27 +233,36 @@ const syncConnectionEvent = async (orgId, eventType, sourceId, connectionId) => 
     );
 
     if (link?.google_event_id) {
-    try {
-      const { data } = await calendar.events.update({
-        calendarId: 'primary', eventId: link.google_event_id, requestBody: body, sendUpdates,
-      });
-      await pool.query(
-        `UPDATE google_calendar_event_links SET sync_status='SYNCED',last_synced_at=NOW(),
-          failure_reason=NULL,google_html_link=$2,remote_updated_at=$3,updated_at=NOW() WHERE id=$1`,
-        [link.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null],
-      );
-      await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { connectionId, operation: 'updated', googleEventId: link.google_event_id });
-      console.log(`[gcal] updated ${eventType}#${sourceId} (org ${orgId}) → ${link.google_event_id}`);
-      return { status: 'SYNCED', googleEventId: link.google_event_id, operation: 'updated' };
-    } catch (err) {
-      if (![404, 410].includes(err?.code ?? err?.response?.status)) throw err;
-      await pool.query(
-        `UPDATE google_calendar_event_links SET google_event_id=NULL,sync_status='PENDING',updated_at=NOW() WHERE id=$1`,
-        [link.id],
-      );
-      link = { ...link, google_event_id: null };
+      try {
+        const { data: remote } = await calendar.events.get({ calendarId: 'primary', eventId: link.google_event_id });
+        const remoteOwner = remote.extendedProperties?.private?.erpEventKey;
+        if (remoteOwner && remoteOwner !== erpEventKey) {
+          // Repair a historical shared mapping without overwriting another ERP
+          // record's event. Its remote event remains untouched.
+          await pool.query(`UPDATE google_calendar_event_links SET google_event_id=NULL,sync_status='PENDING',updated_at=NOW() WHERE id=$1`, [link.id]);
+          link = { ...link, google_event_id: null };
+        } else {
+          const { data } = await calendar.events.update({
+            calendarId: 'primary', eventId: link.google_event_id, requestBody: body, sendUpdates,
+          });
+          await pool.query(
+            `UPDATE google_calendar_event_links SET sync_status='SYNCED',last_synced_at=NOW(),
+              failure_reason=NULL,google_html_link=$2,remote_updated_at=$3,updated_at=NOW() WHERE id=$1`,
+            [link.id, data.htmlLink || null, data.updated ? new Date(data.updated) : null],
+          );
+          await writeSyncAudit(orgId, row.site_id, eventType, sourceId, 'GOOGLE_CALENDAR_SYNCED', { connectionId, operation: 'updated', googleEventId: link.google_event_id });
+          console.log(`[gcal] updated ${eventType}#${sourceId} (org ${orgId}) → ${link.google_event_id}`);
+          return { status: 'SYNCED', googleEventId: link.google_event_id, operation: 'updated' };
+        }
+      } catch (err) {
+        if (![404, 410].includes(err?.code ?? err?.response?.status)) throw err;
+        await pool.query(
+          `UPDATE google_calendar_event_links SET google_event_id=NULL,sync_status='PENDING',updated_at=NOW() WHERE id=$1`,
+          [link.id],
+        );
+        link = { ...link, google_event_id: null };
+      }
     }
-  }
 
     // Recover a remote event whose local mapping was lost before creating a new
     // one. The private ERP key is stable and not visible in the event UI.
@@ -264,8 +286,10 @@ const syncConnectionEvent = async (orgId, eventType, sourceId, connectionId) => 
     }
 
     // Legacy events created before ERP metadata was added can still be safely
-    // recovered by an exact summary + start + end match. Ambiguity fails closed
-    // for manual review instead of creating a possible duplicate.
+    // recovered by an exact summary + start + end match and ERP description.
+    // Never reuse an unrelated personal event or an event
+    // owned by another ERP record. Equivalent unclaimed legacy copies are
+    // assigned oldest-first, preserving all existing calendar entries.
     const expectedStart = body.start.date || body.start.dateTime;
     const expectedEnd = body.end.date || body.end.dateTime;
     const windowStart = body.start.date
@@ -278,18 +302,23 @@ const syncConnectionEvent = async (orgId, eventType, sourceId, connectionId) => 
       calendarId: 'primary', q: body.summary, timeMin: windowStart.toISOString(),
       timeMax: windowEnd.toISOString(), maxResults: 20, singleEvents: true, showDeleted: false,
     });
+    const claimed = await pool.query(`SELECT google_event_id FROM google_calendar_event_links
+      WHERE organization_id=$1 AND connection_id=$2 AND google_event_id=ANY($3::text[])
+        AND (event_type<>$4 OR source_id<>$5)`,
+      [orgId, connectionId, (legacyCandidates.data.items || []).map(item => item.id).filter(Boolean), eventType, sourceId]);
+    const claimedIds = new Set(claimed.rows.map(item => item.google_event_id));
     const exactLegacy = (legacyCandidates.data.items || []).filter((item) => {
+      const owner = item.extendedProperties?.private?.erpEventKey;
+      if (claimedIds.has(item.id) || (owner && owner !== erpEventKey)) return false;
       const remoteStart = item.start?.date || item.start?.dateTime;
       const remoteEnd = item.end?.date || item.end?.dateTime;
       const sameStart = body.start.date ? remoteStart === expectedStart
         : new Date(remoteStart).getTime() === new Date(expectedStart).getTime();
       const sameEnd = body.end.date ? remoteEnd === expectedEnd
         : new Date(remoteEnd).getTime() === new Date(expectedEnd).getTime();
-      return item.summary === body.summary && sameStart && sameEnd;
-    });
-    if (exactLegacy.length > 1) {
-      throw new Error('Multiple legacy Google events match this ERP event; manual duplicate review is required');
-    }
+      const erpDescription = String(item.description || '').split('\n')[0] === EVENT_LABELS[eventType];
+      return erpDescription && item.summary === body.summary && sameStart && sameEnd;
+    }).sort((a, b) => (Date.parse(a.created) || 0) - (Date.parse(b.created) || 0) || String(a.id).localeCompare(String(b.id)));
     if (exactLegacy[0]?.id) {
       const { data } = await calendar.events.update({
         calendarId: 'primary', eventId: exactLegacy[0].id, requestBody: body, sendUpdates,
@@ -331,8 +360,11 @@ const syncConnectionEvent = async (orgId, eventType, sourceId, connectionId) => 
     }
     throw error;
   } finally {
-    await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey]).catch(() => {});
-    lockClient.release();
+    let cleanupError;
+    try { await lockClient.query('ROLLBACK'); }
+    catch (error) { cleanupError = error; }
+    // A client that could still hold the account lock must leave the pool.
+    lockClient.release(cleanupError);
   }
 };
 

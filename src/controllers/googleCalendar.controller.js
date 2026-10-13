@@ -178,16 +178,21 @@ export const getStatus = asyncHandler(async (req, res) => {
     LEFT JOIN LATERAL (
       SELECT COUNT(*) FILTER (WHERE g.sync_status='SYNCED')::int AS synced,
         COUNT(*) FILTER (WHERE g.sync_status='FAILED')::int AS failed,
-        COUNT(*) FILTER (WHERE g.sync_status IN ('PENDING','PROCESSING'))::int AS pending,
+        COUNT(*) FILTER (WHERE g.id IS NULL OR g.sync_status IN ('PENDING','PROCESSING'))::int AS pending,
         MAX(g.last_synced_at) AS last_synced_at
-      FROM google_calendar_event_links g JOIN future_events e
-        ON e.organization_id=g.organization_id AND e.event_type=g.event_type AND e.source_id=g.source_id
-      WHERE g.connection_id=c.id AND g.organization_id=c.organization_id
+      FROM future_events e LEFT JOIN google_calendar_event_links g
+        ON e.organization_id=g.organization_id AND e.event_type=g.event_type AND e.source_id=g.source_id AND g.connection_id=c.id
+      WHERE e.organization_id=c.organization_id AND NOT EXISTS (
+        SELECT 1 FROM event_reminder_preferences p WHERE p.organization_id=e.organization_id
+          AND p.event_type=e.event_type AND p.source_id=e.source_id AND p.calendar_enabled=FALSE
+      )
     ) totals ON TRUE
     LEFT JOIN LATERAL (
       SELECT g.failure_reason FROM google_calendar_event_links g JOIN future_events e
         ON e.organization_id=g.organization_id AND e.event_type=g.event_type AND e.source_id=g.source_id
       WHERE g.connection_id=c.id AND g.organization_id=c.organization_id AND g.sync_status='FAILED'
+        AND NOT EXISTS (SELECT 1 FROM event_reminder_preferences p WHERE p.organization_id=e.organization_id
+          AND p.event_type=e.event_type AND p.source_id=e.source_id AND p.calendar_enabled=FALSE)
       ORDER BY g.updated_at DESC,g.id DESC LIMIT 1
     ) latest ON TRUE
     WHERE c.organization_id=$1 ORDER BY c.created_at,c.id`, [req.user.organization_id]);

@@ -30,26 +30,29 @@ async function run() {
       expiry_date: connection.token_expiry ? new Date(connection.token_expiry).getTime() : undefined,
     });
     const calendar = google.calendar({ version: 'v3', auth });
-    const { rows: links } = await pool.query(
+    const { rows: mappings } = await pool.query(
       `SELECT * FROM google_calendar_event_links
         WHERE organization_id=$1 AND connection_id=$2 ORDER BY event_type,source_id`,
       [connection.organization_id, connection.id],
     );
-    for (const link of links) {
+    const bySource = new Map(mappings.map(link => [`${link.event_type}:${link.source_id}`, link]));
+    const links = [];
+    for (const [eventType, config] of Object.entries(SOURCES)) {
+      const { rows: sources } = await pool.query(`SELECT * FROM ${config.table}
+        WHERE organization_id=$1 AND deleted_at IS NULL AND ${config.dateField}>=CURRENT_DATE`, [connection.organization_id]);
+      for (const source of sources) links.push({ ...bySource.get(`${eventType}:${source.id}`), event_type: eventType, source_id: source.id, source });
+    }
+    const verifyLink = async (link) => {
       const config = SOURCES[link.event_type];
-      if (!config) continue;
-      const { rows } = await pool.query(
-        `SELECT * FROM ${config.table} WHERE organization_id=$1 AND id=$2 AND deleted_at IS NULL AND ${config.dateField} >= CURRENT_DATE`,
-        [connection.organization_id, link.source_id],
-      );
-      const source = rows[0];
-      if (!source) continue;
+      if (!config) return;
+      const source = link.source;
+      if (!source) return;
       const instant = link.event_type === 'COMPLIANCE' ? complianceEventInstant(source) : null;
       const preferences = await getEventPreferences({
         ...source, id: link.source_id, event_type: link.event_type, timed: config.timed || Boolean(instant),
         event_at: instant || source[config.dateField], organization_id: connection.organization_id,
       });
-      if (preferences.calendar_enabled === false) continue;
+      if (preferences.calendar_enabled === false) return;
       let operation = 'verified';
       if (repair) {
         const result = await syncComplianceEvent(connection.organization_id, link.event_type, link.source_id, connection.id);
@@ -61,14 +64,14 @@ async function run() {
       )).rows[0];
       if (!currentLink?.google_event_id) {
         report.push({ connectionId: connection.id, eventType: link.event_type, sourceId: link.source_id, mapping: false, remoteExists: false });
-        continue;
+        return;
       }
       let remote;
       try {
         remote = (await calendar.events.get({ calendarId: 'primary', eventId: currentLink.google_event_id })).data;
       } catch (error) {
         report.push({ connectionId: connection.id, eventType: link.event_type, sourceId: link.source_id, mapping: true, remoteExists: false, error: remoteStatus(error) });
-        continue;
+        return;
       }
       const expected = buildEventBody(link.event_type, source, [], { timeZone: preferences.timezone });
       const erpKey = `${connection.organization_id}:${link.event_type}:${link.source_id}`;
@@ -89,18 +92,32 @@ async function run() {
         mapping: true,
         remoteExists: true,
         remindersOk,
+        ownershipOk: remote.extendedProperties?.private?.erpEventKey === erpKey,
         timezoneOk: expected.start.dateTime ? remote.start?.timeZone === expected.start.timeZone : true,
         dateOk: expected.start.date ? remote.start?.date === expected.start.date
           : new Date(remote.start?.dateTime).getTime() === new Date(expected.start.dateTime).getTime(),
+        endOk: expected.end.date ? remote.end?.date === expected.end.date
+          : new Date(remote.end?.dateTime).getTime() === new Date(expected.end.dateTime).getTime(),
+        noAttendees: !(remote.attendees || []).length,
         startPresent: Boolean(remote.start?.date || remote.start?.dateTime),
         endPresent: Boolean(remote.end?.date || remote.end?.dateTime),
         keyedRemoteCount: duplicates.data.items?.length || 0,
         noKeyedDuplicate: (duplicates.data.items?.length || 0) === 1,
       });
+    };
+    if (repair) {
+      for (const link of links) await verifyLink(link);
+    } else {
+      // Bound independent provider reads; repairs stay sequential per account.
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(4, links.length) }, async () => {
+        while (cursor < links.length) await verifyLink(links[cursor++]);
+      }));
     }
   }
+  report.sort((a, b) => Number(a.connectionId) - Number(b.connectionId) || a.eventType.localeCompare(b.eventType) || Number(a.sourceId) - Number(b.sourceId));
   console.log(JSON.stringify({ repair, organizationId, checked: report.length, events: report }, null, 2));
-  if (report.some((item) => !item.mapping || !item.remoteExists || !item.remindersOk || !item.timezoneOk || !item.dateOk || !item.noKeyedDuplicate)) {
+  if (report.some((item) => !item.mapping || !item.remoteExists || !item.remindersOk || !item.ownershipOk || !item.timezoneOk || !item.dateOk || !item.endOk || !item.noAttendees || !item.noKeyedDuplicate)) {
     process.exitCode = 2;
   }
 }
