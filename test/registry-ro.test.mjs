@@ -28,7 +28,7 @@ test('registry list and detail agree on manual cash plus live linked bank', { sk
         farmer_name text, assigned_admin_id int, noc_farmer_member_ids int[], noc_farmer_member_id int,
         ro_cash_amount numeric, ro_bank_amount numeric);
       CREATE TABLE plots(id int PRIMARY KEY, site_id int, plot_no text, buyer_name text, plot_size numeric, plot_size_mtr numeric,
-        unit_type text, team text, booking_by text, plot_tag text, status text, co_applicant_name text,
+        to_receive_bank numeric, circle_rate numeric, unit_type text, team text, booking_by text, plot_tag text, status text, co_applicant_name text,
         co_applicant_relation text, co_applicant_phone text, co_applicant_aadhar text, co_applicant_pan text);
       CREATE TABLE users(id int PRIMARY KEY, name text);
       CREATE TABLE members(id int PRIMARY KEY, site_id int, full_name text);
@@ -39,7 +39,8 @@ test('registry list and detail agree on manual cash plus live linked bank', { sk
       INSERT INTO plots(id, site_id, plot_no, buyer_name, plot_size, plot_size_mtr, unit_type, plot_tag, status)
         VALUES (444,5,'A53','TEST',169.2,141.516,'plot','NEW','REGISTRY'),(445,5,'OTHER','TEST',100,83.64,'plot','NEW','REGISTRY');
       INSERT INTO plot_registries(id, site_id, plot_id, plot_no, registry_payment, ro_bank_amount)
-        VALUES (703,5,444,'A53',1415160,9999999);
+        VALUES (703,5,444,'A53',999999,9999999);
+      UPDATE plots SET to_receive_bank=1415160.38, circle_rate=10000 WHERE id=444;
       INSERT INTO plot_payments VALUES
         (1,444,500000,'BANK','approved',NULL),(2,444,500000,'BANK','approved',NULL),(3,444,652000,'BANK','approved',NULL),
         (4,444,3155500,'CASH','approved',NULL),(5,445,999999,'BANK','approved',NULL),
@@ -54,7 +55,7 @@ test('registry list and detail agree on manual cash plus live linked bank', { sk
     const pool = { query: (sql, params) => db.query(sql, params) };
     const receiptsBefore = (await db.query('SELECT * FROM plot_payments ORDER BY id')).rows;
     const linksBefore = (await db.query('SELECT * FROM plot_registry_payments ORDER BY id')).rows;
-    const check = async (cash, bank, creator = null) => {
+    const check = async (cash, bank, creator = null, target = 1415160.38) => {
       const list = await plotRegistryModel.findBySiteId(5, pool, creator);
       const detail = await plotRegistryModel.findByIdWithTotals(703, pool, creator);
       for (const row of [list[0], detail]) {
@@ -63,6 +64,10 @@ test('registry list and detail agree on manual cash plus live linked bank', { sk
         assert.equal(row.ro_cash, cash);
         assert.equal(row.ro_bank, bank);
         assert.equal(row.ro_total, cash + bank);
+        assert.equal(row.registry_payment, target, 'list and detail read the exact current Plot Payments target');
+        assert.equal(row.bank_amount, target);
+        assert.equal(row.circle_rate, 10000);
+        assert.equal(row.ro_diff, Math.round((cash + bank - target) * 100) / 100);
       }
     };
     await check(0, 1652000);
@@ -79,5 +84,8 @@ test('registry list and detail agree on manual cash plus live linked bank', { sk
     await check(50000, 1002500);
     await db.exec('UPDATE plot_registries SET ro_cash_amount=NULL WHERE id=703');
     await check(0, 1002500);
+    await db.exec('UPDATE plots SET to_receive_bank=123456.78 WHERE id=444');
+    await check(0, 1002500, null, 123456.78);
+    assert.equal(Number((await db.query('SELECT registry_payment FROM plot_registries WHERE id=703')).rows[0].registry_payment), 999999, 'reads do not rewrite historical saved amounts');
   } finally { await db.close(); }
 });

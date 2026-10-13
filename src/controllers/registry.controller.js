@@ -1,4 +1,4 @@
-import { registrySizeFromPlot } from '../utils/registrySize.js';
+import { registrySizeFromPlot, registryFinanceFromPlot } from '../utils/registrySize.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { registryCoverageSql } from '../utils/registryCashAllocation.js';
 import { nocRegistryDate } from '../utils/nocRegistryDate.js';
@@ -152,7 +152,7 @@ export const createRegistry = asyncHandler(async (req, res) => {
 export async function createRegistryRecord(body, userId, transactionClient = null) {
   const {
     site_id, plot_no, customer_name, registry_date, farmer_name,
-    notes, plot_id, circle_rate, firm_name, seller_name, created_entry_date, bank_amount,
+    notes, plot_id, firm_name, seller_name, created_entry_date,
     payments,
   } = body;
 
@@ -173,7 +173,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
     return { status: 400, body: { message: 'A valid plot is required' } };
   }
   const { rows: plotRows } = await db.query(
-    'SELECT site_id, plot_no, buyer_name, plot_tag, plot_size, plot_size_mtr, unit_type FROM plots WHERE id = $1 LIMIT 1',
+    'SELECT site_id, plot_no, buyer_name, plot_tag, plot_size, plot_size_mtr, unit_type, circle_rate, to_receive_bank FROM plots WHERE id = $1 LIMIT 1',
     [plotIdInt]
   );
   if (!plotRows[0]) return { status: 404, body: { message: 'Plot not found' } };
@@ -226,7 +226,7 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
   const today = new Date().toISOString().split('T')[0];
   const masterSize = registrySizeFromPlot(plotRows[0]);
   const registrySizeMetres = masterSize.size_meter;
-  const calculatedRegistryPayment = registryPaymentFromMetres(registrySizeMetres, circle_rate) ?? 0;
+  const masterFinance = registryFinanceFromPlot(plotRows[0]);
   const ownsTransaction = !transactionClient;
   const client = transactionClient || await pool.connect();
   let row;
@@ -271,12 +271,12 @@ export async function createRegistryRecord(body, userId, transactionClient = nul
         registry_date || null,                                                  // $6
         farmer_name ? farmer_name.trim().toUpperCase() : null,                  // $7
         plotIdInt,                                                              // $8
-        circle_rate !== undefined && circle_rate !== '' ? (parseFloat(circle_rate) || 0) : null, // $9
+        masterFinance.circle_rate,                                               // $9
         firm_name ? firm_name.trim().toUpperCase() : null,                      // $10
         seller_name ? seller_name.trim().toUpperCase() : null,                  // $11
         created_entry_date || today,                                            // $12
-        bank_amount !== undefined && bank_amount !== '' ? (parseFloat(bank_amount) || 0) : null, // $13
-        calculatedRegistryPayment,                                             // $14
+        masterFinance.bank_amount,                                              // $13
+        masterFinance.registry_payment,                                         // $14
         notes ? notes.trim() : null,                                            // $15
         body.assigned_admin_id ? parseInt(body.assigned_admin_id) : null,       // $16
         userId,                                                                 // $17
@@ -418,7 +418,7 @@ export const updateRegistry = asyncHandler(async (req, res) => {
     });
   }
   if (prospectivePlotId) {
-    const { rows } = await pool.query('SELECT site_id, plot_no, buyer_name, plot_size, plot_size_mtr, unit_type FROM plots WHERE id = $1 LIMIT 1', [prospectivePlotId]);
+    const { rows } = await pool.query('SELECT site_id, plot_no, buyer_name, plot_size, plot_size_mtr, unit_type, circle_rate, to_receive_bank FROM plots WHERE id = $1 LIMIT 1', [prospectivePlotId]);
     if (!rows[0]) return res.status(404).json({ message: 'Plot not found' });
     if (parseInt(rows[0].site_id) !== parseInt(existing.site_id)) {
       return res.status(400).json({ message: 'Selected plot does not belong to the registry site' });
@@ -430,12 +430,12 @@ export const updateRegistry = asyncHandler(async (req, res) => {
     if (String(rows[0].buyer_name || '').trim()) {
       updateData.customer_name = rows[0].buyer_name.trim().toUpperCase();
     }
-    if (size_meter !== undefined || size_sqyard !== undefined || circle_rate !== undefined || registry_payment !== undefined || plotIdentityChanging) {
-      Object.assign(updateData, registrySizeFromPlot(rows[0]));
+    if (size_meter !== undefined || size_sqyard !== undefined || circle_rate !== undefined || registry_payment !== undefined || bank_amount !== undefined || plotIdentityChanging) {
+      Object.assign(updateData, registrySizeFromPlot(rows[0]), registryFinanceFromPlot(rows[0]));
     }
   }
 
-  if (updateData.size_meter !== undefined || circle_rate !== undefined || registry_payment !== undefined) {
+  if (!prospectivePlotId && (updateData.size_meter !== undefined || circle_rate !== undefined || registry_payment !== undefined)) {
     const metres = updateData.size_meter !== undefined ? updateData.size_meter : existing.size_meter;
     const rate = updateData.circle_rate !== undefined ? updateData.circle_rate : existing.circle_rate;
     updateData.registry_payment = registryPaymentFromMetres(metres, rate) ?? 0;

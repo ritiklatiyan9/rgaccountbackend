@@ -86,7 +86,7 @@ test('registry workspaces stay atomic across NOC drafts, status edits, imports a
     failMapping = false;
     const created = await invoke('createPlotNocRegistry');
     assert.equal(created.status, 201);
-    assert.equal(Number(created.body.registry.registry_payment), 1255000);
+    assert.equal(Number(created.body.registry.registry_payment), 1000, 'workspace uses the saved bank target instead of recalculating area times rate');
     assert.equal(Number((await rows('plot_registries'))[0].size_meter), 83.61);
     assert.equal((await rows('plot_registries'))[0].customer_name, 'TEST BUYER');
     assert.equal(Number((await rows('plot_registries'))[0].size_sqyard), 100, 'legacy schema defaults to plots');

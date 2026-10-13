@@ -1,5 +1,4 @@
-import { registrySizeFromPlot } from '../utils/registrySize.js';
-import { registryPaymentFromMetres } from '../utils/registryPayment.js';
+import { registrySizeFromPlot, registryFinanceFromPlot } from '../utils/registrySize.js';
 import { PLOT_BUYER_MEMBER_JOIN } from './plotMemberLinks.service.js';
 
 /** Ensure the registry backing record in the caller's transaction. Shared by
@@ -37,7 +36,7 @@ export async function ensurePlotRegistryWorkspace(client, plotId, createdBy = nu
     [plot.id, plot.site_id, plot.plot_no]
   );
   if (existingResult.rows[0]) {
-    return { registry: existingResult.rows[0], created: false };
+    return { registry: { ...existingResult.rows[0], ...registryFinanceFromPlot(plot) }, created: false };
   }
 
   const validPaymentsResult = await client.query(
@@ -54,7 +53,7 @@ export async function ensurePlotRegistryWorkspace(client, plotId, createdBy = nu
   );
   const validPayments = validPaymentsResult.rows;
   const { size_sqyard: gaz, size_meter: sizeMetres } = registrySizeFromPlot(plot);
-  const registryPayment = registryPaymentFromMetres(sizeMetres, plot.circle_rate) || 0;
+  const registryPayment = registryFinanceFromPlot(plot).registry_payment;
   const buyerResult = await client.query(
     `SELECT plot_buyer.full_name AS client_name
        FROM plots p
