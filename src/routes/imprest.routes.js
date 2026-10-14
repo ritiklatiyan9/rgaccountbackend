@@ -33,7 +33,7 @@ import {
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
-import { requireImprestReadAccess } from '../middlewares/imprestPermission.middleware.js';
+import { requireImprestReadAccess, requireImprestBalanceAccess } from '../middlewares/imprestPermission.middleware.js';
 import requireImprestSiteAccess, { requireImprestParticipant } from '../middlewares/imprestSiteAccess.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import uploadProofPhoto from '../middlewares/proofUpload.middleware.js';
@@ -66,7 +66,7 @@ router.use(authMiddleware);
 router.get('/approval-activity', requireImprestReadAccess, accessByRequiredQuerySite, getApprovalActivity);
 
 // ── Balance & Ledger (any authenticated user) ──
-router.get('/balance', requireImprestReadAccess, accessByQuerySite, imprestReadCache, getBalance);
+router.get('/balance', requireImprestBalanceAccess, accessByQuerySite, imprestReadCache, getBalance);
 router.get('/site-balance', requireImprestReadAccess, accessByQuerySite, imprestReadCache, getSiteBalance);
 router.get('/site-balances', requirePermission('imprest', 'read'), imprestReadCache, getSiteBalances);
 router.get('/ledger', requireImprestReadAccess, accessByQuerySite, imprestReadCache, getLedger);

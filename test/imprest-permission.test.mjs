@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import permissionModel from '../src/models/Permission.model.js';
-import { requireImprestReadAccess, hasImprestManagementScope } from '../src/middlewares/imprestPermission.middleware.js';
+import { requireImprestReadAccess, requireImprestBalanceAccess, hasImprestManagementScope } from '../src/middlewares/imprestPermission.middleware.js';
 
 test('Imprest read boundary requires current explicit grants and management scope', async (t) => {
   const original = permissionModel.getPermission;
@@ -39,4 +39,31 @@ test('Imprest read boundary requires current explicit grants and management scop
       assert.equal((await call('unknown')).status,403);
     });
   } finally {permissionModel.getPermission=original;}
+});
+
+test('financial funding access is limited to an own balance and a granted payment module', async () => {
+  const original = permissionModel.getPermission;
+  const queried = [];
+  permissionModel.getPermission = async (_id, module) => {
+    queried.push(module);
+    return module === 'expenses' ? { can_write: true } : module === 'commissions' ? { can_update: true } : { can_write: false };
+  };
+  const call = async query => {
+    const result = { status: 200, next: false };
+    const req = { user: { id: 2, role: 'sub_admin' }, query: { purpose: 'cash-funding', module: 'expense', site_id: 10, ...query } };
+    const res = { status(code) { result.status = code; return this; }, json(body) { result.body = body; return this; } };
+    await requireImprestBalanceAccess(req, res, error => { if (error) throw error; result.next = true; });
+    assert.equal(hasImprestManagementScope(req), false);
+    return result;
+  };
+  try {
+    assert.equal((await call({ user_id: 2 })).next, true);
+    assert.equal((await call({ module: 'plot_commission' })).next, true);
+    assert.deepEqual(queried.slice(0, 2), ['expenses', 'commissions']);
+    assert.equal((await call({ user_id: 3 })).status, 403);
+    assert.equal((await call({ scope: 'management' })).status, 403);
+    assert.equal((await call({ module: 'settings' })).status, 400);
+    assert.equal((await call({ module: 'cashflow' })).status, 403);
+    assert.equal((await call({ purpose: undefined })).status, 403, 'funding grants do not grant normal Imprest reads');
+  } finally { permissionModel.getPermission = original; }
 });

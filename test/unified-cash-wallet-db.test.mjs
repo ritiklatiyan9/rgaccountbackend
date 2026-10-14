@@ -22,7 +22,7 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
   const count=async()=>Number((await query('SELECT count(*)::int AS n FROM loyalty_vault_entries')).rows[0].n);
   let serial=100;
   const entry=async(data={})=>{const values={id:serial++,site_id:10,created_by:1,credit:100,debit:0,cash_type:'CASH',status:'pending',particular:'Cash deposit',...data};const keys=Object.keys(values);await query(`INSERT INTO cash_flow_entries(${keys.join(',')}) VALUES(${keys.map((_,i)=>'$'+(i+1)).join(',')})`,Object.values(values));return values.id;};
-  const request=(amount,recipient_id=2)=>({amount,recipient_id,idempotency_key:randomUUID()});
+  const request=(amount,recipient_id=2)=>({amount,recipient_id,site_id:10,idempotency_key:randomUUID()});
   try {
     await query(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
       CREATE TABLE users(id integer PRIMARY KEY,name text,role text,organization_id integer,is_active boolean DEFAULT true);
@@ -52,10 +52,10 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
     const retiredExplicit=await entry({credit:5,loyalty_vault_holder_type:'user',loyalty_vault_holder_id:7,loyalty_vault_assigned_by:1});
     const retiredDefault=await entry({credit:7,created_by:7});
     await query("UPDATE users SET role='viewer',is_active=false WHERE id=7");
-    const accepted=await createWalletTransfer({id:1},request('100'),db);await resolveWalletTransfer({id:2},accepted.transfer.id,'accept',{},db);
+    const accepted=await createWalletTransfer({id:1},request('100'),db);await resolveWalletTransfer({id:2},accepted.transfer.id,'accept',{site_id:10},db);
     const pending=await createWalletTransfer({id:1},request('50'),db);
     await query('UPDATE wallet_transfers SET note=NULL WHERE id=$1',[pending.transfer.id]);
-    const rejected=await createWalletTransfer({id:1},request('10'),db);await resolveWalletTransfer({id:2},rejected.transfer.id,'reject',{},db);
+    const rejected=await createWalletTransfer({id:1},request('10'),db);await resolveWalletTransfer({id:2},rejected.transfer.id,'reject',{site_id:10},db);
     const beforeSource=JSON.stringify((await query('SELECT * FROM cash_flow_entries ORDER BY id')).rows);
     const beforeLegacy=JSON.stringify((await query('SELECT * FROM wallet_entries ORDER BY id')).rows);
     const beforeSettings=(await query('SELECT tracking_started_at FROM wallet_settings')).rows[0].tracking_started_at;
@@ -97,12 +97,18 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
       const invalid=await entry({credit:100,created_by:6});assert.equal((await balance(6)).balance,'0.00');
       assert.equal((await query(`${vaultTransactionsCte} SELECT cash_flow_entry_id FROM assigned_transactions WHERE cash_flow_entry_id=$1`,[invalid])).rows.length,0);
     });
-    await t.test('legacy pending approval survives and the designated recipient decides it once',async()=>{
-      await assert.rejects(resolveVaultTransfer({id:1},pending.transfer.id,'accept',{},db),e=>e.statusCode===403);
-      await resolveVaultTransfer({id:2},pending.transfer.id,'accept',{},db);
+    await t.test('legacy pending approval awaits proven site attribution, then recipient decides it once',async()=>{
+      const countBefore=await count();
+      await assert.rejects(resolveVaultTransfer({id:2},pending.transfer.id,'accept',{site_id:10},db),e=>e.statusCode===404);
+      assert.equal(await count(),countBefore);
+      // This fixture has a single proven source site. Attribute its pending
+      // metadata explicitly; production must never guess from sidebar state.
+      await query('UPDATE loyalty_vault_transfers SET site_id=10 WHERE id=$1',[pending.transfer.id]);
+      await assert.rejects(resolveVaultTransfer({id:1},pending.transfer.id,'accept',{site_id:10},db),e=>e.statusCode===403);
+      await resolveVaultTransfer({id:2},pending.transfer.id,'accept',{site_id:10},db);
       assert.deepEqual(await balance(1),{balance:'1050.00',reserved_balance:'0.00'});
       assert.deepEqual(await balance(2),{balance:'150.00',reserved_balance:'0.00'});
-      const entries=await count();assert.equal((await resolveVaultTransfer({id:2},pending.transfer.id,'accept',{},db)).replayed,true);assert.equal(await count(),entries);
+      const entries=await count();assert.equal((await resolveVaultTransfer({id:2},pending.transfer.id,'accept',{site_id:10},db)).replayed,true);assert.equal(await count(),entries);
       assert.equal((await query("SELECT sum(amount)::text AS amount FROM loyalty_vault_entries WHERE transfer_id IS NOT NULL")).rows[0].amount,'0.00');
     });
     await t.test('new cash defaults to creator, selected recipient overrides it, and bank instruments never post',async()=>{
@@ -117,13 +123,13 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
       await query("UPDATE cash_flow_entries SET cash_type='BANK' WHERE id=$1",[made]);assert.equal((await balance(1)).balance,'1050.00');
       await query('UPDATE cash_flow_entries SET loyalty_vault_holder_type=NULL,loyalty_vault_holder_id=NULL WHERE id=$1',[other]);assert.equal((await balance(1)).balance,'1075.00');assert.equal((await balance(2)).balance,'250.00');
     });
-    await t.test('approval policy and native cash defaults reconcile atomic adjustments, split cash only and no mirrors',async()=>{
+    await t.test('business debits stay outside the wallet while signed cash receipts and mirrors follow custody rules',async()=>{
       const debit=await entry({credit:0,debit:20}),before=await balance(1);
-      assert.equal((await query(`${vaultTransactionsCte} SELECT status FROM assigned_transactions WHERE cash_flow_entry_id=$1`,[debit])).rows[0].status,'pending_approval');
-      await query("UPDATE cash_flow_entries SET status='approved' WHERE id=$1",[debit]);assert.equal(Number((await balance(1)).balance),Number(before.balance)-20);
+      assert.equal((await query(`${vaultTransactionsCte} SELECT status FROM assigned_transactions WHERE cash_flow_entry_id=$1`,[debit])).rows.length,0);
+      await query("UPDATE cash_flow_entries SET status='approved' WHERE id=$1",[debit]);assert.deepEqual(await balance(1),before);
       await query("UPDATE cash_flow_entries SET status='rejected' WHERE id=$1",[debit]);assert.deepEqual(await balance(1),before);
       await query("INSERT INTO expenses(id,site_id,created_by,status,payment_mode) VALUES(10,10,1,'approved','CASH')");
-      await entry({source_module:'expenses',source_id:10,credit:0,debit:30,status:'approved'});assert.equal(Number((await balance(1)).balance),Number(before.balance)-30);
+      await entry({source_module:'expenses',source_id:10,credit:0,debit:30,status:'approved'});assert.deepEqual(await balance(1),before);
       await query("UPDATE expenses SET status='rejected' WHERE id=10");assert.deepEqual(await balance(1),before,'source updates without explicit assignments still reconcile');
       await query("INSERT INTO farmer_payments(id,site_id,created_by,status,payment_mode,cash_amount) VALUES(10,10,1,'approved','SPLIT',-12)");
       const split=await entry({source_module:'farmer_payments',source_id:10,credit:50,status:'approved',cash_type:'SPLIT'});assert.equal(Number((await balance(1)).balance),Number(before.balance)+12);
@@ -132,7 +138,7 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
       const entries=await count();await entry({credit:100,is_imprest_internal:true});await entry({credit:100,entry_transfer_id:randomUUID()});await entry({source_module:'plot_payments_person',source_id:10});assert.equal(await count(),entries);
       const old=(await query('SELECT count(*)::int AS n FROM wallet_entries')).rows[0].n;await entry({credit:2});assert.equal((await query('SELECT count(*)::int AS n FROM wallet_entries')).rows[0].n,old);
     });
-    await t.test('the lean pending read matches transaction history for receipts, debits, refunds and split cash', async () => {
+    await t.test('the lean pending read and transaction history both exclude pending business cash spending', async () => {
       await query('BEGIN');
       try {
         const incoming = await entry({ credit: 5, debit: 0, status: 'pending' });
@@ -146,23 +152,21 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
           FROM assigned_transactions WHERE cash_flow_entry_id=ANY($1::int[]) AND status IN ('pending_clearance','pending_approval') GROUP BY holder_type,holder_id ORDER BY holder_type,holder_id`, [[incoming,outgoing,refund,split,olderMirror]])).rows;
         const expected = await totals(vaultTransactionsCte);
         assert.deepEqual(await totals(vaultPendingTransactionsCte), expected);
-        assert.equal(Number(expected[0].credit), 0);
-        assert.equal(Number(expected[0].debit), 42);
-        assert.equal(expected[0].n, 4);
+        assert.deepEqual(expected, []);
       } finally { await query('ROLLBACK'); }
     });
     await t.test('new transfer reservation, cancel/reject, insufficient acceptance and immutable history remain enforced',async()=>{
       const sent=await createVaultTransfer({id:1},request('10'),db);
-      assert.equal((await balance(1)).reserved_balance,'10.00');await assert.rejects(resolveVaultTransfer({id:3},sent.transfer.id,'accept',{},db),e=>e.statusCode===404);
-      await resolveVaultTransfer({id:1},sent.transfer.id,'cancel',{},db);assert.equal((await balance(1)).reserved_balance,'0.00');
-      const reject=await createVaultTransfer({id:1},request('10'),db);await resolveVaultTransfer({id:2},reject.transfer.id,'reject',{},db);assert.equal((await balance(1)).reserved_balance,'0.00');
+      assert.equal((await balance(1)).reserved_balance,'10.00');await assert.rejects(resolveVaultTransfer({id:3},sent.transfer.id,'accept',{site_id:10},db),e=>e.statusCode===404);
+      await resolveVaultTransfer({id:1},sent.transfer.id,'cancel',{site_id:10},db);assert.equal((await balance(1)).reserved_balance,'0.00');
+      const reject=await createVaultTransfer({id:1},request('10'),db);await resolveVaultTransfer({id:2},reject.transfer.id,'reject',{site_id:10},db);assert.equal((await balance(1)).reserved_balance,'0.00');
       const endangered=await createVaultTransfer({id:1},request('100'),db);
-      await query('UPDATE cash_flow_entries SET credit=0 WHERE id=$1',[legacy]);await assert.rejects(resolveVaultTransfer({id:2},endangered.transfer.id,'accept',{},db),e=>e.statusCode===409);await resolveVaultTransfer({id:1},endangered.transfer.id,'cancel',{},db);
+      await query('UPDATE cash_flow_entries SET credit=0 WHERE id=$1',[legacy]);await assert.rejects(resolveVaultTransfer({id:2},endangered.transfer.id,'accept',{site_id:10},db),e=>e.statusCode===409);await resolveVaultTransfer({id:1},endangered.transfer.id,'cancel',{site_id:10},db);
       await assert.rejects(query("UPDATE loyalty_vault_entries SET amount=1 WHERE id=1"),/immutable/);
     });
     await t.test('current cash list excludes bank while immutable audit preserves corrections and maker identity',async()=>{
       const originalQuery=pool.query,originalConnect=pool.connect;pool.query=query;pool.connect=db.connect;
-      const invoke=(handler,extra={})=>new Promise((resolve,reject)=>handler({user:{id:1},query:{},body:{},params:{},...extra},{set(){return this;},json:resolve},reject));
+      const invoke=(handler,extra={})=>new Promise((resolve,reject)=>handler({user:{id:1},body:{},params:{},...extra,query:{site_id:10,...extra.query}},{set(){return this;},json:resolve},reject));
       try {
         const history=await invoke(controller.history);assert.ok(history.entries.some(e=>e.details.payment_mode==='BANK'&&e.kind==='reversal'));
         assert.ok(history.entries.some(e=>e.details.payment_mode==='BANK'&&e.kind==='credit'));

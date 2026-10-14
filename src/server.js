@@ -17,6 +17,8 @@ import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_finan
 import { up as migrateLoyaltyVault } from './migrations/199_loyalty_vault.js';
 import { up as migrateUnifiedCashWallet } from './migrations/203_unified_cash_wallet.js';
 import { up as migrateCashWalletReadIndexes } from './migrations/204_cash_wallet_read_indexes.js';
+import { up as migrateCreditWalletImprestDebits } from './migrations/207_credit_wallet_imprest_debits.js';
+import { up as migrateCashWalletSiteScope } from './migrations/208_cash_wallet_site_scope.js';
 import { up as migratePlotFullPaymentDue } from './migrations/201_plot_full_payment_due.js';
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { initSocket } from './config/socket.js';
@@ -51,6 +53,8 @@ connectDB().then(async () => {
   await migrateLoyaltyVault(pool);
   await migrateUnifiedCashWallet(pool);
   await migrateCashWalletReadIndexes(pool);
+  await migrateCreditWalletImprestDebits(pool);
+  await migrateCashWalletSiteScope(pool);
   await migratePlotFullPaymentDue(pool);
   await migrateDataStorage(pool);
   await migrateExistingVoucherGaps(pool);

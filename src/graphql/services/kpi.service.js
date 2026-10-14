@@ -380,11 +380,15 @@ export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
      ),
      pending AS (
        SELECT COALESCE(SUM(amount), 0)::numeric AS pending_imprest_reservations
-         FROM imprest_allocations
-        WHERE site_id = $1
-          AND status = 'PENDING_RECEIPT'
-          AND from_own_float = false
-          AND created_at < $3::date
+         FROM (
+           SELECT amount FROM imprest_allocations
+            WHERE site_id = $1
+              AND status = 'PENDING_RECEIPT'
+              AND from_own_float = false
+              AND created_at < $3::date
+           UNION ALL
+           SELECT amount FROM imprest_site_debit_reservations WHERE site_id = $1
+         ) cash_commitments
      )
      SELECT
        ledger.*,

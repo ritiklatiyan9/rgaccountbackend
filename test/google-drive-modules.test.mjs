@@ -185,13 +185,62 @@ test('cash wallet export uses the consolidated history and scopes transfers to t
   assert.match(query.sql, /e\.organization_id=\$5::int/);
   assert.deepEqual(query.values, [2, 8, null, 8, 3]);
   assert.deepEqual(bundle.entryVisibility, { canViewAll: false, creatorId: 8 });
-  assert.match(query.sql, /balance_after/);
+  assert.match(query.sql, /e\.site_balance_after AS "balance_after"/);
+  assert.doesNotMatch(query.sql, /e\.balance_after AS/);
   const transfers = h.calls.queries.find(({ sql }) => sql.includes('FROM loyalty_vault_transfers t'));
   assert.match(transfers.sql, /t\.from_holder_type='user' AND t\.from_holder_id=\$4::int/);
   assert.match(transfers.sql, /OR t\.recipient_id=\$4::int/);
   assert.match(transfers.sql, /t\.organization_id=\$5::int/);
-  assert.match(transfers.sql, /COALESCE\(t\.site_id,\$1::int\)=\$1/);
+  assert.match(transfers.sql, /t\.site_id=\$1/);
+  assert.doesNotMatch(transfers.sql, /COALESCE\(t\.site_id/);
   assert.deepEqual(transfers.values, [2, 8, null, 8, 3]);
+});
+
+test('wallet workbook isolates interleaved site cash and excludes unassigned legacy transfers', { skip: !process.env.PGLITE_MODULE }, async () => {
+  const { PGlite } = await import(process.env.PGLITE_MODULE);
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      CREATE TABLE users(id int PRIMARY KEY,name text);
+      INSERT INTO users VALUES(8,'Operator'),(9,'Recipient'),(10,'Other holder');
+      CREATE TABLE members(id int PRIMARY KEY,full_name text);
+      INSERT INTO members VALUES(1,'Client');
+      CREATE TABLE loyalty_vault_entries(id int PRIMARY KEY,site_id int,organization_id int,holder_key text,
+        created_at timestamptz,kind text,amount numeric(15,2),balance_after numeric(15,2),description text,
+        source_table text,source_id int,transfer_id uuid,details jsonb DEFAULT '{}');
+      INSERT INTO loyalty_vault_entries(id,site_id,organization_id,holder_key,created_at,kind,amount,balance_after) VALUES
+        (1,2,3,'user:8','2026-10-01','credit',100,100),
+        (2,3,3,'user:8','2026-10-01','credit',1534000,1534100),
+        (3,2,3,'user:8','2026-10-02','credit',20,1534120),
+        (4,2,3,'user:9','2026-10-02','credit',900,900),
+        (5,2,4,'user:8','2026-10-02','credit',999,999),
+        (6,NULL,3,'user:8','2026-10-02','credit',555,1534675);
+      CREATE TABLE loyalty_vault_transfers(id uuid PRIMARY KEY,site_id int,organization_id int,
+        from_holder_type text,from_holder_id int,recipient_id int,created_at timestamptz DEFAULT now(),
+        resolved_at timestamptz,amount numeric(15,2) DEFAULT 1,status text DEFAULT 'pending',note text,resolution_note text);
+      INSERT INTO loyalty_vault_transfers(id,site_id,organization_id,from_holder_type,from_holder_id,recipient_id) VALUES
+        ('00000000-0000-4000-8000-000000000001',2,3,'user',8,9),
+        ('00000000-0000-4000-8000-000000000002',3,3,'user',8,9),
+        ('00000000-0000-4000-8000-000000000003',NULL,3,'user',8,9),
+        ('00000000-0000-4000-8000-000000000004',2,3,'user',9,10),
+        ('00000000-0000-4000-8000-000000000005',2,4,'user',8,9),
+        ('00000000-0000-4000-8000-000000000006',2,3,'member',1,8);
+    `);
+    const h = harness({ query: async (sql, values) => /loyalty_vault_(entries|transfers)/.test(sql)
+      ? (await db.query(sql, values)).rows : undefined });
+    const selected = await build(h, 'wallet');
+    assert.deepEqual(selected.sheets[0].rows.map(({ id, balance_after }) => [id, balance_after]), [[1, '100.00'], [3, '120.00']]);
+    assert.deepEqual(selected.sheets[1].rows.map(row => row.id.slice(-1)), ['1', '6']);
+    const otherSite = await build(h, 'wallet', { siteId: 3 });
+    assert.deepEqual(otherSite.sheets[0].rows.map(({ id, balance_after }) => [id, balance_after]), [[2, '1534000.00']]);
+    assert.deepEqual(otherSite.sheets[1].rows.map(row => row.id.slice(-1)), ['2']);
+
+    // A later date/search filter must retain the site's opening cash, rather
+    // than recomputing its running balance over only the visible receipts.
+    const query = h.calls.queries.find(({ sql }) => sql.includes('FROM loyalty_vault_entries'));
+    const filtered = await db.query(query.sql.replace(' ORDER BY 1', " AND e.created_at>='2026-10-02'::timestamptz ORDER BY 1"), query.values);
+    assert.deepEqual(filtered.rows.map(({ id, balance_after }) => [id, balance_after]), [[3, '120.00']]);
+  } finally { await db.close(); }
 });
 
 test('balance sheet is unpaginated and restricted exports exclude sitewide imprest and quality totals', async () => {

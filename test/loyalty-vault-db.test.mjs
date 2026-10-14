@@ -102,13 +102,13 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
       assert.equal((await amount('user:1')).reserved_balance,'400.10');assert.equal((await amount('user:2')).balance,'-30.00');
       assert.equal((await createVaultTransfer(actor,data,db)).transfer.id,first.transfer.id);
       await assert.rejects(createVaultTransfer(actor,{...data,amount:'400.11'},db),errorStatus(409));
-      await assert.rejects(resolveVaultTransfer(actor,first.transfer.id,'accept',{},db),errorStatus(403));
-      await assert.rejects(resolveVaultTransfer({id:3},first.transfer.id,'accept',{},db),errorStatus(404));
+      await assert.rejects(resolveVaultTransfer(actor,first.transfer.id,'accept',{site_id:10},db),errorStatus(403));
+      await assert.rejects(resolveVaultTransfer({id:3},first.transfer.id,'accept',{site_id:10},db),errorStatus(404));
       const financialBefore=JSON.stringify((await query('SELECT id,credit::text,debit::text FROM cash_flow_entries ORDER BY id')).rows);
       const cashBefore=JSON.stringify((await query('SELECT * FROM wallet_accounts ORDER BY user_id')).rows);
-      await resolveVaultTransfer(admin,first.transfer.id,'accept',{},db);
+      await resolveVaultTransfer(admin,first.transfer.id,'accept',{site_id:10},db);
       assert.equal((await amount('user:1')).balance,'805.15');assert.equal((await amount('user:2')).balance,'370.10');assert.equal(await entries(),before+2);
-      assert.equal((await resolveVaultTransfer(admin,first.transfer.id,'accept',{},db)).replayed,true);assert.equal(await entries(),before+2);
+      assert.equal((await resolveVaultTransfer(admin,first.transfer.id,'accept',{site_id:10},db)).replayed,true);assert.equal(await entries(),before+2);
       assert.equal(JSON.stringify((await query('SELECT id,credit::text,debit::text FROM cash_flow_entries ORDER BY id')).rows),financialBefore);
       assert.equal(JSON.stringify((await query('SELECT * FROM wallet_accounts ORDER BY user_id')).rows),cashBefore);
       assert.equal((await query("SELECT sum(amount)::text AS n FROM loyalty_vault_entries WHERE kind IN ('transfer_in','transfer_out')")).rows[0].n,'0.00');
@@ -117,22 +117,22 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
       await entry({credit:200,loyalty_vault_holder_type:'member',loyalty_vault_holder_id:1});
       await assert.rejects(query('DELETE FROM members WHERE id=1'),error=>error.constraint==='loyalty_vault_holder_funds');
       const incoming=await createVaultTransfer(admin,req('100',{type:'member',id:1},3),db);
-      await resolveVaultTransfer({id:3},incoming.transfer.id,'accept',{},db);assert.equal((await amount('member:1')).balance,'100.00');assert.equal((await amount('user:3')).balance,'100.00');
+      await resolveVaultTransfer({id:3},incoming.transfer.id,'accept',{site_id:10},db);assert.equal((await amount('member:1')).balance,'100.00');assert.equal((await amount('user:3')).balance,'100.00');
       const rejectable=await createVaultTransfer(actor,req('10'),db),cancellable=await createVaultTransfer(actor,req('15'),db),before=await entries();
-      await resolveVaultTransfer(admin,rejectable.transfer.id,'reject',{},db);await resolveVaultTransfer(actor,cancellable.transfer.id,'cancel',{},db);
+      await resolveVaultTransfer(admin,rejectable.transfer.id,'reject',{site_id:10},db);await resolveVaultTransfer(actor,cancellable.transfer.id,'cancel',{site_id:10},db);
       assert.equal((await amount('user:1')).reserved_balance,'0.00');assert.equal(await entries(),before);
     });
     await t.test('receipt corrections after transfer preserve deficit, reject unfunded acceptance, and roll back failures',async()=>{
       const pending=await createVaultTransfer(actor,req('50'),db);
       await query('UPDATE cash_flow_entries SET credit=1 WHERE id=$1',[credit]);assert.equal((await amount('user:1')).balance,'-294.10');
-      await assert.rejects(resolveVaultTransfer(admin,pending.transfer.id,'accept',{},db),errorStatus(409));
+      await assert.rejects(resolveVaultTransfer(admin,pending.transfer.id,'accept',{site_id:10},db),errorStatus(409));
       await assert.rejects(createVaultTransfer(actor,req('0.01'),db),errorStatus(409));
-      await resolveVaultTransfer(actor,pending.transfer.id,'cancel',{},db);
+      await resolveVaultTransfer(actor,pending.transfer.id,'cancel',{site_id:10},db);
       const broken=await createVaultTransfer(admin,req('10',{type:'user',id:2},3),db),before=await amount('user:2'),count=await entries();
       await query("CREATE FUNCTION fail_vault_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.kind='transfer_in' THEN RAISE EXCEPTION 'Storage failed'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_vault_test BEFORE INSERT ON loyalty_vault_entries FOR EACH ROW EXECUTE FUNCTION fail_vault_test()");
-      await assert.rejects(resolveVaultTransfer({id:3},broken.transfer.id,'accept',{},db),/Storage failed/);assert.deepEqual(await amount('user:2'),before);assert.equal(await entries(),count);
+      await assert.rejects(resolveVaultTransfer({id:3},broken.transfer.id,'accept',{site_id:10},db),/Storage failed/);assert.deepEqual(await amount('user:2'),before);assert.equal(await entries(),count);
       assert.equal((await query('SELECT status FROM loyalty_vault_transfers WHERE id=$1',[broken.transfer.id])).rows[0].status,'pending');
-      await query('DROP TRIGGER fail_vault_test ON loyalty_vault_entries');await resolveVaultTransfer(admin,broken.transfer.id,'cancel',{},db);
+      await query('DROP TRIGGER fail_vault_test ON loyalty_vault_entries');await resolveVaultTransfer(admin,broken.transfer.id,'cancel',{site_id:10},db);
     });
     await t.test('zero balance deleted-client history retains its recorded holder name',async()=>{
       await query("INSERT INTO members VALUES(4,10,'Bound zero holder','6666666666')");
@@ -154,7 +154,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
     await t.test('API endpoints enforce scope, history filters, snapshot detail, and paginated notifications',async()=>{
       const originalQuery=pool.query,originalConnect=pool.connect;pool.query=query;pool.connect=db.connect;
       const invoke=(handler,extra={})=>new Promise((resolve,reject)=>{
-        const request={user:actor,query:{},body:{},params:{},...extra};
+        const request={user:actor,body:{},params:{},...extra,query:{site_id:10,...extra.query}};
         const response={set(){return this;},status(code){this.code=code;return this;},json(body){resolve({body,code:this.code||200});}};
         handler(request,response,reject);
       });
@@ -171,7 +171,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         const privateHistory=(await invoke(controller.history,{query:{holder_type:'user',holder_id:2}})).body;assert.equal(privateHistory.total,0);
         await query("UPDATE users SET is_active=false WHERE id=3");
         const retired=(await invoke(controller.holders,{user:admin})).body.holders.find(h=>h.holder_type==='user'&&h.holder_id===3);assert.equal(retired.can_receive_transfer,false);assert.equal(retired.can_transfer_from,true);
-        const recover=await createVaultTransfer(admin,req('1',{type:'user',id:3},2),db);await resolveVaultTransfer(admin,recover.transfer.id,'accept',{},db);
+        const recover=await createVaultTransfer(admin,req('1',{type:'user',id:3},2),db);await resolveVaultTransfer(admin,recover.transfer.id,'accept',{site_id:10},db);
         await query("UPDATE users SET is_active=true WHERE id=3");
         const restricted=(await invoke(controller.history)).body;assert.ok(restricted.entries.every(e=>e.holder_key==='user:1'));
         const search=(await invoke(controller.history,{query:{q:'Client deposit'}})).body;assert.ok(search.total>0);
@@ -181,7 +181,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         const pending=await createVaultTransfer(admin,req('5',{type:'user',id:2},3),db);
         const notices=(await invoke(controller.transfers,{user:{id:3},query:{direction:'incoming',status:'pending',limit:'1'}})).body;
         assert.equal(notices.total,1);assert.equal(notices.transfers[0].id,pending.transfer.id);assert.equal(notices.transfers[0].can_accept,true);
-        await resolveVaultTransfer({id:3},pending.transfer.id,'reject',{},db);
+        await resolveVaultTransfer({id:3},pending.transfer.id,'reject',{site_id:10},db);
         await query("INSERT INTO loyalty_vault_entries(organization_id,holder_key,holder_type,holder_id,amount,balance_after,kind,site_id,created_at) VALUES(1,'user:1','user',1,1,0,'adjustment',10,'2026-09-30T18:29:59Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-09-30T18:30:00Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-10-01T18:29:59Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-10-01T18:30:00Z')");
         const filtered=(await invoke(controller.history,{query:{type:'adjustment',from:'2026-10-01',to:'2026-10-01',limit:'1',page:'2'}})).body;assert.equal(filtered.total,2);assert.equal(new Date(filtered.entries[0].created_at).toISOString(),'2026-09-30T18:30:00.000Z');
         await assert.rejects(invoke(controller.history,{query:{from:'2026-10-02',to:'2026-10-01'}}),errorStatus(400));
@@ -215,7 +215,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
     });
     await t.test('pending original payments are visible without funding custody, then clear exactly once',async()=>{
       const originalQuery=pool.query,originalConnect=pool.connect;pool.query=query;pool.connect=db.connect;
-      const invoke=(handler,extra={})=>new Promise((resolve,reject)=>handler({user:admin,query:{},params:{},...extra},
+      const invoke=(handler,extra={})=>new Promise((resolve,reject)=>handler({user:admin,params:{},...extra,query:{site_id:10,...extra.query}},
         {set(){return this;},json(body){resolve(body);}},reject));
       try {
         await query("INSERT INTO users VALUES(7,'Pending cheque holder','admin',1,true)");

@@ -19,6 +19,8 @@ import { up as migrateExistingVoucherGaps } from '../src/migrations/196_existing
 import { up as migrateLoyaltyVault } from '../src/migrations/199_loyalty_vault.js';
 import { up as migrateUnifiedCashWallet } from '../src/migrations/203_unified_cash_wallet.js';
 import { up as migrateCashWalletReadIndexes } from '../src/migrations/204_cash_wallet_read_indexes.js';
+import { up as migrateCreditWalletImprestDebits } from '../src/migrations/207_credit_wallet_imprest_debits.js';
+import { up as migrateCashWalletSiteScope } from '../src/migrations/208_cash_wallet_site_scope.js';
 await migrateLoyaltyVault(pool);
 await migrateUnifiedCashWallet(pool);
 await migrateCashWalletReadIndexes(pool);
@@ -33,6 +35,8 @@ await migrateImprestApprovalIndexes(pool);
 await migrateExistingVoucherGaps(pool);
 await migratePlotAreaChanges(pool);
 await migratePlotBankRounding(pool);
+await migrateCreditWalletImprestDebits(pool);
+await migrateCashWalletSiteScope(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

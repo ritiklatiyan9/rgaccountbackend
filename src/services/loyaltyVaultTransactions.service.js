@@ -23,11 +23,7 @@ const sourceSql = (pendingOnly = false) => [...LOYALTY_VAULT_SOURCE_TABLES].map(
           OR EXISTS(SELECT 1 FROM loyalty_vault_sources WHERE cash_flow_entry_id=c.id)) THEN 'user' END) AS holder_type,
       COALESCE(t.loyalty_vault_holder_id,t.created_by,c.created_by) AS holder_id) selected
     WHERE selected.holder_type IS NOT NULL AND selected.holder_id IS NOT NULL
-    ${pendingOnly ? `AND (w.consolidated_at IS NULL OR (
-      NOT financial_transaction_posts('debit',COALESCE(t.status,c.status),'CASH',NULL)
-      AND LOWER(TRIM(COALESCE(t.status,c.status,'approved'))) NOT IN ('rejected','cancelled','deleted','void','voided')
-      AND (c.debit>0 OR c.credit<0${table==='farmer_payments'?' OR t.cash_amount>0':''})
-    ))` : ''}
+    ${pendingOnly ? 'AND w.consolidated_at IS NULL' : ''}
     ${direct ? `AND COALESCE(NULLIF(c.source_module,''),'cash_flow_entries')='cash_flow_entries'
       AND NOT EXISTS(SELECT 1 FROM firm_transactions f WHERE f.cash_flow_entry_id=c.id)` : `AND c.source_module='${table}'`}`;
 }).join('\nUNION ALL\n');
@@ -50,7 +46,7 @@ const candidateCte = (pendingOnly = false) => `wallet_candidates AS MATERIALIZED
   SELECT c.* FROM wallet_candidates candidate JOIN LATERAL (
     SELECT cash.* FROM cash_flow_entries cash WHERE cash.id=candidate.id OFFSET 0
   ) c ON true
-  ${pendingOnly ? `WHERE (SELECT consolidated_at FROM wallet_mode) IS NULL OR c.debit>0 OR c.credit<0 OR c.source_module='farmer_payments'` : ''}
+  ${pendingOnly ? 'WHERE (SELECT consolidated_at FROM wallet_mode) IS NULL' : ''}
 )`;
 
 // Materialize each stage once. Inlining the union expands JSON conversion,
@@ -70,8 +66,7 @@ const transactionsCte = (pendingOnly = false) => `WITH wallet_mode AS (SELECT NU
     CASE WHEN (SELECT consolidated_at FROM wallet_mode) IS NOT NULL AND source_table='farmer_payments' AND UPPER(TRIM(source->>'payment_mode'))='SPLIT'
       THEN GREATEST(-COALESCE((source->>'cash_amount')::numeric,0),0)
       ELSE GREATEST(COALESCE((cash->>'credit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'debit')::numeric,0),0) END AS credit,
-    CASE WHEN (SELECT consolidated_at FROM wallet_mode) IS NOT NULL AND source_table='farmer_payments' AND UPPER(TRIM(source->>'payment_mode'))='SPLIT'
-      THEN GREATEST(COALESCE((source->>'cash_amount')::numeric,0),0)
+    CASE WHEN (SELECT consolidated_at FROM wallet_mode) IS NOT NULL THEN 0::numeric
       ELSE GREATEST(COALESCE((cash->>'debit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'credit')::numeric,0),0) END AS debit
   FROM assigned_sources a JOIN sites s ON s.id=a.site_id
     LEFT JOIN users u ON a.holder_type='user' AND u.id=a.holder_id
@@ -98,7 +93,8 @@ const transactionsCte = (pendingOnly = false) => `WITH wallet_mode AS (SELECT NU
     CASE WHEN financial_transaction_posts('credit',source_status,payment_mode,cheque_status) THEN credit ELSE 0 END AS posted_credit,
     CASE WHEN financial_transaction_posts('debit',source_status,payment_mode,cheque_status) THEN debit ELSE 0 END AS posted_debit
   FROM eligible_sources e
-  WHERE (SELECT consolidated_at FROM wallet_mode) IS NULL OR payment_mode='CASH' OR (source_table='farmer_payments' AND payment_mode='SPLIT')
+  WHERE (SELECT consolidated_at FROM wallet_mode) IS NULL OR
+    ((payment_mode='CASH' OR (source_table='farmer_payments' AND payment_mode='SPLIT')) AND credit>0)
 ), assigned_transactions AS (
   SELECT p.*,posted_credit-posted_debit AS posted_amount,
     credit-posted_credit AS unposted_credit,debit-posted_debit AS unposted_debit,
@@ -119,21 +115,25 @@ export const vaultTransactionScope = actor => ({
 });
 
 const pendingReads = new WeakMap();
-export function pendingVaultTotals(actor, database, selected = null) {
+export function pendingVaultTotals(actor, database, selected = null, siteId = null) {
   let reads = pendingReads.get(database);
   if (!reads) { reads = new Map(); pendingReads.set(database, reads); }
-  const key = JSON.stringify([actor.organization_id, isVaultAdmin(actor), actor.id, selected?.type, selected?.id]);
+  const key = JSON.stringify([actor.organization_id, isVaultAdmin(actor), actor.id, selected?.type, selected?.id, siteId]);
   if (reads.has(key)) return reads.get(key);
-  const pending = loadPendingVaultTotals(actor, database, selected).finally(() => reads.delete(key));
+  const pending = loadPendingVaultTotals(actor, database, selected, siteId).finally(() => reads.delete(key));
   reads.set(key, pending);
   return pending;
 }
 
-async function loadPendingVaultTotals(actor, database, selected) {
+async function loadPendingVaultTotals(actor, database, selected, siteId) {
   const scope = vaultTransactionScope(actor);
   if (selected) {
     scope.clause += ' AND holder_type=$4 AND holder_id=$5';
     scope.params.push(selected.type,selected.id);
+  }
+  if (siteId != null) {
+    scope.params.push(siteId);
+    scope.clause += ` AND site_id=$${scope.params.length}`;
   }
   const { rows } = await walletReadQuery(database, `${vaultPendingTransactionsCte}
     SELECT holder_type,holder_id,sum(credit-posted_credit)::text AS pending_credit,

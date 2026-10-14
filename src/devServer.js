@@ -19,6 +19,8 @@ import { up as migratePlotFullPaymentDue } from './migrations/201_plot_full_paym
 import { up as migrateLoyaltyVault } from './migrations/199_loyalty_vault.js';
 import { up as migrateUnifiedCashWallet } from './migrations/203_unified_cash_wallet.js';
 import { up as migrateCashWalletReadIndexes } from './migrations/204_cash_wallet_read_indexes.js';
+import { up as migrateCreditWalletImprestDebits } from './migrations/207_credit_wallet_imprest_debits.js';
+import { up as migrateCashWalletSiteScope } from './migrations/208_cash_wallet_site_scope.js';
 
 // Local previews serve the application without starting production reminder
 // schedulers. They use the same authentication, permissions and database.
@@ -41,6 +43,8 @@ connectDB().then(async () => {
   await migrateLoyaltyVault(pool);
   await migrateUnifiedCashWallet(pool);
   await migrateCashWalletReadIndexes(pool);
+  await migrateCreditWalletImprestDebits(pool);
+  await migrateCashWalletSiteScope(pool);
   server.listen(port, '127.0.0.1', () => {
     console.log(`Local API ready at http://127.0.0.1:${port}`);
   });

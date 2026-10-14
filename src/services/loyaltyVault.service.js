@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pool from '../config/db.js';
 import { walletUser, walletError, walletAmount, positiveId, uuid } from './wallet.service.js';
+import { siteVaultAccountsCte } from './loyaltyVaultSite.service.js';
 export { walletUser as vaultUser };
 export const isVaultAdmin = actor => ['admin','super_admin'].includes(actor.role);
 export const holderKey = (type, id) => `${type}:${id}`;
@@ -11,8 +12,9 @@ export function holder(type, id) {
   return { type, id: parsed, key: holderKey(type, parsed) };
 }
 export async function accessibleSite(actor, value, db = pool) {
-  if (value == null || value === '') return null;
+  if (value == null || value === '') throw walletError('Choose a site from the sidebar to use Cash Wallet.');
   const siteId = positiveId(value);
+  if(siteId>2147483647) throw walletError('Choose a valid site from the sidebar.');
   const { rows } = await db.query(`SELECT id FROM sites s WHERE id=$1 AND organization_id=$2
     AND ($3::boolean OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=$4 AND site_id=s.id))`, [siteId,actor.organization_id,isVaultAdmin(actor),actor.id]);
   if (!rows.length) throw walletError('Choose a site you can access.',403);
@@ -20,10 +22,12 @@ export async function accessibleSite(actor, value, db = pool) {
 }
 export async function validateHolder(actor, selected, db = pool, siteId = null, allowRetired = false) {
   const sql = selected.type === 'user'
-    ? `SELECT id,name FROM users u WHERE id=$1 AND organization_id=$2 AND ((is_active=true AND role IN ('admin','super_admin','sub_admin')) OR ($3::boolean AND EXISTS(SELECT 1 FROM loyalty_vault_accounts a WHERE a.holder_key='user:'||u.id::text AND a.organization_id=$2)))`
+    ? `SELECT id,name FROM users u WHERE id=$1 AND organization_id=$2 AND (
+      (is_active=true AND role IN ('admin','super_admin','sub_admin') AND ($4::int IS NULL OR role IN ('admin','super_admin') OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$4)))
+      OR ($3::boolean AND EXISTS(SELECT 1 FROM loyalty_vault_entries e WHERE e.holder_key='user:'||u.id::text AND e.organization_id=$2 AND ($4::int IS NULL OR e.site_id=$4))))`
     : `SELECT m.id,m.full_name AS name FROM members m JOIN sites s ON s.id=m.site_id WHERE m.id=$1 AND s.organization_id=$2
        AND ($3::int IS NULL OR m.site_id=$3) AND ($4::boolean OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=$5 AND site_id=m.site_id))`;
-  const args = selected.type === 'user' ? [selected.id,actor.organization_id,allowRetired&&isVaultAdmin(actor)] : [selected.id,actor.organization_id,siteId,isVaultAdmin(actor),actor.id];
+  const args = selected.type === 'user' ? [selected.id,actor.organization_id,allowRetired&&isVaultAdmin(actor),siteId] : [selected.id,actor.organization_id,siteId,isVaultAdmin(actor),actor.id];
   const { rows } = await db.query(sql,args);
   if (!rows.length) throw walletError('Choose a cash holder in your accessible organization and site.',403);
   return rows[0];
@@ -55,15 +59,17 @@ export async function createVaultTransfer(user,data,database=pool) {
   return transaction(database,async db=>{
     const actor=await walletUser(user,db), siteId=await accessibleSite(actor,data.site_id,db);
     if (!isVaultAdmin(actor) && (from.type!=='user'||from.id!==actor.id)) throw walletError('You can transfer only your own cash custody.',403);
-    await validateHolder(actor,from,db,siteId,true); await validateHolder(actor,to,db);
+    await validateHolder(actor,from,db,siteId,true); await validateHolder(actor,to,db,siteId);
     await lockAccounts(db,actor,[from,to]);
     const previous=(await db.query('SELECT * FROM loyalty_vault_transfers WHERE sender_id=$1 AND idempotency_key=$2',[actor.id,key])).rows[0];
     if(previous) {
       if(previous.from_holder_type!==from.type || Number(previous.from_holder_id)!==from.id || Number(previous.to_holder_id)!==to.id || walletAmount(previous.amount)!==amount || previous.note!==memo || (previous.site_id==null?null:Number(previous.site_id))!==siteId) throw walletError('This request key belongs to a different transfer.',409);
       return {transfer:previous,replayed:true};
     }
-    const reserved=await db.query(`UPDATE loyalty_vault_accounts SET reserved_balance=reserved_balance+$2::numeric,updated_at=now()
-      WHERE holder_key=$1 AND organization_id=$3 AND balance-reserved_balance >= $2::numeric RETURNING holder_key`,[from.key,amount,actor.organization_id]);
+    const reserved=await db.query(`WITH ${siteVaultAccountsCte('$3','$4')}
+      UPDATE loyalty_vault_accounts SET reserved_balance=reserved_balance+$2::numeric,updated_at=now()
+      WHERE holder_key=$1 AND organization_id=$3 AND balance-reserved_balance >= $2::numeric AND EXISTS(SELECT 1 FROM site_accounts s
+        WHERE s.holder_key=$1 AND s.balance-s.reserved_balance >= $2::numeric) RETURNING holder_key`,[from.key,amount,actor.organization_id,siteId]);
     if(!reserved.rows.length) throw walletError('Insufficient available cash balance. Pending transfers reserve their amounts.',409);
     const transfer=(await db.query(`INSERT INTO loyalty_vault_transfers(id,organization_id,site_id,from_holder_type,from_holder_id,to_holder_id,sender_id,recipient_id,amount,note,idempotency_key)
       VALUES($1,$2,$3,$4,$5,$6,$7,$6,$8,$9,$10) RETURNING *`,[randomUUID(),actor.organization_id,siteId,from.type,from.id,to.id,actor.id,amount,memo,key])).rows[0];
@@ -74,9 +80,9 @@ export async function resolveVaultTransfer(user,transferId,action,data={},databa
   const id=uuid(transferId), state={accept:'accepted',reject:'rejected',cancel:'cancelled'}[action], memo=note(data.note);
   if(!state) throw walletError('Unknown transfer action.');
   return transaction(database,async db=>{
-    const actor=await walletUser(user,db);
+    const actor=await walletUser(user,db),siteId=await accessibleSite(actor,data.site_id,db);
     const transfer=(await db.query(`SELECT * FROM loyalty_vault_transfers WHERE id=$1 AND organization_id=$2
-      AND (sender_id=$3 OR recipient_id=$3) FOR UPDATE`,[id,actor.organization_id,actor.id])).rows[0];
+      AND site_id=$4 AND (sender_id=$3 OR recipient_id=$3) FOR UPDATE`,[id,actor.organization_id,actor.id,siteId])).rows[0];
     if(!transfer) throw walletError('Transfer not found.',404);
     if(actor.id!==Number(action==='cancel'?transfer.sender_id:transfer.recipient_id)) throw walletError(action==='cancel'?'Only the sender can cancel this transfer.':'Only the recipient can accept or reject this transfer.',403);
     if(transfer.status===state) return {transfer,replayed:true};
@@ -84,7 +90,10 @@ export async function resolveVaultTransfer(user,transferId,action,data={},databa
     const from=holder(transfer.from_holder_type,transfer.from_holder_id),to=holder('user',transfer.to_holder_id);
     await lockAccounts(db,actor,[from,to]);
     if(action==='accept') {
-      const funds=await db.query('SELECT holder_key FROM loyalty_vault_accounts WHERE holder_key=$1 AND balance >= $2::numeric AND reserved_balance >= $2::numeric',[from.key,transfer.amount]);
+      const funds=await db.query(`WITH ${siteVaultAccountsCte('$3','$4')}
+        SELECT s.holder_key FROM site_accounts s JOIN loyalty_vault_accounts a USING(holder_key)
+        WHERE s.holder_key=$1 AND s.balance >= $2::numeric AND s.reserved_balance >= $2::numeric AND s.balance >= s.reserved_balance
+          AND a.organization_id=$3 AND a.balance >= $2::numeric AND a.reserved_balance >= $2::numeric`,[from.key,transfer.amount,actor.organization_id,siteId]);
       if(!funds.rows.length) throw walletError('The source balance changed. Ask the sender to cancel or restore enough funds.',409);
       const details={from_holder_type:from.type,from_holder_id:from.id,to_holder_type:to.type,to_holder_id:to.id,note:transfer.note};
       await db.query("SELECT loyalty_vault_apply_delta($1,$2,-$3::numeric,'transfer_out',$4,NULL,NULL,NULL,$5,$6,$7,$8)",[from.key,actor.organization_id,transfer.amount,'Cash handover accepted',transfer.site_id,actor.id,id,details]);

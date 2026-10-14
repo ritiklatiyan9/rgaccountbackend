@@ -57,7 +57,8 @@ export const cashWalletReconciliationSql = `
               v_debit:=GREATEST(COALESCE((v_source->>'cash_amount')::numeric,0),0);
             END IF;
             IF financial_transaction_posts('credit',COALESCE(v_source->>'status',v_entry->>'status'),v_mode,COALESCE(v_source->>'cheque_status',v_entry->>'cheque_status')) THEN v_amount:=v_amount+v_credit; END IF;
-            IF financial_transaction_posts('debit',COALESCE(v_source->>'status',v_entry->>'status'),v_mode,COALESCE(v_source->>'cheque_status',v_entry->>'cheque_status')) THEN v_amount:=v_amount-v_debit; END IF;
+            -- Business outflows use imprest (or Admin site cash). Wallet
+            -- custody receives cash credits and moves out only by handover.
           END IF;
           v_details:=jsonb_strip_nulls(jsonb_build_object('payment_mode',CASE WHEN v_mode='SPLIT' THEN 'CASH' ELSE v_mode END,'source_payment_mode',v_mode,'status',COALESCE(v_source->>'status',v_entry->>'status'),'cheque_status',COALESCE(v_source->>'cheque_status',v_entry->>'cheque_status'),
             'transaction_date',v_entry->>'date','transaction_time',COALESCE(v_source->>'transaction_time',v_entry->>'transaction_time'),'credit',v_entry->>'credit','debit',v_entry->>'debit',
