@@ -470,8 +470,8 @@ const MODULE_MAP = {
 };
 
 // The approval boundary has already checked requester, reviewer, site and
-// module access. Carry both saved time and custody through each owner's native
-// update, including proposals that change only the custody holder.
+// module access. Carry saved time through the native update and preserve the
+// original collector. Any proposed custody change is rejected by the DB guard.
 export function applyApprovedEditRequest(editReq, proposedData, reviewer, db = pool) {
   const handler = MODULE_MAP[editReq.module];
   if (!handler) throw new Error('Unsupported edit request module');

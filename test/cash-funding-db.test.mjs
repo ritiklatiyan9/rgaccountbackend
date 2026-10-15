@@ -137,8 +137,8 @@ test('business cash debits consume imprest and leave receipt/transfer wallets se
     await t.test('refund signs debit imprest, while cash receipts and wallet transfers remain separate', async () => {
       await expense(7, 1, 0, 'pending', 'CASH', -30); assert.equal(await held(), 30);
       await query("UPDATE expenses SET status='approved' WHERE id=7"); assert.equal(await float(), 70); assert.equal(await wallet(1), 500);
-      const transfer = await createVaultTransfer({ id: 1 }, { amount: '25', recipient_id: 2, idempotency_key: randomUUID() }, db);
-      await resolveVaultTransfer({ id: 2 }, transfer.transfer.id, 'accept', {}, db);
+      const transfer = await createVaultTransfer({ id: 1 }, { site_id: 10, amount: '25', recipient_id: 2, idempotency_key: randomUUID() }, db);
+      await resolveVaultTransfer({ id: 2 }, transfer.transfer.id, 'accept', { site_id: 10 }, db);
       assert.equal(await wallet(1), 475); assert.equal(await wallet(2), 25); assert.equal(await float(), 70);
       assert.equal(await scalar(`${vaultTransactionsCte} SELECT count(*) FROM assigned_transactions WHERE debit>0 OR source_table='expenses' AND credit=0`), 0);
       assert.equal(await scalar(`${vaultPendingTransactionsCte} SELECT count(*) FROM assigned_transactions`), 0);

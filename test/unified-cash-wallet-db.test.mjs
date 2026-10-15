@@ -155,9 +155,9 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
         assert.deepEqual(expected, []);
       } finally { await query('ROLLBACK'); }
     });
-    await t.test('new transfer reservation, cancel/reject, insufficient acceptance and immutable history remain enforced',async()=>{
+    await t.test('unreserved transfers, cancel/reject, insufficient acceptance and immutable history remain enforced',async()=>{
       const sent=await createVaultTransfer({id:1},request('10'),db);
-      assert.equal((await balance(1)).reserved_balance,'10.00');await assert.rejects(resolveVaultTransfer({id:3},sent.transfer.id,'accept',{site_id:10},db),e=>e.statusCode===404);
+      assert.equal((await balance(1)).reserved_balance,'0.00');await assert.rejects(resolveVaultTransfer({id:3},sent.transfer.id,'accept',{site_id:10},db),e=>e.statusCode===404);
       await resolveVaultTransfer({id:1},sent.transfer.id,'cancel',{site_id:10},db);assert.equal((await balance(1)).reserved_balance,'0.00');
       const reject=await createVaultTransfer({id:1},request('10'),db);await resolveVaultTransfer({id:2},reject.transfer.id,'reject',{site_id:10},db);assert.equal((await balance(1)).reserved_balance,'0.00');
       const endangered=await createVaultTransfer({id:1},request('100'),db);

@@ -1,3 +1,4 @@
+import { runLoyaltyVaultSourceMaker } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import {
@@ -1324,12 +1325,12 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
     const expenseAmount = parseFloat(expenseData.debit) || requestAmount;
 
     // 2b. Create the expense
-    const expense = await expenseModel.create({
+    const expense = await runLoyaltyVaultSourceMaker(request.sub_admin_id, () => expenseModel.create({
       ...expenseData,
       status: 'approved',
       approved_by: req.user.id,
       created_by: request.sub_admin_id,
-    }, client);
+    }, client));
 
     // 3b. Create a memo Day Book entry. The approved expense is the owning
     // financial row, so this IMPREST row stays outside universal debit posting.
@@ -1357,7 +1358,7 @@ export const approveExpenseRequest = asyncHandler(async (req, res) => {
       is_imprest_internal: true,
     };
 
-    await dayBookModel.create(dayBookData, client);
+    await runLoyaltyVaultSourceMaker(request.sub_admin_id, () => dayBookModel.create(dayBookData, client));
 
     await client.query('COMMIT');
 

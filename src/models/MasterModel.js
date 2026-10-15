@@ -20,7 +20,7 @@ class MasterModel {
   }
 
   async create(data, pool) {
-    data = withLoyaltyVault(this.tableName, withPaymentTds(this.tableName, withTransactionTime(this.tableName, data)));
+    data = withLoyaltyVault(this.tableName, withPaymentTds(this.tableName, withTransactionTime(this.tableName, data)), 'create');
     const keys = Object.keys(data);
     const values = Object.values(data);
     const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');

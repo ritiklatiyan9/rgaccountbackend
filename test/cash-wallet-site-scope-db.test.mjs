@@ -112,25 +112,27 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       } finally {await query('DELETE FROM cash_flow_entries WHERE id=ANY($1::int[])',[made]);await query('UPDATE loyalty_vault_settings SET consolidated_at=$1',[cutoff]);}
     });
 
-    await t.test('same-site reservation/acceptance cannot spend another site balance',async()=>{
+    await t.test('unreserved requests and acceptance cannot spend another site balance',async()=>{
       await assert.rejects(createVaultTransfer({id:1},transfer('30000.01'),db),status(409));
       await assert.rejects(createVaultTransfer({id:1},{...transfer('1'),site_id:null},db),status(400));
       await assert.rejects(createVaultTransfer({id:3},transfer('1',11),db),status(403));
       await assert.rejects(createVaultTransfer({id:1},transfer('1',10,5),db),status(403));
       const liveRequest=transfer('10000'),live=await createVaultTransfer({id:1},liveRequest,db);
       const sandbox=await createVaultTransfer({id:1},transfer('100000',11),db);
-      assert.equal(Number((await balance(10)).reserved_balance),10000);assert.equal(Number((await balance(11)).reserved_balance),100000);
+      assert.equal(Number((await balance(10)).reserved_balance),0);assert.equal(Number((await balance(11)).reserved_balance),0);
       assert.equal((await createVaultTransfer({id:1},liveRequest,db)).replayed,true);
       await assert.rejects(createVaultTransfer({id:1},{...liveRequest,site_id:11},db),status(409));
-      await assert.rejects(createVaultTransfer({id:1},transfer('20000.01'),db),status(409));
+      const unreserved=await createVaultTransfer({id:1},transfer('20000.01'),db);
       const incoming=await invoke(controller.transfers,{extraQuery:{direction:'incoming',status:'pending'}});
-      assert.deepEqual(incoming.transfers.map(e=>e.id),[live.transfer.id]);
-      const summary=await invoke(controller.summary,{user:1});assert.equal(summary.pending_outgoing,1);assert.equal(Number(summary.vault.reserved_balance),10000);
+      assert.deepEqual(new Set(incoming.transfers.map(e=>e.id)),new Set([live.transfer.id,unreserved.transfer.id]));
+      const summary=await invoke(controller.summary,{user:1});assert.equal(summary.pending_outgoing,2);assert.equal(Number(summary.vault.reserved_balance),0);assert.equal(Number(summary.vault.available_balance),30000);
       await assert.rejects(resolveVaultTransfer({id:2},live.transfer.id,'accept',{site_id:11},db),status(404));
       await assert.rejects(resolveVaultTransfer({id:2},live.transfer.id,'accept',{},db),status(400));
       await resolveVaultTransfer({id:2},live.transfer.id,'accept',{site_id:10},db);
       assert.equal(Number((await balance(10)).balance),20000);assert.equal(Number((await balance(10,'user:2')).balance),10000);
-      assert.equal(Number((await balance(11)).balance),1504000);assert.equal(Number((await balance(11)).reserved_balance),100000);
+      assert.equal(Number((await balance(11)).balance),1504000);assert.equal(Number((await balance(11)).reserved_balance),0);
+      await assert.rejects(resolveVaultTransfer({id:2},unreserved.transfer.id,'accept',{site_id:10},db),status(409));
+      await resolveVaultTransfer({id:1},unreserved.transfer.id,'cancel',{site_id:10},db);
       assert.equal((await resolveVaultTransfer({id:2},live.transfer.id,'accept',{site_id:10},db)).replayed,true);
       const posted=(await query('SELECT site_id,sum(amount)::text AS amount,count(*)::int AS n FROM loyalty_vault_entries WHERE transfer_id=$1 GROUP BY site_id',[live.transfer.id])).rows;
       assert.deepEqual(posted,[{site_id:10,amount:'0.00',n:2}]);
@@ -140,6 +142,18 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       // An old unallocated outgoing handover must not be spent a second time
       // just because the source site of that debit is still unknown.
       await assert.rejects(createVaultTransfer({id:2},transfer('9950',10,1),db),status(409));
+    });
+
+    await t.test('an admin-requested handover is visible to its wallet owner without granting decision rights',async()=>{
+      const made=await createVaultTransfer({id:2},{...transfer('1'),from_holder_type:'user',from_holder_id:1},db);
+      const outgoing=await invoke(controller.transfers,{user:1,extraQuery:{direction:'outgoing',status:'pending'}});
+      const row=outgoing.transfers.find(item=>item.id===made.transfer.id);
+      assert.ok(row,'wallet owner receives the outgoing notification even when an admin requested it');
+      assert.equal(row.can_accept,false);assert.equal(row.can_cancel,false);
+      assert.ok((await invoke(controller.summary,{user:1})).pending_outgoing>0);
+      assert.ok(!(await invoke(controller.transfers,{user:3})).transfers.some(item=>item.id===made.transfer.id));
+      await assert.rejects(resolveVaultTransfer({id:1},made.transfer.id,'accept',{site_id:10},db),status(404));
+      await resolveVaultTransfer({id:2},made.transfer.id,'cancel',{site_id:10},db);
     });
 
     await t.test('legacy null-site transfer rows cannot appear or be accepted in an arbitrary site',async()=>{
@@ -206,6 +220,40 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       assert.equal(profile.unallocated.entry_count,0);assert.equal(Number(profile.unallocated.balance),0);
       assert.ok((await invoke(controller.transfers,{site:11})).transfers.some(t=>t.id===unallocatedTransfer));
       assert.ok(!(await invoke(controller.transfers)).transfers.some(t=>t.id===unallocatedTransfer));
+    });
+    await t.test('staff see only their own wallet while admin and super admin can inspect all site wallets',async()=>{
+      await query("INSERT INTO users VALUES(6,'Super administrator','super_admin',1,true)");
+      const privateReceipt=await entry({created_by:3,credit:640});
+      const privateMovement=(await query('SELECT id FROM loyalty_vault_entries WHERE cash_flow_entry_id=$1 ORDER BY id DESC LIMIT 1',[privateReceipt])).rows[0].id;
+      for(const user of [1,3]) {
+        const own=await invoke(controller.holders,{user});
+        assert.deepEqual(own.holders.map(h=>`${h.holder_type}:${h.holder_id}`),[`user:${user}`]);
+        const summary=await invoke(controller.summary,{user});
+        assert.equal(Number(summary.vault.total_balance),Number(summary.vault.balance));
+        assert.ok((await invoke(controller.history,{user})).entries.every(e=>e.holder_key===`user:${user}`));
+        assert.ok((await invoke(controller.assignedTransactions,{user})).transactions.every(e=>e.holder_type==='user'&&e.holder_id===user));
+      }
+      const directory=await invoke(controller.holders,{user:1,extraQuery:{purpose:'selection'}});
+      assert.ok(directory.holders.some(h=>h.holder_id===3&&h.holder_type==='user'),'other recipients remain selectable');
+      for(const other of directory.holders.filter(h=>h.holder_type!=='user'||h.holder_id!==1)) {
+        for(const field of ['balance','available_balance','reserved_balance','pending_credit','pending_debit','pending_count','updated_at']) {
+          assert.equal(other[field],null,`recipient directory must hide ${field}`);
+        }
+        assert.equal(other.can_transfer_from,false);
+      }
+      await assert.rejects(invoke(controller.userDetail,{user:1,params:{id:3}}),status(403));
+      await assert.rejects(invoke(controller.historyDetail,{user:1,params:{id:privateMovement}}),status(404));
+      assert.equal((await invoke(controller.history,{user:1,extraQuery:{holder_type:'user',holder_id:3}})).total,0);
+      assert.equal((await invoke(controller.assignedTransactions,{user:1,extraQuery:{holder_type:'user',holder_id:3}})).total,0);
+      await assert.rejects(invoke(controller.holders,{user:1,extraQuery:{purpose:'all'}}),status(400));
+      for(const user of [2,6]) {
+        const all=await invoke(controller.holders,{user});
+        assert.ok(all.holders.some(h=>h.holder_type==='user'&&h.holder_id===1));
+        assert.equal(Number(all.holders.find(h=>h.holder_type==='user'&&h.holder_id===3).balance),640);
+        assert.equal(Number((await invoke(controller.userDetail,{user,params:{id:3}})).user.balance),640);
+        assert.equal((await invoke(controller.historyDetail,{user,params:{id:privateMovement}})).entry.holder_id,3);
+        await assert.rejects(invoke(controller.summary,{user,site:20}),status(403));
+      }
     });
   } finally {pool.query=originalQuery;pool.connect=originalConnect;await pg.close();}
 });
