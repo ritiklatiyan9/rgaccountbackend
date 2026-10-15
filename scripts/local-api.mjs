@@ -8,6 +8,7 @@ import { up as migrateCashWalletSiteScope } from '../src/migrations/208_cash_wal
 import { up as migrateCashWalletReceiptDetails } from '../src/migrations/209_cash_wallet_receipt_details.js';
 import { up as migrateWalletBalanceGuards } from '../src/migrations/210_wallet_balance_guards.js';
 import { up as migrateLockedCashCollector } from '../src/migrations/211_locked_cash_collector.js';
+import { up as migratePermanentWalletGuard } from '../src/migrations/212_wallet_permanent_balance_guard.js';
 import pool from '../src/config/db.js';
 import { initSocket } from '../src/config/socket.js';
 import { initCache } from '../src/config/cache.js';
@@ -19,6 +20,7 @@ await migrateCashWalletSiteScope(pool);
 await migrateCashWalletReceiptDetails(pool);
 await migrateWalletBalanceGuards(pool);
 await migrateLockedCashCollector(pool);
+await migratePermanentWalletGuard(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

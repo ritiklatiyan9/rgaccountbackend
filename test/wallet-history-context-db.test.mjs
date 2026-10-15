@@ -64,6 +64,13 @@ test('wallet history preserves module descriptions, transfer parties and site-on
     assert.equal((await invoke(history, { q: '100_' })).total, 0);
     assert.equal((await invoke(history, { q: 'Kuldeep' })).total, 2);
     assert.equal((await invoke(history, { q: 'Unrelated expense' })).total, 0);
+    const chronological = await invoke(history, { holder_type: 'user', holder_id: 1, order: 'asc', limit: 1, page: 2 });
+    assert.equal(chronological.order, 'asc');
+    assert.equal(chronological.total, 3);
+    assert.equal(Number(chronological.entries[0].balance_after), 15500, 'pagination retains the earlier opening balance');
+    const searched = await invoke(history, { q: 'Kuldeep', holder_type: 'user', holder_id: 1, order: 'asc' });
+    assert.equal(Number(searched.entries[0].balance_after), 5500, 'search never resets the running balance');
+    await assert.rejects(invoke(history, { order: 'asc; DROP TABLE users' }), error => error.statusCode === 400);
 
     const removed = result.entries.find(row => row.source_id === 22);
     assert.equal(removed.source_details.source_available, false);

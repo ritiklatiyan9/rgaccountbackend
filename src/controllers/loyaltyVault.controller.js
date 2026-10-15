@@ -76,6 +76,8 @@ export const holders = asyncHandler(async(req,res)=>{
       WHERE $5::boolean AND s.organization_id=$2 AND ($3::int IS NULL OR m.site_id=$3) AND ($4::boolean OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=$1 AND site_id=m.site_id))
     ) SELECT h.*,(h.holder_type='member' OR h.can_receive_transfer) AS can_assign_custody,COALESCE(s.name,'') AS site_name,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.balance,0)::text ELSE NULL END AS balance,
+      CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_in,0)::text ELSE NULL END AS total_in,
+      CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_handover,0)::text ELSE NULL END AS total_handover,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.reserved_balance,0)::text ELSE NULL END AS reserved_balance,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text ELSE NULL END AS available_balance,
       ($4::boolean OR (h.holder_type='user' AND h.holder_id=$1)) AS can_transfer_from,
@@ -99,6 +101,7 @@ export const userDetail = asyncHandler(async(req,res)=>{
     FROM assigned_transactions WHERE organization_id=$2 AND site_id=$3 AND holder_type='user' AND holder_id=$1 AND status IN ('pending_clearance','pending_approval')
   ) SELECT u.id,u.name,to_jsonb(u)->>'email' AS email,u.role,u.is_active,to_jsonb(u)->>'phone' AS phone,
     COALESCE(a.balance,0)::text AS balance,COALESCE(a.reserved_balance,0)::text AS reserved_balance,
+    COALESCE(a.total_in,0)::text AS total_in,COALESCE(a.total_handover,0)::text AS total_handover,
     (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text AS available_balance,a.updated_at,pending.*
     FROM users u CROSS JOIN pending LEFT JOIN site_accounts a ON a.holder_key='user:'||u.id::text
     WHERE u.id=$1 AND u.organization_id=$2 AND (u.role IN ('super_admin','admin') OR (u.role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3)) OR a.holder_key IS NOT NULL)`,[id,actor.organization_id,siteId]);
@@ -132,6 +135,9 @@ const siteHistoryCte=`WITH site_history AS (SELECT e.*,sum(amount) OVER(PARTITIO
 const publicHistory = ({site_balance_after,...entry}) => ({...entry,balance_after:site_balance_after});
 export const history = asyncHandler(async(req,res)=>{
   const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id),{page,limit,offset}=pagination(req.query);
+  const order=req.query.order||'desc';
+  if(!['asc','desc'].includes(order)) throw walletError('Unknown wallet history order.');
+  const direction=order==='asc'?'ASC':'DESC';
   // Pre-consolidation noncash movements and their compensating reversals stay
   // visible in the immutable audit. Current transactions remain CASH-only.
   const params=[actor.organization_id,siteId],clauses=['e.organization_id=$1','e.site_id=$2'];
@@ -150,12 +156,12 @@ export const history = asyncHandler(async(req,res)=>{
   // With no source search, paginate custody first: hydrate at most one page
   // of source records instead of looking up every historical module row.
   const pageSql=q
-    ? `${siteHistoryCte} SELECT ${historySelect} ${historyJoins} WHERE ${where} ORDER BY e.id DESC LIMIT $${params.length+1} OFFSET $${params.length+2}`
+    ? `${siteHistoryCte} SELECT ${historySelect} ${historyJoins} WHERE ${where} ORDER BY e.id ${direction} LIMIT $${params.length+1} OFFSET $${params.length+2}`
     : `${siteHistoryCte}, selected_history AS MATERIALIZED (SELECT e.* FROM site_history e WHERE ${where}
-        ORDER BY e.id DESC LIMIT $${params.length+1} OFFSET $${params.length+2})
-       SELECT ${historySelect} ${historyJoins.replace('FROM site_history e','FROM selected_history e')} ORDER BY e.id DESC`;
+        ORDER BY e.id ${direction} LIMIT $${params.length+1} OFFSET $${params.length+2})
+       SELECT ${historySelect} ${historyJoins.replace('FROM site_history e','FROM selected_history e')} ORDER BY e.id ${direction}`;
   const {rows}=await walletReadQuery(pool,pageSql,[...params,limit,offset]);
-  res.set('Cache-Control','no-store').json({site_id:siteId,entries:rows.map(publicHistory),total,page,limit});
+  res.set('Cache-Control','no-store').json({site_id:siteId,entries:rows.map(publicHistory),total,page,limit,order});
 });
 export const historyDetail = asyncHandler(async(req,res)=>{
   const actor=await walletReadActor(req),id=positiveId(req.params.id),siteId=await accessibleSite(actor,req.query.site_id);

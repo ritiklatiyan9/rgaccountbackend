@@ -236,7 +236,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       const directory=await invoke(controller.holders,{user:1,extraQuery:{purpose:'selection'}});
       assert.ok(directory.holders.some(h=>h.holder_id===3&&h.holder_type==='user'),'other recipients remain selectable');
       for(const other of directory.holders.filter(h=>h.holder_type!=='user'||h.holder_id!==1)) {
-        for(const field of ['balance','available_balance','reserved_balance','pending_credit','pending_debit','pending_count','updated_at']) {
+        for(const field of ['balance','total_in','total_handover','available_balance','reserved_balance','pending_credit','pending_debit','pending_count','updated_at']) {
           assert.equal(other[field],null,`recipient directory must hide ${field}`);
         }
         assert.equal(other.can_transfer_from,false);
@@ -254,6 +254,48 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
         assert.equal((await invoke(controller.historyDetail,{user,params:{id:privateMovement}})).entry.holder_id,3);
         await assert.rejects(invoke(controller.summary,{user,site:20}),status(403));
       }
+    });
+    await t.test('cashbook reconciles the notebook example, accepted handovers and receipt corrections across every page',async()=>{
+      await query("INSERT INTO users VALUES(7,'Cashbook collector','sub_admin',1,true); INSERT INTO user_sites VALUES(7,10)");
+      const collect=credit=>entry({created_by:7,credit});
+      const handover=async amount=>{
+        const request=await createVaultTransfer({id:7},transfer(String(amount)),db);
+        await resolveVaultTransfer({id:2},request.transfer.id,'accept',{site_id:10},db);
+      };
+      await collect(500000);await collect(200000);await collect(100000);
+      await handover(500000);
+      await collect(200000);await collect(400000);
+      await handover(900000);
+      const profile=()=>invoke(controller.userDetail,{params:{id:7}});
+      let cashbook=(await profile()).user;
+      assert.equal(Number(cashbook.total_in),1400000);
+      assert.equal(Number(cashbook.total_handover),1400000);
+      assert.equal(Number(cashbook.balance),0);
+      const directory=(await invoke(controller.holders)).holders.find(h=>h.holder_type==='user'&&h.holder_id===7);
+      for(const key of ['total_in','total_handover','balance'])assert.equal(directory[key],cashbook[key]);
+      const own=(await invoke(controller.holders,{user:7})).holders;
+      assert.equal(own.length,1);assert.equal(Number(own[0].total_handover),1400000);
+      const expected=[500000,700000,800000,300000,500000,900000,0];
+      for(let page=1;page<=7;page++){
+        const ledger=await invoke(controller.history,{user:7,extraQuery:{order:'asc',limit:1,page}});
+        assert.equal(ledger.order,'asc');assert.equal(ledger.total,7);
+        assert.equal(Number(ledger.entries[0].balance_after),expected[page-1]);
+      }
+      const corrected=await collect(20.25);
+      await query('UPDATE cash_flow_entries SET credit=10.25 WHERE id=$1',[corrected]);
+      const pending=await createVaultTransfer({id:7},transfer('10'),db);
+      cashbook=(await profile()).user;
+      assert.equal(Number(cashbook.total_in),1400010.25,'receipt corrections reduce net receipts');
+      assert.equal(Number(cashbook.total_handover),1400000,'pending requests never count as handovers');
+      assert.equal(Number(cashbook.balance),10.25);
+      await resolveVaultTransfer({id:7},pending.transfer.id,'cancel',{site_id:10},db);
+      assert.deepEqual((await profile()).user,cashbook);
+      const received=await createVaultTransfer({id:2},{...transfer('5.25'),to_holder_id:7},db);
+      await resolveVaultTransfer({id:7},received.transfer.id,'accept',{site_id:10},db);
+      cashbook=(await profile()).user;
+      assert.equal(Number(cashbook.total_in),1400015.50,'incoming accepted handovers count in receipts');
+      assert.equal(Number(cashbook.total_handover),1400000);
+      assert.equal(Number(cashbook.balance),15.50);
     });
   } finally {pool.query=originalQuery;pool.connect=originalConnect;await pg.close();}
 });

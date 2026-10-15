@@ -22,6 +22,7 @@ import { up as migrateCashWalletSiteScope } from './migrations/208_cash_wallet_s
 import { up as migrateCashWalletReceiptDetails } from './migrations/209_cash_wallet_receipt_details.js';
 import { up as migrateWalletBalanceGuards } from './migrations/210_wallet_balance_guards.js';
 import { up as migrateLockedCashCollector } from './migrations/211_locked_cash_collector.js';
+import { up as migratePermanentWalletGuard } from './migrations/212_wallet_permanent_balance_guard.js';
 import { up as migratePlotFullPaymentDue } from './migrations/201_plot_full_payment_due.js';
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { initSocket } from './config/socket.js';
@@ -61,6 +62,7 @@ connectDB().then(async () => {
   await migrateCashWalletReceiptDetails(pool);
   await migrateWalletBalanceGuards(pool);
   await migrateLockedCashCollector(pool);
+  await migratePermanentWalletGuard(pool);
   await migratePlotFullPaymentDue(pool);
   await migrateDataStorage(pool);
   await migrateExistingVoucherGaps(pool);
