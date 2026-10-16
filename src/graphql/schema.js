@@ -564,6 +564,7 @@ const PlotType = new GraphQLObjectType({
     commission_rate:     { type: GraphQLFloat },
     original_plot_rate:  { type: GraphQLFloat },
     discount_rate:       { type: GraphQLFloat },
+    discount_amount:     { type: GraphQLFloat },
     plc_charges:         { type: GraphQLFloat },
     installments_enabled: { type: GraphQLBoolean },
     full_payment_due:    { type: GraphQLBoolean },

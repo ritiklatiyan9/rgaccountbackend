@@ -201,6 +201,8 @@
     "test:wallet-flow": "PGLITE_MODULE=@electric-sql/pglite node --test test/cash-wallet-module-receipts-db.test.mjs test/wallet-balance-guards-db.test.mjs test/wallet-history-context-db.test.mjs test/cash-wallet-site-scope-db.test.mjs test/loyalty-vault-context.test.mjs test/sunny-wallet-repair-db.test.mjs",
     "migrate:locked-cash-collector": "node src/migrations/211_locked_cash_collector.js",
     "migrate:permanent-wallet-guard": "node src/migrations/212_wallet_permanent_balance_guard.js",
+    "migrate:plot-fixed-discount": "node src/migrations/214_plot_fixed_discount.js",
+    "test:plot-fixed-discount": "node --test test/plot-fixed-discount.test.mjs",
     "ensure:wallet-startup": "node scripts/ensure-wallet-startup.mjs",
     "test:wallet-startup": "node --test test/wallet-startup.test.mjs test/google-drive-startup.test.mjs"
   },

@@ -14,6 +14,7 @@ import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { withCompanyPlotBooking } from '../services/quickPlotBooking.service.js';
 import { validatePlotBuyerMember } from '../services/plotMemberLinks.service.js';
+import { plotDiscountForWrite } from '../services/plotDiscount.service.js';
 
 /**
  * Auto-check BOOKED plots with free_to_sale_days set.
@@ -304,6 +305,7 @@ export const createPlot = asyncHandler(async (req, res) => {
 
   const data = {
     ...unitMetadata,
+    ...plotDiscountForWrite(req.body),
     site_id: parseInt(site_id),
     plot_no: trimmedPlotNo,
     block: block ? block.trim().toUpperCase() : null,
@@ -450,7 +452,7 @@ export const linkPlotBuyer = asyncHandler(async (req, res) => {
 /** PUT /plots/:id — Update plot details */
 export const updatePlot = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { plot_no, block, buyer_name, plot_size, plot_size_mtr, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value, commission_rate, plot_commission, original_plot_rate, discount_rate } = req.body;
+  const { plot_no, block, buyer_name, plot_size, plot_size_mtr, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value, commission_rate, plot_commission, original_plot_rate } = req.body;
 
   const existing = await plotModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
@@ -536,7 +538,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
   if (commission_rate !== undefined) updateData.commission_rate = parseFloat(commission_rate) || 0;
   if (plot_commission !== undefined) updateData.plot_commission = parseFloat(plot_commission) || 0;
   if (original_plot_rate !== undefined) updateData.original_plot_rate = parseFloat(original_plot_rate) || 0;
-  if (discount_rate !== undefined) updateData.discount_rate = parseFloat(discount_rate) || 0;
+  Object.assign(updateData, plotDiscountForWrite(req.body));
   if (team !== undefined) updateData.team = team ? team.trim().toUpperCase() : null;
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
 
