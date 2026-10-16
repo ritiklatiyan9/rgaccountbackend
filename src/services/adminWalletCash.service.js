@@ -7,7 +7,9 @@ const inFlight = new WeakMap();
 // The earlier, explicit site-cash alignment identifies the site's cash wallet.
 // Read its current cash custody without rewriting receipts or replaying old
 // allocations. Staff spending reduces both site cash and imprest, once each.
-export function adminWalletCashStates(organizationId, siteId, database) {
+export function adminWalletCashStates(organizationId, siteId, database, siteDetail) {
+  // Imprest already has a locked site snapshot; reuse it on that connection.
+  if (siteDetail) return readStates(organizationId, siteId, database, siteDetail);
   let reads = inFlight.get(database);
   if (!reads) { reads = new Map(); inFlight.set(database, reads); }
   const key = `${organizationId}:${siteId}`;
@@ -21,7 +23,7 @@ export function adminWalletCashStates(organizationId, siteId, database) {
   return reads.get(key);
 }
 
-async function readStates(organizationId, siteId, database) {
+async function readStates(organizationId, siteId, database, siteDetail) {
   const { rows } = await database.query(`WITH aligned AS (
     SELECT DISTINCT ON (e.holder_key) e.id,e.holder_key
     FROM loyalty_vault_entries e JOIN users u ON e.holder_type='user' AND u.id=e.holder_id
@@ -33,8 +35,11 @@ async function readStates(organizationId, siteId, database) {
     FROM aligned a JOIN loyalty_vault_entries e ON e.holder_key=a.holder_key AND e.organization_id=$1 AND e.site_id=$2
     GROUP BY a.holder_key,a.id`, [organizationId, siteId]);
   if (!rows.length) return new Map();
-  const end = (await database.query("SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date")).rows[0].end_date;
-  const site = await getSiteBalanceDetail(siteId, '1900-01-01', end, database);
+  let site = siteDetail;
+  if (!site) {
+    const end = (await database.query("SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date")).rows[0].end_date;
+    site = await getSiteBalanceDetail(siteId, '1900-01-01', end, database);
+  }
   return new Map(rows.map(row => {
     const recorded = money(row.recorded_balance), transfers = money(row.transfer_net);
     const balance = money(Math.min(recorded, money(site.distributableBalance + transfers)));

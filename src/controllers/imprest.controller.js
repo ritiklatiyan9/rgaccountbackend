@@ -16,6 +16,7 @@ import { loadImprestApprovalActivity } from '../services/imprestApprovalActivity
 import { uploadPlotDoc, getPlotDocUrl, deletePlotDoc } from '../utils/plotDocStorage.js';
 import pool from '../config/db.js';
 import { getAccessibleSiteBalances, getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
+import { adminWalletCashStates } from '../services/adminWalletCash.service.js';
 
 // ── Camera-proof helpers (same S3/local store as document imprest) ──
 const IMPREST_PROOF_PREFIX = 'imprest';
@@ -86,7 +87,11 @@ const siteDistributable = async (db, siteId) => {
   const detail = await getSiteBalanceDetail(siteId, '1900-01-01', indiaTomorrow(), db);
   const round2 = (v) => Math.round(v * 100) / 100;
   const pendingReservations = round2(detail.pendingImprestReservations);
-  const distributableBalance = round2(detail.distributableBalance);
+  const organizationId = (await db.query('SELECT organization_id FROM sites WHERE id=$1', [siteId])).rows[0]?.organization_id;
+  const wallets = organizationId ? await adminWalletCashStates(organizationId, siteId, db, detail) : new Map();
+  // Cash accepted out of the site's cash wallet cannot also fund imprest.
+  const distributableBalance = round2(Math.min(detail.distributableBalance,
+    ...[...wallets.values()].map(wallet => Number(wallet.available_balance))));
   return {
     site_balance: round2(detail.siteBalance),
     cash_balance: round2(detail.cashBalance),
@@ -96,6 +101,7 @@ const siteDistributable = async (db, siteId) => {
     admin_imprest_reserved: 0,
     pending_imprest_reservations: pendingReservations,
     distributable_balance: distributableBalance,
+    wallet_cash_adjustment: round2(distributableBalance - detail.distributableBalance),
     // Preserve the established API aliases used by both imprest screens.
     pending_receipt_total: pendingReservations,
     available: distributableBalance,

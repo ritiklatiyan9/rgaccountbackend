@@ -14,6 +14,7 @@ import { pendingVaultTotals } from '../src/services/loyaltyVaultTransactions.ser
 import * as controller from '../src/controllers/loyaltyVault.controller.js';
 import pool from '../src/config/db.js';
 import { adminWalletCashStates, walletWithCashInHand } from '../src/services/adminWalletCash.service.js';
+import { createAllocation, getSiteBalance } from '../src/controllers/imprest.controller.js';
 
 test('Cash Wallet separates real/test site custody and rejects cross-site spending and detail access', {skip:!process.env.PGLITE_MODULE},async t=>{
   const {PGlite}=await import(process.env.PGLITE_MODULE),pg=new PGlite();
@@ -387,6 +388,12 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       await resolveVaultTransfer({id:1},allowed.transfer.id,'accept',{site_id:12},db);
       assert.equal(await cash(),0,'accepted wallet handovers reduce custody exactly once');
       await assert.rejects(createVaultTransfer({id:2},transfer('1',12,1),db),status(409));
+      const imprestCall=handler=>new Promise((resolve,reject)=>handler({user:{id:2,role:'admin',organization_id:1},query:{site_id:12},imprestSiteId:12,body:{site_id:12,sub_admin_id:1,amount:1},imprestParticipants:{sub_admin_id:{role:'sub_admin'}}},{status(code){this.code=code;return this;},json(data){resolve({status:this.code||200,...data});}},reject));
+      const imprest=await imprestCall(getSiteBalance);
+      assert.equal(imprest.cash_balance,4500000,'gross site Cash remains unchanged');
+      assert.equal(imprest.available,0,'Imprest and Wallet share the same remaining in-hand cash');
+      const blocked=await imprestCall(createAllocation);
+      assert.equal(blocked.status,400);assert.equal(blocked.code,'INSUFFICIENT_SITE_BALANCE','accepted wallet cash cannot be issued again through Imprest');
       await query('INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,-100000)');
       assert.equal(await cash(),100000,'returned imprest restores admin cash');
       await query("INSERT INTO ledger_entries(site_id,bucket,debit) VALUES(12,'cash',50000); INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,-50000)");
