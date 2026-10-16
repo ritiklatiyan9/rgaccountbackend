@@ -1,3 +1,4 @@
+import { walletHistoryParentsSql } from './helpers/walletHistoryParents.mjs';
 import { applyApprovedEditRequest } from '../src/controllers/editRequest.controller.js';
 import pool from '../src/config/db.js';
 import * as controller from '../src/controllers/loyaltyVault.controller.js';
@@ -47,6 +48,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
       cash_flow_entry_id integer,expense_id integer,farmer_payment_id integer,commission_id integer,firm_transaction_id integer,plot_payment_id integer,vendor_payment_id integer,imprest_allocation_id integer,
       entry_transfer_id uuid,money_transfer_id uuid,is_firm_to_firm_transfer boolean,transfer_group_id uuid,is_financial_projection boolean,source_vendor_payment_id integer,is_imprest_internal boolean)`);
     await query("INSERT INTO cash_flow_entries(id,site_id,created_by,credit,cash_type,status,created_at) VALUES(1,10,1,500,'CASH','approved','2020-01-01')");
+    await query(walletHistoryParentsSql);
     await cashWalletUp(db);await up(db);await up(db);
     await t.test('migration is idempotent and historical unassigned finances are unchanged',async()=>{
       assert.equal((await query('SELECT credit::text FROM cash_flow_entries WHERE id=1')).rows[0].credit,'500');

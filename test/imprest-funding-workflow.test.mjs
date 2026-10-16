@@ -16,6 +16,8 @@ for (const available of [0,-100,49]) {
     const queries=[];
     const db={ async query(sql) {
       queries.push(sql);
+      if(sql.includes('WHERE u.id=imprest_site_wallet_holder')) return {rows:[{id:1,name:'Admin'}]};
+      if(sql.includes('COALESCE(sum(e.amount),0) AS balance')) return {rows:[{balance:available}]};
       if(sql.startsWith('WITH ledger AS')) return {rows:[{cash_balance:available+100,bank_balance:999999,
         imprest_held:100,pending_imprest_reservations:0,distributable_balance:available}]};
       if(sql.includes('SELECT name, role')) return {rows:[{name:'Admin',role:'admin'}]};
@@ -40,7 +42,10 @@ for (const available of [0,-100,49]) {
 
 test('a request within the cash balance commits without reserving or crediting cash',async t=> {
   const queries=[];
-  const db={async query(sql){queries.push(sql);return {rows:sql.startsWith('WITH ledger AS')?[{
+  const db={async query(sql){queries.push(sql);
+    if(sql.includes('WHERE u.id=imprest_site_wallet_holder')) return {rows:[{id:1,name:'Admin'}]};
+    if(sql.includes('COALESCE(sum(e.amount),0) AS balance')) return {rows:[{balance:100}]};
+    return {rows:sql.startsWith('WITH ledger AS')?[{
     cash_balance:100,bank_balance:0,imprest_held:0,pending_imprest_reservations:0,distributable_balance:100}]:[]};},release(){}};
   t.mock.method(pool,'connect',async()=>db);
   t.mock.method(imprestExpenseRequestModel,'create',async(data,connection)=>{assert.equal(connection,db);return {id:1,...data};});

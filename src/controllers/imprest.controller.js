@@ -15,6 +15,7 @@ import { hasImprestManagementScope } from '../middlewares/imprestPermission.midd
 import { loadImprestApprovalActivity } from '../services/imprestApprovalActivity.service.js';
 import { uploadPlotDoc, getPlotDocUrl, deletePlotDoc } from '../utils/plotDocStorage.js';
 import pool from '../config/db.js';
+import { getSiteImprestWallet } from '../services/imprestWallet.service.js';
 import { getAccessibleSiteBalances, getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 
 // ── Camera-proof helpers (same S3/local store as document imprest) ──
@@ -62,7 +63,7 @@ const CASH_ONLY_EXPENSE_ERROR = {
   code: 'IMPREST_CASH_ONLY',
   message: 'Imprest expenses must be paid in cash. Record bank or UPI payments in the Expenses module.',
 };
-const FUNDING_HINT = 'Bring cash into the site first — or accept a staff imprest return — then distribute.';
+const FUNDING_HINT = 'Receive cash into the Admin cash wallet or accept a staff imprest return before giving imprest.';
 const canReviewImprestRequest = (user, request) => ADMIN_ROLES.has(user?.role)
   || (
     user?.role === 'sub_admin'
@@ -79,17 +80,18 @@ const indiaTomorrow = () => {
 };
 /** What the Admin can hand out right now, after every custody reservation. */
 const siteDistributable = async (db, siteId) => {
-  // Use the caller's connection so the advisory lock, ledger snapshot and
-  // reservations are all observed inside the same transaction. Stop after
-  // today in the business timezone so future-dated transactions cannot fund
-  // (or block) an imprest distribution prematurely.
+  // Bank and staff figures remain informational. Admin cash is the selected
+  // site's custodian wallet; issued floats and pending issues are already paid.
   const detail = await getSiteBalanceDetail(siteId, '1900-01-01', indiaTomorrow(), db);
+  const wallet = await getSiteImprestWallet(siteId, db);
   const round2 = (v) => Math.round(v * 100) / 100;
   const pendingReservations = round2(detail.pendingImprestReservations);
-  const distributableBalance = round2(detail.distributableBalance);
+  const distributableBalance = wallet.available_balance;
   return {
-    site_balance: round2(detail.siteBalance),
-    cash_balance: round2(detail.cashBalance),
+    ...wallet,
+    site_balance: round2(wallet.balance + detail.bankBalance),
+    cash_balance: wallet.balance,
+    financial_cash_balance: round2(detail.cashBalance),
     bank_balance: round2(detail.bankBalance),
     imprest_held: round2(detail.imprestHeld),
     // Compatibility field for older clients. Admin personal float is retired.
@@ -495,17 +497,12 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
     const fundedByGiverFloat = giverResult.rows[0]?.role === 'sub_admin';
     const recipientIsAdmin = ADMIN_ROLES.has(req.user.role);
 
-    // A pending handover reserves cash but does not guarantee it still exists:
-    // other cash records may have changed since it was created. Recheck under
-    // the same site lock as creation/approval. Release only this row's existing
-    // reservation when measuring its funding; keep all other handovers reserved.
-    if (!fundedByGiverFloat && !recipientIsAdmin && Number(existing.amount) > 0) {
+    // New Admin handovers are already wallet funded. Historical pending
+    // handovers obtain funding on first acceptance under the same site lock.
+    if (!fundedByGiverFloat && !recipientIsAdmin && !existing.wallet_funded && Number(existing.amount) > 0) {
       await lockSiteDistribution(client, existing.site_id);
       const distributable = await siteDistributable(client, existing.site_id);
-      const { rows: [reservation] } = await client.query(`SELECT CASE
-        WHEN from_own_float = false AND created_at < $2::date THEN amount ELSE 0 END AS amount
-        FROM imprest_allocations WHERE id = $1`, [existing.id, indiaTomorrow()]);
-      const availableForReceipt = Math.round((distributable.available + Number(reservation?.amount || 0)) * 100) / 100;
+      const availableForReceipt = distributable.available;
       if (Number(existing.amount) > availableForReceipt + 0.005) {
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -623,16 +620,8 @@ export const getBalance = asyncHandler(async (req, res) => {
   const siteId = req.imprestSiteId || (req.query.site_id ? parseInt(req.query.site_id) : null);
   const target = await pool.query('SELECT role FROM users WHERE id = $1', [userId]);
   if (siteId && ADMIN_ROLES.has(target.rows[0]?.role)) {
-    const cash = await siteDistributable(pool, siteId);
-    const reserved = Math.max(cash.cash_balance - cash.available, 0);
-    return res.json({
-      balance: cash.available,
-      posted_balance: cash.cash_balance,
-      reserved_amount: reserved,
-      available_balance: cash.available,
-      user_id: userId,
-      balance_source: 'SITE_CASH',
-    });
+    const wallet = await getSiteImprestWallet(siteId, pool);
+    return res.json({ ...wallet, user_id: userId });
   }
   const balanceState = await imprestLedgerModel.getBalanceState(userId, siteId, pool);
   res.json({
@@ -671,14 +660,7 @@ export const getLedger = asyncHandler(async (req, res) => {
 
   const target = await pool.query('SELECT role FROM users WHERE id = $1', [userId]);
   const balanceState = parsedSiteId && ADMIN_ROLES.has(target.rows[0]?.role)
-    ? await (async () => {
-      const cash = await siteDistributable(pool, parsedSiteId);
-      return {
-        posted_balance: cash.cash_balance,
-        reserved_amount: Math.max(cash.cash_balance - cash.available, 0),
-        available_balance: cash.available,
-      };
-    })()
+    ? await getSiteImprestWallet(parsedSiteId, pool)
     : await imprestLedgerModel.getBalanceState(userId, parsedSiteId, pool);
   const monthly = await imprestLedgerModel.getMonthlySummary(userId, parsedSiteId, pool);
 
@@ -686,7 +668,7 @@ export const getLedger = asyncHandler(async (req, res) => {
     entries,
     balance: balanceState.available_balance,
     ...balanceState,
-    ...(parsedSiteId && ADMIN_ROLES.has(target.rows[0]?.role) ? { balance_source: 'SITE_CASH' } : {}),
+    ...(parsedSiteId && ADMIN_ROLES.has(target.rows[0]?.role) ? { balance_source: 'CASH_WALLET' } : {}),
     monthly,
     pagination: {
       totalItems,

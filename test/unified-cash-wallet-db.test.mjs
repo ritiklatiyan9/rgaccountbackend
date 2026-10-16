@@ -1,3 +1,4 @@
+import { walletHistoryParentsSql } from './helpers/walletHistoryParents.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -44,6 +45,7 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
       cash_flow_entry_id integer,expense_id integer,farmer_payment_id integer,commission_id integer,firm_transaction_id integer,plot_payment_id integer,vendor_payment_id integer,imprest_allocation_id integer,
       entry_transfer_id uuid,money_transfer_id uuid,is_firm_to_firm_transfer boolean,transfer_group_id uuid,is_financial_projection boolean,source_vendor_payment_id integer,is_imprest_internal boolean)`);
     await entry({id:1,credit:500,created_at:'2020-01-01'});
+    await query(walletHistoryParentsSql);
     await walletUp(db);await detailsUp(db);await vaultUp(db);
     const legacy=await entry({credit:1000});
     const overlap=await entry({credit:200,loyalty_vault_holder_type:'user',loyalty_vault_holder_id:1,loyalty_vault_assigned_by:1});

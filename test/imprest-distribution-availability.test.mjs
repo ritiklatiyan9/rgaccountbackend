@@ -18,9 +18,9 @@ function invoke(handler, body) {
 }
 
 for (const snapshot of [
-  { name: 'staff float exceeds recorded cash', cash: 4104280.4, staff: 51079066, pending: 0, amount: 1 },
-  { name: 'cash is exhausted', cash: 1000, staff: 1000, pending: 0, amount: 1 },
-  { name: 'pending handovers consume available cash', cash: 2000, staff: 1000, pending: 500, amount: 501 },
+  { name: 'wallet has a historical deficit', cash: 4104280.4, staff: 51079066, pending: 0, amount: 1 },
+  { name: 'wallet cash is exhausted', cash: 1000, staff: 1000, pending: 0, amount: 1 },
+  { name: 'wallet has insufficient cash', cash: 2000, staff: 1000, pending: 500, amount: 501 },
 ]) {
   test(`all Admin distribution paths reject when ${snapshot.name}`, async (t) => {
     const queries = [];
@@ -28,6 +28,8 @@ for (const snapshot of [
     const db = {
       async query(sql, params) {
         queries.push(sql);
+        if (sql.includes('WHERE u.id=imprest_site_wallet_holder')) return { rows: [{id:7,name:'Kuldeep Tomar'}] };
+        if (sql.includes('COALESCE(sum(e.amount),0) AS balance')) return {rows:[{balance:available}]};
         if (sql.startsWith('WITH ledger AS')) return { rows: [{
           cash_balance: snapshot.cash, bank_balance: 99999999,
           imprest_held: snapshot.staff, pending_imprest_reservations: snapshot.pending,

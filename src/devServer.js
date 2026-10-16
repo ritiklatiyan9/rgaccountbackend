@@ -1,3 +1,4 @@
+import { up as migrateWalletFundedImprest } from './migrations/213_wallet_funded_imprest.js';
 import 'dotenv/config';
 import http from 'node:http';
 import app from './app.js';
@@ -20,6 +21,10 @@ import { up as migrateLoyaltyVault } from './migrations/199_loyalty_vault.js';
 import { up as migrateUnifiedCashWallet } from './migrations/203_unified_cash_wallet.js';
 import { up as migrateCashWalletReadIndexes } from './migrations/204_cash_wallet_read_indexes.js';
 import { up as migrateCreditWalletImprestDebits } from './migrations/207_credit_wallet_imprest_debits.js';
+import { up as migrateWalletBalanceGuards } from './migrations/210_wallet_balance_guards.js';
+import { up as migratePermanentWalletGuard } from './migrations/212_wallet_permanent_balance_guard.js';
+import { up as migrateLockedCashCollector } from './migrations/211_locked_cash_collector.js';
+import { up as migrateCashWalletReceiptDetails } from './migrations/209_cash_wallet_receipt_details.js';
 import { up as migrateCashWalletSiteScope } from './migrations/208_cash_wallet_site_scope.js';
 
 // Local previews serve the application without starting production reminder
@@ -45,6 +50,11 @@ connectDB().then(async () => {
   await migrateCashWalletReadIndexes(pool);
   await migrateCreditWalletImprestDebits(pool);
   await migrateCashWalletSiteScope(pool);
+  await migrateCashWalletReceiptDetails(pool);
+  await migrateWalletBalanceGuards(pool);
+  await migrateLockedCashCollector(pool);
+  await migratePermanentWalletGuard(pool);
+  await migrateWalletFundedImprest(pool);
   server.listen(port, '127.0.0.1', () => {
     console.log(`Local API ready at http://127.0.0.1:${port}`);
   });

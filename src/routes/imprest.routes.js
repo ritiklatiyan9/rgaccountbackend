@@ -66,9 +66,11 @@ router.use(authMiddleware);
 router.get('/approval-activity', requireImprestReadAccess, accessByRequiredQuerySite, getApprovalActivity);
 
 // ── Balance & Ledger (any authenticated user) ──
-router.get('/balance', requireImprestBalanceAccess, accessByQuerySite, imprestReadCache, getBalance);
-router.get('/site-balance', requireImprestReadAccess, accessByQuerySite, imprestReadCache, getSiteBalance);
-router.get('/site-balances', requirePermission('imprest', 'read'), imprestReadCache, getSiteBalances);
+// Wallet movements can arrive through another API process. These cash reads
+// must stay current with /wallet rather than retaining a 30-second snapshot.
+router.get('/balance', requireImprestBalanceAccess, accessByQuerySite, getBalance);
+router.get('/site-balance', requireImprestReadAccess, accessByQuerySite, getSiteBalance);
+router.get('/site-balances', requirePermission('imprest', 'read'), getSiteBalances);
 router.get('/ledger', requireImprestReadAccess, accessByQuerySite, imprestReadCache, getLedger);
 router.get('/peers', requireImprestReadAccess, accessByQuerySite, imprestReadCache, listTransferPeers);
 

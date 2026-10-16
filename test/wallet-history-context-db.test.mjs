@@ -1,3 +1,4 @@
+import { walletHistoryParentsSql } from './helpers/walletHistoryParents.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pool from '../src/config/db.js';
@@ -31,7 +32,8 @@ test('wallet history preserves module descriptions, transfer parties and site-on
         AS $$ SELECT NULLIF(source->>'site_id','')::int $$;`);
     for (const table of LOYALTY_VAULT_SOURCE_TABLES) await pg.exec(`CREATE TABLE ${table}(id int PRIMARY KEY,
       description text,particular text,narration text,remark text,remarks text,note text,reference_no text,
-      plot_id int,installment_id int,date date,payment_date date,site_id int DEFAULT 10)`);
+      plot_id int,installment_id int,date date,payment_date date,site_id int DEFAULT 10,status text,approved_at timestamptz,approved_by int)`);
+    await pg.exec(walletHistoryParentsSql);
     await pg.exec(`INSERT INTO expenses(id,remark,reference_no) VALUES(20,'Unused material returned — cash received 15K','EXP-20'),
       (21,'Unrelated expense with no wallet custody','EXP-21');
       INSERT INTO loyalty_vault_entries(organization_id,site_id,holder_key,holder_type,holder_id,actor_id,amount,balance_after,kind,
@@ -64,12 +66,26 @@ test('wallet history preserves module descriptions, transfer parties and site-on
     assert.equal((await invoke(history, { q: '100_' })).total, 0);
     assert.equal((await invoke(history, { q: 'Kuldeep' })).total, 2);
     assert.equal((await invoke(history, { q: 'Unrelated expense' })).total, 0);
+    await pg.exec(`UPDATE loyalty_vault_entries SET details=details||'{"status":"pending"}'::jsonb WHERE source_id=20;
+      UPDATE expenses SET status='approved',approved_at='2026-10-15T09:26:36Z',approved_by=1 WHERE id=20`);
+    const approved=(await invoke(historyDetail,{}, {id:expense.id})).entry;
+    assert.equal(approved.current_source_status,'approved');
+    assert.equal(approved.details.status,'pending','immutable posting snapshot is preserved independently');
+    assert.ok(approved.current_source_reviewed_at);
+    await pg.exec("UPDATE expenses SET status='rejected' WHERE id=20");
+    const rejected=(await invoke(historyDetail,{}, {id:expense.id})).entry;
+    assert.equal(rejected.current_source_status,'rejected','opening an old credit shows the latest rejection');
     const chronological = await invoke(history, { holder_type: 'user', holder_id: 1, order: 'asc', limit: 1, page: 2 });
     assert.equal(chronological.order, 'asc');
     assert.equal(chronological.total, 3);
     assert.equal(Number(chronological.entries[0].balance_after), 15500, 'pagination retains the earlier opening balance');
     const searched = await invoke(history, { q: 'Kuldeep', holder_type: 'user', holder_id: 1, order: 'asc' });
     assert.equal(Number(searched.entries[0].balance_after), 5500, 'search never resets the running balance');
+    assert.equal(Number(searched.totals.credit),0);
+    assert.equal(Number(searched.totals.debit),10000,'totals follow the source search and selected holder');
+    assert.equal(Number(searched.totals.net),-10000);
+    const empty=await invoke(history,{from:'2099-01-01',to:'2099-12-31'});
+    assert.deepEqual(empty.totals,{credit:'0',debit:'0',net:'0'});
     await assert.rejects(invoke(history, { order: 'asc; DROP TABLE users' }), error => error.statusCode === 400);
 
     const removed = result.entries.find(row => row.source_id === 22);
@@ -83,10 +99,65 @@ test('wallet history preserves module descriptions, transfer parties and site-on
     const moved = (await invoke(historyDetail, {}, { id: expense.id })).entry;
     assert.equal(moved.source_details.source_description, 'Expense cash receipt');
     assert.equal(moved.source_details.reference, undefined);
+    assert.equal(moved.current_source_status,null,'status from another site must not leak');
+    assert.equal(moved.current_source_reviewed_at,null);
     assert.equal((await invoke(history, { q: 'OTHER-PRIVATE' })).total, 0, 'moving a source never leaks the new site context');
     const own = await invoke(history, {}, {}, 2);
     assert.equal(own.total, 1); assert.equal(own.entries[0].holder_id, 2);
     await assert.rejects(invoke(historyDetail, {}, { id: expense.id }, 2), error => error.statusCode === 404);
     await assert.rejects(invoke(historyDetail, { site_id: 11 }, { id: expense.id }), error => error.statusCode === 404);
+    await pg.exec(`UPDATE loyalty_vault_entries SET created_at=CASE
+      WHEN source_id=20 THEN '2026-10-15T18:29:00Z'::timestamptz
+      WHEN source_id=22 THEN '2026-11-01T00:00:00Z'::timestamptz
+      ELSE '2026-11-02T00:00:00Z'::timestamptz END`);
+    const scope={holder_type:'user',holder_id:1,order:'asc',limit:1};
+    const day=await invoke(history,{...scope,from:'2026-10-15',to:'2026-10-15'});
+    assert.deepEqual(Object.values(day.totals).map(Number),[15000,0,15000],'day totals use the IST date boundary');
+    const month=await invoke(history,{...scope,from:'2026-11-01',to:'2026-11-30'});
+    assert.equal(month.total,2);assert.equal(month.entries.length,1);
+    assert.deepEqual(Object.values(month.totals).map(Number),[500,10000,-9500],'month totals include all pages');
+    const year=await invoke(history,{...scope,from:'2026-01-01',to:'2026-12-31'});
+    assert.deepEqual(Object.values(year.totals).map(Number),[15500,10000,5500],'year totals exclude the other project');
+
+    await pg.exec(`INSERT INTO farmers VALUES(41,10,'Farmer Harish');
+      INSERT INTO firms VALUES(41,10,'Rivergreen Estates');
+      INSERT INTO cash_flow_months VALUES(41,10,'Ravi personal account','person');
+      INSERT INTO vendor_commitments VALUES(41,10,'Oak Construction','Boundary wall labour');
+      INSERT INTO vendor_inventory_orders VALUES(41,10,'Stone Suppliers','Concrete blocks','Materials');
+      INSERT INTO land_deals VALUES(41,10,'Land buyer Ajay','Sale East');
+      INSERT INTO members VALUES(41,'Agent Meera',10),(42,'Partner Neeraj',10);
+      INSERT INTO plots VALUES(41,10,'B7','Plot buyer Anita','B');
+      INSERT INTO plot_commissions_v2 VALUES(41,10,41,41);
+      INSERT INTO misc_income_categories VALUES(41,'Maintenance');`);
+    const parents = {farmer_payments:['farmer_id',41,'Farmer Harish'],firm_transactions:['firm_id',41,'Rivergreen Estates'],
+      cash_flow_entries:['cash_flow_month_id',41,'Ravi personal account'],vendor_payments:['commitment_id',41,'Oak Construction'],
+      vendor_inventory_payments:['order_id',41,'Stone Suppliers'],land_deal_payments:['land_deal_id',41,'Land buyer Ajay'],
+      plot_commission_payments:['plot_commission_id',41,'Agent Meera'],misc_income_entries:['category_id',41,'Income payer'],
+      partner_profit_payments:['member_id',42,'Partner Neeraj']};
+    for (const table of LOYALTY_VAULT_SOURCE_TABLES) {
+      await pg.exec(`ALTER TABLE ${table} ADD COLUMN party_name text, ADD COLUMN category text, ADD COLUMN sub_category text,
+        ADD COLUMN from_entity text, ADD COLUMN to_entity text;`);
+      const parent=parents[table];
+      if(parent) await pg.exec(`ALTER TABLE ${table} ADD COLUMN ${parent[0]} integer;`);
+      await pg.query(`INSERT INTO ${table}(id,site_id,description,party_name,category,from_entity,plot_id${parent?`,${parent[0]}`:''})
+        VALUES(100,10,$1,$2,$3,$4,41${parent?', $5':''})`,
+      [`Detailed ${table} particulars`,table==='misc_income_entries'?'Income payer':null,
+        table==='expenses'?'Material refund':null,['expenses','day_book'].includes(table)?'Cash payer':null,...(parent?[parent[1]]:[])]);
+      await pg.query(`INSERT INTO loyalty_vault_entries(organization_id,site_id,holder_key,holder_type,holder_id,actor_id,
+        amount,kind,description,source_table,source_id) VALUES(1,10,'user:1','user',1,1,10,'credit','Cash receipt',$1,100)`,[table]);
+    }
+    const moduleRows=(await invoke()).entries.filter(row=>row.source_id===100);
+    assert.equal(moduleRows.length,LOYALTY_VAULT_SOURCE_TABLES.size);
+    for(const [table,[,,name]] of Object.entries(parents)) assert.equal(moduleRows.find(row=>row.source_table===table).source_details.party_name,name,table);
+    assert.equal(moduleRows.find(row=>row.source_table==='expenses').source_details.from_entity,'Cash payer');
+    assert.equal(moduleRows.find(row=>row.source_table==='expenses').source_details.category,'Material refund');
+    assert.equal(moduleRows.find(row=>row.source_table==='vendor_payments').source_details.work_title,'Boundary wall labour');
+    assert.equal(moduleRows.find(row=>row.source_table==='vendor_inventory_payments').source_details.item_name,'Concrete blocks');
+    assert.equal(moduleRows.find(row=>row.source_table==='plot_commission_payments').source_details.plot_no,'B7');
+    assert.equal((await invoke(history,{q:'Oak Construction'})).total,1,'human names are searchable');
+    await pg.exec("UPDATE vendor_commitments SET site_id=11,vendor_name='Private vendor' WHERE id=41");
+    const movedVendor=(await invoke()).entries.find(row=>row.source_table==='vendor_payments'&&row.source_id===100);
+    assert.equal(movedVendor.source_details.party_name,undefined,'parents from another site are excluded');
+    assert.equal((await invoke(history,{q:'Private vendor'})).total,0);
   } finally { pool.query = originalQuery; pool.connect = originalConnect; await pg.close(); }
 });

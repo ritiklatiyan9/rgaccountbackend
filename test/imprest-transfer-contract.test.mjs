@@ -38,7 +38,7 @@ test('transfer migration persists audit history and permits every transfer ledge
   assert.match(migration, /amount\s+NUMERIC\(15,2\) NOT NULL CHECK \(amount > 0\)/);
 });
 
-test('pending allocation is ledger-neutral for both parties until the recipient confirms', async () => {
+test('pending handovers wait for receipt before changing staff float', async () => {
   const controller = await readSource('src/controllers/imprest.controller.js');
   const createStart = controller.indexOf('export const createAllocation');
   const confirmStart = controller.indexOf('export const confirmReceipt');

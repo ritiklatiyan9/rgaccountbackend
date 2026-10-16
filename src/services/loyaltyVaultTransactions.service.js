@@ -150,6 +150,7 @@ export function publicVaultTransaction(row) {
     holder_type: row.holder_type, holder_id: row.holder_id, holder_name: row.holder_name,
     plot_no: row.plot_no,buyer_name: row.buyer_name,plot_block: row.plot_block,
     site_id: row.site_id, site_name: row.site_name, status: row.status, source_status: row.source_status,
+    source_reviewed_at: s.approved_at || null,
     cheque_status: row.cheque_status, payment_mode: row.payment_mode==='SPLIT'?'CASH':row.payment_mode, source_payment_mode: row.payment_mode,
     credit: String(row.credit), debit: String(row.debit), posted_amount: String(row.posted_amount),
     pending_credit: ['pending_clearance','pending_approval'].includes(row.status) ? String(row.unposted_credit) : '0',
