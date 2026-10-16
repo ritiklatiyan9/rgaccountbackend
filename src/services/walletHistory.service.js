@@ -39,8 +39,6 @@ const moduleName = `CASE e.source_table
   WHEN 'vendor_payments' THEN 'Vendor Payments' WHEN 'vendor_inventory_payments' THEN 'Vendor Inventory'
   WHEN 'land_deal_payments' THEN 'Land Deals' WHEN 'misc_income_entries' THEN 'Miscellaneous Income'
   WHEN 'partner_profit_payments' THEN 'Partner Profit'
-  WHEN 'imprest_allocations' THEN 'Imprest' WHEN 'imprest_transfers' THEN 'Imprest'
-  WHEN 'imprest_returns' THEN 'Imprest' WHEN 'imprest_ledger' THEN 'Imprest'
   ELSE CASE WHEN e.transfer_id IS NOT NULL THEN 'Wallet Transfer' ELSE 'Cash Wallet' END END`;
 
 export const walletHistoryJoins = `FROM site_history e
@@ -93,7 +91,7 @@ export const walletHistorySelect = `e.*,
   e.details->>'payment_mode' AS payment_mode,t.status AS transfer_status,t.note AS transfer_note,
   t.created_at AS requested_at,t.resolved_at,t.resolution_note,resolver.name AS resolved_by_name,
   COALESCE(sender.name,sender_member.full_name) AS from_holder_name,recipient.name AS to_holder_name,
-  COALESCE(e.details->>'counterparty_name',CASE WHEN e.amount<0 THEN recipient.name ELSE COALESCE(sender.name,sender_member.full_name) END) AS counterparty_name`;
+  CASE WHEN e.amount<0 THEN recipient.name ELSE COALESCE(sender.name,sender_member.full_name) END AS counterparty_name`;
 
 export const walletHistorySearch = `concat_ws(' ',e.description,context.source_description,context.module_name,
   e.source_table,e.source_id::text,e.transfer_id::text,u.name,m.full_name,s.name,actor.name,

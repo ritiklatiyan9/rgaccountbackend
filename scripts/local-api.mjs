@@ -1,4 +1,3 @@
-import { up as migrateWalletFundedImprest } from '../src/migrations/213_wallet_funded_imprest.js';
 // Local application preview using the configured database and authentication.
 // Run schema migrations explicitly with npm run migrate when needed.
 import http from 'node:http';
@@ -22,7 +21,6 @@ await migrateCashWalletReceiptDetails(pool);
 await migrateWalletBalanceGuards(pool);
 await migrateLockedCashCollector(pool);
 await migratePermanentWalletGuard(pool);
-  await migrateWalletFundedImprest(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

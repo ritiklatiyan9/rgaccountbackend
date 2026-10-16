@@ -1,4 +1,3 @@
-import { up as migrateWalletFundedImprest } from './migrations/213_wallet_funded_imprest.js';
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
@@ -64,7 +63,6 @@ connectDB().then(async () => {
   await migrateWalletBalanceGuards(pool);
   await migrateLockedCashCollector(pool);
   await migratePermanentWalletGuard(pool);
-  await migrateWalletFundedImprest(pool);
   await migratePlotFullPaymentDue(pool);
   await migrateDataStorage(pool);
   await migrateExistingVoucherGaps(pool);

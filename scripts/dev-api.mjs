@@ -1,8 +1,3 @@
-import { up as migrateWalletFundedImprest } from '../src/migrations/213_wallet_funded_imprest.js';
-import { up as migrateWalletBalanceGuards } from '../src/migrations/210_wallet_balance_guards.js';
-import { up as migratePermanentWalletGuard } from '../src/migrations/212_wallet_permanent_balance_guard.js';
-import { up as migrateLockedCashCollector } from '../src/migrations/211_locked_cash_collector.js';
-import { up as migrateCashWalletReceiptDetails } from '../src/migrations/209_cash_wallet_receipt_details.js';
 // Local API for frontend development. Schedulers run only in src/server.js.
 import http from 'node:http';
 import app from '../src/app.js';
@@ -42,11 +37,6 @@ await migratePlotAreaChanges(pool);
 await migratePlotBankRounding(pool);
 await migrateCreditWalletImprestDebits(pool);
 await migrateCashWalletSiteScope(pool);
-await migrateCashWalletReceiptDetails(pool);
-await migrateWalletBalanceGuards(pool);
-await migrateLockedCashCollector(pool);
-await migratePermanentWalletGuard(pool);
-await migrateWalletFundedImprest(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

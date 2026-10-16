@@ -47,8 +47,7 @@ export const summary = asyncHandler(async(req,res)=>{
     (COALESCE(w.balance,0)-COALESCE(w.reserved_balance,0))::text AS available_balance,'INR' AS currency,s.tracking_started_at,
     (SELECT COALESCE(sum(balance),0)::text FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS total_balance,
     CASE WHEN $3::boolean THEN (SELECT COALESCE(sum(amount),0)::text FROM loyalty_vault_entries
-      WHERE organization_id=$2 AND site_id=$4 AND kind NOT IN ('transfer_in','transfer_out')
-        AND COALESCE(source_table,'') NOT IN ('imprest_allocations','imprest_transfers','imprest_returns','imprest_ledger')) ELSE NULL END AS site_cash_incoming,
+      WHERE organization_id=$2 AND site_id=$4 AND kind NOT IN ('transfer_in','transfer_out')) ELSE NULL END AS site_cash_incoming,
     (SELECT COALESCE(sum(reserved_balance),0)::text FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS total_reserved_balance,
     (SELECT count(*)::int FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS holder_count,
     (SELECT COALESCE(sum(entry_count),0)::int FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS entry_count,

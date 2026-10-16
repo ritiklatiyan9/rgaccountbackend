@@ -286,8 +286,6 @@ const TdsSummaryType = new GraphQLObjectType({
 const SiteBalanceDetailType = new GraphQLObjectType({
   name: 'SiteBalanceDetail',
   fields: {
-    balanceSource: { type: GraphQLString },
-    walletHolderName: { type: GraphQLString },
     totalMoneyIn:         { type: new GraphQLNonNull(GraphQLFloat) },
     totalMoneyOut:        { type: new GraphQLNonNull(GraphQLFloat) },
     cashBalance:          { type: new GraphQLNonNull(GraphQLFloat) },

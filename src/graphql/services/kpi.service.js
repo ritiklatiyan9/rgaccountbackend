@@ -428,16 +428,6 @@ export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
  * This grouped query lets PostgreSQL scan the posted ledger once and returns
  * zero rows as zero balances through the accessible-sites left join.
  */
-export async function getCashWalletSiteBalanceDetail(siteId, start, end, db = pool) {
-  const detail = await getSiteBalanceDetail(siteId, start, end, db);
-  const { getSiteImprestWallet } = await import('../../services/imprestWallet.service.js');
-  const wallet = await getSiteImprestWallet(siteId, db);
-  return { ...detail, cashBalance: wallet.balance, distributableBalance: wallet.balance,
-    balanceBeforeImprest: roundMoney(wallet.balance + detail.bankBalance),
-    siteBalance: roundMoney(wallet.balance + detail.bankBalance),
-    balanceSource: 'CASH_WALLET', walletHolderName: wallet.wallet_holder_name };
-}
-
 export async function getAccessibleSiteBalances(userId, canReadAllSites, end, db = pool) {
   const { rows } = await db.query(
     `WITH accessible_sites AS MATERIALIZED (
@@ -462,15 +452,10 @@ export async function getAccessibleSiteBalances(userId, canReadAllSites, end, db
         GROUP BY le.site_id
      )
      SELECT access.id::int AS site_id,
-            COALESCE(wallet.balance, 0)::numeric AS cash_balance,
+            COALESCE(balance.cash_balance, 0)::numeric AS cash_balance,
             COALESCE(balance.bank_balance, 0)::numeric AS bank_balance
        FROM accessible_sites access
        LEFT JOIN ledger_balances balance ON balance.site_id = access.id
-       LEFT JOIN LATERAL (
-         SELECT sum(e.amount) AS balance FROM loyalty_vault_entries e
-           JOIN sites s ON s.id=access.id AND s.organization_id=e.organization_id
-          WHERE e.site_id=access.id AND e.holder_key='user:'||imprest_site_wallet_holder(access.id)::text
-       ) wallet ON true
       ORDER BY access.id`,
     [userId, Boolean(canReadAllSites), end]
   );
@@ -484,7 +469,7 @@ export async function getAccessibleSiteBalances(userId, canReadAllSites, end, db
 // Kept as the small compatibility API used by consistency checks and any
 // callers that only need the final number.
 export async function getSiteBalance(siteId, end) {
-  const detail = await getCashWalletSiteBalanceDetail(siteId, '1900-01-01', end);
+  const detail = await getSiteBalanceDetail(siteId, '1900-01-01', end);
   return detail.siteBalance;
 }
 
@@ -800,7 +785,7 @@ export async function getProfitKpis(siteId, end, excludeOldPlots = false) {
     getLandProfitDetail(siteId, end),
     getRunningExpense(siteId, end),
     getLandProfitByFarmer(siteId, end),
-    getCashWalletSiteBalanceDetail(siteId, '1900-01-01', end),
+    getSiteBalanceDetail(siteId, '1900-01-01', end),
   ]);
   const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);
   const farmerPaid = lands.reduce((sum, land) => sum + land.paid, 0);
@@ -857,7 +842,7 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false, re
     needs('imprestDistribution') ? getImprestDistribution(siteId, start, end) : [],
     needsRegistry ? getRegistryPayments(siteId, start, end) : {},
     needs('imprestPairs') ? getImprestPairs(siteId, start, end) : [],
-    needs('siteBalance', 'siteBalanceDetail') ? getCashWalletSiteBalanceDetail(siteId, start, end) : {},
+    needs('siteBalance', 'siteBalanceDetail') ? getSiteBalanceDetail(siteId, start, end) : {},
     needs('miscIncome', 'miscIncomeDetail', 'breakdown') ? getMiscIncome(siteId, start, end) : {},
     needs('plotIncoming', ...profitFields) ? getPlotIncoming(siteId, end, excludeOldPlots)
       : { finalSaleValue: 0, received: 0 },
