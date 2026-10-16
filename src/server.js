@@ -1,3 +1,4 @@
+import { ensureWalletStartup } from './services/walletStartup.service.js';
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
@@ -14,15 +15,6 @@ import { up as migrateTdsDeducteeMapping } from './migrations/191_tds_deductee_m
 import { up as migrateDataStorage } from './migrations/193_data_storage.js';
 import { up as migrateExistingVoucherGaps } from './migrations/196_existing_voucher_gaps_filled.js';
 import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_financial_settlements.js';
-import { up as migrateLoyaltyVault } from './migrations/199_loyalty_vault.js';
-import { up as migrateUnifiedCashWallet } from './migrations/203_unified_cash_wallet.js';
-import { up as migrateCashWalletReadIndexes } from './migrations/204_cash_wallet_read_indexes.js';
-import { up as migrateCreditWalletImprestDebits } from './migrations/207_credit_wallet_imprest_debits.js';
-import { up as migrateCashWalletSiteScope } from './migrations/208_cash_wallet_site_scope.js';
-import { up as migrateCashWalletReceiptDetails } from './migrations/209_cash_wallet_receipt_details.js';
-import { up as migrateWalletBalanceGuards } from './migrations/210_wallet_balance_guards.js';
-import { up as migrateLockedCashCollector } from './migrations/211_locked_cash_collector.js';
-import { up as migratePermanentWalletGuard } from './migrations/212_wallet_permanent_balance_guard.js';
 import { up as migratePlotFullPaymentDue } from './migrations/201_plot_full_payment_due.js';
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { initSocket } from './config/socket.js';
@@ -54,15 +46,10 @@ connectDB().then(async () => {
   await migrateGoogleDriveJobs(pool);
   await migrateTdsDeducteeMapping(pool);
   await migrateTdsFinancialSettlements(pool);
-  await migrateLoyaltyVault(pool);
-  await migrateUnifiedCashWallet(pool);
-  await migrateCashWalletReadIndexes(pool);
-  await migrateCreditWalletImprestDebits(pool);
-  await migrateCashWalletSiteScope(pool);
-  await migrateCashWalletReceiptDetails(pool);
-  await migrateWalletBalanceGuards(pool);
-  await migrateLockedCashCollector(pool);
-  await migratePermanentWalletGuard(pool);
+  const walletStartup = await ensureWalletStartup(pool);
+  console.log(walletStartup.applied.length
+    ? `[startup] Cash Wallet migrations applied: ${walletStartup.applied.join(', ')}`
+    : `[startup] Cash Wallet schema current; installed migrations skipped${walletStartup.repaired.length ? '; runtime functions restored' : ''}`);
   await migratePlotFullPaymentDue(pool);
   await migrateDataStorage(pool);
   await migrateExistingVoucherGaps(pool);
@@ -77,7 +64,7 @@ connectDB().then(async () => {
     startDriveShareRunner();
   } else console.log('Backup maintenance mode: business APIs, sockets and reminder schedulers are paused.');
 }).catch(err => {
-  console.error('Failed to connect to DB', err);
+  console.error('Backend startup failed', err);
   process.exit(1);
 });
 

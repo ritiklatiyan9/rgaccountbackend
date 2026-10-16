@@ -200,7 +200,9 @@
     "migrate:wallet-balance-guards": "node src/migrations/210_wallet_balance_guards.js",
     "test:wallet-flow": "PGLITE_MODULE=@electric-sql/pglite node --test test/cash-wallet-module-receipts-db.test.mjs test/wallet-balance-guards-db.test.mjs test/wallet-history-context-db.test.mjs test/cash-wallet-site-scope-db.test.mjs test/loyalty-vault-context.test.mjs test/sunny-wallet-repair-db.test.mjs",
     "migrate:locked-cash-collector": "node src/migrations/211_locked_cash_collector.js",
-    "migrate:permanent-wallet-guard": "node src/migrations/212_wallet_permanent_balance_guard.js"
+    "migrate:permanent-wallet-guard": "node src/migrations/212_wallet_permanent_balance_guard.js",
+    "ensure:wallet-startup": "node scripts/ensure-wallet-startup.mjs",
+    "test:wallet-startup": "node --test test/wallet-startup.test.mjs test/google-drive-startup.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",
