@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import MasterModel from './MasterModel.js';
 
 // ── Installment Model ──
@@ -50,29 +51,33 @@ class InstallmentPaymentModel extends MasterModel {
   /** All payments for an installment */
   async findByInstallmentId(installmentId, pool, creatorId = null) {
     const query = `
-      SELECT pip.*, u.name AS created_by_name
+      SELECT pip.*, p.site_id, u.name AS created_by_name
       FROM plot_installment_payments pip
+      JOIN plots p ON p.id = pip.plot_id
       LEFT JOIN users u ON u.id = pip.created_by
       WHERE pip.installment_id = $1
         AND ($2::text IS NULL OR pip.created_by = ANY(string_to_array($2::text, ',')::int[]))
       ORDER BY pip.payment_date ASC, pip.created_at ASC
     `;
     const result = await pool.query(query, [installmentId, creatorId]);
+    await attachModuleChequeDates(result.rows, pool, 'plot_installment_payments');
     return result.rows;
   }
 
   /** All payments for a plot */
   async findByPlotId(plotId, pool, creatorId = null) {
     const query = `
-      SELECT pip.*, pi.installment_name, pi.due_date, u.name AS created_by_name
+      SELECT pip.*, p.site_id, pi.installment_name, pi.due_date, u.name AS created_by_name
       FROM plot_installment_payments pip
       JOIN plot_installments pi ON pi.id = pip.installment_id
+      JOIN plots p ON p.id = pip.plot_id
       LEFT JOIN users u ON u.id = pip.created_by
       WHERE pip.plot_id = $1
         AND ($2::text IS NULL OR pip.created_by = ANY(string_to_array($2::text, ',')::int[]))
       ORDER BY pip.payment_date ASC, pip.created_at ASC
     `;
     const result = await pool.query(query, [plotId, creatorId]);
+    await attachModuleChequeDates(result.rows, pool, 'plot_installment_payments');
     return result.rows;
   }
 }

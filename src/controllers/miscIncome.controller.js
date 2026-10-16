@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { tdsInsertColumns, tdsInsertValues, tdsUpdateSet } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 // Miscellaneous Income — maintenance charges, token money, gifts, rent, interest…
@@ -168,6 +169,7 @@ export const listEntries = asyncHandler(async (req, res) => {
       ORDER BY e.date DESC, e.id DESC`,
     [siteId, from, to, categoryId, direction, visibility.creatorId],
   );
+  await attachModuleChequeDates(rows, pool, 'misc_income_entries', siteId);
   res.json({ entries: rows, summary: summarise(rows), entryVisibility: visibility });
 });
 
@@ -201,7 +203,11 @@ const validateEntry = async (data, res) => {
   return true;
 };
 
-const loadEntry = async (id) => (await pool.query(`${ENTRY_SELECT} WHERE e.id = $1`, [id])).rows[0] || null;
+const loadEntry = async (id) => {
+  const entry = (await pool.query(`${ENTRY_SELECT} WHERE e.id = $1`, [id])).rows[0] || null;
+  if (entry) await attachModuleChequeDates([entry], pool, 'misc_income_entries');
+  return entry;
+};
 
 /** POST /misc-income — always created pending, like every other money module. */
 export const createEntry = asyncHandler(async (req, res) => {
@@ -243,7 +249,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
      WHERE id=$1`,
     [id, data.category_id, data.direction, data.date, data.amount, data.payment_mode, data.party_name,
       data.bank_name, data.bank_account_no, data.bank_reference, data.bank_ifsc, data.cheque_no,
-      data.payment_mode === 'CHEQUE' ? 'PENDING' : null, data.remarks, data.voucher_url, data.assigned_admin_id, transactionTimeForWrite(existing.transaction_time ?? null)],
+      chequeStatusForPaymentEdit(existing, data), data.remarks, data.voucher_url, data.assigned_admin_id, transactionTimeForWrite(existing.transaction_time ?? null)],
   );
   res.json({ entry: await loadEntry(id), message: 'Entry updated and sent for approval' });
 });

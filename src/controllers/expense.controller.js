@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { expenseModel } from '../models/Expense.model.js';
@@ -183,6 +184,8 @@ export const listExpenses = asyncHandler(async (req, res) => {
   ]);
   const siteRow = siteRowRes.rows[0] || null;
 
+  await attachModuleChequeDates(paginatedData.items, pool, null, parseInt(site_id));
+
   const expensesWithVerify = paginatedData.items.map((e) => ({
     ...e,
     verifyUrl: buildVerifyUrl({
@@ -235,6 +238,7 @@ export const getExpense = asyncHandler(async (req, res) => {
   if (!(await canUserViewEntry(req.user, 'expenses', expense.created_by))) {
     return res.status(404).json({ message: 'Expense not found' });
   }
+  await attachModuleChequeDates([expense], pool, 'expenses');
   res.json({ expense: await signExpenseDocuments(expense) });
 });
 
@@ -311,11 +315,9 @@ export const updateExpense = asyncHandler(async (req, res) => {
     if (!['waiting', 'returned'].includes(data.status)) data.status = 'pending';
     data.approved_by = null;
     data.approved_at = null;
-    if (payment_mode !== undefined) {
-      data.cheque_status = String(payment_mode).trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null;
-    }
   }
 
+  data.cheque_status = chequeStatusForPaymentEdit(existing, data);
   const updated = await expenseModel.update(expenseId, data, pool);
   if (!updated) return res.status(404).json({ message: 'Expense not found' });
   if (changesPostingData && existing.status === 'approved') {
@@ -445,7 +447,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
           NULL::varchar AS account_no,
           NULL::varchar AS branch,
           'VENDOR'::varchar AS category,
-          vp.status,
+          vp.status, vp.cheque_status, vp.cheque_no,
           vp.approved_by,
           vp.approved_at,
           vp.created_by,
@@ -468,6 +470,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
 
   // Transform day_book entries to expense format and mark source
   const transformedDaybook = daybookList.map(entry => ({
+    ...entry,
     id: entry.id,
     site_id: entry.site_id,
     site_name: entry.site_name,
@@ -513,6 +516,7 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
     return b.id - a.id; // DESC by id
   });
 
+  await attachModuleChequeDates(allExpenses, pool, (row) => row.entry_type ? 'day_book' : row.source || 'expenses');
   res.json({ expenses: await Promise.all(allExpenses.map((expense) => signExpenseDocuments(expense))) });
 });
 

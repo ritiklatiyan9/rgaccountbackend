@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from '../../services/chequeDates.service.js';
 /**
  * Expenses GraphQL Service
  * Reuses the existing unified expense model (expenses + mapped modules).
@@ -82,6 +83,7 @@ export async function getExpensesPageData(siteId, { filters = {}, page = 1, limi
 
   const [paginatedData, siteRow, breakdowns] = await Promise.all(tasks);
 
+  await attachModuleChequeDates(paginatedData.items || [], pool, null, safeSiteId);
   const totalItems = parseInt(paginatedData.totalItems || 0, 10);
 
   const expensesWithVerify = (paginatedData.items || []).map((e) => ({

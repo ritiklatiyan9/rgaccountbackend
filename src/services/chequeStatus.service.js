@@ -3,6 +3,7 @@ import { chequeDateOnly, currentChequeBusinessDate, validateChequeTransactionDat
 const SOURCE_CONFIG = Object.freeze({
   farmer_payment: { table: 'farmer_payments', mirror: 'farmer_payments' },
   plot_commission_payment: { table: 'plot_commission_payments', mirror: 'plot_commission_payments' },
+  plot_commission: { table: 'plot_commissions', mirror: 'plot_commissions' },
   firm_transaction: { table: 'firm_transactions', mirror: 'firm_transactions' },
   plot_payment: { table: 'plot_payments', mirror: 'plot_payments' },
   plot_installment_payment: { table: 'plot_installment_payments', mirror: 'plot_installment_payments' },
@@ -49,7 +50,14 @@ async function lockMirror(db, source, entryId) {
       FOR UPDATE`,
     [config.mirror, entryId]
   );
-  return result.rows[0] || null;
+  if (result.rows[0] || source !== 'plot_commission') return result.rows[0] || null;
+  const projection = await db.query(
+    `SELECT cfe.* FROM cash_flow_entries cfe JOIN day_book d
+       ON cfe.source_module = 'day_book' AND cfe.source_id = d.id AND cfe.site_id = d.site_id
+      WHERE d.commission_id = $1 ORDER BY cfe.id LIMIT 1 FOR UPDATE OF cfe`,
+    [entryId]
+  );
+  return projection.rows[0] || null;
 }
 
 async function reconcilePlotCommission(db, paymentId) {
@@ -122,6 +130,8 @@ export async function updateChequeStatusRecord(db, {
   expectedSiteId,
   expectedAmount,
   requirePending = false,
+  authorizeSite,
+  requireTransactionDate = false,
 }) {
   const config = SOURCE_CONFIG[source];
   const targetStatus = normalizedStatus(status);
@@ -134,6 +144,7 @@ export async function updateChequeStatusRecord(db, {
 
   const mirror = await lockMirror(db, source, numericEntryId);
   if (!mirror) throw new ChequeStatusError('The cheque entry is missing from the accounting ledger.', 409, 'MISSING_LEDGER_MIRROR');
+  if (authorizeSite) await authorizeSite(mirror.site_id);
   if (expectedSiteId != null && Number(mirror.site_id) !== Number(expectedSiteId)) {
     throw new ChequeStatusError('The cheque does not belong to the selected site.', 403, 'SITE_SCOPE_MISMATCH');
   }
@@ -146,7 +157,7 @@ export async function updateChequeStatusRecord(db, {
       throw new ChequeStatusError('The cheque amount changed after matching. Refresh and run matching again.', 409, 'STALE_AMOUNT');
     }
   }
-  if (requirePending && mirror.cash_flow_month_id) {
+  if (mirror.cash_flow_month_id) {
     const period = await db.query(
       `SELECT is_locked FROM cash_flow_months WHERE id = $1`,
       [mirror.cash_flow_month_id]
@@ -158,8 +169,15 @@ export async function updateChequeStatusRecord(db, {
 
   let sourceBefore = mirror;
   let sourceAfter;
+  const requireClearanceDate = (before) => {
+    if (requireTransactionDate && targetStatus === 'CLEARED' && suppliedTransactionDate === undefined
+      && normalizedStatus(before.cheque_status) !== 'CLEARED') {
+      throw new ChequeStatusError('Date of Transaction is required when clearing a cheque.', 400, 'CHEQUE_TRANSACTION_DATE_REQUIRED');
+    }
+  };
   const trimmedChequeNo = chequeNo === undefined ? undefined : (chequeNo ? String(chequeNo).trim() : null);
   if (source === 'cash_flow_entry') {
+    requireClearanceDate(mirror);
     if (requirePending && normalizedStatus(mirror.cheque_status) !== 'PENDING') {
       throw new ChequeStatusError('This cheque is no longer pending.', 409, 'STALE_STATUS');
     }
@@ -179,6 +197,7 @@ export async function updateChequeStatusRecord(db, {
     const locked = await db.query(`SELECT * FROM ${config.table} WHERE id = $1 FOR UPDATE`, [numericEntryId]);
     sourceBefore = locked.rows[0];
     if (!sourceBefore) throw new ChequeStatusError('Cheque entry not found.', 404, 'ENTRY_NOT_FOUND');
+    requireClearanceDate(sourceBefore);
     if (requirePending && normalizedStatus(sourceBefore.cheque_status) !== 'PENDING') {
       throw new ChequeStatusError('This cheque is no longer pending.', 409, 'STALE_STATUS');
     }
@@ -223,6 +242,18 @@ export async function updateChequeStatusRecord(db, {
       [numericEntryId, targetStatus, trimmedChequeNo === undefined ? null : trimmedChequeNo]
     );
   }
+  if (source === 'plot_commission') {
+    // The legacy commission's Day Book row is its financial projection. Keep
+    // that projection aligned while leaving dates, amounts and approval to
+    // the existing source triggers and approval workflow.
+    await db.query(
+      `UPDATE day_book SET cheque_status = $2,
+          cheque_no = CASE WHEN $3::text IS NULL THEN cheque_no ELSE $3 END,
+          updated_at = NOW()
+        WHERE commission_id = $1 AND site_id = $4`,
+      [numericEntryId, targetStatus, trimmedChequeNo === undefined ? null : trimmedChequeNo, mirror.site_id]
+    );
+  }
   // Native trigger upserts deliberately leave this metadata column unchanged.
   // Keep the original source/ledger dates intact and record only clearance.
   // Legacy clients clearing a cheque today remain compatible; an already
@@ -245,6 +276,14 @@ export async function updateChequeStatusRecord(db, {
         WHERE vip.source_vendor_payment_id = $2
           AND cfe.source_module = 'vendor_inventory_payments' AND cfe.source_id = vip.id`,
       [transactionDate, numericEntryId]
+    );
+  }
+  if (source === 'plot_commission') {
+    await db.query(
+      `UPDATE cash_flow_entries cfe SET cheque_transaction_date = $1::date
+         FROM day_book d WHERE d.commission_id = $2 AND d.site_id = $3
+          AND cfe.site_id = d.site_id AND cfe.source_module = 'day_book' AND cfe.source_id = d.id`,
+      [transactionDate, numericEntryId, mirror.site_id]
     );
   }
   sourceAfter.cheque_apply_date = chequeDateOnly(sourceAfter.date || sourceAfter.payment_date || mirror.date);

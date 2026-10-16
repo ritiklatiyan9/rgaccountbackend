@@ -23,6 +23,7 @@ export class AiResolverError extends Error {
 const sourceCaseSql = `CASE cfe.source_module
   WHEN 'farmer_payments' THEN 'farmer_payment'
   WHEN 'plot_commission_payments' THEN 'plot_commission_payment'
+  WHEN 'plot_commissions' THEN 'plot_commission'
   WHEN 'firm_transactions' THEN 'firm_transaction'
   WHEN 'plot_payments' THEN 'plot_payment'
   WHEN 'plot_installment_payments' THEN 'plot_installment_payment'
@@ -43,6 +44,7 @@ END`;
 const sourceChequeStatusSql = `CASE cfe.source_module
   WHEN 'farmer_payments' THEN fp.cheque_status
   WHEN 'plot_commission_payments' THEN pcp.cheque_status
+  WHEN 'plot_commissions' THEN legacy_pc.cheque_status
   WHEN 'firm_transactions' THEN ft.cheque_status
   WHEN 'plot_payments' THEN pp.cheque_status
   WHEN 'plot_installment_payments' THEN pip.cheque_status
@@ -81,7 +83,7 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
        cfe.transaction_time,
        cfe.remarks,
        UPPER(${sourceChequeStatusSql}) AS cheque_status,
-       COALESCE(NULLIF(fp.cheque_no, ''), NULLIF(pcp.cheque_no, ''), NULLIF(ft.cheque_no, ''),
+       COALESCE(NULLIF(legacy_pc.cheque_no, ''), NULLIF(fp.cheque_no, ''), NULLIF(pcp.cheque_no, ''), NULLIF(ft.cheque_no, ''),
                 NULLIF(pp.cheque_no, ''), NULLIF(pip.cheque_no, ''), NULLIF(ex.cheque_no, ''),
                 NULLIF(vp.cheque_no, ''), NULLIF(vip.cheque_no, ''), NULLIF(prp.cheque_no, ''),
                 NULLIF(ldp.cheque_no, ''), NULLIF(mie.cheque_no, ''), NULLIF(db.cheque_no, ''),
@@ -103,6 +105,7 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
      FROM cash_flow_entries cfe
      JOIN sites s ON s.id = cfe.site_id AND s.organization_id = $1
      LEFT JOIN bank_accounts ba ON ba.id = cfe.bank_account_id
+     LEFT JOIN plot_commissions legacy_pc ON cfe.source_module = 'plot_commissions' AND legacy_pc.id = cfe.source_id
      LEFT JOIN farmer_payments fp ON cfe.source_module = 'farmer_payments' AND fp.id = cfe.source_id
      LEFT JOIN farmers f ON f.id = fp.farmer_id
      LEFT JOIN plot_payments pp ON cfe.source_module = 'plot_payments' AND pp.id = cfe.source_id
@@ -140,7 +143,7 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
        AND UPPER(COALESCE(${sourceChequeStatusSql}, '')) IN ('PENDING', 'CLEARED', 'BOUNCED', 'RETURNED')
        AND ($3::text IS NULL OR UPPER(COALESCE(${sourceChequeStatusSql}, '')) = $3)
        AND (cfe.source_module IS NULL OR cfe.source_module IN (
-         'farmer_payments', 'plot_commission_payments', 'firm_transactions', 'plot_payments',
+         'farmer_payments', 'plot_commission_payments', 'plot_commissions', 'firm_transactions', 'plot_payments',
          'plot_installment_payments', 'expenses', 'vendor_payments', 'vendor_inventory_payments',
          'plot_registry_payments', 'land_deal_payments', 'misc_income_entries', 'day_book'
        ))
@@ -148,7 +151,12 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
        -- Linked registry and Day Book rows are projections of another source.
        -- Matching them independently would expose the same cheque twice.
        AND (cfe.source_module IS DISTINCT FROM 'plot_registry_payments' OR prp.source_plot_payment_id IS NULL)
-       AND (cfe.source_module IS DISTINCT FROM 'day_book' OR COALESCE(db.is_financial_projection, FALSE) = FALSE)
+       AND (cfe.source_module IS DISTINCT FROM 'vendor_inventory_payments' OR vip.source_vendor_payment_id IS NULL)
+       AND (cfe.source_module IS DISTINCT FROM 'day_book' OR (
+         COALESCE(db.is_financial_projection, FALSE) = FALSE
+         AND db.farmer_payment_id IS NULL AND db.commission_id IS NULL AND db.cash_flow_entry_id IS NULL
+         AND db.firm_transaction_id IS NULL AND db.plot_payment_id IS NULL AND db.vendor_payment_id IS NULL
+       ))
      ORDER BY cfe.date, cfe.id`,
     [organizationId, siteId, statusFilter]
   );

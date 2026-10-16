@@ -65,8 +65,8 @@ export function requireManualStatusReason(value) {
 
 export function requireManualChequeStatus(value) {
   const status = String(value || '').trim().toUpperCase();
-  if (!['PENDING', 'CLEARED', 'BOUNCED'].includes(status)) {
-    const error = new Error('Manual cheque status must be PENDING, CLEARED, or BOUNCED.');
+  if (!['PENDING', 'CLEARED', 'BOUNCED', 'RETURNED'].includes(status)) {
+    const error = new Error('Manual cheque status must be PENDING, CLEARED, BOUNCED, or RETURNED.');
     error.statusCode = 400;
     error.code = 'INVALID_MANUAL_CHEQUE_STATUS';
     throw error;
@@ -543,6 +543,7 @@ export async function manuallyUpdateChequeStatus(req, res) {
       entryId,
       status,
       chequeTransactionDate: req.body.cheque_transaction_date,
+      requireTransactionDate: true,
       expectedSiteId: site.id,
       expectedAmount: candidate.amount,
       requirePending: false,
@@ -551,7 +552,7 @@ export async function manuallyUpdateChequeStatus(req, res) {
       organizationId: Number(req.user.organization_id) || 1,
       siteId: site.id,
       userId: req.user.id,
-      action: status === 'BOUNCED' ? 'BOUNCE' : status === 'CLEARED' ? 'CLEAR' : 'REOPEN',
+      action: status === 'BOUNCED' ? 'BOUNCE' : status === 'RETURNED' ? 'RETURN' : status === 'CLEARED' ? 'CLEAR' : 'REOPEN',
       eventType: 'MANUAL_CHEQUE_STATUS',
       module: 'bank_reconciliation',
       transactionName: candidate.customer_name || candidate.entry_label,

@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import plotCommissionModel from '../models/PlotCommission.model.js';
 import { dayBookModel } from '../models/DayBook.model.js';
@@ -28,6 +29,8 @@ export const createCommission = asyncHandler(async (req, res) => {
     voucher_url: voucher_url || null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     status: 'pending',
+    cheque_status: /\b(?:CHEQUE|CHECK)\b/i.test(String(by_note || '')) ? 'PENDING' : null,
+    cheque_no: req.body.cheque_no ? String(req.body.cheque_no).trim() : null,
   };
 
   const commission = await plotCommissionModel.create(data, pool);
@@ -51,6 +54,7 @@ export const createCommission = asyncHandler(async (req, res) => {
       created_by: req.user.id,
       assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
       commission_id: commission.id,
+      cheque_status: data.cheque_status, cheque_no: data.cheque_no,
     }, pool);
   }
 
@@ -72,6 +76,7 @@ export const listCommissions = asyncHandler(async (req, res) => {
     plotCommissionModel.getPersonSummary(siteId, pool),
   ]);
 
+  await attachModuleChequeDates(commissions, pool, 'plot_commissions', siteId);
   res.json({ commissions, summary, persons });
 });
 
@@ -100,6 +105,7 @@ export const getCommission = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const commission = await plotCommissionModel.findById(parseInt(id), pool);
   if (!commission) return res.status(404).json({ message: 'Commission entry not found' });
+  await attachModuleChequeDates([commission], pool, 'plot_commissions');
   res.json({ commission });
 });
 
@@ -126,6 +132,9 @@ export const updateCommission = asyncHandler(async (req, res) => {
   if (remarks !== undefined) updateData.remarks = remarks ? remarks.trim() : null;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
 
+  if (['date', 'amount', 'by_note'].some(key => Object.hasOwn(updateData, key))) {
+    updateData.cheque_status = chequeStatusForPaymentEdit(existing, updateData, 'by_note');
+  }
   const updated = await plotCommissionModel.update(parseInt(id), updateData, pool);
 
   // ── Sync DayBook entry ──
@@ -144,6 +153,7 @@ export const updateCommission = asyncHandler(async (req, res) => {
         remarks: updated.remarks || null,
         payment_mode: updated.by_note ? updated.by_note.toUpperCase() : 'CASH',
         to_entity: updated.particular,
+        cheque_status: updated.cheque_status, cheque_no: updated.cheque_no,
       }, pool);
     }
   } catch (err) {

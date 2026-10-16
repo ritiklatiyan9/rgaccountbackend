@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from '../src/services/chequeDates.service.js';
 import test from 'node:test';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
@@ -45,7 +46,7 @@ test('PostgreSQL: pending → cleared → approved posts exactly once; rejected/
     let notifications = 0;
     const controller = readFileSync(new URL('../src/controllers/approval.controller.js', import.meta.url), 'utf8')
       .replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
-    const context = { pool: {query: (sql, params) => {
+    const context = { attachModuleChequeDates, pool: {query: (sql, params) => {
       if (/COUNT\(\*\)/.test(sql) && !sql.includes('FROM plot_payments pp')) return {rows:[{count:0}]};
       return db.query(sql, params);
     }}, asyncHandler: fn => fn, console, chequeReadyForApproval, chequeReadySql,

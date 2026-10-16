@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from './chequeDates.service.js';
 import pool from '../config/db.js';
 import commissionModel from '../models/PlotCommissionV2.model.js';
 import { farmerModel } from '../models/Farmer.model.js';
@@ -25,7 +26,7 @@ export const MODULE_REPORTS = Object.freeze({
   misc_income: 'misc_income', daybook: 'daybook', personal_ledgers: 'cashflow',
 });
 
-export async function loadModuleReport(key, siteId, creatorId, db = pool) {
+async function readModuleReport(key, siteId, creatorId, db = pool) {
   switch (key) {
     case 'commission': return commissionModel.findBySiteIdGroupedByPlot(siteId, db, null, null, creatorId);
     case 'registry': return plotRegistryModel.findBySiteId(siteId, db, creatorId);
@@ -91,7 +92,9 @@ export async function loadModuleReport(key, siteId, creatorId, db = pool) {
       const entries = await queryRows(db, `
       SELECT l.*, e.voucher_url, ${daybookLedgerDateSql('l', 'e')} AS entry_date,
              ${daybookLedgerDateSql('l', 'e')} AS date, l.entry_date AS cheque_apply_date,
-             e.cheque_transaction_date, l.raw_mode AS payment_mode, l.source_key AS source,
+             e.cheque_transaction_date, COALESCE(e.source_module, 'cash_flow_entries') AS cheque_source_module,
+             COALESCE(e.source_id, e.id) AS cheque_source_id,
+             l.raw_mode AS payment_mode, l.source_key AS source,
              l.entity_name AS party, l.linked_detail AS category
       FROM ledger_entries l JOIN cash_flow_entries e ON e.id::text = split_part(l.id, ':', 1) AND e.site_id = l.site_id
       WHERE l.site_id = $1 AND ${scope('e')}
@@ -103,4 +106,12 @@ export async function loadModuleReport(key, siteId, creatorId, db = pool) {
     }
     default: throw new Error('Unknown module report.');
   }
+}
+
+// The same receipt metadata follows payments into portfolio, print and Drive readers.
+export async function loadModuleReport(key, siteId, creatorId, db = pool) {
+  const rows = await readModuleReport(key, siteId, creatorId, db);
+  const modules = { commission_payments: 'plot_commission_payments', land_payments: 'farmer_payments', vendor_payments: 'vendor_payments', misc_income: 'misc_income_entries' };
+  if (key === 'expenses' || modules[key]) await attachModuleChequeDates(rows, db, modules[key] || null, siteId);
+  return rows;
 }

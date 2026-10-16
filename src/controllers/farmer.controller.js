@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { tdsInsertColumns, tdsInsertValues, withPaymentTds } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
@@ -456,6 +457,7 @@ export const listPayments = asyncHandler(async (req, res) => {
   const totalPaid = parseFloat(farmer.total_paid) || 0;
   const totalInterest = parseFloat(farmer.total_interest) || 0;
 
+  await attachModuleChequeDates(payments, pool, 'farmer_payments', farmer.site_id);
   const paymentsWithVerify = payments.map((p) => ({
     ...p,
     verifyUrl: buildVerifyUrl({
@@ -582,7 +584,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
     updateData.approved_by = null;
     updateData.approved_at = null;
     if (tupleTouched || cheque_no !== undefined) {
-      updateData.cheque_status = effectiveMode === 'CHEQUE' ? 'PENDING' : null;
+      updateData.cheque_status = chequeStatusForPaymentEdit(existing, updateData);
     }
 
     Object.assign(updateData, withPaymentTds('farmer_payments', {}));

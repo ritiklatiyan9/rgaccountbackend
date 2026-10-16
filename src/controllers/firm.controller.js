@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model.js';
@@ -504,7 +505,8 @@ export const bulkCreateTransactions = asyncHandler(async (req, res) => {
 
     const normalizedDescription = description.toString().trim();
     const normalizedChequeNo = cheque_no ? cheque_no.toString().trim() : null;
-    const txnPaymentMode = (payment_mode || 'bank').toLowerCase() === 'cash' ? 'cash' : 'bank';
+    const rawMode = String(payment_mode || 'bank').trim().toLowerCase();
+    const txnPaymentMode = ['cash', 'bank', 'cheque'].includes(rawMode) ? rawMode : 'bank';
     const signature = txnSignature({
       date: txnDate,
       description: normalizedDescription,
@@ -698,7 +700,7 @@ export const listTransactions = asyncHandler(async (req, res) => {
   // so it can run in the same parallel batch (was a serial follow-up).
   const cfFirmPromise = pool.query(
     `SELECT
-       cfe.id,
+       cfe.id, cfe.site_id, cfe.source_module, cfe.source_id, cfe.cheque_no, cfe.cheque_transaction_date,
        cfe.date,
        cfe.particular AS description,
        CASE WHEN cfe.from_firm_id = $1 THEN COALESCE(cfe.debit, 0) + COALESCE(cfe.credit, 0) ELSE 0 END AS debit,
@@ -756,6 +758,7 @@ export const listTransactions = asyncHandler(async (req, res) => {
     cfResult.rows.forEach((r) => { cfMap[r.id] = r; });
   }
 
+  await attachModuleChequeDates(transactions, pool, 'firm_transactions', firmData?.site_id);
   const enriched = transactions.map((t) => {
     if (t.cash_flow_entry_id && cfMap[t.cash_flow_entry_id]) {
       const cf = cfMap[t.cash_flow_entry_id];
@@ -764,9 +767,11 @@ export const listTransactions = asyncHandler(async (req, res) => {
     return t;
   });
 
+  await attachModuleChequeDates(cfFirmResult.rows, pool, 'cash_flow_entries', firmData?.site_id);
+
   const cfFirmEntries = cfFirmResult.rows.map(row => ({
     ...row,
-    payment_mode: (row.payment_mode || 'cash').toLowerCase() === 'bank' ? 'bank' : 'cash',
+    payment_mode: (row.payment_mode || 'cash').toLowerCase(),
     id: `cf_${row.id}`,
     is_cashflow_entry: true,
     balance: null,
@@ -793,6 +798,7 @@ export const getTransaction = asyncHandler(async (req, res) => {
   if (!(await canUserViewEntry(req.user, 'firm_transactions', txn.created_by))) {
     return res.status(404).json({ message: 'Transaction not found' });
   }
+  await attachModuleChequeDates([txn], pool, 'firm_transactions');
   res.json({ transaction: txn });
 });
 
@@ -815,7 +821,11 @@ export const updateTransaction = asyncHandler(async (req, res) => {
   if (description !== undefined) updateData.description = description.trim();
   if (debit !== undefined) updateData.debit = parseFloat(debit) || 0;
   if (credit !== undefined) updateData.credit = parseFloat(credit) || 0;
-  if (payment_mode !== undefined) updateData.payment_mode = payment_mode.toLowerCase() === 'bank' ? 'bank' : 'cash';
+  if (payment_mode !== undefined) {
+    const nextMode = String(payment_mode).trim().toLowerCase();
+    if (!['cash', 'bank', 'cheque'].includes(nextMode)) return res.status(400).json({ message: 'Payment mode must be cash, bank, or cheque' });
+    updateData.payment_mode = nextMode;
+  }
   if (name !== undefined) updateData.name = name ? name.trim().toUpperCase() : null;
   if (purpose !== undefined) updateData.purpose = purpose ? purpose.trim().toUpperCase() : null;
   if (remark !== undefined) updateData.remark = remark ? remark.trim().toUpperCase() : null;
@@ -832,6 +842,8 @@ export const updateTransaction = asyncHandler(async (req, res) => {
     updateData.approved_by = null;
     updateData.approved_at = null;
   }
+
+  updateData.cheque_status = chequeStatusForPaymentEdit(existing, updateData);
 
   // ── If a linked CF entry exists, fetch (cf_entry + cf_month + firm) in
   //    ONE query in parallel with the main UPDATE. Was up to 4 serial RTTs:
@@ -860,9 +872,10 @@ export const updateTransaction = asyncHandler(async (req, res) => {
     const cfUpdate = {};
     if (date !== undefined) cfUpdate.date = date;
     if (description !== undefined) cfUpdate.particular = description.trim().toUpperCase();
-    if (payment_mode !== undefined) cfUpdate.cash_type = payment_mode.toLowerCase() === 'bank' ? 'bank' : 'cash';
+    if (payment_mode !== undefined) cfUpdate.cash_type = updateData.payment_mode;
     if (debit !== undefined) cfUpdate.debit = parseFloat(debit) || 0;
     if (credit !== undefined) cfUpdate.credit = parseFloat(credit) || 0;
+    cfUpdate.cheque_status = updated.cheque_status;
     cfUpdate.remarks = [ctx.firm_name, remark ?? existing.remark, purpose ?? existing.purpose, name ?? existing.name].filter(Boolean).join(' | ');
     await cashFlowEntryModel.update(existing.cash_flow_entry_id, cfUpdate, pool);
   }
@@ -1066,6 +1079,7 @@ export const getFirmHistoryAnalytics = asyncHandler(async (req, res) => {
     ),
   ]);
 
+  await attachModuleChequeDates(transactionsResult.rows, pool, 'firm_transactions');
   res.json({
     summary: summaryResult.rows[0] || { total_entries: 0, total_debit: 0, total_credit: 0 },
     byFirm: byFirmResult.rows,

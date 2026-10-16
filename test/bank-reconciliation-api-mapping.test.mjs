@@ -180,10 +180,10 @@ test('manual cheque status route is permission gated and auditable', async () =>
   assert.match(controller, /bank_statement_linked: false/);
 });
 
-test('manual cheque status accepts only the three requested decisions', () => {
-  for (const status of ['PENDING', 'CLEARED', 'BOUNCED']) assert.equal(requireManualChequeStatus(status), status);
+test('manual cheque status accepts all four lifecycle decisions', () => {
+  for (const status of ['PENDING', 'CLEARED', 'BOUNCED', 'RETURNED']) assert.equal(requireManualChequeStatus(status), status);
   assert.throws(
-    () => requireManualChequeStatus('RETURNED'),
+    () => requireManualChequeStatus('APPROVED'),
     (error) => error.code === 'INVALID_MANUAL_CHEQUE_STATUS' && error.statusCode === 400,
   );
 });

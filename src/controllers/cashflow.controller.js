@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model.js';
 import { firmModel } from '../models/Firm.model.js';
@@ -325,6 +326,7 @@ export const listEntries = asyncHandler(async (req, res) => {
     ? (await pool.query('SELECT name, city, state FROM sites WHERE id = $1', [monthData.site_id])).rows[0] || null
     : null;
 
+  await attachModuleChequeDates(entries, pool, 'cash_flow_entries', monthData?.site_id);
   const entriesWithVerify = entries.map((e) => {
     const debit = parseFloat(e.debit) || 0;
     const credit = parseFloat(e.credit) || 0;
@@ -372,6 +374,7 @@ export const getEntry = asyncHandler(async (req, res) => {
   if (!(await canUserViewEntry(req.user, 'cashflow', entry.created_by))) {
     return res.status(404).json({ message: 'Entry not found' });
   }
+  await attachModuleChequeDates([entry], pool, 'cash_flow_entries');
   res.json({ entry });
 });
 
@@ -398,10 +401,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
   // ── Single round-trip lookup: existing entry + its month's lock state in
   //    one query (was 2 serial queries: findById + cfMonth lookup). ──
   const lookupRes = await pool.query(
-    `SELECT cfe.id, cfe.cash_flow_month_id, cfe.site_id, cfe.is_firm_transaction,
-            cfe.from_firm_id, cfe.to_firm_id, cfe.to_name,
-            cfe.created_by,
-            cfm.is_locked
+    `SELECT cfe.*, cfm.is_locked
        FROM cash_flow_entries cfe
        JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
       WHERE cfe.id = $1`,
@@ -419,7 +419,7 @@ export const updateEntry = asyncHandler(async (req, res) => {
   if (particular !== undefined) updateData.particular = particular.trim().toUpperCase();
   if (debit !== undefined) updateData.debit = parseFloat(debit) || 0;
   if (credit !== undefined) updateData.credit = parseFloat(credit) || 0;
-  if (cash_type !== undefined) updateData.cash_type = (['cash', 'bank'].includes(String(cash_type).toLowerCase())) ? String(cash_type).toLowerCase() : 'bank';
+  if (cash_type !== undefined) updateData.cash_type = (['cash', 'bank', 'cheque'].includes(String(cash_type).toLowerCase())) ? String(cash_type).toLowerCase() : 'bank';
   if (remarks !== undefined) updateData.remarks = remarks ? remarks.trim() : null;
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
@@ -484,10 +484,8 @@ export const updateEntry = asyncHandler(async (req, res) => {
   updateData.status = 'pending';
   updateData.approved_by = null;
   updateData.approved_at = null;
-  if (cash_type !== undefined) {
-    updateData.cheque_status = String(cash_type).toLowerCase() === 'cheque' ? 'PENDING' : null;
-  }
 
+  updateData.cheque_status = chequeStatusForPaymentEdit(existing, updateData, 'cash_type');
   const updated = await cashFlowEntryModel.update(entryId, updateData, pool);
   clearCacheByPrefixes(['dashboard:']).catch(() => {});
   res.json({ entry: updated });

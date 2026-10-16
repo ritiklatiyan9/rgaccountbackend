@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { attachChequeDates, chequeDateOnly, chequeMetadataFromOwner, currentChequeBusinessDate, validateChequeTransactionDate } from '../src/services/chequeDates.service.js';
+import { chequeStatusForPaymentEdit, attachChequeDates, chequeDateOnly, chequeMetadataFromOwner, currentChequeBusinessDate, validateChequeTransactionDate } from '../src/services/chequeDates.service.js';
 
 test('clearance dates reject impossible calendar dates, timestamps and absent values', () => {
   assert.equal(validateChequeTransactionDate('2028-02-29'), '2028-02-29');
@@ -71,4 +71,16 @@ test('linked daily rows take cheque metadata from the owner and match ledger ran
   const reopened = { ...daily, ...chequeMetadataFromOwner({ ...owner, cheque_status: 'PENDING', cheque_transaction_date: '2026-08-22' }) };
   await attachChequeDates([reopened], { query() { throw new Error('No read for a pending cheque'); } }, () => null);
   assert.equal(reopened.cheque_transaction_date, null, 'a preloaded old date cannot override reopened owner status');
+});
+
+
+test('ordinary edit resubmissions preserve lifecycle while material payment changes require re-verification', () => {
+  for (const status of ['PENDING','CLEARED','BOUNCED','RETURNED']) {
+    const original = { payment_mode:'cheque',date:new Date(2026,9,1),amount:'100.00',bank_name:'PNB',cheque_no:'001',cheque_status:status };
+    assert.equal(chequeStatusForPaymentEdit(original,{payment_mode:'CHEQUE',date:'2026-10-01',amount:100,remarks:'Changed note',cheque_status:'CLEARED'}),status);
+    for (const changed of [{amount:200},{date:'2026-10-02'},{cheque_no:'002'},{bank_name:'SBI'}]) assert.equal(chequeStatusForPaymentEdit(original,changed),'PENDING');
+    assert.equal(chequeStatusForPaymentEdit(original,{payment_mode:'BANK'}),null);
+  }
+  assert.equal(chequeStatusForPaymentEdit({cash_type:'bank'},{cash_type:'cheque'},'cash_type'),'PENDING');
+  assert.equal(chequeStatusForPaymentEdit({by_note:'CHEQUE',cheque_status:'CLEARED'},{remarks:'No financial change'},'by_note'),'CLEARED');
 });

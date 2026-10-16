@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import { tdsInsertColumns, tdsInsertValues, tdsUpdateSet } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -477,7 +478,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   let itemPaymentsByOrder = new Map();
   if (orderIds.length > 0) {
     const itemPaysResult = await pool.query(
-      `SELECT p.id, p.order_id, p.payment_date, p.amount, p.payment_mode, p.reference_no,
+      `SELECT p.id, p.site_id, p.source_vendor_payment_id, p.order_id, p.payment_date, p.amount, p.payment_mode, p.reference_no,
               p.cheque_no, p.cheque_status, p.status, p.note, p.voucher_url, p.created_at, p.updated_at,
               u.name AS created_by_name
        FROM vendor_inventory_payments p
@@ -487,6 +488,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
        ORDER BY p.payment_date DESC, p.id DESC`,
       [orderIds, entryVisibility.creatorId]
     );
+    await attachModuleChequeDates(itemPaysResult.rows, pool, 'vendor_inventory_payments', siteId);
     for (const row of itemPaysResult.rows) {
       const list = itemPaymentsByOrder.get(row.order_id);
       if (list) list.push(row);
@@ -513,6 +515,7 @@ export const getVendorCommitmentDetail = asyncHandler(async (req, res) => {
   });
 
   const siteRow = siteResult.rows[0] || null;
+  await attachModuleChequeDates(paymentsResult.rows, pool, 'vendor_payments', siteId);
   const payments = paymentsResult.rows.map((p) => ({
     ...p,
     verifyUrl: buildVerifyUrl({
@@ -546,7 +549,7 @@ export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
       vp.commitment_id,
       vp.payment_date,
       vp.amount,
-      vp.payment_mode,
+      vp.payment_mode, vp.cheque_status, vp.cheque_no, cfe.cheque_transaction_date,
       cfe.bank_account_id,
       ba.name AS bank_account_name,
       vp.reference_no,
@@ -591,6 +594,7 @@ export const getVendorPaymentReceipt = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Payment not found' });
   }
 
+  await attachModuleChequeDates([receipt], pool, 'vendor_payments', siteId);
   res.json({
     receipt: {
       ...receipt,
@@ -888,7 +892,9 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
             assigned_admin_id = $7, status = 'pending',
             approved_by = NULL, approved_at = NULL,
             cheque_no = CASE WHEN $3 = 'cheque' THEN $4 ELSE NULL END,
-            cheque_status = CASE WHEN $3 = 'cheque' THEN 'PENDING' ELSE NULL END,
+            cheque_status = CASE WHEN $3 = 'cheque' THEN CASE
+              WHEN LOWER(payment_mode) = 'cheque' AND payment_date = $1::date AND amount = $2::numeric
+                AND cheque_no IS NOT DISTINCT FROM $4::text THEN COALESCE(cheque_status, 'PENDING') ELSE 'PENDING' END ELSE NULL END,
             updated_at = NOW()${tdsUpdateSet('vendor_payments')}
      WHERE id = $8 AND site_id = $9
      RETURNING *`,
@@ -911,7 +917,7 @@ export const updateVendorPayment = asyncHandler(async (req, res) => {
         SET payment_date = $2, payment_mode = $3, reference_no = $4,
             transaction_time = (SELECT transaction_time FROM vendor_payments WHERE id = $1),
             cheque_no = CASE WHEN $3 = 'cheque' THEN $4 ELSE NULL END,
-            cheque_status = CASE WHEN $3 = 'cheque' THEN 'PENDING' ELSE NULL END,
+            cheque_status = (SELECT vp.cheque_status FROM vendor_payments vp WHERE vp.id = $1),
             note = $5, voucher_url = $6, assigned_admin_id = $7,
             status = 'pending', approved_by = NULL, approved_at = NULL, updated_at = NOW()
       WHERE source_vendor_payment_id = $1`,

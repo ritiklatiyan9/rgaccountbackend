@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -323,6 +324,7 @@ export const getPlotCommissionDetail = asyncHandler(async (req, res) => {
 
   if (!master) return res.status(404).json({ message: 'Commission not found' });
 
+  await attachModuleChequeDates(payments, pool, 'plot_commission_payments', master.site_id);
   res.json({ master, payments, entryVisibility });
 });
 
@@ -435,6 +437,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
   ]);
 
   const allPayments = paymentsResult.rows;
+  await attachModuleChequeDates(allPayments, pool, 'plot_commission_payments');
   const siteRow = siteResult.rows[0] || null;
 
   // ── Shape the timeline rows (one booking of this plot_no per row) FIRST so
@@ -647,6 +650,7 @@ const landSubjectDetail = async (kind, subjectId, numSiteId, entryVisibility) =>
   const site = siteRows[0] || null;
   const agentName = Object.fromEntries(commissions.map((c) => [c.id, c.agent_name]));
   const byCommission = {};
+  await attachModuleChequeDates(payments, pool, 'plot_commission_payments', numSiteId);
   for (const p of payments) {
     (byCommission[p.plot_commission_id] ||= []).push({
       ...p,
@@ -927,9 +931,8 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Payment date must be a valid date between 1900 and 2100' });
   }
 
-  // Build the SET-list dynamically. The cheque_status update needs the
-  // existing row's value when payment_mode stays CHEQUE — handled below
-  // with a CASE in SQL so we don't need a separate SELECT round-trip.
+  // Preserve lifecycle for unchanged instrument fields; material payment
+  // edits require verification again through the shared status workflow.
   const fields = [];
   const values = [];
   const add = (col, val) => { fields.push(`${col} = $${fields.length + 1}`); values.push(val); };
@@ -947,18 +950,8 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   if (voucher_url !== undefined) add('voucher_url', voucher_url || null);
   if (assigned_admin_id !== undefined) add('assigned_admin_id', assigned_admin_id ? parseInt(assigned_admin_id) : null);
 
-  // cheque_status follows payment_mode: edited cheques return to PENDING,
-  // otherwise NULL. Handled via CASE so we don't need a SELECT round-trip.
-  if (payment_mode !== undefined) {
-    fields.push(
-      `cheque_status = CASE
-         WHEN UPPER($${fields.length + 1}::text) = 'CHEQUE'
-           THEN 'PENDING'
-         ELSE NULL
-       END`
-    );
-    values.push(payment_mode);
-  }
+  const chequeChanges = Object.fromEntries(fields.map((field, index) => [field.split('=')[0].trim(), values[index]]));
+  add('cheque_status', chequeStatusForPaymentEdit(existing, chequeChanges));
 
   if (fields.length === 0) return res.status(400).json({ message: 'Nothing to update' });
 

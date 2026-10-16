@@ -206,7 +206,7 @@
     "ensure:wallet-startup": "node scripts/ensure-wallet-startup.mjs",
     "test:wallet-startup": "node --test test/wallet-startup.test.mjs test/google-drive-startup.test.mjs",
     "migrate:cheque-transaction-dates": "node src/migrations/215_cheque_transaction_dates.js",
-    "test:cheque-dates": "node --test test/cheque-dates.test.mjs test/cheque-status.test.mjs test/cheque-transaction-dates-db.test.mjs test/historical-cheque-entry-dates-db.test.mjs",
+    "test:cheque-dates": "node --test test/cheque-dates.test.mjs test/cheque-status.test.mjs test/cheque-transaction-dates-db.test.mjs test/historical-cheque-entry-dates-db.test.mjs test/cheque-module-coverage-db.test.mjs",
     "backfill:historical-cheque-dates": "node src/scripts/backfillHistoricalChequeDates.mjs"
   },
   "dependencies": {

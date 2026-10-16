@@ -16,7 +16,7 @@ import { clearCacheByPrefixes } from '../config/cache.js';
 import { attachDayBookTds, attachDayBookTdsSettlements, excludeSourceLinkedTdsSettlement } from '../services/daybookTds.service.js';
 import { attachTransactionParticulars } from '../services/transactionParticulars.service.js';
 import { withPaymentTds, tdsUpdateSet } from '../services/paymentTds.service.js';
-import { attachChequeDates, chequeMetadataFromOwner } from '../services/chequeDates.service.js';
+import { attachChequeDates, chequeMetadataFromOwner, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { commissionTdsModule, getTdsWorkflow, parsePaymentTds } from '../services/tdsWorkflow.service.js';
 import { resolveTdsDeductee, resolvePaymentDeductee } from '../services/tdsDeductee.service.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
@@ -2321,7 +2321,7 @@ export const updateFarmerPaymentFromDayBook = asyncHandler(async (req, res) => {
     fpUpdate.approved_by = null;
     fpUpdate.approved_at = null;
     if (tupleTouched || cheque_no !== undefined) {
-      fpUpdate.cheque_status = effectiveMode === 'CHEQUE' ? 'PENDING' : null;
+      fpUpdate.cheque_status = chequeStatusForPaymentEdit(existing, fpUpdate);
     }
 
     Object.assign(fpUpdate, withPaymentTds('farmer_payments', {}));
@@ -2866,6 +2866,7 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
             cfe.bank_account_id, ba.name AS bank_account_name,
             cfe.remarks, cfe.status, cfe.source_module, cfe.source_id,
             cfe.voucher_url, cfe.created_at, cfe.cheque_status, cfe.cheque_no,
+            cfe.cheque_transaction_date, cfe.site_id,
             COALESCE(u.name, u.email) AS created_by_name,
             CASE
               WHEN cfe.source_module = 'plot_payments' THEN pl.plot_no
@@ -2918,6 +2919,7 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
   const siteRowRes = await pool.query('SELECT name, city, state FROM sites WHERE id = $1', [siteId]);
   const siteRow = siteRowRes.rows[0] || null;
 
+  await attachChequeDates(result.rows, pool, (row) => ({ ledgerId: row.id, siteId }));
   const transactions = result.rows.map((row) => ({
     ...row,
     verifyUrl: buildVerifyUrl({

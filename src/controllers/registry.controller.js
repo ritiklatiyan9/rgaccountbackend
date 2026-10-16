@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { registrySizeFromPlot, registryFinanceFromPlot } from '../utils/registrySize.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { registryCoverageSql } from '../utils/registryCashAllocation.js';
@@ -691,6 +692,7 @@ export const listRegistryPayments = asyncHandler(async (req, res) => {
     ),
   ]);
 
+  await attachModuleChequeDates(payments, pool, 'plot_registry_payments', registry?.site_id);
   const receiptContext = contextResult.rows[0] || registry || {};
   res.json({
     payments: payments.map((payment) => withRegistryPaymentVerifyUrl(payment, receiptContext)),
@@ -716,6 +718,7 @@ export const getRegistryPayment = asyncHandler(async (req, res) => {
       WHERE pr.id = $1`,
     [payment.registry_id]
   );
+  await attachModuleChequeDates([payment], pool, 'plot_registry_payments');
   res.json({ payment: withRegistryPaymentVerifyUrl(payment, rows[0] || {}) });
 });
 
@@ -745,8 +748,7 @@ export const updateRegistryPayment = asyncHandler(async (req, res) => {
   updateData.status = 'pending';
   updateData.approved_by = null;
   updateData.approved_at = null;
-  const finalMode = String(payment_mode !== undefined ? payment_mode : existing.payment_mode || '').trim().toUpperCase();
-  updateData.cheque_status = finalMode === 'CHEQUE' ? 'PENDING' : null;
+  updateData.cheque_status = chequeStatusForPaymentEdit(existing, updateData);
 
   // Atomic UPDATE — saves a SELECT round-trip.
   const updated = await plotRegistryPaymentModel.update(paymentId, updateData, pool);
@@ -965,6 +967,7 @@ const buildNocPayload = async (registryId) => {
     plotPayments = payRes.rows;
   }
   const inlinePayments = inlineRes.rows;
+  await attachModuleChequeDates([...plotPayments, ...inlinePayments], pool, (row) => row.registry_id ? 'plot_registry_payments' : 'plot_payments', registry.site_id);
   const people = await resolveNocPeople(pool, registry, plot);
   // People picked from Clients for this certificate: the seller/farmer, and the
   // company member who signs it. One query — both are optional.

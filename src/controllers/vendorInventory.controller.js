@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import { tdsInsertColumns, tdsInsertValues, tdsUpdateSet } from '../services/paymentTds.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -245,6 +246,7 @@ export const getInventoryOrderDetail = asyncHandler(async (req, res) => {
     [orderId, visibility.creatorId]
   );
 
+  await attachModuleChequeDates(paymentsRes.rows, pool, 'vendor_inventory_payments', siteId);
   const visiblePaid = paymentsRes.rows.reduce((sum, payment) => {
     const posted = transactionMovesMoney({
       direction: 'debit',
@@ -496,7 +498,7 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
   if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: 'amount must be > 0' });
 
   const { payment_date, payment_mode, reference_no, note, voucher_url, assigned_admin_id } = req.body;
-  const normalizedMode = payment_mode || 'cash';
+  const normalizedMode = String(payment_mode || 'cash').toLowerCase();
   const normalizedReference = (reference_no || '').trim() || null;
 
   const result = await pool.query(
@@ -513,7 +515,9 @@ export const updateInventoryPayment = asyncHandler(async (req, res) => {
          status = 'pending',
          approved_by = NULL,
          approved_at = NULL,
-         cheque_status = CASE WHEN $5 = 'cheque' THEN 'PENDING' ELSE NULL END,
+         cheque_status = CASE WHEN $5 = 'cheque' THEN CASE
+           WHEN LOWER(p.payment_mode) = 'cheque' AND p.payment_date = $3::date AND p.amount = $4::numeric
+             AND p.cheque_no IS NOT DISTINCT FROM $7::text THEN COALESCE(p.cheque_status, 'PENDING') ELSE 'PENDING' END ELSE NULL END,
          updated_at = NOW()${tdsUpdateSet('vendor_inventory_payments')}
      FROM vendor_inventory_orders o
      WHERE p.id = $1
@@ -627,7 +631,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
   );
 
   const recentTxPromise = pool.query(
-    `SELECT p.id, p.payment_date AS date, p.amount, p.payment_mode,
+    `SELECT p.id, p.site_id, p.source_vendor_payment_id, p.cheque_status, p.cheque_no, p.payment_date AS date, p.amount, p.payment_mode,
             o.item_name, o.item_category, o.unit
      FROM vendor_inventory_payments p
      INNER JOIN vendor_inventory_orders o ON o.id = p.order_id
@@ -668,6 +672,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
     catPromise, recentTxPromise, totalPromise,
   ]);
 
+  await attachModuleChequeDates(recentTxRes.rows, pool, 'vendor_inventory_payments', siteId);
   res.json({
     categories: catRes.rows,
     recentTransactions: recentTxRes.rows,

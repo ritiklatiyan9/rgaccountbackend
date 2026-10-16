@@ -1,3 +1,4 @@
+import { chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet, vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { attachChequeDates } from '../services/chequeDates.service.js';
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
@@ -881,6 +882,7 @@ export const getPayment = asyncHandler(async (req, res) => {
   if (!(await canUserViewEntry(req.user, 'plot_payments', payment.created_by))) {
     return res.status(404).json({ message: 'Payment not found' });
   }
+  await attachChequeDates([payment], pool, (row) => ({ sourceModule: 'plot_payments', sourceId: row.id, siteId: row.site_id }));
   res.json({ payment });
 });
 
@@ -906,7 +908,6 @@ export const updatePayment = asyncHandler(async (req, res) => {
   if (voucher_url !== undefined) updateData.voucher_url = voucher_url || null;
   if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
   if (cheque_no !== undefined) updateData.cheque_no = cheque_no ? String(cheque_no).trim() : null;
-  if (cheque_status !== undefined) updateData.cheque_status = cheque_status || null;
   if (received_by !== undefined) updateData.received_by = received_by ? received_by.trim().toUpperCase() : null;
 
   if (normalizedPaymentType === 'CASH') {
@@ -920,8 +921,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
   updateData.status = 'pending';
   updateData.approved_by = null;
   updateData.approved_at = null;
-  const finalPaymentType = normalizedPaymentType || existing.payment_type;
-  updateData.cheque_status = finalPaymentType === 'CHEQUE' ? 'PENDING' : null;
+  updateData.cheque_status = chequeStatusForPaymentEdit(existing, updateData, 'payment_type');
 
   // Atomic UPDATE — saves a SELECT round-trip.
   const updated = await plotPaymentModel.updateWithPlotIdentity(paymentId, updateData, pool);

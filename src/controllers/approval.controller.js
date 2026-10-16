@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import { chequeReadyForApproval, chequeReadySql } from '../utils/chequeWorkflow.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
@@ -872,6 +873,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
     }
   }
 
+  await attachModuleChequeDates(results, pool, (row) => String(row.source).startsWith('daybook') ? 'day_book' : row.source);
   await attachApprovalClientLinks(results);
 
   // Sort combined results by date DESC
@@ -1572,6 +1574,13 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
   if (statusFilter) allParams.push(statusFilter);
 
   const unionParts = [
+    `SELECT t.id, 'plot_commission' AS source, 'Commission - ' || COALESCE(t.particular, '') AS entry_label,
+      COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
+      t.site_id, s.name AS site_name, t.created_at,
+      t.plot_no, NULL::text AS booked_by
+    FROM plot_commissions t LEFT JOIN sites s ON s.id = t.site_id
+    WHERE ${whereParts()}`,
+
     `SELECT t.id, 'farmer_payment' AS source, COALESCE(t.particular, '') || ' - ' || COALESCE(f.name, '') AS entry_label,
       COALESCE(t.amount, 0)::numeric AS amount, t.cheque_no, t.cheque_status, t.date,
       f.site_id, s.name AS site_name, t.created_at,
@@ -1690,6 +1699,7 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
 
   const result = await pool.query(fullQuery, allParams);
 
+  await attachModuleChequeDates(result.rows, pool);
   await attachApprovalClientLinks(result.rows);
 
   // Count by status
@@ -1730,6 +1740,12 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
       status: normalizedStatus,
       chequeNo: cheque_no,
       chequeTransactionDate: cheque_transaction_date,
+      requireTransactionDate: true,
+      authorizeSite: async (siteId) => {
+        if (['admin', 'super_admin'].includes(req.user.role)) return;
+        const allowed = await client.query('SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1', [req.user.id, siteId]);
+        if (!allowed.rows.length) throw Object.assign(new Error('Access denied to this site'), { statusCode: 403 });
+      },
     });
     await client.query('COMMIT');
     res.json({ entry: result.after, message: `Cheque status updated to ${normalizedStatus}` });

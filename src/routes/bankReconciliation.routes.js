@@ -46,7 +46,7 @@ const upload = multer({
 
 router.use(authMiddleware);
 router.use((req, res, next) => req.method === 'GET' ? next() : invalidateCacheOnSuccess([
-  'approvals|', 'plots|', 'plots:pageData:', '/plots', '/cashflow', '/daybook', '/registries', 'registries|', 'registries-meta|',
+  'approvals|', 'plots|', 'plots:pageData:', '/plots', '/cashflow', '/daybook', '/registries', 'registries|', 'registries-meta|', 'vendors|', 'members|', 'expenses|', 'expenses:page:', 'commissions|', 'plot-commissions|', 'cashflow|', 'firms|', 'farmers|', 'land-deals|', 'misc-income|',
 ])(req, res, next));
 router.use(requireRole('admin', 'sub_admin'));
 

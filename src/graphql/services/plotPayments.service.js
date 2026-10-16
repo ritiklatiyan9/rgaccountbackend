@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from '../../services/chequeDates.service.js';
 /**
  * Plot Payments GraphQL Service
  * Optimized SQL queries replacing multiple REST endpoints with single GraphQL calls.
@@ -319,6 +320,7 @@ export async function getPlotPaymentDetail(plotId, siteId, creatorId = null) {
     pool.query(installmentsQuery, [plotId, siteId, creatorId]),
   ]);
 
+  await attachModuleChequeDates(paymentsRes.rows, pool, 'plot_payments', siteId);
   return {
     payments: paymentsRes.rows,
     plot: plotRes.rows[0] || null,
@@ -349,7 +351,7 @@ export async function getRegistryBankChequePayments(siteId, creatorId = null) {
         pp.id, pp.plot_id, p.plot_no,
         p.buyer_name AS customer_name,
         m.phone AS customer_phone,
-        pp.date, pp.amount, pp.payment_type, pp.payment_from,
+        pp.site_id, pp.cheque_status, pp.cheque_no, pp.date, pp.amount, pp.payment_type, pp.payment_from,
         pp.narration, pp.bank_details,
         prp.id AS mapped_registry_payment_id
       FROM plot_payments pp
@@ -368,7 +370,7 @@ export async function getRegistryBankChequePayments(siteId, creatorId = null) {
         pp.id, pp.plot_id, p.plot_no,
         p.buyer_name AS customer_name,
         m.phone AS customer_phone,
-        pp.date, pp.amount, pp.payment_type, pp.payment_from,
+        pp.site_id, pp.cheque_status, pp.cheque_no, pp.date, pp.amount, pp.payment_type, pp.payment_from,
         pp.narration, pp.bank_details,
         NULL::INTEGER AS mapped_registry_payment_id
       FROM plot_payments pp
@@ -383,6 +385,7 @@ export async function getRegistryBankChequePayments(siteId, creatorId = null) {
     `;
 
   const { rows } = await pool.query(query, [siteId, creatorId]);
+  await attachModuleChequeDates(rows, pool, 'plot_payments', siteId);
   return rows.map(r => ({
     ...r,
     date: r.date instanceof Date ? r.date.toISOString() : r.date,

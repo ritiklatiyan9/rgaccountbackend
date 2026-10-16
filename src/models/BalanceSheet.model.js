@@ -3,7 +3,7 @@ import { SEQUENCE_ORDER_BY } from '../services/daybookOrderSync.service.js';
 import { attachTransactionParticulars } from '../services/transactionParticulars.service.js';
 import { attachDayBookTds } from '../services/daybookTds.service.js';
 import { getTdsSummary } from '../services/tdsAccounting.service.js';
-import { attachChequeDates } from '../services/chequeDates.service.js';
+import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import { daybookLedgerDateSql } from '../services/daybookDate.service.js';
 
 /**
@@ -23,6 +23,9 @@ const SCOPED = `
       le.*,
       CASE WHEN $13::boolean THEN ${daybookLedgerDateSql()} ELSE le.entry_date END AS report_date,
       creator_cfe.transaction_time,
+      creator_cfe.id AS cheque_ledger_id,
+      creator_cfe.source_module AS cheque_ledger_source_module,
+      creator_cfe.source_id AS cheque_ledger_source_id,
       settlement.id AS tds_settlement_id,
       settlement.kind AS tds_settlement_kind,
       settlement.amount AS tds_settlement_amount,
@@ -237,6 +240,7 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
     CASE WHEN tds_settlement_id IS NOT NULL THEN 'tds_settlements' ELSE source_key END AS source_key,
     CASE WHEN tds_settlement_id IS NOT NULL THEN tds_settlement_id ELSE source_id END AS source_id,
     source_key AS native_source_key, source_id AS native_source_id,
+    cheque_ledger_id, cheque_ledger_source_module AS source_module, cheque_ledger_source_id,
     tds_settlement_id, tds_settlement_kind, tds_settlement_amount, challan_no, ca_name,
     (tds_settlement_id IS NOT NULL) AS read_only,
     status, cheque_status, cheque_no,
@@ -284,7 +288,7 @@ class BalanceSheetModel {
     if (!report) return null;
 
     const transactionResult = await pool.query(REPORT_TRANSACTIONS_QUERY, params);
-    await attachChequeDates(transactionResult.rows, pool, (row) => ({ ledgerId: String(row.id).split(':')[0], siteId }));
+    await attachModuleChequeDates(transactionResult.rows, pool, 'cash_flow_entries', siteId);
     await attachDayBookTds(transactionResult.rows, pool);
     await attachTransactionParticulars(transactionResult.rows, pool);
     const tds = await getTdsSummary(siteId, { asOf: dateTo || undefined, dateFrom, dateTo }, pool);

@@ -23,6 +23,8 @@ test('pending loader trusts module status, supports newer sources, and preserves
   const [candidateRow] = await loadPendingChequeCandidates(db, 1, 8);
 
   assert.match(sql, /WHEN 'plot_payments' THEN pp\.cheque_status/);
+  assert.match(sql, /cfe\.source_module IS DISTINCT FROM 'vendor_inventory_payments' OR vip\.source_vendor_payment_id IS NULL/);
+  assert.match(sql, /WHEN 'plot_commissions' THEN 'plot_commission'/);
   assert.match(sql, /WHEN 'land_deal_payments' THEN ldp\.cheque_status/);
   assert.match(sql, /WHEN 'misc_income_entries' THEN mie\.cheque_status/);
   assert.match(sql, /WHEN 'plot_payments' THEN pp\.plot_id/);

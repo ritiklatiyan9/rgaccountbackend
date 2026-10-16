@@ -1,3 +1,4 @@
+import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 // Land Sale + Land Profit — the SELL side of Lands Payments.
@@ -364,6 +365,7 @@ export const listPayments = asyncHandler(async (req, res) => {
       ORDER BY p.date DESC, p.id DESC`,
     [dealId, visibility.creatorId],
   );
+  await attachModuleChequeDates(payments, pool, 'land_deal_payments', deal.site_id);
   res.json({ deal, payments, entryVisibility: visibility });
 });
 
@@ -428,7 +430,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
      WHERE id=$1 RETURNING *`,
     [paymentId, data.date, data.amount, data.payment_mode, data.bank_name, data.bank_account_no,
       data.bank_reference, data.bank_ifsc, data.cheque_no,
-      data.payment_mode === 'CHEQUE' ? 'PENDING' : null, data.remarks, data.voucher_url, data.assigned_admin_id, transactionTimeForWrite(existing.transaction_time ?? null)],
+      chequeStatusForPaymentEdit(existing, data), data.remarks, data.voucher_url, data.assigned_admin_id, transactionTimeForWrite(existing.transaction_time ?? null)],
   );
   res.json({ payment: updated[0], message: 'Receipt updated and sent for approval' });
 });

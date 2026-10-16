@@ -1,3 +1,4 @@
+import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { linkMemberSiteRegistration, lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
 import { reviewMemberIdentity, linkMemberIdentity } from '../services/memberIdentityLink.service.js';
@@ -831,7 +832,7 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
   const expensesQuery = `
     SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
            e.debit, e.credit, e.remark, e.category, e.account_no, e.branch,
-           e.voucher_url, e.status, e.created_at,
+           e.voucher_url, e.status, e.created_at, e.site_id, e.cheque_status, e.cheque_no,
            'EXPENSE' as source
     FROM expenses e
     WHERE e.site_id = $1
@@ -843,7 +844,8 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
   const daybookQuery = `
     SELECT d.id, d.date, d.from_entity, d.to_entity, d.payment_mode,
            d.debit, d.credit, d.remarks AS remark, d.category, d.account_no, d.branch,
-           d.entry_type, d.status, d.created_at,
+           d.entry_type, d.status, d.created_at, d.site_id, d.cheque_status, d.cheque_no,
+           d.farmer_payment_id, d.commission_id, d.cash_flow_entry_id, d.firm_transaction_id, d.plot_payment_id, d.vendor_payment_id,
            'DAYBOOK' as source
     FROM day_book d
     WHERE d.site_id = $1
@@ -859,6 +861,7 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
 
   const expenses = expResult.rows;
   const daybook = dbResult.rows;
+  await attachModuleChequeDates([...expenses, ...daybook], pool, (row) => row.source === 'EXPENSE' ? 'expenses' : 'day_book', siteId);
 
   // Combine and sort by date DESC
   const all = [...expenses, ...daybook].sort((a, b) => {
@@ -897,7 +900,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     // 1. Expenses — assigned/mapped client, then an unambiguous legacy name.
     pool.query(
       `SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
-              e.debit, e.credit, e.remark, e.category, e.status, e.voucher_url
+              e.debit, e.credit, e.remark, e.category, e.status, e.voucher_url, e.cheque_status, e.cheque_no
        FROM expenses e
        WHERE e.site_id = $1
          AND ${memberTransactionMatch('e', ['e.to_entity', 'e.from_entity'], { assigned: true })}
@@ -907,7 +910,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     // 2. Plot Commissions (legacy v1) — by particular (person name)
     pool.query(
       `SELECT pc.id, pc.date, pc.particular, pc.amount, pc.plot_no, pc.plot_size,
-              pc.by_note, pc.remarks, pc.status, pc.voucher_url
+              pc.by_note, pc.remarks, pc.status, pc.voucher_url, pc.cheque_status, pc.cheque_no
        FROM plot_commissions pc
        WHERE pc.site_id = $1 AND ${uniqueMemberNameMatch('pc.particular')}
        ORDER BY pc.date DESC, pc.id DESC`,
@@ -934,7 +937,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     // 4. Farmer Payments — via farmers.member_id
     pool.query(
       `SELECT fp.id, fp.date, fp.amount, fp.particular, fp.payment_mode,
-              fp.cash_amount, fp.bank_amount, fp.remarks, fp.by_note,
+              fp.cash_amount, fp.bank_amount, fp.remarks, fp.by_note, fp.status, fp.cheque_status, fp.cheque_no,
               f.name AS farmer_name
        FROM farmer_payments fp
        JOIN farmers f ON f.id = fp.farmer_id
@@ -946,7 +949,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     pool.query(
       `SELECT ft.id, ft.date, ft.debit, ft.credit, ft.description, ft.purpose,
               ft.payment_mode,
-              ft.remark, ft.cheque_no, ft.name,
+              ft.remark, ft.cheque_no, ft.cheque_status, ft.status, ft.name,
               fi.name AS firm_name
        FROM firm_transactions ft
        JOIN firms fi ON fi.id = ft.firm_id
@@ -957,7 +960,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     // 6. Commission Payments (v2) — member is the plot's commission agent
     pool.query(
       `SELECT pcp.id, pcp.date, pcp.amount, pcp.payment_mode, pcp.bank_name,
-              pcp.transaction_id, pcp.remarks, pcp.status, pcp.voucher_url,
+              pcp.transaction_id, pcp.remarks, pcp.status, pcp.voucher_url, pcp.cheque_status, pcp.cheque_no,
               p.plot_no, p.block
        FROM plot_commission_payments pcp
        JOIN plot_commissions_v2 pc ON pc.id = pcp.plot_commission_id
@@ -980,6 +983,11 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
   const farmerPayments = farmerPayRes.rows;
   const firmTransactions = firmRes.rows;
   const commissionPayments = commPayRes.rows;
+  const chequeModules = new Map([
+    [expenses, 'expenses'], [commissions, 'plot_commissions'], [plotPayments, 'plot_payments'],
+    [farmerPayments, 'farmer_payments'], [firmTransactions, 'firm_transactions'], [commissionPayments, 'plot_commission_payments'],
+  ].flatMap(([rows, module]) => rows.map(row => [row, module])));
+  await attachModuleChequeDates([...chequeModules.keys()], pool, (row) => chequeModules.get(row), siteId);
 
   // Summaries per category
   const expTotal = expenses.reduce((s, e) => ({ debit: s.debit + (parseFloat(e.debit) || 0), credit: s.credit + (parseFloat(e.credit) || 0) }), { debit: 0, credit: 0 });
