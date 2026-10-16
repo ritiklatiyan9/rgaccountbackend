@@ -3,6 +3,7 @@ import { SEQUENCE_ORDER_BY } from '../services/daybookOrderSync.service.js';
 import { attachTransactionParticulars } from '../services/transactionParticulars.service.js';
 import { attachDayBookTds } from '../services/daybookTds.service.js';
 import { getTdsSummary } from '../services/tdsAccounting.service.js';
+import { attachChequeDates } from '../services/chequeDates.service.js';
 
 /**
  * Balance Sheet reads `ledger_entries` — the canonical money view created in
@@ -276,6 +277,7 @@ class BalanceSheetModel {
     if (!report) return null;
 
     const transactionResult = await pool.query(REPORT_TRANSACTIONS_QUERY, params);
+    await attachChequeDates(transactionResult.rows, pool, (row) => ({ ledgerId: String(row.id).split(':')[0], siteId }));
     await attachDayBookTds(transactionResult.rows, pool);
     await attachTransactionParticulars(transactionResult.rows, pool);
     const tds = await getTdsSummary(siteId, { asOf: dateTo || undefined, dateFrom, dateTo }, pool);

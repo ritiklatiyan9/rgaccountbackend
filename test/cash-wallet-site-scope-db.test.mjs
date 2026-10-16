@@ -410,5 +410,36 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       const lowRecorded=new Map([['user:2',{balance:'1.00'}]]);
       assert.equal(walletWithCashInHand({id:2,balance:'2.00'},lowRecorded).balance,'1.00');
     });
+    await t.test('delegated wallet viewers see the admin read surfaces without gaining site or transfer rights',async()=>{
+      await query("INSERT INTO user_permissions VALUES(1,'wallet',true,true)");
+      try {
+        const invokeAs=(handler,options={})=>invoke(handler,{user:1,...options});
+        const adminHolders=(await invoke(controller.holders)).holders;
+        const viewers=(await invokeAs(controller.holders)).holders;
+        assert.deepEqual(viewers.map(row=>[row.holder_id,row.balance]),adminHolders.map(row=>[row.holder_id,row.balance]));
+        assert.ok(viewers.length>1);
+        for(const row of viewers) assert.equal(row.can_transfer_from,row.holder_type==='user'&&row.holder_id===1);
+        for(const handler of [controller.history,controller.assignedTransactions,controller.transfers]) {
+          assert.equal((await invokeAs(handler)).total,(await invoke(handler)).total);
+        }
+        assert.equal((await invokeAs(controller.userDetail,{params:{id:2}})).user.id,2);
+        const otherEntry=(await invoke(controller.history)).entries.find(row=>row.holder_key!=='user:1');
+        assert.ok(otherEntry);
+        assert.equal((await invokeAs(controller.historyDetail,{params:{id:otherEntry.id}})).entry.id,otherEntry.id);
+        assert.equal((await invokeAs(controller.siteBalance,{site:12})).cash_balance,4451000);
+        await assert.rejects(invokeAs(controller.holders,{site:13}),status(403));
+        await assert.rejects(invokeAs(controller.userDetail,{params:{id:4}}),status(404));
+        const count=(await query('SELECT count(*)::int AS n FROM loyalty_vault_entries')).rows[0].n;
+        await assert.rejects(createVaultTransfer({id:1},{...transfer('1'),from_holder_id:2,to_holder_id:1},db),status(403));
+        assert.equal((await query('SELECT count(*)::int AS n FROM loyalty_vault_entries')).rows[0].n,count);
+        await query("UPDATE user_permissions SET can_view_all=false WHERE user_id=1 AND module='wallet'");
+        assert.deepEqual((await invokeAs(controller.holders)).holders.map(row=>row.holder_id),[1]);
+        await assert.rejects(invokeAs(controller.userDetail,{params:{id:2}}),status(403));
+        await assert.rejects(invokeAs(controller.historyDetail,{params:{id:otherEntry.id}}),status(404));
+        await assert.rejects(invokeAs(controller.siteBalance),status(403));
+        await query("UPDATE user_permissions SET can_read=false,can_view_all=true WHERE user_id=1 AND module='wallet'");
+        await assert.rejects(invokeAs(controller.holders),status(403));
+      } finally {await query("DELETE FROM user_permissions WHERE user_id=1 AND module='wallet'");}
+    });
   } finally {pool.query=originalQuery;pool.connect=originalConnect;await pg.close();}
 });

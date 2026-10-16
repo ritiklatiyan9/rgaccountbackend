@@ -22,6 +22,15 @@ test('shared cheque command blocks cross-site confirmation before source mutatio
   assert.equal(db.calls.length, 1);
 });
 
+test('shared cheque command rejects invalid clearance dates before any database write', async () => {
+  const db = fakeDb(() => { throw new Error('No database operation should run'); });
+  await assert.rejects(
+    () => updateChequeStatusRecord(db, { source: 'plot_payment', entryId: 7, status: 'CLEARED', chequeTransactionDate: '2026-02-30' }),
+    (error) => error.code === 'INVALID_CHEQUE_TRANSACTION_DATE'
+  );
+  assert.equal(db.calls.length, 0);
+});
+
 test('shared cheque command blocks a locked accounting period', async () => {
   const db = fakeDb((sql) => {
     if (sql.includes('FROM cash_flow_entries')) return { rows: [{ id: 10, site_id: 6, debit: '100.00', credit: '0.00', cheque_status: 'PENDING', cash_flow_month_id: 22 }] };

@@ -33,7 +33,7 @@ test('PostgreSQL: pending → cleared → approved posts exactly once; rejected/
         date date DEFAULT CURRENT_DATE, created_at timestamptz DEFAULT now(), created_by integer, buyer_name text, payment_from text,
         status text DEFAULT 'pending', approved_by integer, approved_at timestamptz,
         assigned_admin_id integer, payment_type text, payment_mode text, cash_type text,
-        cheque_status text, cheque_no text, amount numeric, debit numeric DEFAULT 0, credit numeric DEFAULT 0,
+        cheque_status text, cheque_no text, cheque_transaction_date date, amount numeric, debit numeric DEFAULT 0, credit numeric DEFAULT 0,
         source_module text, source_id integer, cash_flow_month_id integer, updated_at timestamptz)`);
     }
     await db.query('CREATE TABLE plot_installments(id integer PRIMARY KEY, amount numeric, paid_amount numeric, due_date date, status text)');

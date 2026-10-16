@@ -1,5 +1,5 @@
 import { LOYALTY_VAULT_SOURCE_TABLES } from './loyaltyVaultContext.service.js';
-import { isVaultAdmin } from './loyaltyVault.service.js';
+import { canViewAllWallets } from './walletVisibility.service.js';
 import { walletReadQuery } from './walletRead.service.js';
 
 // Read canonical cash transactions, including pending approval. The legacy
@@ -111,14 +111,14 @@ export const vaultPendingTransactionsCte = transactionsCte(true);
 
 export const vaultTransactionScope = actor => ({
   clause: 'organization_id=$1 AND ($2::boolean OR (holder_type=\'user\' AND holder_id=$3))',
-  params: [actor.organization_id,isVaultAdmin(actor),actor.id],
+  params: [actor.organization_id,canViewAllWallets(actor),actor.id],
 });
 
 const pendingReads = new WeakMap();
 export function pendingVaultTotals(actor, database, selected = null, siteId = null) {
   let reads = pendingReads.get(database);
   if (!reads) { reads = new Map(); pendingReads.set(database, reads); }
-  const key = JSON.stringify([actor.organization_id, isVaultAdmin(actor), actor.id, selected?.type, selected?.id, siteId]);
+  const key = JSON.stringify([actor.organization_id, canViewAllWallets(actor), actor.id, selected?.type, selected?.id, siteId]);
   if (reads.has(key)) return reads.get(key);
   const pending = loadPendingVaultTotals(actor, database, selected, siteId).finally(() => reads.delete(key));
   reads.set(key, pending);

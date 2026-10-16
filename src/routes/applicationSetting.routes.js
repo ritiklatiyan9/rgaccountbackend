@@ -19,9 +19,16 @@ import {
   updateTdsWorkflowSettings,
 } from '../controllers/applicationSetting.controller.js';
 import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
+import { getWalletManagement, updateWalletManagement } from '../controllers/walletManagement.controller.js';
+import { getExpenseManagement, updateExpenseManagement } from '../controllers/expenseManagement.controller.js';
 
 const router = express.Router();
 const bustRegistryCache = invalidateCacheOnSuccess(['registries|']);
+
+router.get('/wallet-management', authMiddleware, requireRole('admin'), getWalletManagement);
+router.put('/wallet-management/:userId', authMiddleware, requireRole('admin'), invalidateCacheOnSuccess(['permissions|']), updateWalletManagement);
+router.get('/expense-management', authMiddleware, requireRole('admin'), getExpenseManagement);
+router.put('/expense-management/:userId', authMiddleware, requireRole('admin'), invalidateCacheOnSuccess(['permissions|', 'expenses|', 'expenses:page:', 'expenses-meta|']), updateExpenseManagement);
 
 // Every authenticated user may read flags for an assigned site because feature
 // consumers (such as Plot Registry) need them. Only admins may change them.

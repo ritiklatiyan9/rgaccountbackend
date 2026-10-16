@@ -3,6 +3,7 @@ import pool from '../config/db.js';
 import { walletUser, walletError, walletAmount, positiveId, uuid } from './wallet.service.js';
 import { siteVaultAccountsCte } from './loyaltyVaultSite.service.js';
 import { adminWalletCashStates } from './adminWalletCash.service.js';
+import { canViewAllWallets } from './walletVisibility.service.js';
 export { walletUser as vaultUser };
 export const isVaultAdmin = actor => ['admin','super_admin'].includes(actor.role);
 export const holderKey = (type, id) => `${type}:${id}`;
@@ -28,7 +29,7 @@ export async function validateHolder(actor, selected, db = pool, siteId = null, 
       OR ($3::boolean AND EXISTS(SELECT 1 FROM loyalty_vault_entries e WHERE e.holder_key='user:'||u.id::text AND e.organization_id=$2 AND ($4::int IS NULL OR e.site_id=$4))))`
     : `SELECT m.id,m.full_name AS name FROM members m JOIN sites s ON s.id=m.site_id WHERE m.id=$1 AND s.organization_id=$2
        AND ($3::int IS NULL OR m.site_id=$3) AND ($4::boolean OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=$5 AND site_id=m.site_id))`;
-  const args = selected.type === 'user' ? [selected.id,actor.organization_id,allowRetired&&isVaultAdmin(actor),siteId] : [selected.id,actor.organization_id,siteId,isVaultAdmin(actor),actor.id];
+  const args = selected.type === 'user' ? [selected.id,actor.organization_id,allowRetired&&canViewAllWallets(actor),siteId] : [selected.id,actor.organization_id,siteId,isVaultAdmin(actor),actor.id];
   const { rows } = await db.query(sql,args);
   if (!rows.length) throw walletError('Choose a cash holder in your accessible organization and site.',403);
   return rows[0];

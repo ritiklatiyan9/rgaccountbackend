@@ -1,4 +1,5 @@
 import { completeDeferredChequeBooking } from './quickPlotBooking.service.js';
+import { chequeDateOnly, currentChequeBusinessDate, validateChequeTransactionDate } from './chequeDates.service.js';
 const SOURCE_CONFIG = Object.freeze({
   farmer_payment: { table: 'farmer_payments', mirror: 'farmer_payments' },
   plot_commission_payment: { table: 'plot_commission_payments', mirror: 'plot_commission_payments' },
@@ -117,6 +118,7 @@ export async function updateChequeStatusRecord(db, {
   entryId,
   status,
   chequeNo,
+  chequeTransactionDate,
   expectedSiteId,
   expectedAmount,
   requirePending = false,
@@ -127,6 +129,8 @@ export async function updateChequeStatusRecord(db, {
   if (!config) throw new ChequeStatusError(`Invalid cheque source: ${source}`, 400, 'INVALID_SOURCE');
   if (!Number.isInteger(numericEntryId) || numericEntryId <= 0) throw new ChequeStatusError('Invalid cheque entry id', 400, 'INVALID_ENTRY_ID');
   if (!CHEQUE_STATUSES.includes(targetStatus)) throw new ChequeStatusError(`Invalid cheque status: ${targetStatus}`, 400, 'INVALID_STATUS');
+  const suppliedTransactionDate = targetStatus === 'CLEARED' && chequeTransactionDate !== undefined
+    ? validateChequeTransactionDate(chequeTransactionDate) : undefined;
 
   const mirror = await lockMirror(db, source, numericEntryId);
   if (!mirror) throw new ChequeStatusError('The cheque entry is missing from the accounting ledger.', 409, 'MISSING_LEDGER_MIRROR');
@@ -219,6 +223,32 @@ export async function updateChequeStatusRecord(db, {
       [numericEntryId, targetStatus, trimmedChequeNo === undefined ? null : trimmedChequeNo]
     );
   }
+  // Native trigger upserts deliberately leave this metadata column unchanged.
+  // Keep the original source/ledger dates intact and record only clearance.
+  // Legacy clients clearing a cheque today remain compatible; an already
+  // cleared historical record with no bank evidence keeps its unknown date.
+  const transactionDate = targetStatus !== 'CLEARED' ? null
+    : suppliedTransactionDate ?? (normalizedStatus(sourceBefore.cheque_status) === 'CLEARED'
+      ? chequeDateOnly(mirror.cheque_transaction_date) : currentChequeBusinessDate());
+  if (source === 'cash_flow_entry') {
+    await db.query('UPDATE cash_flow_entries SET cheque_transaction_date = $1::date WHERE id = $2', [transactionDate, numericEntryId]);
+  } else {
+    await db.query(
+      'UPDATE cash_flow_entries SET cheque_transaction_date = $1::date WHERE source_module = $2 AND source_id = $3',
+      [transactionDate, config.mirror, numericEntryId]
+    );
+  }
+  if (source === 'vendor_payment') {
+    await db.query(
+      `UPDATE cash_flow_entries cfe SET cheque_transaction_date = $1::date
+         FROM vendor_inventory_payments vip
+        WHERE vip.source_vendor_payment_id = $2
+          AND cfe.source_module = 'vendor_inventory_payments' AND cfe.source_id = vip.id`,
+      [transactionDate, numericEntryId]
+    );
+  }
+  sourceAfter.cheque_apply_date = chequeDateOnly(sourceAfter.date || sourceAfter.payment_date || mirror.date);
+  sourceAfter.cheque_transaction_date = transactionDate;
   if (source === 'plot_commission_payment') await reconcilePlotCommission(db, numericEntryId);
   if (source === 'plot_installment_payment') await reconcileInstallment(db, numericEntryId);
 

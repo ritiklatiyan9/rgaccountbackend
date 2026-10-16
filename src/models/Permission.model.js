@@ -6,6 +6,7 @@ import pool from '../config/db.js';
 export const ALL_MODULES = Object.freeze([
     'home',
     'dashboard',
+    'wallet',
     'finance_forecast',
     'clients',
     'vendors',
@@ -51,7 +52,7 @@ export const ALL_MODULES = Object.freeze([
     'tds',
 ]);
 
-const READ_ONLY_MODULES = new Set(['home', 'dashboard', 'finance_forecast', 'balance_sheet', 'reports', 'settings', 'audit_logs', 'management_analytics']);
+const READ_ONLY_MODULES = new Set(['home', 'dashboard', 'wallet', 'finance_forecast', 'balance_sheet', 'reports', 'settings', 'audit_logs', 'management_analytics']);
 // Modules introduced after the original permission rollout stay fail-closed for
 // existing sub-admins. An administrator must opt users into these sensitive
 // document/payment surfaces from the permission matrix.

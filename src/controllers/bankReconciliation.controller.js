@@ -224,17 +224,31 @@ async function persistSuggestions(db, runId, results) {
   return persisted;
 }
 
-function storedSuggestionDto(row) {
-  const alternatives = Array.isArray(row.alternatives) ? row.alternatives : [];
+function storedSuggestionDto(row, currentCandidates) {
+  // Alternatives retain the evidence used by the matching run, while these
+  // lifecycle fields describe the cheque now. Older snapshots predate the
+  // separate clearing date and must not turn a confirmed cheque into Pending.
+  const refreshChequeMetadata = (candidate) => {
+    const key = candidate.candidate_id || `${candidate.source}:${candidate.entry_id}`;
+    const current = currentCandidates.get(key);
+    return current ? {
+      ...candidate,
+      cheque_status: current.cheque_status,
+      date: current.date,
+      cheque_apply_date: current.cheque_apply_date,
+      cheque_transaction_date: current.cheque_transaction_date,
+    } : candidate;
+  };
+  const alternatives = Array.isArray(row.alternatives) ? row.alternatives.map(refreshChequeMetadata) : [];
   const candidateId = row.candidate_source && row.candidate_entry_id ? `${row.candidate_source}:${row.candidate_entry_id}` : null;
   return {
     id: Number(row.id),
     transaction: transactionDto({ ...row, id: row.transaction_row_id }),
-    candidate: alternatives.find((item) => item.candidate_id === candidateId) || (candidateId ? {
+    candidate: alternatives.find((item) => item.candidate_id === candidateId) || (candidateId ? refreshChequeMetadata({
       candidate_id: candidateId,
       source: row.candidate_source,
       entry_id: Number(row.candidate_entry_id),
-    } : null),
+    }) : null),
     proposed_status: row.proposed_status,
     match_origin: row.match_origin,
     confidence: Number(row.confidence),
@@ -275,7 +289,10 @@ async function loadRun(db, user, runId) {
       ORDER BY t.row_number`,
     [id]
   );
-  const rows = suggestions.rows.map((row) => storedSuggestionDto({ ...row, id: row.id, upload_id: row.upload_id }));
+  const currentCandidates = suggestions.rows.length
+    ? await loadPendingChequeCandidates(db, run.organization_id, run.site_id, null) : [];
+  const currentById = new Map(currentCandidates.map((candidate) => [candidate.id, candidate]));
+  const rows = suggestions.rows.map((row) => storedSuggestionDto({ ...row, id: row.id, upload_id: row.upload_id }, currentById));
   return {
     run: {
       id: Number(run.id),
@@ -312,7 +329,7 @@ export async function listPendingCheques(req, res) {
     const site = await assertSiteAccess(pool, req.user, req.query.site_id ?? req.query.siteId);
     const status = requireChequeListStatus(req.query.status);
     const entries = await loadPendingChequeCandidates(pool, site.organization_id, site.id, status === 'ALL' ? null : status);
-    return res.json({ entries, total: entries.length, status, site: { id: site.id, name: site.name } });
+    return res.json({ entries, total: entries.length, status, cheque_dates_supported: true, site: { id: site.id, name: site.name } });
   } catch (error) {
     return sendError(res, error);
   }
@@ -525,6 +542,7 @@ export async function manuallyUpdateChequeStatus(req, res) {
       source,
       entryId,
       status,
+      chequeTransactionDate: req.body.cheque_transaction_date,
       expectedSiteId: site.id,
       expectedAmount: candidate.amount,
       requirePending: false,
@@ -545,8 +563,8 @@ export async function manuallyUpdateChequeStatus(req, res) {
       statusCode: 200,
       outcome: 'SUCCESS',
       description: `Cheque ${candidate.cheque_no || `#${entryId}`} manually set to ${status} after independent verification`,
-      oldValues: { cheque_status: changed.before?.cheque_status },
-      newValues: { cheque_status: status, transaction_approval_status: changed.after?.status || 'pending' },
+      oldValues: { cheque_status: changed.before?.cheque_status, cheque_transaction_date: candidate.cheque_transaction_date },
+      newValues: { cheque_status: status, cheque_transaction_date: changed.after?.cheque_transaction_date, transaction_approval_status: changed.after?.status || 'pending' },
       metadata: {
         status_change_method: 'MANUAL',
         reason,
@@ -559,7 +577,7 @@ export async function manuallyUpdateChequeStatus(req, res) {
 
     return res.json({
       entry: changed.after,
-      cheque: { ...candidate, cheque_status: status },
+      cheque: { ...candidate, cheque_status: status, cheque_transaction_date: changed.after?.cheque_transaction_date ?? null },
       message: `Cheque status set to ${status}.`,
     });
   } catch (error) {
@@ -686,6 +704,7 @@ export async function confirmMatches(req, res) {
         source,
         entryId,
         status,
+        chequeTransactionDate: status === 'CLEARED' ? dateOnlyDto(suggestion.transaction_date || suggestion.value_date) : undefined,
         expectedSiteId: run.site_id,
         expectedAmount: candidate.amount,
         requirePending: true,
@@ -726,7 +745,7 @@ export async function confirmMatches(req, res) {
         outcome: 'SUCCESS',
         description: `Cheque ${candidate.cheque_no || `#${entryId}`} confirmed as ${status} from bank statement`,
         oldValues: { cheque_status: changed.before?.cheque_status },
-        newValues: { cheque_status: status, reconciliation_link_id: linkResult.rows[0].id },
+        newValues: { cheque_status: status, cheque_transaction_date: changed.after?.cheque_transaction_date, reconciliation_link_id: linkResult.rows[0].id },
         metadata: {
           upload_id: Number(run.upload_id), run_id: runId, suggestion_id: Number(suggestion.id),
           bank_transaction_id: Number(suggestion.bank_transaction_id), matching_mode: run.mode,
@@ -739,6 +758,8 @@ export async function confirmMatches(req, res) {
         link_id: Number(linkResult.rows[0].id), suggestion_id: Number(suggestion.id),
         bank_transaction_id: Number(suggestion.bank_transaction_id), candidate_id: candidate.id,
         cheque_no: candidate.cheque_no, status, amount: candidate.amount,
+        cheque_apply_date: changed.after?.cheque_apply_date ?? candidate.cheque_apply_date,
+        cheque_transaction_date: changed.after?.cheque_transaction_date ?? null,
       });
     }
 

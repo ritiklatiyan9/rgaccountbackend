@@ -6,6 +6,7 @@ import {
   rankCandidates,
   runAiAssistance,
   runManualMatching,
+  serializeMatchResult,
 } from '../src/services/chequeMatching.service.js';
 
 test('pending loader trusts module status, supports newer sources, and preserves reversal face values', async () => {
@@ -77,6 +78,16 @@ const candidate = (id, overrides = {}) => ({
   account_suffix: '0042',
   aliases: [],
   ...overrides,
+});
+
+test('new candidate summaries preserve current cheque status and both lifecycle dates', () => {
+  const [result] = runManualMatching([transaction(1)], [candidate(1, {
+    cheque_status: 'PENDING', cheque_apply_date: '2026-08-20', cheque_transaction_date: null,
+  })]);
+  const dto = serializeMatchResult(result);
+  assert.equal(dto.candidate.cheque_status, 'PENDING');
+  assert.equal(dto.candidate.cheque_apply_date, '2026-08-20');
+  assert.equal(dto.alternatives[0].cheque_status, 'PENDING');
 });
 
 test('Manual Rules gives four exact matches and six Review rows for ten generic cases', () => {

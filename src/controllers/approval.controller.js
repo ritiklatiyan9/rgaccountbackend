@@ -1711,7 +1711,7 @@ export const listChequeEntries = asyncHandler(async (req, res) => {
 export const updateChequeStatus = asyncHandler(async (req, res) => {
   // Preserve the original accounting debit/credit values. The shared command
   // changes cheque metadata only; ledger views exclude bounced/returned rows.
-  const { id, source, cheque_status, cheque_no } = req.body;
+  const { id, source, cheque_status, cheque_no, cheque_transaction_date } = req.body;
 
   if (!id || !source || !cheque_status) {
     return res.status(400).json({ message: 'id, source, and cheque_status are required' });
@@ -1729,6 +1729,7 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
       entryId: id,
       status: normalizedStatus,
       chequeNo: cheque_no,
+      chequeTransactionDate: cheque_transaction_date,
     });
     await client.query('COMMIT');
     res.json({ entry: result.after, message: `Cheque status updated to ${normalizedStatus}` });

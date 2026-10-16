@@ -16,6 +16,7 @@ import { clearCacheByPrefixes } from '../config/cache.js';
 import { attachDayBookTds, attachDayBookTdsSettlements, excludeSourceLinkedTdsSettlement } from '../services/daybookTds.service.js';
 import { attachTransactionParticulars } from '../services/transactionParticulars.service.js';
 import { withPaymentTds, tdsUpdateSet } from '../services/paymentTds.service.js';
+import { attachChequeDates, chequeMetadataFromOwner } from '../services/chequeDates.service.js';
 import { commissionTdsModule, getTdsWorkflow, parsePaymentTds } from '../services/tdsWorkflow.service.js';
 import { resolveTdsDeductee, resolvePaymentDeductee } from '../services/tdsDeductee.service.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
@@ -786,6 +787,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   const cashFlowEntryById = new Map(cashFlowEntries.map((entry) => [entry.id, entry]));
   const firmTxnById = new Map(firmTxnEntries.map((entry) => [entry.id, entry]));
   const plotPaymentById = new Map(plotPaymentEntries.map((entry) => [entry.id, entry]));
+  const vendorPaymentById = new Map(moduleLedgerEntries.filter((entry) => entry.source_module === 'vendor_payments').map((entry) => [entry.source_id, entry]));
 
   // Enrich daybook entries that ARE linked to farmer payments, commissions, etc.
   const enrichedDayBookEntries = dayBookEntries.map(e => {
@@ -794,6 +796,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (fp) {
         return {
           ...e,
+          ...chequeMetadataFromOwner(fp),
           transaction_time: fp.transaction_time ?? null,
           farmer_id: fp.farmer_id,
           farmer_name: fp.farmer_name,
@@ -814,6 +817,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (pc) {
         return {
           ...e,
+          ...chequeMetadataFromOwner(pc),
           transaction_time: pc.transaction_time ?? null,
           plot_no: pc.plot_no,
           plot_size: pc.plot_size,
@@ -830,6 +834,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (cf) {
         return {
           ...e,
+          ...chequeMetadataFromOwner(cf),
           transaction_time: cf.transaction_time ?? null,
           ledger_name: cf.ledger_name,
           ledger_type: cf.ledger_type,
@@ -845,6 +850,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (ft) {
         return {
           ...e,
+          ...chequeMetadataFromOwner(ft),
           transaction_time: ft.transaction_time ?? null,
           firm_id: ft.firm_id,
           firm_name: ft.firm_name,
@@ -862,6 +868,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (pp) {
         return {
           ...e,
+          ...chequeMetadataFromOwner(pp),
           transaction_time: pp.transaction_time ?? null,
           pp_plot_id: pp.plot_id,
           pp_plot_no: pp.plot_no,
@@ -877,6 +884,10 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           source: 'daybook_plot_payment',
         };
       }
+    }
+    if (e.vendor_payment_id) {
+      const vp = vendorPaymentById.get(e.vendor_payment_id);
+      if (vp) return { ...e, ...chequeMetadataFromOwner(vp) };
     }
     return e;
   });
@@ -1207,6 +1218,11 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       e.bank_account_name = mapped.bank_account_name;
     }
   }
+  await attachChequeDates(allEntries, pool, (entry) => ({
+    sourceModule: entry.bank_source_key,
+    sourceId: entry.bank_source_id,
+    siteId,
+  }));
 
   // Compute summary
   let total_debit = 0, total_credit = 0;

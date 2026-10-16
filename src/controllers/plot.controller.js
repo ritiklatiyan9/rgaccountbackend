@@ -1,4 +1,5 @@
 import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet, vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
+import { attachChequeDates } from '../services/chequeDates.service.js';
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
 import { isDirectPlotStatusChange, validatePlotApprover } from '../services/plotApproval.service.js';
 import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
@@ -832,6 +833,7 @@ export const listPayments = asyncHandler(async (req, res) => {
     plotPaymentModel.getReceivedByBreakdown(plotIdInt, pool, entryVisibility.creatorId),
   ]);
   const payments = paymentsRes.rows;
+  await attachChequeDates(payments, pool, (row) => ({ sourceModule: 'plot_payments', sourceId: row.id, siteId: row.site_id }));
   const plot = plotRes.rows[0] || null;
 
   const siteRow = plot

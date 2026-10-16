@@ -1,4 +1,5 @@
 import { decimalToMinorUnits, normalizeText } from './bankStatementParser.service.js';
+import { attachChequeDates } from './chequeDates.service.js';
 
 export const CHEQUE_MATCHER_VERSION = 'cheque-matcher-v1';
 export const AI_RESOLVER_VERSION = 'groq-cheque-resolver-v1';
@@ -76,6 +77,7 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
        END AS parent_id,
        cfe.site_id,
        cfe.date,
+       TO_CHAR(cfe.cheque_transaction_date, 'YYYY-MM-DD') AS cheque_transaction_date,
        cfe.transaction_time,
        cfe.remarks,
        UPPER(${sourceChequeStatusSql}) AS cheque_status,
@@ -151,7 +153,7 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
     [organizationId, siteId, statusFilter]
   );
 
-  return result.rows.map((row) => ({
+  const candidates = result.rows.map((row) => ({
     ...row,
     id: `${row.source}:${row.entry_id}`,
     ledger_id: Number(row.ledger_id),
@@ -160,6 +162,8 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
     amount: String(row.amount),
     aliases: Array.isArray(row.aliases) ? row.aliases : [],
   }));
+  await attachChequeDates(candidates, db, (row) => ({ ledgerId: row.ledger_id, siteId: row.site_id }));
+  return candidates;
 }
 
 const asMinor = (value) => decimalToMinorUnits(value) ?? 0n;
@@ -223,8 +227,11 @@ function candidateSummary(candidate, score = 0, signals = [], conflicts = []) {
     ledger_id: candidate.ledger_id,
     parent_id: candidate.parent_id,
     cheque_no: candidate.cheque_no,
+    cheque_status: candidate.cheque_status ?? null,
     amount: candidate.amount,
     date: candidate.date,
+    cheque_apply_date: candidate.cheque_apply_date,
+    cheque_transaction_date: candidate.cheque_transaction_date,
     direction: candidate.direction,
     customer_name: candidate.customer_name,
     booking_reference: candidate.booking_reference,

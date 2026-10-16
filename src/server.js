@@ -5,6 +5,7 @@ import app from './app.js';
 import { up as migratePlotAreaChanges } from './migrations/205_plot_area_conversion_and_approval_changes.js';
 import { up as migratePlotBankRounding } from './migrations/206_plot_bank_target_rounding.js';
 import { up as migratePlotFixedDiscount } from './migrations/214_plot_fixed_discount.js';
+import { up as migrateChequeTransactionDates } from './migrations/215_cheque_transaction_dates.js';
 import pool, { connectDB } from './config/db.js';
 import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
 import { up as migrateMemberIdentityLinking } from './migrations/192_member_identity_linking.js';
@@ -39,6 +40,7 @@ connectDB().then(async () => {
   await migratePlotAreaChanges(pool);
   await migratePlotBankRounding(pool);
   await migratePlotFixedDiscount(pool);
+  await migrateChequeTransactionDates(pool);
   // Direct node/nodemon starts must have the same required client schema as npm start.
   await migrateMemberSiteSharing(pool);
   await migrateMemberIdentityLinking(pool);

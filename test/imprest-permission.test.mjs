@@ -2,6 +2,35 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import permissionModel from '../src/models/Permission.model.js';
 import { requireImprestReadAccess, requireImprestBalanceAccess, hasImprestManagementScope } from '../src/middlewares/imprestPermission.middleware.js';
+import { PGlite } from '@electric-sql/pglite';
+
+test('a saved Imprest Management permission applies only to the selected sub-admin and revokes on the next request', async () => {
+  const db = new PGlite();
+  const original = permissionModel.getPermission;
+  try {
+    await db.exec(`CREATE TABLE user_permissions(user_id int,module text,can_read boolean,can_write boolean,
+      can_update boolean,can_delete boolean,can_restore boolean,can_view_all boolean,updated_at timestamptz,UNIQUE(user_id,module));`);
+    permissionModel.getPermission = async (id, module) => (await db.query('SELECT * FROM user_permissions WHERE user_id=$1 AND module=$2', [id, module])).rows[0];
+    const check = async id => {
+      const result = { status: 200, next: false };
+      const req = { user: { id, role: 'sub_admin' }, query: { scope: 'management' } };
+      await requireImprestReadAccess(req, { status(code) { result.status = code; return this; }, json() {} }, error => {
+        if (error) throw error;
+        result.next = true;
+      });
+      result.management = hasImprestManagementScope(req);
+      return result;
+    };
+    assert.equal((await check(2)).status, 403);
+    const saved = await permissionModel.upsert(2, 'imprest_management', { can_read: true }, db);
+    assert.equal(saved.can_write, false);
+    assert.equal(saved.can_update, false);
+    assert.deepEqual(await check(2), { status: 200, next: true, management: true });
+    assert.equal((await check(3)).status, 403);
+    await permissionModel.upsert(2, 'imprest_management', { can_read: false }, db);
+    assert.equal((await check(2)).status, 403);
+  } finally { permissionModel.getPermission = original; await db.close(); }
+});
 
 test('Imprest read boundary requires current explicit grants and management scope', async (t) => {
   const original = permissionModel.getPermission;

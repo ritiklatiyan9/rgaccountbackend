@@ -21,6 +21,7 @@ test('wallet history preserves module descriptions, transfer parties and site-on
       CREATE TABLE members(id int PRIMARY KEY,full_name text,site_id int);
       CREATE TABLE sites(id int PRIMARY KEY,name text,organization_id int); INSERT INTO sites VALUES(10,'Main project',1),(11,'Other project',1);
       CREATE TABLE user_sites(user_id int,site_id int); INSERT INTO user_sites VALUES(2,10);
+      CREATE TABLE user_permissions(user_id int,module text,can_read boolean,can_view_all boolean);
       CREATE TABLE loyalty_vault_transfers(id uuid PRIMARY KEY,from_holder_type text,from_holder_id int,to_holder_id int,
         status text,note text,created_at timestamptz,resolved_at timestamptz,resolved_by int,resolution_note text);
       CREATE TABLE loyalty_vault_entries(id serial PRIMARY KEY,organization_id int,site_id int,holder_key text,holder_type text,
