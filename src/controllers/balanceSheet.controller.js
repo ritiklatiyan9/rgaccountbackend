@@ -115,6 +115,8 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     grain,
     plotId,
     creatorId: entryVisibility.creatorId,
+    chequeTransactionDates: req.query.date_basis === 'cheque_transaction',
+    includeUndatedCheques: !dateFrom && req.query.include_undated_cheques === 'true',
   };
   const reportKey = JSON.stringify([getCacheGeneration(), req.user.id, req.sessionId,
     req.user.role, req.user.organization_id, reportArgs]);
@@ -139,6 +141,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
   res.json({
     site,
     scope,
+    cheque_date_basis: reportArgs.chequeTransactionDates ? 'transaction' : 'application',
     order_revision: Number(orderStateResult.rows[0]?.revision) || 0,
     order_revisions: orderStateResult.rows[0]?.revisions || {},
     period: { preset, date_from: dateFrom, date_to: dateTo, grain },

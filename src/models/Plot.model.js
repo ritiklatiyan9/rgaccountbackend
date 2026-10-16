@@ -1,3 +1,4 @@
+import { daybookSourceDatePredicate } from '../services/daybookDate.service.js';
 import { withLoyaltyVault } from '../services/loyaltyVaultContext.service.js';
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
 import { chequeReadySql } from '../utils/chequeWorkflow.js';
@@ -378,7 +379,7 @@ class PlotPaymentModel extends MasterModel {
       FROM plot_payments pp
       JOIN plots p ON p.id = pp.plot_id
       LEFT JOIN users u ON pp.assigned_admin_id = u.id
-      WHERE pp.site_id = $1 AND pp.date = $2
+      WHERE pp.site_id = $1 AND ${daybookSourceDatePredicate('plot_payments', 'pp')}
         AND ($3::text IS NULL OR pp.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY pp.id ASC
     `;

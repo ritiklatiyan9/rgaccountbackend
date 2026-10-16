@@ -1,8 +1,8 @@
+import { daybookEntryDate, daybookLedgerDateSql, daybookMirrorDateSql } from '../services/daybookDate.service.js';
 import { vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { dayBookModel } from '../models/DayBook.model.js';
-import { dayBookDailyBalanceModel } from '../models/DayBookDailyBalance.model.js';
 import { expenseModel } from '../models/Expense.model.js';
 import { farmerModel, farmerPaymentModel } from '../models/Farmer.model.js';
 import { plotCommissionModel } from '../models/PlotCommission.model.js';
@@ -62,22 +62,6 @@ import {
 // Balance Sheet and dashboard because each kept its own copy of the filters.
 export async function siteBalanceAsOf(siteId, cutoffDate, pool) {
   return loadSiteBalanceAsOf(siteId, cutoffDate, pool);
-}
-
-// Fetch or seed the daily-balance row for (siteId, date).
-// Seeds are only created for today-or-later, per product decision to start tracking from today.
-async function getOrSeedDailyBalance(siteId, date, pool) {
-  const today = new Date().toISOString().split('T')[0];
-  const existing = await dayBookDailyBalanceModel.findBySiteAndDate(siteId, date, pool);
-  if (existing) return existing;
-  if (date < today) return null;
-
-  const prev = await dayBookDailyBalanceModel.findLatestBefore(siteId, date, pool);
-  const opening = prev
-    ? parseFloat(prev.closing_balance) || 0
-    : await siteBalanceAsOf(siteId, date, pool);
-
-  return dayBookDailyBalanceModel.upsertOpening(siteId, date, opening, pool);
 }
 
 // ══════════════════════════════════════════════════
@@ -677,7 +661,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
            ON cfe.source_module = 'plot_commission_payments' AND cfe.source_id = pcp.id
          LEFT JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
          LEFT JOIN plots p ON pcm.plot_id = p.id
-        WHERE cfe.site_id = $1 AND cfe.date = $2
+        WHERE cfe.site_id = $1 AND ${daybookMirrorDateSql('cfe')} = $2::date
           AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'vendor_inventory_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements')
           AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
           AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'
@@ -695,8 +679,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     entryTimes,
     orderRevision,
     siteRow,
-    dailyBalanceRow,
     bankMapRows,
+    missingChequeDates,
   } = auxiliaryData;
 
   // Exclude IMPREST entries from daybook — they are managed in the Imprest module
@@ -1158,7 +1142,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       .filter((row) => row.entry_key)
       .map((row) => [row.entry_key, Number(row.position)])
   );
-  const allEntries = fallbackEntries
+  let allEntries = fallbackEntries
     .map((entry, fallbackIndex) => ({
       ...entry,
       order_key: dayBookOrderKey(entry),
@@ -1223,6 +1207,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     sourceId: entry.bank_source_id,
     siteId,
   }));
+  allEntries = allEntries.map(entry => ({ ...entry, date: daybookEntryDate(entry) }))
+    .filter(entry => entry.date === queryDate);
 
   // Compute summary
   let total_debit = 0, total_credit = 0;
@@ -1253,62 +1239,21 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     catMap[c].total_debit += dr; catMap[c].total_credit += cr; catMap[c].entries += 1;
   }
 
-  // ── Daily balance (opening + running/closing) ──
-  // Seeds today's row if missing; closing is kept in sync with live entries for every tracked date.
-  let balance = null;
-  if (visibility.creatorId) {
-    const running = total_credit - total_debit;
-    balance = {
-      opening_balance: 0,
-      closing_balance: running,
-      running_balance: running,
-      is_live: true,
-      tracked: true,
-      creator_scoped: true,
-    };
-  } else {
-  try {
-    const todayIso = new Date().toISOString().split('T')[0];
-    // The common existing snapshot was loaded with the daily metadata query.
-    // Only a missing current/future row needs the slower seed path.
-    const row = dailyBalanceRow || (
-      queryDate >= todayIso
-        ? await getOrSeedDailyBalance(siteId, queryDate, pool)
-        : null
-    );
-    if (row) {
-      const opening = parseFloat(row.opening_balance) || 0;
-      const running = opening + total_credit - total_debit;
-      const storedClosing = parseFloat(row.closing_balance) || 0;
-      // Stable reads do not need a write or another database round trip. An
-      // edit still refreshes the stored snapshot before the response returns.
-      const updated = Math.abs(storedClosing - running) > 0.0001
-        ? await dayBookDailyBalanceModel.updateClosing(siteId, queryDate, running, pool)
-        : null;
-      const closing = updated
-        ? parseFloat(updated.closing_balance) || 0
-        : running;
-      balance = {
-        opening_balance: opening,
-        closing_balance: closing,
-        running_balance: running,
-        is_live: queryDate >= todayIso,
-        tracked: true,
-      };
-    } else {
-      balance = {
-        opening_balance: null,
-        closing_balance: null,
-        running_balance: null,
-        is_live: false,
-        tracked: false,
-      };
-    }
-  } catch (err) {
-    console.error('[daybook] balance compute error:', err.message);
-    balance = { opening_balance: null, closing_balance: null, running_balance: null, is_live: false, tracked: false };
-  }
-  }
+  // Recompute dated balances from clearing dates, rather than reusing snapshots
+  // previously seeded with cheque application dates. Source dates stay intact.
+  const scopedBalances = visibility.creatorId
+    ? await loadDayBookModeBalanceData({siteId,date:queryDate,creatorId:visibility.creatorId},pool) : null;
+  const opening = scopedBalances
+    ? scopedBalances.rows.filter(row => row.is_before).reduce((sum,row) => sum + Number(row.credit) - Number(row.debit),0)
+    : await siteBalanceAsOf(siteId, queryDate, pool);
+  const balance = {
+    opening_balance: opening,
+    closing_balance: opening + total_credit - total_debit,
+    running_balance: opening + total_credit - total_debit,
+    is_live: queryDate >= new Date().toISOString().split('T')[0],
+    tracked: true,
+    ...(visibility.creatorId ? { creator_scoped: true } : {}),
+  };
 
   // Attach a signed verifyUrl to each entry so the DayBook receipt can embed
   // a QR. Payload fields are minimal — display info only. The `i` field uses
@@ -1344,6 +1289,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     typeBreakdown: Object.values(typeMap).sort((a, b) => b.total_debit - a.total_debit),
     modeBreakdown: Object.values(modeMap).sort((a, b) => b.total_debit - a.total_debit),
     categoryBreakdown: Object.values(catMap).sort((a, b) => b.total_debit - a.total_debit),
+    quality: { missing_cheque_transaction_dates: missingChequeDates || 0 },
+    cheque_date_basis: 'transaction',
     entryVisibility: { canViewAll: visibility.canViewAll, creatorId: visibility.creatorId },
   });
 });
@@ -1623,7 +1570,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
                LEFT JOIN cash_flow_entries cfe ON cfe.id = SPLIT_PART(le.id, ':', 1)::int
                LEFT JOIN daybook_entry_order dbo
                  ON dbo.site_id = le.site_id
-                AND dbo.entry_date = le.entry_date
+                AND dbo.entry_date = ${daybookLedgerDateSql('le', 'cfe')}
                 AND dbo.entry_key = CONCAT(
                   le.source_key,
                   ':',
@@ -1632,7 +1579,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
                LEFT JOIN daybook_global_order dgo
                  ON dgo.site_id = le.site_id
                 AND dgo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))
-              WHERE le.site_id = $1 AND le.entry_date = $2
+              WHERE le.site_id = $1 AND ${daybookLedgerDateSql('le', 'cfe')} = $2::date
               GROUP BY 1
              ) ordered
             ORDER BY ordered.display_position ASC NULLS LAST,
@@ -1750,29 +1697,18 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
 /**
  * GET /daybook/daily-balance?site_id=X&date=YYYY-MM-DD
  * Returns the opening + closing balance for a site+date.
- * Seeds today's record if missing (opening = yesterday's closing or Site Balance).
- * Returns tracked:false for past dates that pre-date the feature rollout.
+ * Uses the same clearing-date ledger as the daily rows and mode balances.
  */
 export const getDailyBalance = asyncHandler(async (req, res) => {
   const { site_id, date } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
   const queryDate = date || new Date().toISOString().split('T')[0];
 
-  const row = await getOrSeedDailyBalance(site_id, queryDate, pool);
-  if (!row) {
-    return res.json({
-      date: queryDate,
-      opening_balance: null,
-      closing_balance: null,
-      tracked: false,
-    });
-  }
-  res.json({
-    date: queryDate,
-    opening_balance: parseFloat(row.opening_balance) || 0,
-    closing_balance: parseFloat(row.closing_balance) || 0,
-    tracked: true,
-  });
+  const visibility = await resolveEntryVisibility(req.user, 'daybook', req.query.created_by);
+  const data = await loadDayBookModeBalanceData({siteId:Number(site_id),date:queryDate,creatorId:visibility.creatorId},pool);
+  const opening = data.siteOpening ?? data.rows.filter(row => row.is_before).reduce((sum,row) => sum + Number(row.credit) - Number(row.debit),0);
+  const movement = data.rows.filter(row => !row.is_before).reduce((sum,row) => sum + Number(row.credit) - Number(row.debit),0);
+  res.json({date:queryDate,opening_balance:opening,closing_balance:opening+movement,tracked:true,cheque_date_basis:'transaction'});
 });
 
 /**
@@ -3423,25 +3359,8 @@ export const getLatestDate = asyncHandler(async (req, res) => {
   const creatorClause = visibility.creatorId ? ' AND created_by = ANY(string_to_array($2::text, \',\' )::int[])' : '';
 
   const result = await pool.query(
-    `SELECT MAX(d)::text AS latest_date FROM (
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) AS d FROM day_book WHERE site_id = $1${creatorClause}
-       UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM expenses WHERE site_id = $1${creatorClause}
-       UNION ALL
-       SELECT MAX((fp.date AT TIME ZONE 'Asia/Kolkata')::date) FROM farmer_payments fp JOIN farmers f ON fp.farmer_id = f.id WHERE f.site_id = $1${visibility.creatorId ? ' AND fp.created_by = ANY(string_to_array($2::text, \',\' )::int[])' : ''}
-       UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_commissions WHERE site_id = $1${creatorClause}
-       UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM cash_flow_entries WHERE site_id = $1${creatorClause}
-       UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM firm_transactions WHERE site_id = $1${creatorClause}
-       UNION ALL
-       SELECT MAX((date AT TIME ZONE 'Asia/Kolkata')::date) FROM plot_payments WHERE site_id = $1${creatorClause}
-       UNION ALL
-       SELECT MAX((ldp.date AT TIME ZONE 'Asia/Kolkata')::date)
-       FROM land_deal_payments ldp JOIN land_deals ld ON ld.id = ldp.land_deal_id
-       WHERE ld.site_id = $1${visibility.creatorId ? ' AND ldp.created_by = ANY(string_to_array($2::text, \',\' )::int[])' : ''}
-     ) sub`,
+    `SELECT TO_CHAR(MAX(${daybookMirrorDateSql('cfe')}), 'YYYY-MM-DD') AS latest_date
+       FROM cash_flow_entries cfe WHERE cfe.site_id = $1${creatorClause}`,
     visibility.creatorId ? [siteId, visibility.creatorId] : [siteId]
   );
 

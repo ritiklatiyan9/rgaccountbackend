@@ -1,3 +1,4 @@
+import { daybookSourceDatePredicate } from '../services/daybookDate.service.js';
 import MasterModel from './MasterModel.js';
 
 // ── Firm Model ──
@@ -239,7 +240,7 @@ class FirmTransactionModel extends MasterModel {
       FROM firm_transactions ft
       JOIN firms f ON f.id = ft.firm_id
       LEFT JOIN users u ON ft.assigned_admin_id = u.id
-      WHERE ft.site_id = $1 AND ft.date = $2
+      WHERE ft.site_id = $1 AND ${daybookSourceDatePredicate('firm_transactions', 'ft')}
         AND ($3::text IS NULL OR ft.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY ft.id ASC
     `;

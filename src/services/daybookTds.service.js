@@ -13,7 +13,7 @@ export function sourceOf(entry) {
   if (tables.has(entry.source_key) && entry.source_id) return { table: entry.source_key, id: entry.source_id };
   if (entry.source_key === 'tds_settlements') return null;
   if (entry.source_key === 'day_book' && entry.source_id) return { table: 'day_book', id: entry.source_id };
-  if (entry.source_key === 'personal_ledger' && entry.entry_date) return { table: 'cash_flow_entries', id: String(entry.id).split(':')[0] };
+  if (entry.source_key === 'personal_ledger' && Object.hasOwn(entry, 'entry_date')) return { table: 'cash_flow_entries', id: String(entry.id).split(':')[0] };
   if (typeof entry.id === 'number') return { table: 'day_book', id: entry.id };
   const [prefix, id] = String(entry.id).split('_');
   return prefixes[prefix] ? { table: prefixes[prefix], id } : null;
@@ -110,7 +110,7 @@ export async function attachDayBookTdsSettlements(entries, db = pool) {
   for (const entry of entries) {
     if (entry.source_key === 'tds_settlements' && entry.source_id) ids.add(Number(entry.source_id));
     if (entry.cash_flow_entry_id) cashflowIds.add(Number(entry.cash_flow_entry_id));
-    if (entry.entry_date) cashflowIds.add(Number(String(entry.id).split(':')[0]));
+    if (Object.hasOwn(entry, 'entry_date')) cashflowIds.add(Number(String(entry.id).split(':')[0]));
     const source = sourceOf(entry);
     if (source) ownerKeys.add(`${source.table}:${source.id}`);
   }
@@ -127,7 +127,7 @@ export async function attachDayBookTdsSettlements(entries, db = pool) {
   const byOwner = new Map(rows.filter(row => row.source_module).map(row => [`${row.source_module}:${row.source_id}`, row]));
   for (const entry of entries) {
     const source = sourceOf(entry);
-    const cashflowId = entry.cash_flow_entry_id || (entry.entry_date ? Number(String(entry.id).split(':')[0]) : null);
+    const cashflowId = entry.cash_flow_entry_id || (Object.hasOwn(entry, 'entry_date') ? Number(String(entry.id).split(':')[0]) : null);
     const settlement = entry.source_key === 'tds_settlements' ? bySettlement.get(Number(entry.source_id))
       : byCashflow.get(Number(cashflowId)) || (source && byOwner.get(`${source.table}:${source.id}`));
     if (!settlement) continue;

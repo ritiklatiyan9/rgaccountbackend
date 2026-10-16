@@ -1,3 +1,4 @@
+import { daybookLedgerDateSql } from './daybookDate.service.js';
 import { loadGlobalSequence } from './daybookOrderSync.service.js';
 
 const mergeUnique = (...groups) => {
@@ -109,11 +110,12 @@ export async function applyBankDaybookOrder(client, {
                MAX(le.created_at) AS created_at,
                MAX(le.id) AS ledger_id
              FROM ledger_entries le
+             LEFT JOIN cash_flow_entries date_cfe ON date_cfe.id = SPLIT_PART(le.id, ':', 1)::int
              LEFT JOIN daybook_entry_order dbo
                ON dbo.site_id = le.site_id
-              AND dbo.entry_date = le.entry_date
+              AND dbo.entry_date = ${daybookLedgerDateSql('le', 'date_cfe')}
               AND dbo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))
-            WHERE le.site_id = $1 AND le.entry_date = $2::date
+            WHERE le.site_id = $1 AND ${daybookLedgerDateSql('le', 'date_cfe')} = $2::date
             GROUP BY 1
            ) ordered
           ORDER BY ordered.display_position ASC NULLS LAST,

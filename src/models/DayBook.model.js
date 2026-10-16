@@ -1,3 +1,4 @@
+import { daybookSourceDatePredicate } from '../services/daybookDate.service.js';
 import MasterModel from './MasterModel.js';
 
 // ── Day Book Model ──
@@ -45,7 +46,7 @@ class DayBookModel extends MasterModel {
       FROM day_book d
       LEFT JOIN users u ON d.assigned_admin_id = u.id
       LEFT JOIN users approver ON d.approved_by = approver.id
-      WHERE d.site_id = $1 AND d.date = $2 ${creatorId ? 'AND d.created_by = ANY(string_to_array($3::text, \',\' )::int[])' : ''}
+      WHERE d.site_id = $1 AND ${daybookSourceDatePredicate('day_book', 'd')} ${creatorId ? 'AND d.created_by = ANY(string_to_array($3::text, \',\' )::int[])' : ''}
       ORDER BY d.id ASC
     `;
     const result = await pool.query(query, creatorId ? [siteId, date, creatorId] : [siteId, date]);

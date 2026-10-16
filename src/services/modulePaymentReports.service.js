@@ -7,6 +7,7 @@ import { cashFlowMonthModel } from '../models/CashFlow.model.js';
 import { readLandSalesReport, readLandProfitReport } from '../controllers/landDeal.controller.js';
 import { attachTransactionParticulars } from './transactionParticulars.service.js';
 import { attachDayBookTds, attachDayBookTdsSettlements } from './daybookTds.service.js';
+import { daybookLedgerDateSql } from './daybookDate.service.js';
 
 const scope = alias => `($2::text IS NULL OR ${alias}.created_by = ANY(string_to_array($2::text, ',')::int[]))`;
 const posted = alias => `financial_transaction_posts(CASE WHEN ${alias}.amount < 0 THEN 'credit' ELSE 'debit' END, ${alias}.status, ${alias}.payment_mode, ${alias}.cheque_status)`;
@@ -88,11 +89,13 @@ export async function loadModuleReport(key, siteId, creatorId, db = pool) {
       WHERE e.site_id = $1 AND ${scope('e')} ORDER BY e.date DESC, e.id DESC`, siteId, creatorId);
     case 'daybook': {
       const entries = await queryRows(db, `
-      SELECT l.*, e.voucher_url, l.entry_date AS date, l.raw_mode AS payment_mode, l.source_key AS source,
+      SELECT l.*, e.voucher_url, ${daybookLedgerDateSql('l', 'e')} AS entry_date,
+             ${daybookLedgerDateSql('l', 'e')} AS date, l.entry_date AS cheque_apply_date,
+             e.cheque_transaction_date, l.raw_mode AS payment_mode, l.source_key AS source,
              l.entity_name AS party, l.linked_detail AS category
       FROM ledger_entries l JOIN cash_flow_entries e ON e.id::text = split_part(l.id, ':', 1) AND e.site_id = l.site_id
       WHERE l.site_id = $1 AND ${scope('e')}
-      ORDER BY l.entry_date DESC, l.id DESC`, siteId, creatorId);
+      ORDER BY ${daybookLedgerDateSql('l', 'e')} DESC NULLS LAST, l.id DESC`, siteId, creatorId);
       await attachDayBookTds(entries, db);
       await attachDayBookTdsSettlements(entries, db);
       await attachTransactionParticulars(entries, db);

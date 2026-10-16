@@ -1,3 +1,4 @@
+import { daybookLedgerDateSql } from './daybookDate.service.js';
 import crypto from 'crypto';
 
 export const BANK_DAYBOOK_MATCHER_VERSION = 'bank-daybook-v1';
@@ -311,7 +312,7 @@ export async function loadBankDaybookCandidates(db, {
        le.id::text AS ledger_id,
        CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))) AS entry_key,
        le.source_key, le.source_id,
-       TO_CHAR(le.entry_date, 'YYYY-MM-DD') AS date,
+       TO_CHAR(${daybookLedgerDateSql('le', 'date_cfe')}, 'YYYY-MM-DD') AS date,
        CASE
          WHEN GREATEST(le.debit, 0) + GREATEST(-le.credit, 0) > 0 THEN 'DEBIT'
          ELSE 'CREDIT'
@@ -333,24 +334,25 @@ export async function loadBankDaybookCandidates(db, {
        le.bank_account_id, le.bank_account_name, le.created_at,
        dbo.position AS local_position,
        dgo.position AS global_position,
-       (le.entry_date BETWEEN $3::date AND $4::date) AS in_statement_period
+       (${daybookLedgerDateSql('le', 'date_cfe')} BETWEEN $3::date AND $4::date) AS in_statement_period
      FROM ledger_entries le
+     LEFT JOIN cash_flow_entries date_cfe ON date_cfe.id = SPLIT_PART(le.id, ':', 1)::int
      LEFT JOIN daybook_entry_order dbo
        ON dbo.site_id = le.site_id
-      AND dbo.entry_date = le.entry_date
+      AND dbo.entry_date = ${daybookLedgerDateSql('le', 'date_cfe')}
       AND dbo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))
      LEFT JOIN daybook_global_order dgo
        ON dgo.site_id = le.site_id
       AND dgo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))
      WHERE le.site_id = $1
        AND le.bucket <> 'cash'
-       AND le.entry_date BETWEEN ($3::date - $5::int) AND ($4::date + $5::int)
+       AND ${daybookLedgerDateSql('le', 'date_cfe')} BETWEEN ($3::date - $5::int) AND ($4::date + $5::int)
        AND (
          $2::text = 'all'
          OR ($2::text = 'unmapped' AND le.bank_account_id IS NULL)
          OR ($6::int IS NOT NULL AND le.bank_account_id = $6::int)
        )
-     ORDER BY le.entry_date, le.created_at, le.id`,
+     ORDER BY ${daybookLedgerDateSql('le', 'date_cfe')}, le.created_at, le.id`,
     [siteId, String(scope), dateFrom, dateTo, toleranceDays, numericScope]
   );
   return result.rows.map((row) => ({

@@ -1,3 +1,5 @@
+import { chequeLedgerSql, daybookLedgerDateSql, daybookMirrorDateSql } from './daybookDate.service.js';
+
 const SOURCE_EXPRESSION = `CASE
   WHEN le.source_key = 'personal_ledger' AND le.ledger_type = 'site' THEN 'site_ledger'
   ELSE le.source_key
@@ -36,7 +38,8 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
                  AND NOT EXISTS (SELECT 1 FROM daybook_entry_order dbo
                    WHERE dbo.site_id = $1 AND dbo.entry_date = $2::date AND dbo.entry_key = dgo.entry_key)
                  AND EXISTS (SELECT 1 FROM ledger_entries le
-                   WHERE le.site_id = $1 AND le.entry_date = $2::date
+                   LEFT JOIN cash_flow_entries date_cfe ON date_cfe.id = SPLIT_PART(le.id, ':', 1)::int
+                   WHERE le.site_id = $1 AND ${daybookLedgerDateSql('le', 'date_cfe')} = $2::date
                      AND dgo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1))))
              ) positions
            ) ordered
@@ -44,7 +47,7 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
        COALESCE((SELECT jsonb_object_agg(
          CONCAT(COALESCE(cfe.source_module, 'personal_ledger'), ':', COALESCE(cfe.source_id, cfe.id)),
          cfe.transaction_time)
-         FROM cash_flow_entries cfe WHERE cfe.site_id = $1 AND cfe.date = $2::date
+         FROM cash_flow_entries cfe WHERE cfe.site_id = $1 AND ${daybookMirrorDateSql('cfe')} = $2::date
            AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))), '{}'::jsonb) AS entry_times,
        COALESCE((
          SELECT dos.revision
@@ -80,9 +83,16 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
                 )
            FROM cash_flow_entries cfe
            JOIN bank_accounts ba ON ba.id = cfe.bank_account_id
-          WHERE cfe.site_id = $1 AND cfe.date = $2::date
+          WHERE cfe.site_id = $1 AND ${daybookMirrorDateSql('cfe')} = $2::date
             AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))
-       ), '[]'::jsonb) AS bank_map_rows`,
+       ), '[]'::jsonb) AS bank_map_rows,
+       (SELECT COUNT(*)::int FROM cash_flow_entries cfe
+          WHERE cfe.site_id = $1 AND ${chequeLedgerSql('cfe')}
+            AND UPPER(TRIM(COALESCE(cfe.cheque_status, ''))) = 'CLEARED'
+            AND cfe.cheque_transaction_date IS NULL
+            AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))
+            AND ((cfe.credit <> 0 AND financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status))
+              OR (cfe.debit <> 0 AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)))) AS missing_cheque_dates`,
     [siteId, date, creatorId]
   );
 
@@ -94,6 +104,7 @@ export async function loadDayBookAuxiliaryData(siteId, date, queryable, creatorI
     siteRow: row.site_row || null,
     dailyBalanceRow: row.daily_balance_row || null,
     bankMapRows: row.bank_map_rows || [],
+    missingChequeDates: Number(row.missing_cheque_dates) || 0,
   };
 }
 
@@ -108,7 +119,8 @@ export async function loadSiteBalanceAsOf(siteId, cutoffDate, queryable) {
        COALESCE((
          SELECT SUM(le.credit - le.debit)
            FROM ledger_entries le
-          WHERE le.site_id = $1 AND le.entry_date < $2::date
+           LEFT JOIN cash_flow_entries creator_cfe ON creator_cfe.id = SPLIT_PART(le.id, ':', 1)::int
+          WHERE le.site_id = $1 AND ${daybookLedgerDateSql()} < $2::date
        ), 0)::numeric AS ledger_net,
        COALESCE((
          SELECT SUM(GREATEST(user_balance, 0))
@@ -144,7 +156,7 @@ export async function loadDayBookModeBalanceData({ siteId, date, creatorId = nul
     const { rows } = await queryable.query(
       `SELECT
          le.bucket,
-         (le.entry_date < $2::date) AS is_before,
+         (${daybookLedgerDateSql()} < $2::date) AS is_before,
          ${SOURCE_EXPRESSION} AS src,
          COALESCE(SUM(le.credit), 0)::numeric AS credit,
          COALESCE(SUM(le.debit), 0)::numeric AS debit
@@ -152,7 +164,7 @@ export async function loadDayBookModeBalanceData({ siteId, date, creatorId = nul
        JOIN cash_flow_entries creator_cfe
          ON creator_cfe.id = split_part(le.id, ':', 1)::int
       WHERE le.site_id = $1
-        AND le.entry_date <= $2::date
+        AND ${daybookLedgerDateSql()} <= $2::date
         AND creator_cfe.created_by = ANY(string_to_array($3::text, ',' )::int[])
       GROUP BY le.bucket, is_before, src`,
       [siteId, date, creatorId]
@@ -171,11 +183,12 @@ export async function loadDayBookModeBalanceData({ siteId, date, creatorId = nul
     `WITH ledger AS MATERIALIZED (
        SELECT
          le.bucket,
-         le.entry_date,
+         ${daybookLedgerDateSql()} AS entry_date,
          ${SOURCE_EXPRESSION} AS src,
          le.credit,
          le.debit
        FROM ledger_entries le
+       LEFT JOIN cash_flow_entries creator_cfe ON creator_cfe.id = SPLIT_PART(le.id, ':', 1)::int
        WHERE le.site_id = $1
      ),
      bucket_rows AS (

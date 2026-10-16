@@ -5,22 +5,24 @@ import balanceSheet from '../src/models/BalanceSheet.model.js';
 import { updateDayBookOrder } from '../src/controllers/daybook.controller.js';
 
 // Dates lead before pagination; saved positions only arrange the same day.
-const ANCHORED_SEQUENCE = /ORDER BY entry_date DESC,\s+COALESCE\(\s+global_display_position::numeric,[\s\S]*PARTITION BY entry_date[\s\S]*ASC NULLS LAST,\s+display_position ASC NULLS LAST/;
+const ANCHORED_SEQUENCE = /ORDER BY (entry_date|report_date) DESC NULLS LAST,\s+COALESCE\(\s+global_display_position::numeric,[\s\S]*PARTITION BY \1[\s\S]*ASC NULLS LAST,\s+display_position ASC NULLS LAST/;
 
 test('period reads sort by date before saved positions and pagination in every book', async (t) => {
   const calls = [];
   t.mock.method(pool, 'query', async (sql, params) => {
     calls.push({ sql, params });
-    return calls.length === 1 ? { rows: [{ report: { order_revision: 2 } }] } : { rows: [] };
+    if (sql.includes('WITH deductions AS')) return { rows: [{ deducted: 0, deposited: 0, payable: 0, with_ca: 0, reserve: 0 }] };
+    return calls.length === 1 ? { rows: [{ report: { order_revision: 2, summary: { balance_in_hand: 0 } } }] } : { rows: [] };
   });
   for (const scope of ['bank', 'cash', 'all']) {
     calls.length = 0;
-    await balanceSheet.getReport({ siteId: 9, scope, limit: 50 });
-    assert.equal(calls.length, 2);
+    await balanceSheet.getReport({ siteId: 9, scope, limit: 50, chequeTransactionDates: true });
+    assert.equal(calls.length, 3);
     assert.match(calls[1].sql, ANCHORED_SEQUENCE);
-    assert.match(calls[1].sql, /ORDER BY entry_date DESC,[\s\S]*LIMIT \$9::int/);
+    assert.match(calls[1].sql, /ORDER BY report_date DESC NULLS LAST,[\s\S]*LIMIT \$9::int/);
     assert.equal(calls[1].params[3], scope);
     assert.equal(calls[1].params[8], 50);
+    assert.equal(calls[1].params[12], true);
   }
 });
 

@@ -4,6 +4,7 @@ import { attachTransactionParticulars } from '../services/transactionParticulars
 import { attachDayBookTds } from '../services/daybookTds.service.js';
 import { getTdsSummary } from '../services/tdsAccounting.service.js';
 import { attachChequeDates } from '../services/chequeDates.service.js';
+import { daybookLedgerDateSql } from '../services/daybookDate.service.js';
 
 /**
  * Balance Sheet reads `ledger_entries` — the canonical money view created in
@@ -20,6 +21,7 @@ const SCOPED = `
   WITH scoped_entries AS (
     SELECT
       le.*,
+      CASE WHEN $13::boolean THEN ${daybookLedgerDateSql()} ELSE le.entry_date END AS report_date,
       creator_cfe.transaction_time,
       settlement.id AS tds_settlement_id,
       settlement.kind AS tds_settlement_kind,
@@ -55,7 +57,7 @@ const SCOPED = `
     LEFT JOIN plots plot ON plot.id = COALESCE(pp.plot_id, pip.plot_id, commission_plot.id)
     LEFT JOIN daybook_entry_order dbo
       ON dbo.site_id = le.site_id
-     AND dbo.entry_date = le.entry_date
+     AND dbo.entry_date = CASE WHEN $13::boolean THEN ${daybookLedgerDateSql()} ELSE le.entry_date END
      AND dbo.entry_key = CONCAT(
        le.source_key,
        ':',
@@ -95,13 +97,14 @@ const SCOPED = `
   period_entries AS (
     SELECT *
     FROM scoped_entries
-    WHERE ($2::date IS NULL OR entry_date >= $2::date)
-      AND ($3::date IS NULL OR entry_date <= $3::date)
+    WHERE (($2::date IS NULL OR report_date >= $2::date)
+      AND ($3::date IS NULL OR report_date <= $3::date))
+      OR ($13::boolean AND $14::boolean AND report_date IS NULL)
   ),
   opening AS (
     SELECT COALESCE(SUM(credit - debit), 0)::numeric AS amount
     FROM scoped_entries
-    WHERE $2::date IS NOT NULL AND entry_date < $2::date
+    WHERE $2::date IS NOT NULL AND report_date < $2::date
   ),
   summary AS (
     SELECT
@@ -174,15 +177,16 @@ const REPORT_META_QUERY = `${SCOPED}
       SELECT jsonb_agg(to_jsonb(t) ORDER BY t.period)
       FROM (
         SELECT
-          CASE WHEN $10::text = 'day' THEN entry_date ELSE DATE_TRUNC('month', entry_date)::date END AS period,
+          CASE WHEN $10::text = 'day' THEN report_date ELSE DATE_TRUNC('month', report_date)::date END AS period,
           COALESCE(SUM(debit), 0)::numeric AS total_debit,
           COALESCE(SUM(credit), 0)::numeric AS total_credit,
           COALESCE(SUM(credit - debit), 0)::numeric AS net
-        FROM period_entries
-        GROUP BY CASE WHEN $10::text = 'day' THEN entry_date ELSE DATE_TRUNC('month', entry_date)::date END
+        FROM period_entries WHERE report_date IS NOT NULL
+        GROUP BY CASE WHEN $10::text = 'day' THEN report_date ELSE DATE_TRUNC('month', report_date)::date END
       ) t
     ), '[]'::jsonb),
     'quality', jsonb_build_object(
+      'missing_cheque_transaction_dates', (SELECT COUNT(*)::int FROM scoped_entries WHERE $13::boolean AND report_date IS NULL),
       -- Entries whose date is a typo (year 0025, 20222, …). They are excluded
       -- from every balance until corrected — surfaced so they get fixed rather
       -- than silently swallowed.
@@ -209,12 +213,12 @@ const REPORT_META_QUERY = `${SCOPED}
       -- today excludes it. Counted here so a post-dated (or mistyped) row is
       -- visible rather than only appearing in an unbounded total.
       'post_dated_entries', (
-        SELECT COUNT(*)::int FROM ledger_entries
-        WHERE site_id = $1 AND entry_date > CURRENT_DATE
+        SELECT COUNT(*)::int FROM ledger_entries le LEFT JOIN cash_flow_entries creator_cfe ON creator_cfe.id = SPLIT_PART(le.id, ':', 1)::int
+        WHERE le.site_id = $1 AND CASE WHEN $13::boolean THEN ${daybookLedgerDateSql()} ELSE le.entry_date END > CURRENT_DATE
       ),
       'post_dated_amount', (
-        SELECT COALESCE(SUM(debit + credit), 0)::numeric FROM ledger_entries
-        WHERE site_id = $1 AND entry_date > CURRENT_DATE
+        SELECT COALESCE(SUM(le.debit + le.credit), 0)::numeric FROM ledger_entries le LEFT JOIN cash_flow_entries creator_cfe ON creator_cfe.id = SPLIT_PART(le.id, ':', 1)::int
+        WHERE le.site_id = $1 AND CASE WHEN $13::boolean THEN ${daybookLedgerDateSql()} ELSE le.entry_date END > CURRENT_DATE
       ),
       'is_truncated', summary.total_entries > $9::int
     )
@@ -225,7 +229,8 @@ const REPORT_META_QUERY = `${SCOPED}
 const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
   SELECT
     id,
-    TO_CHAR(entry_date, 'YYYY-MM-DD') AS entry_date,
+    TO_CHAR(report_date, 'YYYY-MM-DD') AS entry_date,
+    TO_CHAR(entry_date, 'YYYY-MM-DD') AS cheque_apply_date,
     particular, remarks, debit, credit,
     raw_mode AS payment_mode,
     bucket,
@@ -246,7 +251,7 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
   WHERE $10::text IS NOT NULL
   -- Keep dates chronological before limiting rows. Saved positions only
   -- arrange entries within the same date (see SEQUENCE_ORDER_BY).
-  ${SEQUENCE_ORDER_BY}
+  ${SEQUENCE_ORDER_BY.replaceAll('entry_date', 'report_date')}
   LIMIT $9::int
 `;
 
@@ -264,9 +269,11 @@ class BalanceSheetModel {
     grain = 'day',
     plotId = null,
     creatorId = null,
+    chequeTransactionDates = false,
+    includeUndatedCheques = false,
   }) {
     const params = [
-      siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain, plotId, creatorId,
+      siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain, plotId, creatorId, chequeTransactionDates, includeUndatedCheques,
     ];
 
     // Run sequentially so one API call cannot reserve two large ledger working

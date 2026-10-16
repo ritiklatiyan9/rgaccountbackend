@@ -1,3 +1,4 @@
+import { daybookLedgerDateSql } from './daybookDate.service.js';
 /**
  * One presentation sequence, two storage layers.
  *
@@ -18,7 +19,7 @@ export const LEDGER_ENTRY_KEY_SQL = "CONCAT(le.source_key, ':', COALESCE(le.sour
  * transaction_time, created_at, id.
  */
 export const SEQUENCE_ORDER_BY = `
-  ORDER BY entry_date DESC,
+  ORDER BY entry_date DESC NULLS LAST,
            COALESCE(
              global_display_position::numeric,
              COALESCE(
@@ -60,7 +61,7 @@ export async function loadGlobalSequence(client, siteId) {
            ${LEDGER_ENTRY_KEY_SQL} AS entry_key,
            MIN(dgo.position) AS global_display_position,
            MIN(dbo.position) AS display_position,
-           MAX(le.entry_date) AS entry_date,
+           MAX(${daybookLedgerDateSql('le', 'cfe')}) AS entry_date,
            MAX(cfe.transaction_time) AS transaction_time,
            MAX(le.created_at) AS created_at,
            MAX(le.id) AS id
@@ -69,7 +70,7 @@ export async function loadGlobalSequence(client, siteId) {
          LEFT JOIN daybook_global_order dgo
            ON dgo.site_id = le.site_id AND dgo.entry_key = ${LEDGER_ENTRY_KEY_SQL}
          LEFT JOIN daybook_entry_order dbo
-           ON dbo.site_id = le.site_id AND dbo.entry_date = le.entry_date AND dbo.entry_key = ${LEDGER_ENTRY_KEY_SQL}
+           ON dbo.site_id = le.site_id AND dbo.entry_date = ${daybookLedgerDateSql('le', 'cfe')} AND dbo.entry_key = ${LEDGER_ENTRY_KEY_SQL}
         WHERE le.site_id = $1
         GROUP BY 1
        ) ordered

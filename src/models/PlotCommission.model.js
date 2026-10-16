@@ -1,3 +1,4 @@
+import { daybookSourceDatePredicate } from '../services/daybookDate.service.js';
 import MasterModel from './MasterModel.js';
 
 class PlotCommissionModel extends MasterModel {
@@ -90,7 +91,7 @@ class PlotCommissionModel extends MasterModel {
         LIMIT 1
       ) m ON true
       LEFT JOIN users u ON pc.assigned_admin_id = u.id
-      WHERE pc.site_id = $1 AND pc.date = $2
+      WHERE pc.site_id = $1 AND ${daybookSourceDatePredicate('plot_commissions', 'pc')}
         AND ($3::text IS NULL OR pc.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY pc.id ASC
     `;

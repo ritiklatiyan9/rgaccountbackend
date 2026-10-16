@@ -1,3 +1,4 @@
+import { daybookSourceDatePredicate } from '../services/daybookDate.service.js';
 import MasterModel from './MasterModel.js';
 
 class FarmerModel extends MasterModel {
@@ -126,7 +127,7 @@ class FarmerPaymentModel extends MasterModel {
       FROM farmer_payments fp
       JOIN farmers f ON fp.farmer_id = f.id
       LEFT JOIN users u ON fp.assigned_admin_id = u.id
-      WHERE f.site_id = $1 AND fp.date = $2
+      WHERE f.site_id = $1 AND ${daybookSourceDatePredicate('farmer_payments', 'fp')}
         AND ($3::text IS NULL OR fp.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY fp.id ASC
     `;

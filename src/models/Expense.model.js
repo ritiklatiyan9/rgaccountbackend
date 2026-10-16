@@ -1,3 +1,4 @@
+import { daybookSourceDatePredicate } from '../services/daybookDate.service.js';
 import MasterModel from './MasterModel.js';
 
 /**
@@ -269,7 +270,7 @@ class ExpenseModel extends MasterModel {
       FROM expenses e
       LEFT JOIN users u ON e.approved_by = u.id
       LEFT JOIN users admin_u ON e.assigned_admin_id = admin_u.id
-      WHERE e.site_id = $1 AND e.date = $2
+      WHERE e.site_id = $1 AND ${daybookSourceDatePredicate('expenses', 'e')}
         AND ($3::text IS NULL OR e.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY e.id ASC
     `;

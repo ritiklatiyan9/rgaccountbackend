@@ -1,3 +1,4 @@
+import { daybookMirrorDateSql } from '../services/daybookDate.service.js';
 import MasterModel from './MasterModel.js';
 
 // ── Cash Flow Month Model ──
@@ -245,7 +246,7 @@ class CashFlowEntryModel extends MasterModel {
       FROM cash_flow_entries cfe
       JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
       LEFT JOIN users u ON cfe.assigned_admin_id = u.id
-      WHERE cfe.site_id = $1 AND cfe.date = $2
+      WHERE cfe.site_id = $1 AND ${daybookMirrorDateSql('cfe')} = $2::date
         AND cfe.source_module IS NULL
         AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))
       ORDER BY cfe.created_at ASC

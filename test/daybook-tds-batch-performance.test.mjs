@@ -25,6 +25,7 @@ test('mixed-owner TDS snapshots need one query and keep source net/gross and ide
       { id: '2:cash', source_key: 'plot_commission_payments', source_id: 2 },
       { id: '3:cash', source_key: 'plot_commission_payments', source_id: 3 },
       { id: 'unknown_1', source_key: 'untrusted_source', source_id: 1 },
+      { id: '1', source_key: 'personal_ledger', entry_date: null },
     ];
     assert.equal(await attachDayBookTds(entries, tracked), entries);
     assert.equal(queries, 1, 'four source tables share one database statement');
@@ -42,6 +43,7 @@ test('mixed-owner TDS snapshots need one query and keep source net/gross and ide
     assert.equal(entries[5].gross_amount, 2000);
     assert.equal(entries[6].gross_amount, 500);
     assert.equal(entries[7].tds_amount, undefined);
+    assert.equal(entries[8].gross_amount, 1000, 'an unknown cheque clearing date does not hide its TDS snapshot');
     assert.deepEqual(await attachDayBookTds([], tracked), []);
     assert.equal(queries, 1);
   } finally { await db.close(); }
