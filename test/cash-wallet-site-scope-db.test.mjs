@@ -13,6 +13,7 @@ import { siteVaultAccountsCte } from '../src/services/loyaltyVaultSite.service.j
 import { pendingVaultTotals } from '../src/services/loyaltyVaultTransactions.service.js';
 import * as controller from '../src/controllers/loyaltyVault.controller.js';
 import pool from '../src/config/db.js';
+import { adminWalletCashStates, walletWithCashInHand } from '../src/services/adminWalletCash.service.js';
 
 test('Cash Wallet separates real/test site custody and rejects cross-site spending and detail access', {skip:!process.env.PGLITE_MODULE},async t=>{
   const {PGlite}=await import(process.env.PGLITE_MODULE),pg=new PGlite();
@@ -347,6 +348,60 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       await assert.rejects(invoke(controller.transfers,{extraQuery:{holder_id:4}}),status(403));
       await assert.rejects(invoke(controller.transfers,{site:11,extraQuery:scope}),status(403));
       await resolveVaultTransfer({id:7},request.transfer.id,'cancel',{site_id:10},db);
+    });
+    await t.test('site cash wallet uses actual custody after imprest and enforces it on request and acceptance',async()=>{
+      await query(`INSERT INTO sites VALUES(12,'Cash custody',1),(13,'Another project',1);
+        INSERT INTO user_sites VALUES(1,12);
+        CREATE TABLE ledger_entries(site_id integer,entry_date date DEFAULT CURRENT_DATE,bucket text,credit numeric DEFAULT 0,debit numeric DEFAULT 0);
+        CREATE TABLE imprest_ledger(site_id integer,user_id integer,amount numeric,created_at timestamptz DEFAULT now());
+        CREATE TABLE imprest_allocations(site_id integer,amount numeric,status text,from_own_float boolean DEFAULT false,created_at timestamptz DEFAULT now());
+        CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric);
+        INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(12,'cash',4500000),(12,'bank',900000),(13,'cash',200);
+        INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,200000),(12,2,999999),(12,3,-500),(13,1,50)`);
+      const delta=(amount,kind='adjustment',source=null,site=12,key='user:2')=>query('SELECT loyalty_vault_apply_delta($1,1,$2,$3,$4,$5,NULL,NULL,$6,2)',[key,amount,kind,'Custody test',source,site]);
+      await delta(4500000,'adjustment','manual_wallet_site_cash_alignment');
+      await delta(200,'adjustment','manual_wallet_site_cash_alignment',13);
+      const originals=(await query('SELECT * FROM loyalty_vault_entries ORDER BY id')).rows;
+      const states=()=>adminWalletCashStates(1,12,db);
+      const cash=async()=>Number((await states()).get('user:2').balance);
+      assert.equal(await cash(),4300000);
+      assert.equal((await adminWalletCashStates(1,13,db)).get('user:2').balance,'150.00');
+      assert.equal((await adminWalletCashStates(2,12,db)).size,0);
+      assert.equal((await adminWalletCashStates(1,10,db)).size,0,'unaligned receipt wallets are unchanged');
+      assert.equal(walletWithCashInHand({holder_id:2,balance:null},await states()).balance,null,'private picker balances stay private');
+      const projected=(await invoke(controller.summary,{site:12})).vault;
+      const holder=(await invoke(controller.holders,{site:12})).holders.find(h=>h.holder_type==='user'&&h.holder_id===2);
+      const profile=(await invoke(controller.userDetail,{site:12,params:{id:2}})).user;
+      for(const value of [projected,holder,profile]) {
+        assert.equal(Number(value.balance),4300000);assert.equal(Number(value.available_balance),4300000);
+        assert.equal(Number(value.recorded_balance),4500000);assert.equal(value.cash_in_hand_basis,'SITE_CASH_AFTER_IMPREST');
+      }
+      assert.equal(Number(projected.total_balance),4300000);
+      await assert.rejects(createVaultTransfer({id:2},transfer('4300000.01',12,1),db),status(409));
+      const requested=await createVaultTransfer({id:2},transfer('4300000',12,1),db);
+      await query('INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,100000)');
+      await assert.rejects(resolveVaultTransfer({id:1},requested.transfer.id,'accept',{site_id:12},db),status(409));
+      assert.equal((await query('SELECT status FROM loyalty_vault_transfers WHERE id=$1',[requested.transfer.id])).rows[0].status,'pending');
+      await resolveVaultTransfer({id:2},requested.transfer.id,'cancel',{site_id:12},db);
+      const allowed=await createVaultTransfer({id:2},transfer('4200000',12,1),db);
+      await resolveVaultTransfer({id:1},allowed.transfer.id,'accept',{site_id:12},db);
+      assert.equal(await cash(),0,'accepted wallet handovers reduce custody exactly once');
+      await assert.rejects(createVaultTransfer({id:2},transfer('1',12,1),db),status(409));
+      await query('INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,-100000)');
+      assert.equal(await cash(),100000,'returned imprest restores admin cash');
+      await query("INSERT INTO ledger_entries(site_id,bucket,debit) VALUES(12,'cash',50000); INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,-50000)");
+      assert.equal(await cash(),100000,'staff spending reduces both cash and imprest without increasing admin custody');
+      await query("INSERT INTO imprest_allocations(site_id,amount,status) VALUES(12,25000,'PENDING_RECEIPT')");
+      assert.equal(await cash(),75000,'pending site handovers cannot be spent twice');
+      await query("UPDATE imprest_allocations SET status='CANCELLED' WHERE site_id=12");
+      assert.equal(await cash(),100000);
+      await query("INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(12,'cash',1000)");await delta(1000,'credit');
+      assert.equal(await cash(),101000,'new receipts increase available cash');
+      await query('INSERT INTO imprest_site_debit_reservations VALUES(12,100)');
+      assert.equal(await cash(),100900);
+      assert.deepEqual((await query('SELECT * FROM loyalty_vault_entries ORDER BY id')).rows.slice(0,originals.length),originals,'read projection never rewrites original receipts or alignment');
+      const lowRecorded=new Map([['user:2',{balance:'1.00'}]]);
+      assert.equal(walletWithCashInHand({id:2,balance:'2.00'},lowRecorded).balance,'1.00');
     });
   } finally {pool.query=originalQuery;pool.connect=originalConnect;await pg.close();}
 });

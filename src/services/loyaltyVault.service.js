@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import pool from '../config/db.js';
 import { walletUser, walletError, walletAmount, positiveId, uuid } from './wallet.service.js';
 import { siteVaultAccountsCte } from './loyaltyVaultSite.service.js';
+import { adminWalletCashStates } from './adminWalletCash.service.js';
 export { walletUser as vaultUser };
 export const isVaultAdmin = actor => ['admin','super_admin'].includes(actor.role);
 export const holderKey = (type, id) => `${type}:${id}`;
@@ -57,7 +58,9 @@ async function hasFunds(db, actor, from, amount, siteId) {
     SELECT a.holder_key FROM loyalty_vault_accounts a JOIN site_accounts s USING(holder_key)
     WHERE a.holder_key=$1 AND a.organization_id=$3 AND a.balance >= $2::numeric AND s.balance >= $2::numeric`,
     [from.key,amount,actor.organization_id,siteId]);
-  return rows.length>0;
+  if (!rows.length) return false;
+  const state = (await adminWalletCashStates(actor.organization_id, siteId, db)).get(from.key);
+  return !state || Number(state.available_balance) >= Number(amount);
 }
 export async function createVaultTransfer(user,data,database=pool) {
   const from=holder(data.from_holder_type??'user',data.from_holder_id??user?.id);
@@ -67,6 +70,7 @@ export async function createVaultTransfer(user,data,database=pool) {
   const amount=walletAmount(data.amount), key=uuid(data.idempotency_key,'Request key'), memo=note(data.note);
   return transaction(database,async db=>{
     const actor=await walletUser(user,db), siteId=await accessibleSite(actor,data.site_id,db);
+    await db.query("SELECT pg_advisory_xact_lock(hashtext('imprest-site-' || $1::text))", [siteId]);
     if (!isVaultAdmin(actor) && (from.type!=='user'||from.id!==actor.id)) throw walletError('You can transfer only your own cash custody.',403);
     await validateHolder(actor,from,db,siteId,true); await validateHolder(actor,to,db,siteId);
     // Serialize retries even when a caller changes both holders on the same key.
@@ -88,6 +92,7 @@ export async function resolveVaultTransfer(user,transferId,action,data={},databa
   if(!state) throw walletError('Unknown transfer action.');
   return transaction(database,async db=>{
     const actor=await walletUser(user,db),siteId=await accessibleSite(actor,data.site_id,db);
+    await db.query("SELECT pg_advisory_xact_lock(hashtext('imprest-site-' || $1::text))", [siteId]);
     const transfer=(await db.query(`SELECT * FROM loyalty_vault_transfers WHERE id=$1 AND organization_id=$2
       AND site_id=$4 AND (sender_id=$3 OR recipient_id=$3) FOR UPDATE`,[id,actor.organization_id,actor.id,siteId])).rows[0];
     if(!transfer) throw walletError('Transfer not found.',404);

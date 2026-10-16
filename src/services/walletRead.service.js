@@ -41,7 +41,7 @@ function limiterFor(database) {
 // Bound expensive wallet reads on the server so they cannot monopolize the
 // shared pool. SET LOCAL stays inside this read-only transaction and works
 // through Neon's transaction pooler without changing other requests/migrations.
-export async function walletReadQuery(database, sql, params = []) {
+export async function walletReadTransaction(database, run, { repeatableRead = false } = {}) {
   const configured = Number(process.env.WALLET_READ_TIMEOUT_MS || 8000);
   const timeout = Number.isInteger(configured) && configured > 0 ? Math.min(configured, 30000) : 8000;
   const releaseSlot = await limiterFor(database).acquire();
@@ -49,9 +49,9 @@ export async function walletReadQuery(database, sql, params = []) {
   let discard;
   try {
     client = await database.connect();
-    await client.query('BEGIN READ ONLY');
+    await client.query(repeatableRead ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN READ ONLY');
     await client.query("SELECT set_config('statement_timeout',$1,true)", [`${timeout}ms`]);
-    const result = await client.query(sql, params);
+    const result = await run(client);
     await client.query('COMMIT');
     return result;
   } catch (error) {
@@ -61,3 +61,5 @@ export async function walletReadQuery(database, sql, params = []) {
     try { client?.release(discard); } finally { releaseSlot(); }
   }
 }
+
+export const walletReadQuery = (database, sql, params = []) => walletReadTransaction(database, client => client.query(sql, params));
