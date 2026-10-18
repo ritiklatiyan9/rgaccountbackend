@@ -599,6 +599,13 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
   if (!siteId) return res.status(400).json({ message: 'site_id is required' });
   const visibility = await resolveEntryVisibility(req.user, 'vendors', req.query.created_by);
 
+  // Migration 141 adds project_id. Older orders cannot be project-linked, so
+  // reading the optional key from their row JSON safely treats them as general
+  // site stock. When present, enforce exactly the same assigned-project scope.
+  // Do not catch 42703 and rerun an unscoped aggregate: that would leak data.
+  const orderProjectId = `(to_jsonb(o)->>'project_id')::integer`;
+  const projectScope = `($3::int[] IS NULL OR ${orderProjectId} IS NULL OR ${orderProjectId}=ANY($3::int[]))`;
+
   // 3 independent reads in parallel — was 3 serial round-trips.
   const catPromise = pool.query(
     `SELECT
@@ -626,7 +633,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
          AND ($2::text IS NULL OR vip.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ) vp ON true
-     WHERE o.site_id = $1 AND o.status != 'cancelled' AND ($3::int[] IS NULL OR o.project_id IS NULL OR o.project_id=ANY($3::int[]))
+     WHERE o.site_id = $1 AND o.status != 'cancelled' AND ${projectScope}
      GROUP BY COALESCE(NULLIF(o.item_category, ''), 'UNCATEGORIZED')
      ORDER BY total_value DESC`,
     [siteId, visibility.creatorId,req.vendorProjectIds||null]
@@ -637,7 +644,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
             o.item_name, o.item_category, o.unit
      FROM vendor_inventory_payments p
      INNER JOIN vendor_inventory_orders o ON o.id = p.order_id
-     WHERE p.site_id = $1 AND ($3::int[] IS NULL OR o.project_id IS NULL OR o.project_id=ANY($3::int[]))
+     WHERE p.site_id = $1 AND ${projectScope}
        AND ($2::text IS NULL OR p.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ORDER BY p.payment_date DESC, p.id DESC
      LIMIT 10`,
@@ -666,7 +673,7 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
          AND ($2::text IS NULL OR vip.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ) vp ON true
-     WHERE o.site_id = $1 AND o.status != 'cancelled' AND ($3::int[] IS NULL OR o.project_id IS NULL OR o.project_id=ANY($3::int[]))`,
+     WHERE o.site_id = $1 AND o.status != 'cancelled' AND ${projectScope}`,
     [siteId, visibility.creatorId,req.vendorProjectIds||null]
   );
 

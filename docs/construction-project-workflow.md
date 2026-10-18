@@ -55,6 +55,8 @@ The new migrations are additive schema/guard changes and do not backfill, dedupl
 ```sh
 # From Accounts/rgaccountbackend; existing repository migrations are prerequisites.
 npm run check:construction-payments -- --preflight
+# Required on the inspected deployment: project/location columns are not installed.
+npm run migrate:construction-portfolio
 npm run migrate:construction-workflow
 npm run migrate:construction-payment-integrity
 npm run check:construction-payments
@@ -77,3 +79,11 @@ Live database inspection was READ ONLY. All five construction preflight probes r
 The original `src/checks/ledger-consistency.mjs` was run with read-only sessions. It exited nonzero for sites 1, 2, 5, 6, 8 and 10. Its nonnegative net-revenue assertion and four-exclusion debit-only expense assertion are stale relative to current net refund/transfer and operating-cost/TDS conventions in `kpi.service.js`; these failures do not establish duplicate vendor debits. No accounting policy or history was changed to make that script pass. It additionally surfaced nine existing quarantined date rows totaling ₹14,12,510 and one post-dated personal-ledger debit of ₹20,000 dated 2054-07-05. These records were left untouched.
 
 After applying 219/220, run the full construction checker against the intended database to verify migrated live Expenses and dashboard projections. Isolated DB tests prove these projections for fixtures, including matching filters and access scopes; that migrated-live check remains outstanding. New reversal/cancellation policy for posted payments was not introduced; existing explicit rejection behavior is retained.
+
+## Stock-summary 42703 deployment fix
+
+The reported `GET /vendors/inventory/stock-summary?site_id=5` failure was reproduced in a READ ONLY transaction. PostgreSQL reported `column o.project_id does not exist`; the connected `vendor_inventory_orders` table has not received migration 141. This is separate from the newer 219/220 prerequisites.
+
+The summary now reads its optional project key through the order row's JSON representation. Pre-141 rows have no project link and retain their general-site-stock behavior. Upgraded rows still enforce the assigned-project filter in category totals, recent transactions and overall totals. The vendor middleware's project-list authorization similarly treats missing optional owner/task-owner/approver fields as unassigned, preserving existing creator/admin assignments and site membership; it does not fall back to an unrestricted query after an exception.
+
+Verification: `node --test test/vendor-stock-summary-db.test.mjs test/construction-workflow-db.test.mjs test/construction-portfolio-contract.test.mjs` passed **18 tests**. The new four-test regression suite covers populated legacy schema, preserved approved/TDS totals, creator/site/organization isolation, upgraded project scopes and task assignment revocation. Syntax/whitespace checks passed. The patched controller plus vendor-access middleware returned **200** against the connected database using a READ ONLY transaction, with no migration or data writes. Redeploy the backend to activate the code fix on Render; the external URL was not redeployed or claimed verified by this local check. Run `npm run test:vendor-stock-summary` for the targeted regression suite.

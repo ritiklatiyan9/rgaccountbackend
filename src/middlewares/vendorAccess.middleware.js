@@ -50,7 +50,7 @@ export default async function requireVendorAccess(req,res,next) {
     if(req.query.project_id) await assertConstructionProjectAccess(pool,req.user,req.query.project_id,siteId);
     if(req.user.role==='sub_admin') {
       const all=await constructionCanViewAll(pool,req.user);
-      req.vendorProjectIds=(await pool.query(`SELECT p.id FROM construction_projects p WHERE p.site_id=$1 AND ${projectAccessPredicate('p','$2','$3')}`,[siteId,req.user.id,all])).rows.map(row=>row.id);
+      req.vendorProjectIds=(await pool.query(`SELECT p.id FROM construction_projects p WHERE p.site_id=$1 AND ${projectAccessPredicate('p','$2','$3',{legacySafe:true})}`,[siteId,req.user.id,all])).rows.map(row=>row.id);
     }
     req.query.site_id=String(siteId);
     next();

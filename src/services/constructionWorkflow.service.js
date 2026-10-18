@@ -58,10 +58,16 @@ export async function constructionPaymentVisibility(db,user) {
   const {rows}=await db.query("SELECT can_read,can_view_all FROM user_permissions WHERE user_id=$1 AND module='vendors'",[user.id]);
   return {read:rows[0]?.can_read===true,all:rows[0]?.can_view_all===true};
 }
-export function projectAccessPredicate(alias = 'p', userPlaceholder = '$2', allPlaceholder = '$3') {
+export function projectAccessPredicate(alias = 'p', userPlaceholder = '$2', allPlaceholder = '$3', { legacySafe = false } = {}) {
   // Only trusted SQL aliases/placeholders from server code are accepted.
   if (!/^[a-z][a-z0-9_]*$/i.test(alias) || !/^\$\d+$/.test(userPlaceholder) || !/^\$\d+$/.test(allPlaceholder)) throw new Error('Invalid construction scope SQL arguments');
-  return `(${allPlaceholder}::boolean OR ${alias}.created_by=${userPlaceholder} OR ${alias}.owner_user_id=${userPlaceholder} OR ${alias}.assigned_admin_id=${userPlaceholder} OR ${alias}.assigned_approver_id=${userPlaceholder} OR EXISTS (SELECT 1 FROM construction_tasks assigned_task WHERE assigned_task.project_id=${alias}.id AND assigned_task.owner_user_id=${userPlaceholder}))`;
+  // Vendor reads must remain available before the optional assignment migration.
+  // An absent assignment is NULL, never an implicit grant. Default project
+  // workflows retain direct columns/indexes and their migration prerequisites.
+  const owner = legacySafe ? `(to_jsonb(${alias})->>'owner_user_id')::integer` : `${alias}.owner_user_id`;
+  const approver = legacySafe ? `(to_jsonb(${alias})->>'assigned_approver_id')::integer` : `${alias}.assigned_approver_id`;
+  const taskOwner = legacySafe ? `(to_jsonb(assigned_task)->>'owner_user_id')::integer` : 'assigned_task.owner_user_id';
+  return `(${allPlaceholder}::boolean OR ${alias}.created_by=${userPlaceholder} OR ${owner}=${userPlaceholder} OR ${alias}.assigned_admin_id=${userPlaceholder} OR ${approver}=${userPlaceholder} OR EXISTS (SELECT 1 FROM construction_tasks assigned_task WHERE assigned_task.project_id=${alias}.id AND ${taskOwner}=${userPlaceholder}))`;
 }
 export async function assertConstructionProjectAccess(db, user, projectId, siteId, { lock = false } = {}) {
   await assertConstructionSiteAccess(db, user, siteId);
