@@ -52,8 +52,12 @@ async function fixture(t) {
     CREATE TABLE transaction_party_links(source_key varchar(40), source_id integer, site_id integer REFERENCES sites(id),
       member_id integer REFERENCES members(id), direction text CHECK (direction IN ('debit','credit')),
       created_by integer, updated_at timestamptz DEFAULT now(), PRIMARY KEY(source_key, source_id));
-    CREATE TABLE ledger_entries(id integer, debit numeric, credit numeric);
-    INSERT INTO ledger_entries VALUES (1, 1000, 50);
+    CREATE TABLE ledger_entries(id text, site_id integer, source_key text, source_id integer, ledger_type text, debit numeric, credit numeric);
+    INSERT INTO ledger_entries(id,debit,credit) VALUES ('1', 1000, 50);
+    CREATE FUNCTION ledger_bucket(text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT CASE WHEN upper($1)='CASH' THEN 'cash' ELSE 'bank' END $$;
+    CREATE TABLE construction_projects(id integer,name text,site_id integer,created_by integer,owner_user_id integer,assigned_admin_id integer,assigned_approver_id integer);
+    CREATE TABLE construction_tasks(project_id integer,owner_user_id integer);
+    CREATE TABLE user_sites(user_id integer,site_id integer);
     CREATE FUNCTION financial_transaction_posts(text, text, text, text) RETURNS boolean
       LANGUAGE sql IMMUTABLE AS $$ SELECT $2 = 'approved' $$;
     CREATE TABLE farmers(id integer, site_id integer, name text);
@@ -62,7 +66,7 @@ async function fixture(t) {
     CREATE TABLE plots(id integer, plot_no text);
     CREATE TABLE plot_commissions_v2(id integer, plot_id integer, agent_id integer);
     CREATE TABLE plot_commission_payments(LIKE expenses, plot_commission_id integer, amount numeric, remarks text);
-    CREATE TABLE vendor_commitments(id integer, vendor_name text);
+    CREATE TABLE vendor_commitments(id integer, vendor_name text,site_id integer,project_id integer,work_title text);
     CREATE TABLE vendor_payments(LIKE expenses, commitment_id integer, amount numeric, payment_date date, note text);
     CREATE TABLE cash_flow_months(id integer, ledger_type text);
     CREATE TABLE cash_flow_entries(LIKE expenses, cash_flow_month_id integer, to_name text, particular text,
@@ -93,7 +97,7 @@ test('a sub-admin expense and its client save together and are visible to admin 
   assert.equal(page.expenses[0].created_by_name, 'Sunny');
   const relatedType = schema.getType('ExpenseEntry').getFields().related_party.type;
   assert.deepEqual(Object.keys(relatedType.getFields()), ['member_id', 'name', 'phone', 'direction']);
-  assert.deepEqual((await query('SELECT * FROM ledger_entries')).rows, [{ id: 1, debit: '1000', credit: '50' }]);
+  assert.deepEqual((await query('SELECT id,debit,credit FROM ledger_entries')).rows, [{ id: '1', debit: '1000', credit: '50' }]);
 });
 
 test('a failed link write rolls back the expense instead of silently accepting an unlinked expense', async t => {
@@ -200,7 +204,7 @@ test('the full expense route keeps client-only saves outside financial updates d
     assert.equal(result.expense.related_party?.member_id || null, memberId);
     assert.deepEqual((await query('SELECT * FROM expenses WHERE id=$1', [expense.id])).rows[0], before);
   }
-  assert.deepEqual((await query('SELECT * FROM ledger_entries')).rows, [{ id: 1, debit: '1000', credit: '50' }]);
+  assert.deepEqual((await query('SELECT id,debit,credit FROM ledger_entries')).rows, [{ id: '1', debit: '1000', credit: '50' }]);
 });
 
 async function partyVisibilityFixture(t) {
@@ -244,7 +248,7 @@ test('a revoked expense read-all grant cannot reuse a cached site-wide party ros
       ADD COLUMN is_active boolean DEFAULT true, ADD COLUMN organization_id integer DEFAULT 1;
     UPDATE users SET role = CASE WHEN id=1 THEN 'admin' ELSE 'sub_admin' END;
     CREATE TABLE user_sessions(id integer, user_id integer, logout_time timestamptz);
-    CREATE TABLE user_sites(user_id integer, site_id integer);
+    CREATE TABLE IF NOT EXISTS user_sites(user_id integer, site_id integer);
     INSERT INTO user_sites VALUES(12,5);
     UPDATE user_permissions SET can_view_all=true WHERE user_id=12 AND module='expenses';`);
   t.mock.method(jwt, 'verify', () => ({ id: 12, role: 'sub_admin', version: 0 }));

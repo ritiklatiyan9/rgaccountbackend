@@ -2,6 +2,7 @@
 // Run schema migrations explicitly with npm run migrate when needed.
 import http from 'node:http';
 import app from '../src/app.js';
+import { up as migrateTransactionDocumentation } from '../src/migrations/218_transaction_documentation.js';
 import { up as migratePlotAreaChanges } from '../src/migrations/205_plot_area_conversion_and_approval_changes.js';
 import { up as migratePlotBankRounding } from '../src/migrations/206_plot_bank_target_rounding.js';
 import { up as migrateChequeTransactionDates } from '../src/migrations/215_cheque_transaction_dates.js';
@@ -23,6 +24,7 @@ await migrateCashWalletReceiptDetails(pool);
 await migrateWalletBalanceGuards(pool);
 await migrateLockedCashCollector(pool);
 await migratePermanentWalletGuard(pool);
+await migrateTransactionDocumentation(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

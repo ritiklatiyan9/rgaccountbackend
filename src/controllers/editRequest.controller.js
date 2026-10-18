@@ -19,6 +19,10 @@ import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
 import { applyFarmerPaymentBank } from '../services/farmerPaymentBank.service.js';
 import {
+  validateDocumentationDraft, documentationRecord, documentationSourceForTable,
+  documentationSource, saveDocumentation,
+} from '../services/transactionDocumentation.service.js';
+import {
   FarmerPaymentValidationError,
   canonicalFarmerPaymentModeFromDayBook,
   farmerPaymentFieldsTouched,
@@ -688,6 +692,14 @@ export const createEditRequest = asyncHandler(async (req, res) => {
     if (!parsedProposed || typeof parsedProposed !== 'object' || Array.isArray(parsedProposed)) {
       return rejectCreateRequest(res, 400, 'proposed_data must be an object');
     }
+    if (req.transactionDocumentationDraft) parsedProposed.documentation = req.transactionDocumentationDraft;
+    if (parsedProposed.documentation !== undefined) {
+      const draft = validateDocumentationDraft(parsedProposed.documentation);
+      const expected = documentationSourceForTable(handler.model.tableName);
+      if (!expected || documentationSource(draft.source) !== expected) return rejectCreateRequest(res, 400, 'Documentation must belong to the transaction being edited');
+      await documentationRecord(req.user, expected, recordId, pool, 'update');
+      parsedProposed.documentation = { ...draft, source: expected };
+    }
     if (Object.hasOwn(parsedProposed, 'transaction_time')) {
       try {
         parsedProposed.transaction_time = normalizeTransactionTime(parsedProposed.transaction_time);
@@ -891,7 +903,7 @@ export const approveEditRequest = asyncHandler(async (req, res) => {
     }
 
     const { rows: requesterRows } = await client.query(
-      'SELECT id, role, is_active FROM users WHERE id = $1 LIMIT 1 FOR SHARE',
+      'SELECT id, role, is_active, name, organization_id FROM users WHERE id = $1 LIMIT 1 FOR SHARE',
       [editReq.requested_by]
     );
     const requester = requesterRows[0];
@@ -931,6 +943,15 @@ export const approveEditRequest = asyncHandler(async (req, res) => {
       throw workflowError(409, 'The stored proposed data is invalid');
     }
     proposedData = { ...proposedData };
+    const documentationDraft = proposedData.documentation;
+    delete proposedData.documentation;
+    if (documentationDraft !== undefined) {
+      const expected = documentationSourceForTable(handler.model.tableName);
+      if (!expected || documentationSource(documentationDraft.source) !== expected) throw workflowError(409, 'Documentation no longer matches this transaction');
+      // Recheck the original maker's current grant and row visibility. Approval
+      // must not elevate a saved documentation override after access is revoked.
+      await documentationRecord(requester, expected, editReq.record_id, client, 'update');
+    }
 
     // Remove immutable bookkeeping fields even from legacy requests.
     delete proposedData.id;
@@ -959,7 +980,9 @@ export const approveEditRequest = asyncHandler(async (req, res) => {
     let applied;
     try {
       applied = await applyApprovedEditRequest(editReq, proposedData, req.user, client);
+      if (documentationDraft !== undefined) await saveDocumentation(requester, documentationDraft.source, editReq.record_id, documentationDraft, client);
     } catch (error) {
+      if (error.code?.startsWith('DOCUMENTATION_')) throw workflowError(error.statusCode || 409, error.message);
       throw workflowError(400, `Could not apply this request: ${error.message}`);
     }
 

@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import fs from 'fs';
 
@@ -35,6 +35,7 @@ export const uploadToS3 = async (filePath, fileName, contentType) => {
       Key: uniqueKey,
       Body: fileStream,
       ContentType: contentType,
+      CacheControl: 'private, max-age=3600',
     },
     queueSize: 4,
     partSize: 5 * 1024 * 1024, // 5MB parts

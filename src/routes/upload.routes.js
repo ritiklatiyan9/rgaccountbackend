@@ -11,7 +11,9 @@ router.post('/single', authMiddleware, receiveUpload(upload.single('file')), asy
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
     const { provider = 's3' } = req.query;
     const url = await uploadSingle(req.file, provider);
-    res.json({ url, fileUrl: url });
+    const previewUrl = req.query.preview === 'true' ? await signExpenseDocumentUrl(url) : undefined;
+    // Keep durable URLs for database writes; signed previews can expire.
+    res.json({ url, fileUrl: url, ...(previewUrl ? { previewUrl } : {}) });
   } catch (err) {
     console.error('[Upload] Failed:', err.message);
     res.status(500).json({ message: 'File upload failed: ' + err.message });

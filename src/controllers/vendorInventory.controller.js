@@ -126,6 +126,7 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
     conditions.push(`o.status <> 'cancelled' AND o.qty_ordered > ${RECEIVED_QTY_SQL}`);
   }
 
+  if(req.vendorProjectIds){conditions.push(`(o.project_id IS NULL OR o.project_id=ANY($${idx++}::int[]))`);values.push(req.vendorProjectIds);}
   const where = conditions.join(' AND ');
   const creatorIdx = idx;
 
@@ -193,8 +194,8 @@ export const listInventoryOrders = asyncHandler(async (req, res) => {
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
          AND ($2::text IS NULL OR vip.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ) vp ON true
-     WHERE o.site_id = $1`,
-    [siteId, visibility.creatorId]
+     WHERE o.site_id = $1 AND ($3::int[] IS NULL OR o.project_id IS NULL OR o.project_id=ANY($3::int[]))`,
+    [siteId, visibility.creatorId,req.vendorProjectIds||null]
   );
 
   const [countRes, ordersRes, sumRes] = await Promise.all([countPromise, ordersPromise, sumPromise]);
@@ -584,8 +585,9 @@ export const listInventoryCategories = asyncHandler(async (req, res) => {
     `SELECT DISTINCT item_category
      FROM vendor_inventory_orders
      WHERE site_id = $1 AND item_category IS NOT NULL AND item_category <> ''
+       AND ($2::int[] IS NULL OR project_id IS NULL OR project_id=ANY($2::int[]))
      ORDER BY item_category ASC`,
-    [siteId]
+    [siteId,req.vendorProjectIds||null]
   );
 
   res.json({ categories: result.rows.map((r) => r.item_category) });
@@ -624,10 +626,10 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
          AND ($2::text IS NULL OR vip.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ) vp ON true
-     WHERE o.site_id = $1 AND o.status != 'cancelled'
+     WHERE o.site_id = $1 AND o.status != 'cancelled' AND ($3::int[] IS NULL OR o.project_id IS NULL OR o.project_id=ANY($3::int[]))
      GROUP BY COALESCE(NULLIF(o.item_category, ''), 'UNCATEGORIZED')
      ORDER BY total_value DESC`,
-    [siteId, visibility.creatorId]
+    [siteId, visibility.creatorId,req.vendorProjectIds||null]
   );
 
   const recentTxPromise = pool.query(
@@ -635,11 +637,11 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
             o.item_name, o.item_category, o.unit
      FROM vendor_inventory_payments p
      INNER JOIN vendor_inventory_orders o ON o.id = p.order_id
-     WHERE p.site_id = $1
+     WHERE p.site_id = $1 AND ($3::int[] IS NULL OR o.project_id IS NULL OR o.project_id=ANY($3::int[]))
        AND ($2::text IS NULL OR p.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ORDER BY p.payment_date DESC, p.id DESC
      LIMIT 10`,
-    [siteId, visibility.creatorId]
+    [siteId, visibility.creatorId,req.vendorProjectIds||null]
   );
 
   const totalPromise = pool.query(
@@ -664,8 +666,8 @@ export const getInventoryStockSummary = asyncHandler(async (req, res) => {
          AND ${POSTED_INVENTORY_PAYMENT_SQL('vip')}
          AND ($2::text IS NULL OR vip.created_by = ANY(string_to_array($2::text, ',')::int[]))
      ) vp ON true
-     WHERE o.site_id = $1 AND o.status != 'cancelled'`,
-    [siteId, visibility.creatorId]
+     WHERE o.site_id = $1 AND o.status != 'cancelled' AND ($3::int[] IS NULL OR o.project_id IS NULL OR o.project_id=ANY($3::int[]))`,
+    [siteId, visibility.creatorId,req.vendorProjectIds||null]
   );
 
   const [catRes, recentTxRes, totalRes] = await Promise.all([

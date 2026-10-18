@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { BoundedPool, boundedInteger, databasePoolStats } from './boundedPool.js';
 import { instrumentDatabaseClient } from '../utils/requestPerformance.js';
+import { installRequestTransactionAdapter } from '../services/requestTransactionContext.js';
 
 const sslOption = process.env.DB_SSL === 'true' || (process.env.DB_HOST && process.env.DB_HOST.includes('neon'))
   ? { rejectUnauthorized: false }
@@ -29,6 +30,8 @@ const pool = new BoundedPool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: boundedInteger(process.env.DB_CONNECTION_TIMEOUT_MS, 10000, 30000),
 });
+
+export const { originalConnect: connectOutsideRequestTransaction } = installRequestTransactionAdapter(pool);
 
 // Safe operational metrics: never include connection options or credentials.
 export const getDatabasePoolStats = () => databasePoolStats(pool);

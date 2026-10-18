@@ -329,7 +329,8 @@ test('farmer edit-request paths use the same tuple normalizer and mirror rebuild
   }
 
   assert.match(approve, /await client\.query\(['"]BEGIN['"]\)/);
-  assert.match(approve, /handler\.applyUpdate\([\s\S]*client\)/);
+  assert.match(approve, /applyApprovedEditRequest\(editReq, proposedData, req\.user, client\)/);
+  assert.match(source, /handler\.applyUpdate\(editReq\.record_id, proposedData, editReq, db\)/);
   assert.match(approve, /await client\.query\(['"]COMMIT['"]\)/);
   assert.match(approve, /await client\.query\(['"]ROLLBACK['"]\)/);
 });

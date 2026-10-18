@@ -68,6 +68,7 @@ import manualProfitSandboxRoutes from './manualProfitSandbox.routes.js';
 import walletRoutes from './wallet.routes.js';
 import loyaltyVaultRoutes from './loyaltyVault.routes.js';
 import backupRoutes from './backup.routes.js';
+import transactionDocumentationRoutes from './transactionDocumentation.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -143,4 +144,5 @@ router.use('/manual-profit-sandboxes', manualProfitSandboxRoutes);
 router.use('/wallet', walletRoutes);
 router.use('/loyalty-vault', loyaltyVaultRoutes);
 router.use('/backups', backupRoutes);
+router.use('/transaction-documentation', transactionDocumentationRoutes);
 export default router;

@@ -2853,11 +2853,19 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
   const lim = Math.min(parseInt(limit) || 10, 50);
   const pg = Math.max(parseInt(page) || 1, 1);
   const offset = (pg - 1) * lim;
-  const siteId = parseInt(site_id);
+  const siteId = Number(site_id);
+  if (!Number.isSafeInteger(siteId) || siteId <= 0) return res.status(400).json({ message: 'Invalid site_id' });
+  if (!['admin', 'super_admin'].includes(req.user.role)) {
+    const access = await pool.query('SELECT 1 FROM user_sites WHERE user_id = $1 AND site_id = $2 LIMIT 1', [req.user.id, siteId]);
+    if (!access.rows.length) return res.status(403).json({ message: 'Access denied to this site' });
+  }
+  const visibility = await resolveEntryVisibility(req.user, 'daybook', null);
+  const creatorId = visibility.canViewAll ? null : visibility.creatorId;
+  res.set('Cache-Control', 'no-store');
 
   const countResult = await pool.query(
-    `SELECT COUNT(*)::int AS total FROM cash_flow_entries WHERE site_id = $1`,
-    [siteId]
+    `SELECT COUNT(*)::int AS total FROM cash_flow_entries WHERE site_id = $1 AND ($2::int IS NULL OR created_by = $2)`,
+    [siteId, creatorId]
   );
   const total = countResult.rows[0].total;
 
@@ -2907,10 +2915,10 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
      LEFT JOIN plot_commission_payments pcp ON cfe.source_module = 'plot_commission_payments' AND cfe.source_id = pcp.id
      LEFT JOIN plot_registry_payments prp ON cfe.source_module = 'plot_registry_payments' AND cfe.source_id = prp.id
      LEFT JOIN vendor_payments vp ON cfe.source_module = 'vendor_payments' AND cfe.source_id = vp.id
-     WHERE cfe.site_id = $1
+     WHERE cfe.site_id = $1 AND ($4::int IS NULL OR cfe.created_by = $4)
      ORDER BY cfe.date DESC, cfe.created_at DESC
      LIMIT $2 OFFSET $3`,
-    [siteId, lim, offset]
+    [siteId, lim, offset, creatorId]
   );
 
   // Each row carries a signed verifyUrl so the receipt printed from the
@@ -2920,6 +2928,21 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
   const siteRow = siteRowRes.rows[0] || null;
 
   await attachChequeDates(result.rows, pool, (row) => ({ ledgerId: row.id, siteId }));
+  // Enrich the authorized page once from each native source. The presentation
+  // helper uses owner references, while API identities remain the actual
+  // cash-flow row ID and its original source_module/source_id.
+  const presentationRows = result.rows.map(row => ({
+    ...row,
+    source_key: !row.source_module || ['cash_flow_entries', 'cashflow', 'cashflow_entry', 'personal_ledger'].includes(row.source_module)
+      ? 'personal_ledger' : row.source_module,
+    source_id: row.source_id || row.id,
+  }));
+  await attachTransactionParticulars(presentationRows, pool);
+  for (let index = 0; index < result.rows.length; index += 1) {
+    for (const field of ['party_name', 'category', 'sub_category', 'ledger_name', 'ledger_type', 'linked_client_name']) {
+      if (presentationRows[index][field] != null) result.rows[index][field] = presentationRows[index][field];
+    }
+  }
   const transactions = result.rows.map((row) => ({
     ...row,
     verifyUrl: buildVerifyUrl({
@@ -2929,7 +2952,7 @@ export const listRecentTransactions = asyncHandler(async (req, res) => {
       dr: (parseFloat(row.debit) || 0) > 0 ? 'OUT' : 'IN',
       d: row.date,
       pm: row.cash_type || null,
-      pn: row.buyer_name || row.particular || null,
+      pn: row.linked_client_name || row.party_name || row.buyer_name || row.particular || null,
       pl: row.plot_no || null,
       sn: siteRow?.name || null,
       sy: siteRow?.city || null,

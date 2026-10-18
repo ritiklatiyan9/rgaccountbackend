@@ -10,6 +10,7 @@ import {
   distributePaymentToItems,
   getVendorCommitmentDetail,
   getVendorPaymentReceipt,
+  getVendorPaymentLedger,
   getVendorUsers,
   createVendorUser,
   listConstructionProjectOptions,
@@ -37,22 +38,27 @@ import {
   getInventoryStockSummary,
 } from '../controllers/vendorInventory.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
+import requireVendorAccess from '../middlewares/vendorAccess.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const router = express.Router();
 
-const vendorReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'vendors' });
+const cachedVendorRead = cacheResponse({ ttlSeconds: 30, namespace: 'vendors' });
+// Assignment changes must take effect immediately, including list aggregates.
+const vendorReadCache = (req,res,next) => req.user.role==='sub_admin' ? next() : cachedVendorRead(req,res,next);
 // Vendor users + heads + categories rarely change; cache longer in a
 // dedicated namespace and don't bust them on every commitment write.
-const vendorMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'vendors-meta' });
+const cachedVendorMeta = cacheResponse({ ttlSeconds: 300, namespace: 'vendors-meta' });
+const vendorMetaCache = (req,res,next) => req.user.role==='sub_admin' ? next() : cachedVendorMeta(req,res,next);
 // Anchored prefix so 'vendors|...' is busted but 'vendors-meta|...' survives.
-const bustVendorCache = invalidateCacheOnSuccess(['vendors|']);
+const bustVendorCache = invalidateCacheOnSuccess(['vendors|', 'expenses|', 'expenses:page:', '/expenses', 'construction|', 'dashboard|', 'approvals|']);
 const bustVendorMetaCache = invalidateCacheOnSuccess(['vendors|', 'vendors-meta|']);
 
 router.use(authMiddleware);
 router.use(requireRole('admin', 'sub_admin'));
+router.use(requireVendorAccess);
 
 router.get('/users', requirePermission('vendors', 'read'), vendorMetaCache, getVendorUsers);
 router.post('/users', requirePermission('vendors', 'write'), bustVendorMetaCache, createVendorUser);
@@ -66,6 +72,7 @@ router.delete('/heads/:id', requirePermission('vendors', 'delete'), bustVendorMe
 router.get('/commitments', requirePermission('vendors', 'read'), vendorReadCache, listVendorCommitments);
 router.get('/inventory-all', requirePermission('vendors', 'read'), vendorReadCache, listAllInventoryItems);
 router.get('/commitments/:id', requirePermission('vendors', 'read'), vendorReadCache, getVendorCommitmentDetail);
+router.get('/payments/:paymentId/ledger', requirePermission('vendors', 'read'), getVendorPaymentLedger);
 router.get('/payments/:paymentId/receipt', requirePermission('vendors', 'read'), vendorReadCache, getVendorPaymentReceipt);
 router.post('/commitments', requirePermission('vendors', 'write'), bustVendorCache, createVendorCommitment);
 router.put('/commitments/:id', requirePermission('vendors', 'update'), bustVendorCache, updateVendorCommitment);

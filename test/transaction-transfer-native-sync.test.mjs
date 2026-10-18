@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { daybookMirrorDateSql } from '../src/services/daybookDate.service.js';
 import { readFile } from 'node:fs/promises';
 import pool from '../src/config/db.js';
 import { up } from '../src/migrations/163_paired_transaction_transfers.js';
+import { up as upVendorIntegrity } from '../src/migrations/220_construction_payment_integrity.js';
 import { up as upTdsRegister } from '../src/migrations/179_tds_register.js';
 import { up as upCommissionTds } from '../src/migrations/183_commission_tds_workflow.js';
 import { createPlotCommissionPayment } from '../src/controllers/plotCommissionV2.controller.js';
@@ -111,6 +113,12 @@ test('real accounting CHECK constraints and native mirror functions accept balan
       `);
     }
     await up(pool);
+    await db.exec(`CREATE TABLE construction_projects(id int PRIMARY KEY,site_id int,budget numeric);
+      ALTER TABLE vendor_commitments ADD COLUMN project_id int,ADD COLUMN vendor_member_id int,ADD COLUMN contract_amount numeric DEFAULT 1000000,ADD COLUMN start_date date,ADD COLUMN due_date date;
+      ALTER TABLE cash_flow_entries ADD COLUMN cheque_transaction_date date;
+      ALTER TABLE vendor_payments ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;
+      ALTER TABLE vendor_inventory_payments ADD COLUMN tds_amount numeric NOT NULL DEFAULT 0;`);
+    await upVendorIntegrity(pool);
     for (const [type, table] of Object.entries(owners)) {
       await t.test(`${type}: strict owner fields and native mirrors preserve the posted balance`, async () => {
         const original = (await query(`INSERT INTO cash_flow_entries(cash_flow_month_id,site_id,date,particular,credit,debit,cash_type,status,created_by,bank_account_id)
@@ -156,7 +164,7 @@ test('real accounting CHECK constraints and native mirror functions accept balan
         if (type === 'vendor_inventory_payment') {
           assert.equal(Number((await query('SELECT total_paid FROM vendor_inventory_orders WHERE id=1')).rows[0].total_paid), -75);
           const daybook = await read('src/controllers/daybook.controller.js');
-          const dailyModuleQuery = daybook.match(/`(SELECT cfe\.\*, u\.name AS assigned_admin_name,[\s\S]*?\$3::text[\s\S]*?)`/)[1];
+          const dailyModuleQuery = daybook.match(/`(SELECT cfe\.\*, u\.name AS assigned_admin_name,[\s\S]*?\$3::text[\s\S]*?)`/)[1].replace("${daybookMirrorDateSql('cfe')}",daybookMirrorDateSql('cfe'));
           const dailyRows = (await query(dailyModuleQuery, [1, '2026-10-30', '1'])).rows
             .filter((row) => row.source_module === 'vendor_inventory_payments');
           assert.equal(dailyRows.length, 2, 'daily Daybook includes both dated purchasing adjustments');

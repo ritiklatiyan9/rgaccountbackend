@@ -62,7 +62,7 @@ test('migration and shared single/bulk approvals preserve the plot lifecycle', {
       return { ...r, rowCount: r.affectedRows ?? r.rows.length };
     };
     const controller = read('../src/controllers/approval.controller.js').replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
-    const ctx = { attachModuleChequeDates, chequeReadyForApproval, chequeReadySql, pool: { query }, asyncHandler: fn => fn, console,
+    const ctx = { constructionCanViewAll:async()=>false,projectAccessPredicate:()=> 'true', attachModuleChequeDates, chequeReadyForApproval, chequeReadySql, pool: { query }, asyncHandler: fn => fn, console,
       hasRelation: async name => (await db.query('SELECT to_regclass($1) IS NOT NULL AS present', [name])).rows[0].present };
     vm.createContext(ctx);
     vm.runInContext(`${controller}\nthis.handlers = { approveEntry, rejectEntry, bulkApprove, bulkReject, listAllPending, getPendingCounts };`, ctx);

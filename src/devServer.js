@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import http from 'node:http';
 import app from './app.js';
+import { up as migrateTransactionDocumentation } from './migrations/218_transaction_documentation.js';
 import { up as migratePlotAreaChanges } from './migrations/205_plot_area_conversion_and_approval_changes.js';
 import { up as migratePlotBankRounding } from './migrations/206_plot_bank_target_rounding.js';
 import pool, { connectDB } from './config/db.js';
@@ -45,6 +46,7 @@ connectDB().then(async () => {
   await migrateCashWalletReadIndexes(pool);
   await migrateCreditWalletImprestDebits(pool);
   await migrateCashWalletSiteScope(pool);
+  await migrateTransactionDocumentation(pool);
   server.listen(port, '127.0.0.1', () => {
     console.log(`Local API ready at http://127.0.0.1:${port}`);
   });

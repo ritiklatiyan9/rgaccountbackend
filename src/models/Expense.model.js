@@ -1,5 +1,7 @@
+import { vendorExpensePredicate } from '../services/constructionExpenseScope.service.js';
 import { daybookSourceDatePredicate } from '../services/daybookDate.service.js';
 import MasterModel from './MasterModel.js';
+import { hasRelation } from '../utils/schemaProbe.js';
 
 /**
  * Category WHERE fragment shared by the paginated list and the breakdown stats,
@@ -396,7 +398,9 @@ class ExpenseModel extends MasterModel {
     let pIdx = 2;
     let whereClause = '';
 
-    if (only_site === 'true') { whereClause += ` AND u.source = 'expenses'`; }
+    if (only_site === 'true') { whereClause += ` AND u.source IN ('expenses', 'vendor_payment')`; }
+    if (filters.vendor_only === true) whereClause += ` AND u.source = 'vendor_payment'`;
+    if (filters.vendor_payment_id) { whereClause += ` AND u.source = 'vendor_payment' AND u.original_id = $${pIdx++}`; params.push(filters.vendor_payment_id); }
     if (entry_origin === 'transfer') whereClause += ` AND u.entry_transfer_id IS NOT NULL`;
     else if (entry_origin === 'original') whereClause += ` AND u.entry_transfer_id IS NULL`;
     if (created_by) { whereClause += ` AND u.created_by = ANY(string_to_array($${pIdx++}::text, ',' )::int[])`; params.push(created_by); }
@@ -419,7 +423,14 @@ class ExpenseModel extends MasterModel {
       pIdx++;
     }
     if (missing_bill === 'true') {
-      whereClause += ` AND u.payment_mode IS NOT NULL AND u.payment_mode != '' AND u.payment_mode != 'CASH' AND (u.bill_url IS NULL OR u.bill_url = '')`;
+      if (await hasRelation('transaction_documentation')) {
+        whereClause += ` AND (transaction_documentation_state(CASE u.source WHEN 'expenses' THEN 'expense'
+          WHEN 'commission' THEN 'plot_commission_payment' WHEN 'personal_ledger' THEN 'cash_flow_entry'
+          ELSE u.source END,u.original_id,u.site_id,u.documentation_record)->>'missing_bill')='true'`;
+      } else {
+        whereClause += ` AND UPPER(COALESCE(NULLIF(u.payment_mode,''),'CASH')) != 'CASH'
+          AND NULLIF(TRIM(u.bill_url),'') IS NULL AND COALESCE(array_length(u.bill_urls,1),0)=0`;
+      }
     }
     const party = buildRelatedPartyWhere(related_member_ids, params, pIdx, 'u.original_id');
     if (party.clause) whereClause += ` AND u.source = 'expenses'${party.clause}`;
@@ -430,6 +441,8 @@ class ExpenseModel extends MasterModel {
       params.push(expense_ids);
     }
 
+    const vendorScope = vendorExpensePredicate(filters, params);
+    pIdx = params.length + 1;
     const filterParams = [...params]; // snapshot before LIMIT/OFFSET
 
     // ── Unified CTE fragment (reused) ──
@@ -449,7 +462,7 @@ class ExpenseModel extends MasterModel {
           COALESCE(voucher_urls, ARRAY_REMOVE(ARRAY[voucher_url], NULL)) as voucher_urls,
           COALESCE(bill_urls, ARRAY_REMOVE(ARRAY[bill_url], NULL)) as bill_urls,
           display_order, transaction_time, entry_transfer_id, entry_transfer_role,
-          tds_amount, tds_rate, tds_mode, tds_section, tds_module, tds_deductee_name, tds_pan, 'expenses' as source
+          tds_amount, tds_rate, tds_mode, tds_section, tds_module, tds_deductee_name, tds_pan, 'expenses' as source, ${missing_bill === 'true' ? 'to_jsonb(expenses)' : 'NULL::jsonb'} AS documentation_record
         FROM expenses
         WHERE site_id = $1
         
@@ -466,7 +479,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[fp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, fp.transaction_time, fp.entry_transfer_id, fp.entry_transfer_role,
-          fp.tds_amount, fp.tds_rate, fp.tds_mode, fp.tds_section, fp.tds_module, fp.tds_deductee_name, fp.tds_pan, 'farmer_payment' as source
+          fp.tds_amount, fp.tds_rate, fp.tds_mode, fp.tds_section, fp.tds_module, fp.tds_deductee_name, fp.tds_pan, 'farmer_payment' as source, ${missing_bill === 'true' ? 'to_jsonb(fp)' : 'NULL::jsonb'} AS documentation_record
         FROM farmer_payments fp
         JOIN farmers f ON f.id = fp.farmer_id
         WHERE f.site_id = $1
@@ -484,7 +497,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[pcp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, pcp.transaction_time, pcp.entry_transfer_id, pcp.entry_transfer_role,
-          pcp.tds_amount, pcp.tds_rate, pcp.tds_mode, pcp.tds_section, NULL::text as tds_module, NULL::text as tds_deductee_name, NULL::text as tds_pan, 'commission' as source
+          pcp.tds_amount, pcp.tds_rate, pcp.tds_mode, pcp.tds_section, NULL::text as tds_module, NULL::text as tds_deductee_name, NULL::text as tds_pan, 'commission' as source, ${missing_bill === 'true' ? 'to_jsonb(pcp)' : 'NULL::jsonb'} AS documentation_record
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
         LEFT JOIN plots p ON pcm.plot_id = p.id -- land commissions carry no plot (migration 155); the remark COALESCEs it away
@@ -497,17 +510,18 @@ class ExpenseModel extends MasterModel {
           'vp_' || vp.id as virtual_id, vp.id as original_id, vp.site_id, vp.payment_date as date,
           NULL as from_entity, UPPER(vc.vendor_name) as to_entity,
           UPPER(vp.payment_mode) as payment_mode, vp.amount as debit, 0::numeric as credit,
-          UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' || CASE WHEN vp.note IS NOT NULL AND vp.note != '' THEN ' - ' || vp.note ELSE '' END as remark,
+          UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' || COALESCE(' · ' || cp.name, '') || CASE WHEN vp.note IS NOT NULL AND vp.note != '' THEN ' - ' || vp.note ELSE '' END as remark,
           NULL as account_no, NULL as branch, 'VENDOR PAYMENT' as category, NULL::varchar as sub_category,
           vp.status, vp.cheque_status, vp.cheque_no, vp.approved_by, vp.approved_at, vp.created_by, vp.created_at, vp.updated_at,
           NULL::int as assigned_user_id, vp.assigned_admin_id, vp.voucher_url, NULL as bill_url, NULL as customer_signature_url, NULL as authority_signature_url,
           ARRAY_REMOVE(ARRAY[vp.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, vp.transaction_time, vp.entry_transfer_id, vp.entry_transfer_role,
-          vp.tds_amount, vp.tds_rate, vp.tds_mode, vp.tds_section, vp.tds_module, vp.tds_deductee_name, vp.tds_pan, 'vendor_payment' as source
+          vp.tds_amount, vp.tds_rate, vp.tds_mode, vp.tds_section, vp.tds_module, vp.tds_deductee_name, vp.tds_pan, 'vendor_payment' as source, ${missing_bill === 'true' ? 'to_jsonb(vp)' : 'NULL::jsonb'} AS documentation_record
         FROM vendor_payments vp
         JOIN vendor_commitments vc ON vp.commitment_id = vc.id
-        WHERE vp.site_id = $1
+        LEFT JOIN construction_projects cp ON cp.id = vc.project_id AND cp.site_id = vp.site_id
+        WHERE vp.site_id = $1 AND ${vendorScope}
 
         UNION ALL
 
@@ -522,7 +536,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[cfe.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, cfe.transaction_time, cfe.entry_transfer_id, cfe.entry_transfer_role,
-          cfe.tds_amount, cfe.tds_rate, cfe.tds_mode, cfe.tds_section, cfe.tds_module, cfe.tds_deductee_name, cfe.tds_pan, 'personal_ledger' as source
+          cfe.tds_amount, cfe.tds_rate, cfe.tds_mode, cfe.tds_section, cfe.tds_module, cfe.tds_deductee_name, cfe.tds_pan, 'personal_ledger' as source, ${missing_bill === 'true' ? 'to_jsonb(cfe)' : 'NULL::jsonb'} AS documentation_record
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
@@ -541,7 +555,7 @@ class ExpenseModel extends MasterModel {
           ARRAY_REMOVE(ARRAY[d.voucher_url], NULL) as voucher_urls,
           ARRAY[]::text[] as bill_urls,
           NULL::int as display_order, d.transaction_time, d.entry_transfer_id, d.entry_transfer_role,
-          d.tds_amount, d.tds_rate, d.tds_mode, d.tds_section, d.tds_module, d.tds_deductee_name, d.tds_pan, 'daybook' as source
+          d.tds_amount, d.tds_rate, d.tds_mode, d.tds_section, d.tds_module, d.tds_deductee_name, d.tds_pan, 'daybook' as source, ${missing_bill === 'true' ? 'to_jsonb(d)' : 'NULL::jsonb'} AS documentation_record
         FROM day_book d
         WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
@@ -553,6 +567,11 @@ class ExpenseModel extends MasterModel {
       ${unifiedCTE}
       SELECT u.*,
              us.name as approved_by_name,
+             vendor_source.commitment_id, vendor_commitment.project_id, vendor_project.name AS project_name,
+             vendor_commitment.vendor_name, vendor_commitment.work_title,
+             CASE WHEN u.source = 'vendor_payment' THEN vendor_posted.debit::text END AS posted_debit,
+             CASE WHEN u.source = 'vendor_payment' THEN vendor_posted.credit::text END AS posted_credit,
+             vendor_posted.ledger_id AS ledger_id,
              m.full_name as assigned_user_name,
              admin_u.name as assigned_admin_name,
              COALESCE(NULLIF(TRIM(cu.name), ''), cu.email) AS created_by_name,
@@ -561,6 +580,12 @@ class ExpenseModel extends MasterModel {
                'phone', party_member.phone, 'direction', party_link.direction
              ) ELSE NULL END AS related_party
       FROM unified u
+      LEFT JOIN vendor_payments vendor_source ON u.source = 'vendor_payment' AND vendor_source.id = u.original_id
+      LEFT JOIN vendor_commitments vendor_commitment ON vendor_commitment.id = vendor_source.commitment_id
+      LEFT JOIN construction_projects vendor_project ON vendor_project.id = vendor_commitment.project_id AND vendor_project.site_id = u.site_id
+      LEFT JOIN LATERAL (SELECT COALESCE(SUM(le.debit),0) AS debit, COALESCE(SUM(le.credit),0) AS credit, MIN(le.id) AS ledger_id
+        FROM ledger_entries le WHERE u.source = 'vendor_payment' AND le.source_key = 'vendor_payments'
+          AND le.source_id = u.original_id AND le.site_id = u.site_id AND le.ledger_type = 'site') vendor_posted ON TRUE
       LEFT JOIN users us ON u.approved_by = us.id
       LEFT JOIN members m ON u.assigned_user_id = m.id
       LEFT JOIN users admin_u ON u.assigned_admin_id = admin_u.id
@@ -591,22 +616,29 @@ class ExpenseModel extends MasterModel {
       WHERE 1=1 ${whereClause}
     `;
 
-    // ── Q3: Summary aggregates (exclude rejected and fully returned records) ──
-    // cash_debit / bank_debit etc. split totals by payment mode so the page
-    // can render Cash-vs-Bank flow cards with the same classifier the Day
-    // Book uses (CASH and SPLIT cash leg → cash; everything else → bank).
+    // Vendor rows contribute only their canonical posted amount, never a second
+    // expense or the gross source amount (which can include withheld TDS).
     const summaryQuery = `
-      ${unifiedCTE}
-      SELECT
-        COALESCE(SUM(debit) FILTER (WHERE financial_transaction_posts('debit', status, payment_mode, cheque_status)), 0)::numeric as total_debit,
-        COALESCE(SUM(credit) FILTER (WHERE financial_transaction_posts('credit', status, payment_mode, cheque_status)), 0)::numeric as total_credit,
-        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') AND financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END), 0)::numeric as cash_debit,
-        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') AND financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END), 0)::numeric as cash_credit,
-        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') AND financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END), 0)::numeric as bank_debit,
-        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_mode,'CASH')) NOT IN ('CASH','CASH PLOT PAYMENT','CASH REFUND PLOT PAYMENT','PAY ADVANCE') AND financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END), 0)::numeric as bank_credit,
-        COUNT(*)::int as total_count
-      FROM unified u
-      WHERE 1=1 ${whereClause}
+      ${unifiedCTE}, financial AS (
+        SELECT u.*,
+          CASE WHEN u.source = 'vendor_payment' THEN COALESCE(v.debit,0)
+            WHEN financial_transaction_posts('debit',u.status,u.payment_mode,u.cheque_status) THEN u.debit ELSE 0 END AS posted_debit,
+          CASE WHEN u.source = 'vendor_payment' THEN COALESCE(v.credit,0)
+            WHEN financial_transaction_posts('credit',u.status,u.payment_mode,u.cheque_status) THEN u.credit ELSE 0 END AS posted_credit
+        FROM unified u
+        LEFT JOIN LATERAL (SELECT SUM(le.debit) AS debit, SUM(le.credit) AS credit FROM ledger_entries le
+          WHERE u.source = 'vendor_payment' AND le.source_key = 'vendor_payments' AND le.source_id = u.original_id
+            AND le.site_id = u.site_id AND le.ledger_type = 'site') v ON TRUE
+        WHERE 1=1 ${whereClause}
+      )
+      SELECT COALESCE(SUM(posted_debit),0)::numeric AS total_debit,
+        COALESCE(SUM(posted_credit),0)::numeric AS total_credit,
+        COALESCE(SUM(posted_debit) FILTER (WHERE ledger_bucket(payment_mode)='cash'),0)::numeric AS cash_debit,
+        COALESCE(SUM(posted_credit) FILTER (WHERE ledger_bucket(payment_mode)='cash'),0)::numeric AS cash_credit,
+        COALESCE(SUM(posted_debit) FILTER (WHERE ledger_bucket(payment_mode)<>'cash'),0)::numeric AS bank_debit,
+        COALESCE(SUM(posted_credit) FILTER (WHERE ledger_bucket(payment_mode)<>'cash'),0)::numeric AS bank_credit,
+        COUNT(*)::int AS total_count
+      FROM financial
     `;
 
     // ── Run all 3 in parallel ──
@@ -618,7 +650,7 @@ class ExpenseModel extends MasterModel {
 
     return {
       items: dataResult.rows.map(row => {
-        const { virtual_id, ...rest } = row;
+        const { virtual_id, documentation_record, ...rest } = row;
         return { ...rest, id: virtual_id };
       }),
       summary: summaryResult.rows[0],
@@ -630,10 +662,20 @@ class ExpenseModel extends MasterModel {
    * Unified Breakdown stats based on the active filters
    */
   async getUnifiedBreakdowns(siteId, filters, pool) {
-    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, only_site, created_by, related_member_ids, expense_ids, entry_origin } = filters;
+    const { search, status, mode, category, categories, sub_category, sub_categories, to_entity, dateFrom, dateTo, missing_bill, only_site, created_by, related_member_ids, expense_ids, entry_origin } = filters;
     const params = [siteId];
     let pIdx = 2;
     let whereClause = '';
+    const documentationReady = missing_bill === 'true' && await hasRelation('transaction_documentation');
+    const missingBillFlag = (source, id, owningSite, record) => {
+      if (missing_bill !== 'true') return 'false';
+      if (documentationReady) return `(transaction_documentation_state('${source}',${id},${owningSite},to_jsonb(${record}))->>'missing_bill')='true'`;
+      return source === 'expense'
+        ? `(UPPER(COALESCE(NULLIF(${record}.payment_mode,''),'CASH'))<>'CASH' AND NULLIF(TRIM(${record}.bill_url),'') IS NULL AND COALESCE(array_length(${record}.bill_urls,1),0)=0)`
+        : 'false';
+    };
+    if (missing_bill === 'true') whereClause += ' AND u.documentation_missing_bill';
+
 
     if (only_site === 'true' && entry_origin === 'transfer') whereClause += ` AND u.entry_transfer_id IS NOT NULL`;
     else if (only_site === 'true' && entry_origin === 'original') whereClause += ` AND u.entry_transfer_id IS NULL`;
@@ -670,32 +712,40 @@ class ExpenseModel extends MasterModel {
     // When only_site=true, use simplified queries against expenses table only.
     // A client filter means expense rows only, exactly as the list applies it.
     if (only_site === 'true' || party.clause || Array.isArray(expense_ids)) {
-      const modeQ = `
-        SELECT COALESCE(payment_mode, 'UNSPECIFIED') as payment_mode,
-          COALESCE(SUM(debit), 0)::numeric as total_debit,
-          COALESCE(SUM(credit), 0)::numeric as total_credit,
-          COUNT(*)::int as entries
-        FROM (
-          SELECT payment_mode,
-                 CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
-                 CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-                 id, date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status, entry_transfer_id
-          FROM expenses WHERE site_id = $1
-        ) u WHERE 1=1 ${whereClause}
-        GROUP BY COALESCE(payment_mode, 'UNSPECIFIED') ORDER BY total_debit DESC`;
-      const catQ = `
-        SELECT COALESCE(category, 'UNCATEGORIZED') as category,
-          COALESCE(SUM(debit), 0)::numeric as total_debit,
-          COALESCE(SUM(credit), 0)::numeric as total_credit,
-          COUNT(*)::int as entries
-        FROM (
-          SELECT payment_mode,
-                 CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
-                 CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-                 id, date, from_entity, to_entity, remark, account_no, branch, category, sub_category, created_by, status, entry_transfer_id
-          FROM expenses WHERE site_id = $1
-        ) u WHERE 1=1 ${whereClause}
-        GROUP BY COALESCE(category, 'UNCATEGORIZED') ORDER BY category ASC`;
+      if (filters.vendor_payment_id) { whereClause += ` AND u.source = 'vendor_payment' AND u.id = $${pIdx++}`; params.push(filters.vendor_payment_id); }
+      const vendorScope = vendorExpensePredicate(filters, params);
+      const registerCTE = `WITH register AS (
+        SELECT e.*, 'expenses'::text AS source,
+          CASE WHEN financial_transaction_posts('debit', e.status,e.payment_mode,e.cheque_status) THEN e.debit ELSE 0 END AS posted_debit,
+          CASE WHEN financial_transaction_posts('credit',e.status,e.payment_mode,e.cheque_status) THEN e.credit ELSE 0 END AS posted_credit,
+          ${missingBillFlag('expense','e.id','e.site_id','e')} AS documentation_missing_bill
+        FROM expenses e WHERE e.site_id=$1
+      ), vendor_register AS (
+        SELECT vp.id, vp.payment_date AS date, UPPER(vp.payment_mode) AS payment_mode, 'VENDOR PAYMENT'::text AS category, NULL::text AS sub_category,
+          UPPER(vc.vendor_name) AS to_entity, NULL::text AS from_entity,
+          UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' || COALESCE(' · ' || cp.name,'') || COALESCE(' - ' || vp.note,'') AS remark,
+          NULL::text AS account_no, NULL::text AS branch, vp.created_by, vp.status, vp.entry_transfer_id, 'vendor_payment'::text AS source,
+          COALESCE(posted.debit,0) AS debit, COALESCE(posted.credit,0) AS credit,
+          ${missingBillFlag('vendor_payment','vp.id','vp.site_id','vp')} AS documentation_missing_bill
+        FROM vendor_payments vp JOIN vendor_commitments vc ON vc.id=vp.commitment_id
+        LEFT JOIN construction_projects cp ON cp.id=vc.project_id AND cp.site_id=vp.site_id
+        LEFT JOIN LATERAL (SELECT SUM(le.debit) AS debit,SUM(le.credit) AS credit FROM ledger_entries le
+          WHERE le.site_id=vp.site_id AND le.source_key='vendor_payments' AND le.source_id=vp.id AND le.ledger_type='site') posted ON TRUE
+        WHERE vp.site_id=$1 AND ${vendorScope}
+          ${party.clause || Array.isArray(expense_ids) ? 'AND FALSE' : ''}
+      ), unified AS (
+        SELECT id,date,payment_mode,category,sub_category,to_entity,from_entity,remark,account_no,branch,created_by,status,entry_transfer_id,source,
+          posted_debit AS debit,posted_credit AS credit,documentation_missing_bill FROM register
+        UNION ALL SELECT * FROM vendor_register
+      )`;
+      const modeQ = `${registerCTE}
+        SELECT COALESCE(payment_mode,'UNSPECIFIED') AS payment_mode,
+          COALESCE(SUM(debit),0)::numeric AS total_debit, COALESCE(SUM(credit),0)::numeric AS total_credit,COUNT(*)::int AS entries
+        FROM unified u WHERE 1=1 ${whereClause} GROUP BY COALESCE(payment_mode,'UNSPECIFIED') ORDER BY total_debit DESC`;
+      const catQ = `${registerCTE}
+        SELECT COALESCE(category,'UNCATEGORIZED') AS category,
+          COALESCE(SUM(debit),0)::numeric AS total_debit,COALESCE(SUM(credit),0)::numeric AS total_credit,COUNT(*)::int AS entries
+        FROM unified u WHERE 1=1 ${whereClause} GROUP BY COALESCE(category,'UNCATEGORIZED') ORDER BY category ASC`;
       const [modeRes, catRes] = await Promise.all([
         pool.query(modeQ, params),
         pool.query(catQ, params)
@@ -707,16 +757,17 @@ class ExpenseModel extends MasterModel {
     // Previously: same heavy 6-table UNION executed TWICE in parallel.
     // Now: ONE execution scans the unified data once, and PostgreSQL
     // computes both groupings using GROUPING SETS.
+    const vendorScope = vendorExpensePredicate(filters, params);
     const combinedQuery = `
       WITH unified AS (
         SELECT date, payment_mode, category, sub_category, to_entity, from_entity, remark, account_no, branch,
           CASE WHEN financial_transaction_posts('debit', status, payment_mode, cheque_status) THEN debit ELSE 0 END AS debit,
           CASE WHEN financial_transaction_posts('credit', status, payment_mode, cheque_status) THEN credit ELSE 0 END AS credit,
-          created_by, status
+          created_by, status, ${missingBillFlag('expense', 'id', 'site_id', 'expenses')} AS documentation_missing_bill
         FROM expenses WHERE site_id = $1
         UNION ALL
         SELECT fp.date, fp.payment_mode, 'FARMER PAYMENT' as category, NULL::varchar as sub_category, UPPER(f.name) as to_entity, NULL as from_entity,
-          UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit, fp.created_by, fp.status
+          UPPER(f.name) || ' - FARMER PAYMENT' as remark, fp.bank_account_no as account_no, fp.bank_ifsc as branch, fp.amount as debit, 0::numeric as credit, fp.created_by, fp.status, ${missingBillFlag('farmer_payment', 'fp.id', 'f.site_id', 'fp')}
         FROM farmer_payments fp JOIN farmers f ON f.id = fp.farmer_id
         WHERE f.site_id = $1 AND financial_transaction_posts('debit', fp.status, fp.payment_mode, fp.cheque_status)
         UNION ALL
@@ -724,7 +775,7 @@ class ExpenseModel extends MasterModel {
           UPPER(ag.full_name) || ' - COMMISSION' as remark, NULL as account_no, NULL as branch,
           CASE WHEN pcp.amount > 0 THEN pcp.amount ELSE 0 END as debit,
           CASE WHEN pcp.amount < 0 THEN ABS(pcp.amount) ELSE 0 END as credit,
-          pcp.created_by, pcp.status
+          pcp.created_by, pcp.status, ${missingBillFlag('plot_commission_payment', 'pcp.id', 'pcp.site_id', 'pcp')}
         FROM plot_commission_payments pcp
         JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
         JOIN members ag ON pcm.agent_id = ag.id
@@ -734,19 +785,23 @@ class ExpenseModel extends MasterModel {
         )
         UNION ALL
         SELECT vp.payment_date as date, UPPER(vp.payment_mode) as payment_mode, 'VENDOR PAYMENT' as category, NULL::varchar as sub_category, UPPER(vc.vendor_name) as to_entity, NULL as from_entity,
-          UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' as remark, NULL as account_no, NULL as branch, vp.amount as debit, 0::numeric as credit, vp.created_by, vp.status
+          UPPER(vc.vendor_name) || ' - VENDOR PAYMENT' || COALESCE(' · ' || cp.name,'') as remark, NULL as account_no, NULL as branch,
+          COALESCE(posted.debit,0) as debit, COALESCE(posted.credit,0) as credit, vp.created_by, vp.status, ${missingBillFlag('vendor_payment', 'vp.id', 'vp.site_id', 'vp')}
         FROM vendor_payments vp JOIN vendor_commitments vc ON vp.commitment_id = vc.id
-        WHERE vp.site_id = $1 AND financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)
+        LEFT JOIN construction_projects cp ON cp.id=vc.project_id AND cp.site_id=vp.site_id
+        LEFT JOIN LATERAL (SELECT SUM(le.debit) debit,SUM(le.credit) credit FROM ledger_entries le
+          WHERE le.source_key='vendor_payments' AND le.source_id=vp.id AND le.site_id=vp.site_id AND le.ledger_type='site') posted ON TRUE
+        WHERE vp.site_id = $1 AND ${vendorScope} AND (COALESCE(posted.debit,0)<>0 OR COALESCE(posted.credit,0)<>0)
         UNION ALL
         SELECT cfe.date, UPPER(cfe.cash_type) as payment_mode, 'PERSONAL LEDGER' as category, NULL::varchar as sub_category, cfe.to_name as to_entity, NULL as from_entity,
-          COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit, cfe.created_by, 'approved'::varchar as status
+          COALESCE(cfe.particular, '') as remark, NULL as account_no, NULL as branch, cfe.debit, 0::numeric as credit, cfe.created_by, 'approved'::varchar as status, ${missingBillFlag('cash_flow_entry', 'cfe.id', 'cfe.site_id', 'cfe')}
         FROM cash_flow_entries cfe
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
           AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
         UNION ALL
-        SELECT d.date, d.payment_mode, d.category, NULL::varchar as sub_category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit, d.created_by, d.status
+        SELECT d.date, d.payment_mode, d.category, NULL::varchar as sub_category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit, d.created_by, d.status, ${missingBillFlag('daybook', 'd.id', 'd.site_id', 'd')}
         FROM day_book d WHERE d.site_id = $1 AND d.entry_type = 'EXPENSE'
           AND d.farmer_payment_id IS NULL AND d.commission_id IS NULL AND d.vendor_payment_id IS NULL
           AND (

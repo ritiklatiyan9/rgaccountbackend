@@ -13,6 +13,7 @@ import auditRequestMiddleware from './middlewares/audit.middleware.js';
 import { loyaltyVaultMiddleware } from './services/loyaltyVaultContext.service.js';
 import { transactionTimeMiddleware } from './services/transactionTime.service.js';
 import backupMaintenanceMiddleware from './middlewares/backupMaintenance.middleware.js';
+import { transactionDocumentationMiddleware } from './middlewares/transactionDocumentation.middleware.js';
 
 const app = express();
 
@@ -25,6 +26,7 @@ app.use(cors());
 app.use(backupMaintenanceMiddleware);
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use(transactionDocumentationMiddleware);
 app.use(transactionTimeMiddleware);
 app.use(loyaltyVaultMiddleware);
 // Register before authenticated routes. The middleware records on response

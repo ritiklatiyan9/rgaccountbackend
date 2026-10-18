@@ -20,6 +20,7 @@ import { up as migrateExistingVoucherGaps } from './migrations/196_existing_vouc
 import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_financial_settlements.js';
 import { up as migratePlotFullPaymentDue } from './migrations/201_plot_full_payment_due.js';
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
+import { up as migrateTransactionDocumentation } from './migrations/218_transaction_documentation.js';
 import { initSocket } from './config/socket.js';
 import { initCache } from './config/cache.js';
 import { startSmsReminderScheduler } from './services/smsReminder.service.js';
@@ -60,6 +61,7 @@ connectDB().then(async () => {
   await migrateDataStorage(pool);
   await migrateExistingVoucherGaps(pool);
   await migrateImprestApprovalIndexes(pool);
+  await migrateTransactionDocumentation(pool);
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

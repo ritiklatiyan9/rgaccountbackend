@@ -1,3 +1,5 @@
+import { getConstructionSummaryData } from '../controllers/construction.controller.js';
+import { constructionExpenseScope } from '../services/constructionExpenseScope.service.js';
 /**
  * GraphQL Schema — Dashboard Analytics BFF.
  * Runs alongside existing REST API on /graphql.
@@ -103,6 +105,7 @@ const ExpensesPageFiltersInput = new GraphQLInputObjectType({
     // "Money Related To" multi-select: rows linked to ANY of these clients.
     relatedMemberIds: { type: new GraphQLList(new GraphQLNonNull(GraphQLInt)) },
     expenseIds: { type: new GraphQLList(new GraphQLNonNull(GraphQLInt)) },
+    vendorPaymentId: { type: GraphQLInt },
     order:       { type: ExpenseSortOrderEnum },
     onlySite:    { type: GraphQLBoolean },
     createdBy:   { type: GraphQLInt },
@@ -380,6 +383,10 @@ const ExpensePageSummaryType = new GraphQLObjectType({
     total_debit:  { type: GraphQLFloat },
     total_credit: { type: GraphQLFloat },
     total_count:  { type: GraphQLInt },
+    cash_debit:   { type: GraphQLFloat },
+    cash_credit:  { type: GraphQLFloat },
+    bank_debit:   { type: GraphQLFloat },
+    bank_credit:  { type: GraphQLFloat },
   },
 });
 
@@ -455,10 +462,20 @@ const ExpenseEntryType = new GraphQLObjectType({
     assigned_admin_id: { type: GraphQLInt },
     assigned_admin_name:{ type: GraphQLString },
     voucher_url:       { type: GraphQLString },
+    voucher_urls:      { type: new GraphQLList(GraphQLString) },
     bill_url:          { type: GraphQLString },
+    bill_urls:         { type: new GraphQLList(GraphQLString) },
     customer_signature_url: { type: GraphQLString },
     authority_signature_url: { type: GraphQLString },
     source:            { type: GraphQLString },
+    commitment_id:     { type: GraphQLInt },
+    project_id:        { type: GraphQLInt },
+    project_name:      { type: GraphQLString },
+    vendor_name:       { type: GraphQLString },
+    work_title:        { type: GraphQLString },
+    posted_debit:      { type: GraphQLString },
+    posted_credit:     { type: GraphQLString },
+    ledger_id:         { type: GraphQLString },
     cheque_no:         { type: GraphQLString },
     cheque_status:     { type: GraphQLString },
     cheque_apply_date: { type: GraphQLString },
@@ -961,24 +978,15 @@ const QueryType = new GraphQLObjectType({
       args: { siteId: { type: new GraphQLNonNull(GraphQLID) } },
       async resolve(_, { siteId }, ctx) {
         const id = requireModuleRead(ctx, 'construction', siteId);
-        const [agg, req, cost] = await Promise.all([
-          pool.query(
-            `SELECT
-               COUNT(*) FILTER (WHERE status = 'ACTIVE')::int AS active_projects,
-               COUNT(*) FILTER (WHERE status = 'DELAYED' OR (target_end_date IS NOT NULL AND target_end_date < CURRENT_DATE AND status <> 'COMPLETED'))::int AS delayed_projects,
-               COALESCE(ROUND(AVG(progress_pct) FILTER (WHERE status IN ('ACTIVE','DELAYED'))), 0)::int AS avg_progress,
-               COALESCE(SUM(budget), 0) AS total_budget
-             FROM construction_projects WHERE site_id = $1`, [id]),
-          pool.query(`SELECT COUNT(*)::int AS c FROM construction_material_requests WHERE site_id = $1 AND status IN ('REQUESTED','PARTIALLY_FULFILLED')`, [id]),
-          pool.query(`SELECT COALESCE(SUM(qty*rate),0) AS c FROM inventory_movements WHERE movement_type='CONSUMPTION' AND site_id = $1`, [id]),
-        ]);
+        const { summary } = await getConstructionSummaryData({ siteId: id, user: ctx.user });
         return {
-          activeProjects: agg.rows[0].active_projects,
-          delayedProjects: agg.rows[0].delayed_projects,
-          avgProgress: agg.rows[0].avg_progress,
-          pendingMaterialRequests: req.rows[0].c,
-          totalBudget: parseFloat(agg.rows[0].total_budget) || 0,
-          totalActualCost: parseFloat(cost.rows[0].c) || 0,
+          activeProjects: summary.active_projects,
+          delayedProjects: summary.delayed_projects,
+          avgProgress: summary.avg_progress,
+          pendingMaterialRequests: summary.pending_material_requests,
+          totalBudget: Number(summary.total_budget) || 0,
+          // Operational material consumption valuation, separate from posted cash.
+          totalActualCost: Number(summary.total_actual_cost) || 0,
         };
       },
     },
@@ -1115,9 +1123,11 @@ const QueryType = new GraphQLObjectType({
           missing_bill: filters.missingBill ? 'true' : undefined,
           related_member_ids: positiveIntList(filters.relatedMemberIds),
           expense_ids: Array.isArray(filters.expenseIds) ? positiveIntList(filters.expenseIds) || [] : undefined,
+          vendor_payment_id: filters.vendorPaymentId ? requirePositiveId(filters.vendorPaymentId,'vendorPaymentId') : undefined,
+          ...await constructionExpenseScope(ctx.user),
           entry_origin: ['original', 'transfer'].includes(filters.entryOrigin) ? filters.entryOrigin : undefined,
           order: filters.order || 'desc',
-          // Expenses module should show only entries from expense page.
+          // Ordinary expenses and authorized linked vendor payments share one register.
           only_site: filters.onlySite === false ? undefined : 'true',
           created_by: canViewAllEntries
             ? (Number.isInteger(requestedCreator) && requestedCreator > 0 ? requestedCreator : undefined)
@@ -1132,7 +1142,7 @@ const QueryType = new GraphQLObjectType({
           serializeFilters(normalizedFilters),
         ) + `:br=${includeBreakdowns ? 1 : 0}`;
 
-        if (cacheEnabled()) {
+        if (cacheEnabled() && !normalizedFilters.include_vendor) {
           const cached = await cacheGet(key);
           if (cached) return cached;
         }
@@ -1144,7 +1154,7 @@ const QueryType = new GraphQLObjectType({
           includeBreakdowns,
         });
 
-        if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
+        if (cacheEnabled() && !normalizedFilters.include_vendor) await cacheSet(key, data, CACHE_TTL);
         return data;
       },
     },
@@ -1178,6 +1188,8 @@ const QueryType = new GraphQLObjectType({
           missing_bill: filters.missingBill ? 'true' : undefined,
           related_member_ids: positiveIntList(filters.relatedMemberIds),
           expense_ids: Array.isArray(filters.expenseIds) ? positiveIntList(filters.expenseIds) || [] : undefined,
+          vendor_payment_id: filters.vendorPaymentId ? requirePositiveId(filters.vendorPaymentId,'vendorPaymentId') : undefined,
+          ...await constructionExpenseScope(ctx.user),
           entry_origin: ['original', 'transfer'].includes(filters.entryOrigin) ? filters.entryOrigin : undefined,
           order: filters.order || 'desc',
           only_site: filters.onlySite === false ? undefined : 'true',
@@ -1188,14 +1200,14 @@ const QueryType = new GraphQLObjectType({
 
         const key = `expenses:breakdown:${ctx.user.id || 'anon'}:${id}:${serializeFilters(normalizedFilters)}`;
 
-        if (cacheEnabled()) {
+        if (cacheEnabled() && !normalizedFilters.include_vendor) {
           const cached = await cacheGet(key);
           if (cached) return cached;
         }
 
         const data = await getExpensesBreakdown(id, { filters: normalizedFilters });
 
-        if (cacheEnabled()) await cacheSet(key, data, CACHE_TTL);
+        if (cacheEnabled() && !normalizedFilters.include_vendor) await cacheSet(key, data, CACHE_TTL);
         return data;
       },
     },

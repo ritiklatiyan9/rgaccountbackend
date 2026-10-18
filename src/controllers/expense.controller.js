@@ -1,3 +1,5 @@
+import { decideVendorPayment, vendorApprovalScope, vendorApprovalVisibility } from './approval.controller.js';
+import { constructionExpenseScope, vendorExpenseCreationConflict } from '../services/constructionExpenseScope.service.js';
 import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -95,21 +97,6 @@ const voucherColumns = (voucher_urls, voucher_url) =>
 const billColumns = (bill_urls, bill_url) =>
   fileColumns('bill_urls', 'bill_url', bill_urls, bill_url);
 
-const syncLinkedVendorInventoryPayments = async (payments, status, approvedBy) => {
-  const rows = Array.isArray(payments) ? payments : [payments];
-  const ids = rows.map((row) => Number(row?.id)).filter(Number.isInteger);
-  if (ids.length === 0) return;
-  await pool.query(
-    `UPDATE vendor_inventory_payments vip
-        SET status = $2, approved_by = $3, approved_at = NOW(),
-            cheque_status = vp.cheque_status, cheque_no = vp.cheque_no,
-            updated_at = NOW()
-       FROM vendor_payments vp
-      WHERE vip.source_vendor_payment_id = vp.id
-        AND vp.id = ANY($1::int[])`,
-    [ids, status, approvedBy]
-  );
-};
 
 /**
  * POST /expenses
@@ -124,6 +111,10 @@ export const createExpense = asyncHandler(async (req, res) => {
   } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
+  if (vendorExpenseCreationConflict(req.body)) return res.status(409).json({
+    message: 'Record vendor payments against the vendor commitment. They appear in Expenses automatically.',
+    source_path: '/construction-vendors/vendors',
+  });
 
   const data = {
     site_id: parseInt(site_id),
@@ -175,7 +166,9 @@ export const listExpenses = asyncHandler(async (req, res) => {
 
   const visibility = await resolveEntryVisibility(req.user, 'expenses', created_by);
   const filters = {
-    search, status, mode, category, to_entity, dateFrom, dateTo, missing_bill, order, only_site,
+    search, status, mode, category, to_entity, dateFrom, dateTo, missing_bill, order, only_site: only_site ?? 'true',
+    vendor_payment_id: /^\d+$/.test(String(req.query.vendor_payment_id || '')) ? Number(req.query.vendor_payment_id) : undefined,
+    ...await constructionExpenseScope(req.user),
     created_by: visibility.creatorId,
   };
 
@@ -197,8 +190,8 @@ export const listExpenses = asyncHandler(async (req, res) => {
   const expensesWithVerify = paginatedData.items.map((e) => ({
     ...e,
     verifyUrl: buildVerifyUrl({
-      t: ReceiptType.EXPENSE,
-      i: e.id,
+      t: e.source === 'vendor_payment' ? ReceiptType.VENDOR : ReceiptType.EXPENSE,
+      i: e.source === 'vendor_payment' ? e.original_id : e.id,
       a: parseFloat(e.debit) || parseFloat(e.credit) || 0,
       dr: (parseFloat(e.debit) || 0) > 0 ? 'OUT' : 'IN',
       d: e.date,
@@ -257,6 +250,10 @@ export const getExpense = asyncHandler(async (req, res) => {
  * SELECT round-trip vs the previous SELECT-then-UPDATE pattern.
  */
 export const updateExpense = asyncHandler(async (req, res) => {
+  if (vendorExpenseCreationConflict(req.body)) return res.status(409).json({
+    message: 'Update vendor payments in their source commitment; the Expenses representation is linked automatically.',
+    source_path: '/construction-vendors/vendors',
+  });
   const expenseId = parseInt(req.params.id);
   const existing = await expenseModel.findById(expenseId, pool);
   if (!existing || !(await canUserViewEntry(req.user, 'expenses', existing.created_by))) {
@@ -436,6 +433,11 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
   let daybookList = [];
   let vendorPayments = [];
 
+  const vendorParams = [status, site_id ? parseInt(site_id) : null, date_from || null, date_to || null];
+  const visibility = await vendorApprovalVisibility(req);
+  let vendorScope = await vendorApprovalScope('vp', req, vendorParams);
+  if (visibility.scoped) { vendorParams.push(req.user.id); vendorScope += ` AND vp.assigned_admin_id=$${vendorParams.length}`; }
+
   // Use the new findByStatus method for flexibility
   [expensesList, daybookList, vendorPayments] = await Promise.all([
     expenseModel.findByStatus(
@@ -483,8 +485,9 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
            AND ($2::int IS NULL OR vp.site_id = $2)
            AND ($3::date IS NULL OR vp.payment_date >= $3)
            AND ($4::date IS NULL OR vp.payment_date <= $4)
+           AND ${vendorScope}
          ORDER BY vp.payment_date DESC, vp.id DESC`,
-        [status, site_id ? parseInt(site_id) : null, date_from || null, date_to || null]
+        vendorParams
       )
       .then((r) => r.rows),
   ]);
@@ -548,16 +551,20 @@ export const listPendingExpenses = asyncHandler(async (req, res) => {
 export const getStatusCounts = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
 
+  const vendorParams = [site_id ? parseInt(site_id) : null];
+  const visibility = await vendorApprovalVisibility(req);
+  let vendorScope = await vendorApprovalScope('vp', req, vendorParams);
+  if (visibility.scoped) { vendorParams.push(req.user.id); vendorScope += ` AND vp.assigned_admin_id=$${vendorParams.length}`; }
   const [expenseCounts, daybookCounts, vendorCounts] = await Promise.all([
     expenseModel.getStatusCounts(site_id ? parseInt(site_id) : null, pool),
     dayBookModel.getStatusCounts(site_id ? parseInt(site_id) : null, pool),
     pool
       .query(
-        `SELECT status, COUNT(*)::int AS count
-         FROM vendor_payments
-         WHERE ($1::int IS NULL OR site_id = $1)
-         GROUP BY status`,
-        [site_id ? parseInt(site_id) : null]
+        `SELECT vp.status, COUNT(*)::int AS count
+         FROM vendor_payments vp
+         WHERE ($1::int IS NULL OR vp.site_id = $1) AND ${vendorScope}
+         GROUP BY vp.status`,
+        vendorParams
       )
       .then((r) => r.rows),
   ]);
@@ -590,36 +597,8 @@ export const approveExpense = asyncHandler(async (req, res) => {
 
   // ── Vendor payment branch ──
   if (source === 'vendor_payment') {
-    // Atomic: only flip status when not already 'approved'. Saves the
-    // SELECT round-trip and rejects the dup in a single query.
-    const result = await pool.query(
-      `UPDATE vendor_payments
-          SET status = 'approved', approved_by = $2, approved_at = NOW()
-        WHERE id = $1 AND status != 'approved'
-        RETURNING *`,
-      [parseInt(id), req.user.id]
-    );
-    if (!result.rows[0]) {
-      // Either not found or already approved — distinguish via a tiny lookup.
-      const check = await pool.query('SELECT status FROM vendor_payments WHERE id = $1', [parseInt(id)]);
-      if (check.rows.length === 0) return res.status(404).json({ message: 'Vendor payment not found' });
-      return res.status(400).json({ message: 'Vendor payment is already approved' });
-    }
-    const approvedPayment = result.rows[0];
-    await syncLinkedVendorInventoryPayments(approvedPayment, 'approved', req.user.id);
-
-    // Imprest deduction in BACKGROUND — caller doesn't need to wait.
-    deductImprestOnApproval(
-      approvedPayment.created_by,
-      parseFloat(approvedPayment.amount) || 0,
-      approvedPayment.id,
-      `VENDOR PAYMENT #${approvedPayment.id}`,
-      req.user.id,
-      'vendor_payment',
-      approvedPayment.site_id
-    ).catch(() => {});
-
-    return res.json({ expense: approvedPayment, message: 'Vendor payment approved successfully' });
+    const result = await decideVendorPayment(req, id, 'approve');
+    return res.json({ ...result, expense: result.entry });
   }
 
   // ── DayBook branch ──
@@ -690,37 +669,8 @@ export const rejectExpense = asyncHandler(async (req, res) => {
 
   // ── Vendor payment branch ── single SELECT + atomic UPDATE
   if (source === 'vendor_payment') {
-    const result = await pool.query(
-      `UPDATE vendor_payments
-          SET status = 'rejected', approved_by = $2, approved_at = NOW()
-        WHERE id = $1 AND status != 'rejected'
-        RETURNING *, (
-          SELECT status FROM vendor_payments WHERE id = $1
-        ) AS prev_status`,
-      [parseInt(id), req.user.id]
-    );
-    if (!result.rows[0]) {
-      const check = await pool.query('SELECT status FROM vendor_payments WHERE id = $1', [parseInt(id)]);
-      if (check.rows.length === 0) return res.status(404).json({ message: 'Vendor payment not found' });
-      return res.status(400).json({ message: 'Vendor payment is already rejected' });
-    }
-    const rejectedPayment = result.rows[0];
-    await syncLinkedVendorInventoryPayments(rejectedPayment, 'rejected', req.user.id);
-
-    // Reverse imprest deduction in BACKGROUND if previously approved.
-    // (`reverseImprestOnRejection` already filters via a row check, so it's
-    // safe to fire even when there was no prior deduction.)
-    reverseImprestOnRejection(
-      rejectedPayment.created_by,
-      parseFloat(rejectedPayment.amount) || 0,
-      rejectedPayment.id,
-      `VENDOR PAYMENT #${rejectedPayment.id}`,
-      req.user.id,
-      'vendor_payment',
-      rejectedPayment.site_id
-    ).catch(() => {});
-
-    return res.json({ expense: rejectedPayment, message: 'Vendor payment rejected' });
+    const result = await decideVendorPayment(req, id, 'reject');
+    return res.json({ ...result, expense: result.entry });
   }
 
   // ── DayBook branch ──
@@ -857,15 +807,14 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
     pureExpenseIds.length > 0 ? expenseModel.bulkApprove(pureExpenseIds, req.user.id, pool) : [],
     daybookIds.length > 0 ? dayBookModel.bulkApprove(daybookIds, req.user.id, pool) : [],
     vendorPaymentIds.length > 0
-      ? pool
-          .query(
-            `UPDATE vendor_payments
-             SET status = 'approved', approved_by = $2, approved_at = NOW()
-             WHERE id = ANY($1::int[])
-             RETURNING *`,
-            [vendorPaymentIds, req.user.id]
-          )
-          .then((r) => r.rows)
+      ? (async () => {
+          const decided = [];
+          for (const id of new Set(vendorPaymentIds)) {
+            const result = await decideVendorPayment(req,id,'approve');
+            decided.push(result.entry);
+          }
+          return decided;
+        })()
       : [],
   ]);
 
@@ -891,17 +840,7 @@ export const bulkApproveExpenses = asyncHandler(async (req, res) => {
       sourceModule: 'daybook',
       siteId: entry.site_id,
     })),
-    ...results[2].map((vp) => ({
-      creator: vp.created_by,
-      type: 'EXPENSE',
-      referenceId: vp.id,
-      amount: parseFloat(vp.amount) || 0,
-      remarks: `VENDOR PAYMENT #${vp.id}`,
-      sourceModule: 'vendor_payment',
-      siteId: vp.site_id,
-    })),
   ];
-  await syncLinkedVendorInventoryPayments(results[2], 'approved', req.user.id);
   bulkImprestDeduct(ledgerPayload);
 
   const totalApproved = results[0].length + results[1].length + results[2].length;

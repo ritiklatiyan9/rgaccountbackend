@@ -21,7 +21,8 @@ const bustEditRequestCache = invalidateCacheOnSuccess(['edit-requests|']);
 // Approval applies the change to the target module's records (e.g.
 // plot_registry_create creates a registry) — bust those read caches too.
 const bustApprovalCaches = invalidateCacheOnSuccess([
-  'edit-requests|', 'registries|', 'registries-meta|',
+  'edit-requests|', 'registries|', 'registries-meta|', 'approvals|',
+  'expenses|', 'expenses:page:', 'expenses:breakdown:',
 ]);
 
 // All routes require authentication

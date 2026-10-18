@@ -1,12 +1,57 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { inventoryModel } from '../models/Inventory.model.js';
+import {
+  constructionError, isConstructionAdmin, positiveId, PROJECT_TRANSITIONS, validateProjectTransition,
+  decimalAmount, dateValue, validateDateRange, progressValue,
+  assertConstructionSiteAccess, assertConstructionProjectAccess, constructionCanViewAll, constructionPaymentVisibility, projectAccessPredicate,
+  validateConstructionAssignment, recordConstructionActivity, markProjectCommitted, projectMetricsSql,
+} from '../services/constructionWorkflow.service.js';
 
-const num = (v) => (v === undefined || v === null || v === '' ? null : Number(v));
-const asId = (v) => {
-  const id = Number.parseInt(v, 10);
-  return Number.isInteger(id) && id > 0 ? id : null;
+const transaction = async fn => {
+  const client = await pool.connect();
+  try { await client.query('BEGIN'); const result = await fn(client); await client.query('COMMIT'); return result; }
+  catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
 };
+const editableProject = project => {
+  if (['CLOSED','CANCELLED'].includes(project.status)) throw constructionError(409, 'Closed or cancelled projects cannot be changed');
+};
+const projectResponse = row => ({...row, progress_pct: row.calculated_progress_pct ?? row.progress_pct});
+const textValue = value => value == null ? null : String(value).trim() || null;
+const mutateProjectRecord = (req,projectId,sql,values,action,entityType,details={},validate=null) => transaction(async db=> {
+  const project=await assertConstructionProjectAccess(db,req.user,projectId,req.constructionSiteId||positiveId(req.query.site_id||req.body.site_id),{lock:true});editableProject(project);
+  if(validate)await validate(db);
+  const result=await db.query(sql,values);
+  if(result.rows.length)await recordConstructionActivity(db,{projectId,actorId:req.user.id,action,entityType,entityId:result.rows.length===1?result.rows[0].id:null,details});
+  return result;
+});
+
+
+// Resolve child IDs from their authoritative project before any read or write.
+export const requireConstructionAccess = asyncHandler(async(req,res,next) => {
+  const siteId=positiveId(req.query.site_id || req.body?.site_id);
+  await assertConstructionSiteAccess(pool,req.user,siteId);
+  req.constructionSiteId=siteId;
+  req.constructionViewAll=await constructionCanViewAll(pool,req.user);
+  let projectId=positiveId(req.params.id);
+  if(req.params.id!==undefined&&!projectId)throw constructionError(400,'Invalid project id');
+  const child = req.params.taskId ? ['construction_tasks',req.params.taskId] : req.params.locationId ? ['construction_locations',req.params.locationId] : req.params.reqId ? ['construction_material_requests',req.params.reqId] : req.params.quoteId ? ['construction_project_quotes',req.params.quoteId] : null;
+  if(child) {
+    if(!positiveId(child[1]))throw constructionError(400,'Invalid record id');
+    const {rows}=await pool.query(`SELECT project_id FROM ${child[0]} WHERE id=$1`,[positiveId(child[1])]);
+    if(!rows[0]) throw constructionError(404,'Record not found');
+    projectId=rows[0].project_id;
+  }
+  if(projectId) {
+    req.constructionProject=await assertConstructionProjectAccess(pool,req.user,projectId,siteId);
+    if(!['GET','HEAD'].includes(req.method)) editableProject(req.constructionProject);
+  }
+  next();
+});
+
+
+const optionalArea = value => value == null || value === '' ? null : decimalAmount(value,'Area',{allowZero:true});
+const asId = positiveId;
 const requireSite = (req, res) => {
   const siteId = parseInt(req.query.site_id || req.body.site_id, 10);
   if (!siteId) { res.status(400).json({ message: 'site_id is required' }); return null; }
@@ -17,9 +62,7 @@ const PROJECT_TYPES = new Set([
   'GENERAL', 'STUDIO_APARTMENTS', 'APARTMENTS', 'FLATS', 'PLOTTED_DEVELOPMENT',
   'MIXED_USE', 'INFRASTRUCTURE', 'RENOVATION',
 ]);
-const PROJECT_STATUSES = new Set(['PLANNING', 'ACTIVE', 'ON_HOLD', 'DELAYED', 'COMPLETED', 'CANCELLED']);
 const TASK_STATUSES = new Set(['PENDING', 'IN_PROGRESS', 'BLOCKED', 'DONE']);
-const REQUEST_STATUSES = new Set(['DRAFT', 'REQUESTED', 'PARTIALLY_FULFILLED', 'FULFILLED', 'CANCELLED']);
 const LOCATION_TYPES = new Set([
   'SITE', 'PHASE', 'TOWER', 'BLOCK', 'FLOOR', 'UNIT', 'FLAT', 'STUDIO',
   'PLOT', 'VILLA', 'ZONE', 'AMENITY',
@@ -63,81 +106,64 @@ const deriveRequestStatus = (items) => {
 
 export const listProjects = asyncHandler(async (req, res) => {
   const siteId = requireSite(req, res); if (!siteId) return;
-  const params = [siteId];
-  let where = 'WHERE p.site_id = $1';
-  if (req.query.status && req.query.status !== 'all') { params.push(req.query.status.toUpperCase()); where += ` AND p.status = $${params.length}`; }
-  if (req.query.project_type && req.query.project_type !== 'all') { params.push(req.query.project_type.toUpperCase()); where += ` AND p.project_type = $${params.length}`; }
-  if (req.query.search?.trim()) { params.push(`%${req.query.search.trim()}%`); where += ` AND (p.name ILIKE $${params.length} OR p.code ILIKE $${params.length})`; }
-  const { rows } = await pool.query(
-    `SELECT p.*,
-       aa.name AS assigned_admin_name,
-       COALESCE(t.task_count, 0)::int         AS task_count,
-       COALESCE(t.done_count, 0)::int         AS done_task_count,
-       COALESCE(c.actual_cost, 0)             AS actual_cost,
-       COALESCE(r.pending_requests, 0)::int   AS pending_requests,
-       COALESCE(l.location_count, 0)::int     AS location_count,
-       COALESCE(l.completed_locations, 0)::int AS completed_location_count,
-       COALESCE(v.vendor_count, 0)::int       AS vendor_commitment_count,
-       COALESCE(v.committed_value, 0)         AS committed_value,
-       (p.target_end_date IS NOT NULL AND p.target_end_date < CURRENT_DATE AND p.status <> 'COMPLETED') AS is_overdue
-     FROM construction_projects p
-     LEFT JOIN users aa ON aa.id = p.assigned_admin_id
-     LEFT JOIN (SELECT t2.project_id, COUNT(*) task_count, COUNT(*) FILTER (WHERE t2.status='DONE') done_count
-                  FROM construction_tasks t2 JOIN construction_projects sp ON sp.id = t2.project_id
-                 WHERE sp.site_id = $1 GROUP BY t2.project_id) t ON t.project_id = p.id
-     LEFT JOIN (SELECT mv.project_id, SUM(mv.qty*mv.rate) actual_cost
-                  FROM inventory_movements mv
-                 WHERE mv.site_id = $1 AND mv.movement_type='CONSUMPTION' GROUP BY mv.project_id) c ON c.project_id = p.id
-     LEFT JOIN (SELECT mr.project_id, COUNT(*) pending_requests
-                  FROM construction_material_requests mr
-                 WHERE mr.site_id = $1 AND mr.status IN ('REQUESTED','PARTIALLY_FULFILLED') GROUP BY mr.project_id) r ON r.project_id = p.id
-     LEFT JOIN (SELECT l2.project_id, COUNT(*) location_count, COUNT(*) FILTER (WHERE l2.status='COMPLETED') completed_locations
-                  FROM construction_locations l2 JOIN construction_projects sp ON sp.id = l2.project_id
-                 WHERE sp.site_id = $1 GROUP BY l2.project_id) l ON l.project_id = p.id
-     LEFT JOIN (SELECT vc.project_id, COUNT(*) vendor_count, SUM(vc.contract_amount) committed_value
-                  FROM vendor_commitments vc
-                 WHERE vc.site_id = $1 AND vc.project_id IS NOT NULL AND vc.status <> 'cancelled' GROUP BY vc.project_id) v ON v.project_id = p.id
-     ${where}
-     ORDER BY p.created_at DESC`,
-    params
-  );
-  res.json({ projects: rows });
+  const params = [siteId,req.user.id,req.constructionViewAll ?? await constructionCanViewAll(pool,req.user)];
+  let where = `WHERE p.site_id=$1 AND ${projectAccessPredicate('p','$2','$3')}`;
+  if(req.query.status && req.query.status!=='all') {params.push(req.query.status.toUpperCase());where+=` AND p.status=$${params.length}`;}
+  if(req.query.project_type && req.query.project_type!=='all') {params.push(req.query.project_type.toUpperCase());where+=` AND p.project_type=$${params.length}`;}
+  if(req.query.search?.trim()) {params.push(`%${req.query.search.trim()}%`);where+=` AND (p.name ILIKE $${params.length} OR p.code ILIKE $${params.length})`;}
+  const {rows}=await pool.query(`${projectMetricsSql} ${where} ORDER BY p.created_at DESC`,params);
+  res.json({projects:rows.map(projectResponse)});
+});
+
+export const assignableUsers = asyncHandler(async(req,res)=> {
+ const siteId=requireSite(req,res);if(!siteId)return;
+ const {rows}=await pool.query(`SELECT u.id,u.name,u.role,
+   (u.role IN ('admin','super_admin') OR COALESCE(up.can_update,false)) AS can_approve
+   FROM users u JOIN sites picker_site ON picker_site.id=$1 AND picker_site.organization_id=u.organization_id LEFT JOIN user_permissions up ON up.user_id=u.id AND up.module='construction'
+   WHERE u.is_active=true AND (u.role IN ('admin','super_admin') OR (u.role='sub_admin'
+   AND EXISTS(SELECT 1 FROM user_sites us WHERE us.user_id=u.id AND us.site_id=$1))) ORDER BY u.name,u.id`,[siteId]);
+ res.json({users:rows});
 });
 
 export const createProject = asyncHandler(async (req, res) => {
   const siteId = requireSite(req, res); if (!siteId) return;
-  const { name, code, status, start_date, target_end_date, budget, notes, assigned_admin_id } = req.body;
-  if (!name || !name.trim()) return res.status(400).json({ message: 'Project name is required' });
-  const projectType = normalizeProjectType(req.body.project_type);
-  const projectStatus = String(status || 'PLANNING').toUpperCase();
-  if (!projectType) return res.status(400).json({ message: 'Invalid project type' });
-  if (!PROJECT_STATUSES.has(projectStatus)) return res.status(400).json({ message: 'Invalid project status' });
-  const { rows } = await pool.query(
-    `INSERT INTO construction_projects (site_id, name, code, project_type, status, start_date, target_end_date, budget, notes, assigned_admin_id, created_by)
-     VALUES ($1,$2,$3,$4,COALESCE($5,'PLANNING'),$6,$7,$8,$9,$10,$11) RETURNING *`,
-    [siteId, name.trim(), code?.trim() || null, projectType, projectStatus,
-     start_date || null, target_end_date || null, num(budget) || 0, notes?.trim() || null,
-     assigned_admin_id || null, req.user.id]
-  );
-  res.status(201).json({ project: rows[0] });
+  const name=textValue(req.body.name);if(!name) throw constructionError(400,'Project name is required');
+  const projectType=normalizeProjectType(req.body.project_type);
+  const status=String(req.body.status || 'NEED').toUpperCase();
+  if(!projectType) throw constructionError(400,'Invalid project type');
+  if(!['NEED','PLANNING'].includes(status)) throw constructionError(400,'A project must start as a need');
+  const priority=String(req.body.priority||'NORMAL').toUpperCase();
+  if(!['LOW','NORMAL','HIGH','URGENT'].includes(priority)) throw constructionError(400,'Invalid priority');
+  const start=dateValue(req.body.start_date),end=dateValue(req.body.target_end_date);validateDateRange(start,end);
+  const project=await transaction(async db=> {
+    await assertConstructionSiteAccess(db,req.user,siteId);
+    if(!isConstructionAdmin(req.user) && ['owner_user_id','assigned_admin_id','assigned_approver_id'].some(k=>req.body[k] && Number(req.body[k])!==req.user.id)) throw constructionError(403,'Only administrators can assign project users');
+    const owner=await validateConstructionAssignment(db,siteId,req.body.owner_user_id || req.body.assigned_admin_id || req.user.id);
+    const approver=await validateConstructionAssignment(db,siteId,req.body.assigned_approver_id,{approver:true,approvalModule:'construction'});
+    const {rows}=await db.query(`INSERT INTO construction_projects(site_id,name,code,project_type,status,start_date,target_end_date,budget,notes,scope,priority,owner_user_id,assigned_admin_id,assigned_approver_id,requested_by,created_by)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$13,$14,$14) RETURNING *`,
+      [siteId,name,textValue(req.body.code),projectType,status,start,end,decimalAmount(req.body.budget??'0','Budget',{allowZero:true}),textValue(req.body.notes),textValue(req.body.scope),priority,owner,approver,req.user.id]);
+    await recordConstructionActivity(db,{projectId:rows[0].id,actorId:req.user.id,action:'need_created',details:{status,owner_user_id:owner}});
+    return rows[0];
+  });
+  res.status(201).json({project});
 });
 
 export const getProject = asyncHandler(async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const siteId = requireSite(req, res); if (!siteId) return;
   const { rows } = await pool.query(
-    `SELECT p.*, aa.name AS assigned_admin_name
-       FROM construction_projects p
-       LEFT JOIN users aa ON aa.id = p.assigned_admin_id
-      WHERE p.id = $1 AND p.site_id = $2`,
+    `${projectMetricsSql} WHERE p.id=$1 AND p.site_id=$2`,
     [id, siteId]
   );
   const project = rows[0];
   if (!project) return res.status(404).json({ message: 'Project not found' });
 
-  const [tasks, requests, cost, locations, commitments, locationCosts] = await Promise.all([
-    pool.query(`SELECT t.*, l.name AS location_name, l.location_type
+  const paymentVisibility=await constructionPaymentVisibility(pool,req.user);
+  const [tasks, requests, cost, locations, commitments, locationCosts, quotes, activity, payments, movements] = await Promise.all([
+    pool.query(`SELECT t.*, l.name AS location_name, l.location_type, owner.name AS owner_name
                   FROM construction_tasks t
+                  LEFT JOIN users owner ON owner.id=t.owner_user_id
                   LEFT JOIN construction_locations l ON l.id = t.location_id
                  WHERE t.project_id = $1 ORDER BY t.sequence ASC, t.id ASC`, [id]),
     pool.query(
@@ -173,9 +199,10 @@ export const getProject = asyncHandler(async (req, res) => {
     pool.query(
       `SELECT vc.id, vc.vendor_name, vc.work_title, vc.head_name, vc.contract_amount,
               vc.status, vc.due_date, vc.location_id, l.name AS location_name,
-              COALESCE(SUM(vp.amount) FILTER (WHERE financial_transaction_posts('debit', vp.status, vp.payment_mode, vp.cheque_status)), 0)::numeric(14,2) AS paid_amount
+              COALESCE(SUM(posted.paid_amount), 0)::numeric(14,2) AS paid_amount
          FROM vendor_commitments vc
          LEFT JOIN vendor_payments vp ON vp.commitment_id = vc.id
+         LEFT JOIN LATERAL (SELECT SUM(le.debit-le.credit) paid_amount FROM ledger_entries le WHERE le.source_key='vendor_payments' AND le.source_id=vp.id AND le.ledger_type='site' AND le.site_id=vc.site_id) posted ON true
          LEFT JOIN construction_locations l ON l.id = vc.location_id
         WHERE vc.project_id = $1
         GROUP BY vc.id, l.name
@@ -191,10 +218,25 @@ export const getProject = asyncHandler(async (req, res) => {
         GROUP BY mv.location_id, l.name ORDER BY actual_cost DESC`,
       [id]
     ),
+    pool.query(`SELECT q.*,u.name AS created_by_name FROM construction_project_quotes q LEFT JOIN users u ON u.id=q.created_by WHERE q.project_id=$1 ORDER BY q.id DESC`,[id]),
+    pool.query(`SELECT a.*,u.name AS actor_name FROM construction_project_activity a LEFT JOIN users u ON u.id=a.actor_id WHERE a.project_id=$1 AND (a.entity_type<>'vendor_payment' OR ($2::boolean AND ($3::boolean OR EXISTS(SELECT 1 FROM vendor_payments visible_payment WHERE visible_payment.id=a.entity_id AND visible_payment.created_by=$4)))) ORDER BY a.id DESC LIMIT 100`,[id,paymentVisibility.read,paymentVisibility.all,req.user.id]),
+    pool.query(`SELECT vp.*,vc.vendor_name,vc.work_title,u.name AS created_by_name,
+      COALESCE(posted.paid_amount,0)::numeric(15,2) AS posted_amount,'vendor_payments' AS source_key
+      FROM vendor_payments vp JOIN vendor_commitments vc ON vc.id=vp.commitment_id LEFT JOIN users u ON u.id=vp.created_by
+      LEFT JOIN LATERAL(SELECT SUM(le.debit-le.credit) paid_amount FROM ledger_entries le WHERE le.source_key='vendor_payments' AND le.source_id=vp.id AND le.ledger_type='site' AND le.site_id=vc.site_id) posted ON true
+      WHERE vc.project_id=$1 AND $2::boolean AND ($3::boolean OR vp.created_by=$4) ORDER BY vp.payment_date DESC,vp.id DESC`,[id,paymentVisibility.read,paymentVisibility.all,req.user.id]),
+    pool.query(`SELECT mv.*,m.name AS material_name,m.unit,l.name AS location_name,u.name AS created_by_name
+      FROM inventory_movements mv JOIN inventory_materials m ON m.id=mv.material_id
+      LEFT JOIN users u ON u.id=mv.created_by LEFT JOIN construction_locations l ON l.id=mv.location_id
+      WHERE mv.project_id=$1 ORDER BY mv.created_at DESC,mv.id DESC LIMIT 100`,[id]),
   ]);
 
+  const allowed=(PROJECT_TRANSITIONS[project.status]||[]).filter(status=>status!=='APPROVED'||isConstructionAdmin(req.user)||(project.assigned_approver_id===req.user.id&&project.created_by!==req.user.id));
   res.json({
-    project: { ...project, actual_cost: parseFloat(cost.rows[0].actual_cost) || 0 },
+    project: { ...projectResponse(project), actual_cost: cost.rows[0].actual_cost, allowed_statuses: allowed },
+    allowed_statuses: allowed,
+    quotes: quotes.rows, activity: activity.rows, vendor_payments: payments.rows, material_movements: movements.rows,
+    payment_history_restricted:!paymentVisibility.read||!paymentVisibility.all,
     tasks: tasks.rows,
     material_requests: requests.rows,
     locations: locations.rows,
@@ -204,46 +246,66 @@ export const getProject = asyncHandler(async (req, res) => {
 });
 
 export const updateProject = asyncHandler(async (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  const siteId = requireSite(req, res); if (!siteId) return;
-  const fields = ['name', 'code', 'project_type', 'status', 'start_date', 'target_end_date', 'actual_end_date', 'budget', 'progress_pct', 'notes', 'assigned_admin_id'];
-  const sets = [];
-  const params = [];
-  for (const f of fields) {
-    if (req.body[f] === undefined) continue;
-    let v = req.body[f];
-    if (f === 'status') {
-      v = String(v).toUpperCase();
-      if (!PROJECT_STATUSES.has(v)) return res.status(400).json({ message: 'Invalid project status' });
-    }
-    else if (f === 'project_type') {
-      v = normalizeProjectType(v);
-      if (!v) return res.status(400).json({ message: 'Invalid project type' });
-    }
-    else if (f === 'budget') v = num(v) || 0;
-    else if (f === 'progress_pct') v = Math.max(0, Math.min(100, parseInt(v, 10) || 0));
-    else if (['start_date', 'target_end_date', 'actual_end_date', 'assigned_admin_id'].includes(f)) v = v || null;
-    else v = v === null ? null : String(v).trim() || null;
-    params.push(v);
-    sets.push(`${f} = $${params.length}`);
-  }
-  if (sets.length === 0) return res.status(400).json({ message: 'Nothing to update' });
-  params.push(id, siteId);
-  const { rows } = await pool.query(
-    `UPDATE construction_projects SET ${sets.join(', ')}, updated_at = NOW()
-      WHERE id = $${params.length - 1} AND site_id = $${params.length} RETURNING *`,
-    params
-  );
-  if (!rows[0]) return res.status(404).json({ message: 'Project not found' });
-  res.json({ project: rows[0] });
+ const id=positiveId(req.params.id),siteId=requireSite(req,res);if(!siteId)return;
+ const project=await transaction(async db=> {
+   const current=await assertConstructionProjectAccess(db,req.user,id,siteId,{lock:true});editableProject(current);
+   const fields=['name','code','project_type','status','start_date','target_end_date','actual_start_date','actual_end_date','budget','progress_pct','notes','scope','priority','owner_user_id','assigned_admin_id','assigned_approver_id'];
+   const change={};
+   for(const field of fields) {
+     if(req.body[field]===undefined) continue;
+     let value=req.body[field];
+     if(field==='name') {value=textValue(value);if(!value)throw constructionError(400,'Project name is required');}
+     else if(field==='project_type') {value=normalizeProjectType(value);if(!value)throw constructionError(400,'Invalid project type');}
+     else if(field==='status') {value=String(value).toUpperCase();validateProjectTransition(current.status,value);}
+     else if(field==='priority') {value=String(value).toUpperCase();if(!['LOW','NORMAL','HIGH','URGENT'].includes(value))throw constructionError(400,'Invalid priority');}
+     else if(field==='budget') value=decimalAmount(value,'Budget',{allowZero:true});
+     else if(field==='progress_pct') value=progressValue(value);
+     else if(field.endsWith('_date')) value=dateValue(value);
+     else if(['owner_user_id','assigned_admin_id','assigned_approver_id'].includes(field)) {
+       if(!isConstructionAdmin(req.user)) throw constructionError(403,'Only administrators can assign project users');
+       value=await validateConstructionAssignment(db,siteId,value,{approver:field==='assigned_approver_id',approvalModule:'construction'});
+     } else value=textValue(value);
+     change[field]=value;
+   }
+   if(!Object.keys(change).length) throw constructionError(400,'Nothing to update');
+   if(!isConstructionAdmin(req.user)&&!['NEED','PLANNING','REVIEW'].includes(current.status)&&['budget','scope'].some(field=>change[field]!==undefined&&String(change[field]??'')!==String(current[field]??'')))throw constructionError(403,'Only administrators can change an approved project budget or scope');
+   if(change.owner_user_id!==undefined) change.assigned_admin_id=change.owner_user_id;
+   else if(change.assigned_admin_id!==undefined) change.owner_user_id=change.assigned_admin_id;
+   validateDateRange(change.start_date===undefined?current.start_date:change.start_date,change.target_end_date===undefined?current.target_end_date:change.target_end_date);
+   validateDateRange(change.actual_start_date===undefined?current.actual_start_date:change.actual_start_date,change.actual_end_date===undefined?current.actual_end_date:change.actual_end_date);
+   if(change.budget!==undefined) {
+     const {rows}=await db.query("SELECT COALESCE(SUM(contract_amount),0)>$2::numeric AS exceeded FROM vendor_commitments WHERE project_id=$1 AND status<>'cancelled'",[id,change.budget]);
+     if(rows[0].exceeded) throw constructionError(409,'Budget cannot be less than existing vendor commitments');
+   }
+   if(change.status==='APPROVED' && current.status!=='APPROVED') {
+     if(!isConstructionAdmin(req.user) && (current.assigned_approver_id!==req.user.id || current.created_by===req.user.id)) throw constructionError(403,'Only the assigned approver or an administrator can approve this need');
+     change.approved_by=req.user.id;change.approved_at=new Date();
+   }
+   if(change.status==='COMMITTED' && current.status!=='COMMITTED') {
+     if(!(await db.query("SELECT 1 FROM vendor_commitments WHERE project_id=$1 AND status<>'cancelled' LIMIT 1",[id])).rows[0]) throw constructionError(409,'Select a vendor commitment before marking this project committed');
+   }
+   if(['COMPLETED','CLOSED'].includes(change.status)) {
+     if((await db.query("SELECT 1 FROM construction_tasks WHERE project_id=$1 AND status<>'DONE' LIMIT 1",[id])).rows[0]) throw constructionError(409,'Complete all tasks and milestones first');
+     change.progress_pct=100;
+     if(!current.actual_end_date&&!change.actual_end_date)change.actual_end_date=new Date().toISOString().slice(0,10);
+   }
+   if(change.status==='CLOSED') {
+     if((await db.query("SELECT 1 FROM vendor_payments vp JOIN vendor_commitments vc ON vc.id=vp.commitment_id WHERE vc.project_id=$1 AND vp.status='pending' LIMIT 1",[id])).rows[0]) throw constructionError(409,'Resolve pending vendor payments before closing the project');
+   }
+   if(change.status==='CANCELLED' && (await db.query("SELECT 1 FROM vendor_commitments WHERE project_id=$1 AND status<>'cancelled' LIMIT 1",[id])).rows[0]) throw constructionError(409,'Resolve vendor commitments before cancelling this project');
+   if(change.status==='IN_PROGRESS'&&!current.actual_start_date&&!change.actual_start_date)change.actual_start_date=new Date().toISOString().slice(0,10);
+   const keys=Object.keys(change),values=Object.values(change);values.push(id);
+   const {rows}=await db.query(`UPDATE construction_projects SET ${keys.map((k,i)=>`${k}=$${i+1}`).join(',')},updated_at=NOW() WHERE id=$${values.length} RETURNING *`,values);
+   await recordConstructionActivity(db,{projectId:id,actorId:req.user.id,action:change.status&&change.status!==current.status?'status_changed':'project_updated',details:{from:current.status,to:change.status||current.status,changes:change}});
+   return rows[0];
+ });
+ res.json({project});
 });
 
 export const deleteProject = asyncHandler(async (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  const siteId = requireSite(req, res); if (!siteId) return;
-  const del = await pool.query('DELETE FROM construction_projects WHERE id = $1 AND site_id = $2 RETURNING id', [id, siteId]);
-  if (!del.rows[0]) return res.status(404).json({ message: 'Project not found' });
-  res.json({ success: true });
+ // Project history and financial source links are retained. Cancellation is the
+ // supported removal action; no historical payment is deleted or reversed.
+ throw constructionError(409,'Projects retain their history. Cancel an uncommitted need or close completed work instead.');
 });
 
 // ── Project structure (phase / tower / floor / flat / plot / zone) ─────────
@@ -265,14 +327,14 @@ export const createLocation = asyncHandler(async (req, res) => {
 
   const status = String(req.body.status || 'PLANNED').toUpperCase();
   if (!LOCATION_STATUSES.has(status)) return res.status(400).json({ message: 'Invalid location status' });
-  const { rows } = await pool.query(
+  const { rows } = await mutateProjectRecord(req,projectId,
     `INSERT INTO construction_locations
        (project_id, parent_id, location_type, name, code, status, progress_pct, sequence, area_sqft, notes, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
     [projectId, parentId, locationType, name, String(req.body.code || '').trim() || null, status,
-     Math.max(0, Math.min(100, Number.parseInt(req.body.progress_pct, 10) || 0)),
-     Number.parseInt(req.body.sequence, 10) || 0, num(req.body.area_sqft),
-     String(req.body.notes || '').trim() || null, req.user.id]
+     progressValue(req.body.progress_pct??0),
+     Number.parseInt(req.body.sequence, 10) || 0, optionalArea(req.body.area_sqft),
+     String(req.body.notes || '').trim() || null, req.user.id], 'location_created', 'location', {name,location_type:locationType}
   );
   res.status(201).json({ location: rows[0] });
 });
@@ -296,7 +358,7 @@ export const bulkCreateLocations = asyncHandler(async (req, res) => {
     code: String(row.code || '').trim() || null,
     type: normalizeLocationType(row.location_type),
     sequence: Number.parseInt(row.sequence, 10) || index,
-    area: num(row.area_sqft),
+    area: optionalArea(row.area_sqft),
   }));
   if (clean.some((row) => !row.name || !row.type)) {
     return res.status(400).json({ message: 'Every location needs a name and valid location type' });
@@ -308,11 +370,11 @@ export const bulkCreateLocations = asyncHandler(async (req, res) => {
     values.push(projectId, parentId, row.type, row.name, row.code, row.sequence, row.area, req.user.id);
     return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7},$${base + 8})`;
   });
-  const { rows } = await pool.query(
+  const { rows } = await mutateProjectRecord(req,projectId,
     `INSERT INTO construction_locations
        (project_id, parent_id, location_type, name, code, sequence, area_sqft, created_by)
      VALUES ${placeholders.join(',')} RETURNING *`,
-    values
+    values, 'locations_created', 'location', {count:clean.length}
   );
   res.status(201).json({ locations: rows });
 });
@@ -340,9 +402,9 @@ export const updateLocation = asyncHandler(async (req, res) => {
     } else if (field === 'status') {
       value = String(value).toUpperCase();
       if (!LOCATION_STATUSES.has(value)) return res.status(400).json({ message: 'Invalid location status' });
-    } else if (field === 'progress_pct') value = Math.max(0, Math.min(100, Number.parseInt(value, 10) || 0));
+    } else if (field === 'progress_pct') value = progressValue(value);
     else if (field === 'sequence') value = Number.parseInt(value, 10) || 0;
-    else if (field === 'area_sqft') value = num(value);
+    else if (field === 'area_sqft') value = optionalArea(value);
     else if (field === 'parent_id') {
       value = asId(value);
       if (value === locationId) return res.status(400).json({ message: 'A location cannot be its own parent' });
@@ -359,18 +421,26 @@ export const updateLocation = asyncHandler(async (req, res) => {
         );
         if (cycle.rows[0]) return res.status(400).json({ message: 'That parent would create a location cycle' });
       }
-    } else value = value === null ? null : String(value).trim() || null;
+    } else { value = value === null ? null : String(value).trim() || null; if(field==='name'&&!value)throw constructionError(400,'Location name is required'); }
     values.push(value);
     sets.push(`${field} = $${values.length}`);
   }
   if (!sets.length) return res.status(400).json({ message: 'Nothing to update' });
   values.push(locationId, siteId);
-  const { rows } = await pool.query(
+  const { rows } = await mutateProjectRecord(req,existing.project_id,
     `UPDATE construction_locations l SET ${sets.join(', ')}, updated_at = NOW()
       FROM construction_projects p
      WHERE l.id = $${values.length - 1} AND l.project_id = p.id AND p.site_id = $${values.length}
      RETURNING l.*`,
-    values
+    values, 'location_updated', 'location', {changes:req.body}, async db=> {
+      if(req.body.parent_id) {
+        const cycle=await db.query(`WITH RECURSIVE descendants AS (
+          SELECT id FROM construction_locations WHERE parent_id=$1
+          UNION ALL SELECT l.id FROM construction_locations l JOIN descendants d ON l.parent_id=d.id
+        ) SELECT 1 FROM descendants WHERE id=$2 LIMIT 1`,[locationId,asId(req.body.parent_id)]);
+        if(cycle.rows[0])throw constructionError(400,'That parent would create a location cycle');
+      }
+    }
   );
   res.json({ location: rows[0] });
 });
@@ -379,10 +449,10 @@ export const deleteLocation = asyncHandler(async (req, res) => {
   const locationId = asId(req.params.locationId);
   const siteId = requireSite(req, res); if (!siteId) return;
   try {
-    const { rows } = await pool.query(
+    const { rows } = await mutateProjectRecord(req,req.constructionProject?.id || (await pool.query('SELECT project_id FROM construction_locations WHERE id=$1',[locationId])).rows[0]?.project_id,
       `DELETE FROM construction_locations l USING construction_projects p
         WHERE l.id = $1 AND l.project_id = p.id AND p.site_id = $2 RETURNING l.id`,
-      [locationId, siteId]
+      [locationId, siteId], 'location_deleted', 'location', {}
     );
     if (!rows[0]) return res.status(404).json({ message: 'Location not found' });
     res.json({ success: true });
@@ -396,85 +466,73 @@ export const deleteLocation = asyncHandler(async (req, res) => {
 
 // ── Tasks ───────────────────────────────────────────────────
 
-export const createTask = asyncHandler(async (req, res) => {
-  const projectId = parseInt(req.params.id, 10);
-  const siteId = requireSite(req, res); if (!siteId) return;
-  const project = await getScopedProject(projectId, siteId);
-  if (!project) return res.status(404).json({ message: 'Project not found' });
-  const { name, status, progress_pct, sequence, start_date, due_date } = req.body;
-  const locationId = asId(req.body.location_id);
-  if (!name || !name.trim()) return res.status(400).json({ message: 'Task name is required' });
-  const taskStatus = String(status || 'PENDING').toUpperCase();
-  if (!TASK_STATUSES.has(taskStatus)) return res.status(400).json({ message: 'Invalid task status' });
-  if (locationId && !(await locationBelongsToProject(locationId, projectId))) {
-    return res.status(400).json({ message: 'Location does not belong to this project' });
-  }
-  const { rows } = await pool.query(
-    `INSERT INTO construction_tasks (project_id, location_id, name, status, progress_pct, sequence, start_date, due_date, created_by)
-     VALUES ($1,$2,$3,COALESCE($4,'PENDING'),$5,$6,$7,$8,$9) RETURNING *`,
-    [projectId, locationId, name.trim(), taskStatus,
-     Math.max(0, Math.min(100, parseInt(progress_pct, 10) || 0)), parseInt(sequence, 10) || 0,
-     start_date || null, due_date || null, req.user.id]
-  );
-  res.status(201).json({ task: rows[0] });
+export const createTask = asyncHandler(async(req,res)=> {
+ const projectId=positiveId(req.params.id),siteId=requireSite(req,res);if(!siteId)return;
+ const task=await transaction(async db=> {
+   const project=await assertConstructionProjectAccess(db,req.user,projectId,siteId,{lock:true});editableProject(project);
+   const name=textValue(req.body.name);if(!name)throw constructionError(400,'Task name is required');
+   const status=String(req.body.status||'PENDING').toUpperCase();if(!TASK_STATUSES.has(status))throw constructionError(400,'Invalid task status');
+   const requestedProgress=progressValue(req.body.progress_pct??0);
+   const progress=status==='DONE'?100:requestedProgress;
+   if(progress===100&&status!=='DONE')throw constructionError(400,'Set the task status to DONE for 100% progress');
+   const locationId=positiveId(req.body.location_id);
+   if(locationId&&!await locationBelongsToProject(locationId,projectId,db))throw constructionError(400,'Location does not belong to this project');
+   if(!isConstructionAdmin(req.user)&&req.body.owner_user_id&&Number(req.body.owner_user_id)!==req.user.id)throw constructionError(403,'Only administrators can assign task owners');
+   const owner=await validateConstructionAssignment(db,siteId,req.body.owner_user_id||req.user.id);
+   const start=dateValue(req.body.start_date),due=dateValue(req.body.due_date);validateDateRange(start,due);
+   const {rows}=await db.query(`INSERT INTO construction_tasks(project_id,location_id,name,status,progress_pct,sequence,start_date,due_date,created_by,owner_user_id,notes,is_milestone)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,[projectId,locationId,name,status,progress,Number.parseInt(req.body.sequence,10)||0,start,due,req.user.id,owner,textValue(req.body.notes),req.body.is_milestone===true]);
+   await recordConstructionActivity(db,{projectId,actorId:req.user.id,action:'task_created',entityType:'task',entityId:rows[0].id,details:{name,owner_user_id:owner,status}});
+   return rows[0];
+ });res.status(201).json({task});
 });
 
-export const updateTask = asyncHandler(async (req, res) => {
-  const id = parseInt(req.params.taskId, 10);
-  const siteId = requireSite(req, res); if (!siteId) return;
-  const { rows: taskRows } = await pool.query(
-    `SELECT t.project_id FROM construction_tasks t JOIN construction_projects p ON p.id = t.project_id
-      WHERE t.id = $1 AND p.site_id = $2`,
-    [id, siteId]
-  );
-  const task = taskRows[0];
-  if (!task) return res.status(404).json({ message: 'Task not found' });
-  const fields = ['name', 'status', 'progress_pct', 'sequence', 'start_date', 'due_date', 'location_id'];
-  const sets = [];
-  const params = [];
-  for (const f of fields) {
-    if (req.body[f] === undefined) continue;
-    let v = req.body[f];
-    if (f === 'status') {
-      v = String(v).toUpperCase();
-      if (!TASK_STATUSES.has(v)) return res.status(400).json({ message: 'Invalid task status' });
-    }
-    else if (f === 'progress_pct') v = Math.max(0, Math.min(100, parseInt(v, 10) || 0));
-    else if (f === 'sequence') v = parseInt(v, 10) || 0;
-    else if (f === 'name') v = String(v).trim();
-    else if (f === 'location_id') {
-      v = asId(v);
-      if (v && !(await locationBelongsToProject(v, task.project_id))) {
-        return res.status(400).json({ message: 'Location does not belong to this project' });
-      }
-    }
-    else v = v || null;
-    params.push(v);
-    sets.push(`${f} = $${params.length}`);
-  }
-  if (sets.length === 0) return res.status(400).json({ message: 'Nothing to update' });
-  params.push(id, siteId);
-  const { rows } = await pool.query(
-    `UPDATE construction_tasks t SET ${sets.join(', ')}, updated_at = NOW()
-      FROM construction_projects p
-     WHERE t.id = $${params.length - 1} AND t.project_id = p.id AND p.site_id = $${params.length}
-     RETURNING t.*`,
-    params
-  );
-  if (!rows[0]) return res.status(404).json({ message: 'Task not found' });
-  res.json({ task: rows[0] });
+export const updateTask = asyncHandler(async(req,res)=> {
+ const id=positiveId(req.params.taskId),siteId=requireSite(req,res);if(!siteId)return;
+ const task=await transaction(async db=> {
+   const {rows:existing}=await db.query(`SELECT t.* FROM construction_tasks t JOIN construction_projects p ON p.id=t.project_id WHERE t.id=$1 AND p.site_id=$2 FOR UPDATE OF t`,[id,siteId]);
+   const current=existing[0];if(!current)throw constructionError(404,'Task not found');
+   const project=await assertConstructionProjectAccess(db,req.user,current.project_id,siteId,{lock:true});editableProject(project);
+   const change={};
+   for(const field of ['name','status','progress_pct','sequence','start_date','due_date','location_id','owner_user_id','notes','is_milestone']) {
+     if(req.body[field]===undefined)continue;
+     let value=req.body[field];
+     if(field==='name'){value=textValue(value);if(!value)throw constructionError(400,'Task name is required');}
+     else if(field==='status'){value=String(value).toUpperCase();if(!TASK_STATUSES.has(value))throw constructionError(400,'Invalid task status');}
+     else if(field==='progress_pct')value=progressValue(value);
+     else if(field==='sequence'){value=Number(value);if(!Number.isInteger(value))throw constructionError(400,'Sequence must be an integer');}
+     else if(field==='is_milestone'){if(typeof value!=='boolean')throw constructionError(400,'Milestone must be true or false');}
+     else if(field.endsWith('_date'))value=dateValue(value);
+     else if(field==='owner_user_id'){
+       if(!isConstructionAdmin(req.user))throw constructionError(403,'Only administrators can assign task owners');
+       value=await validateConstructionAssignment(db,siteId,value);
+     } else if(field==='location_id'){
+       value=positiveId(value);if(value&&!await locationBelongsToProject(value,current.project_id,db))throw constructionError(400,'Location does not belong to this project');
+     } else value=textValue(value);
+     change[field]=value;
+   }
+   if(!Object.keys(change).length)throw constructionError(400,'Nothing to update');
+   const status=change.status||current.status;
+   if(status==='DONE')change.progress_pct=100;
+   else if((change.progress_pct??current.progress_pct)===100)throw constructionError(400,'Set progress below 100 when reopening a task');
+   validateDateRange(change.start_date===undefined?current.start_date:change.start_date,change.due_date===undefined?current.due_date:change.due_date);
+   const keys=Object.keys(change),values=Object.values(change);values.push(id);
+   const {rows}=await db.query(`UPDATE construction_tasks SET ${keys.map((k,i)=>`${k}=$${i+1}`).join(',')},updated_at=NOW() WHERE id=$${values.length} RETURNING *`,values);
+   await recordConstructionActivity(db,{projectId:current.project_id,actorId:req.user.id,action:'task_updated',entityType:'task',entityId:id,details:{changes:change}});
+   return rows[0];
+ });res.json({task});
 });
 
-export const deleteTask = asyncHandler(async (req, res) => {
-  const id = parseInt(req.params.taskId, 10);
-  const siteId = requireSite(req, res); if (!siteId) return;
-  const del = await pool.query(
-    `DELETE FROM construction_tasks t USING construction_projects p
-      WHERE t.id = $1 AND t.project_id = p.id AND p.site_id = $2 RETURNING t.id`,
-    [id, siteId]
-  );
-  if (!del.rows[0]) return res.status(404).json({ message: 'Task not found' });
-  res.json({ success: true });
+export const deleteTask = asyncHandler(async(req,res)=> {
+ const id=positiveId(req.params.taskId),siteId=requireSite(req,res);if(!siteId)return;
+ await transaction(async db=> {
+   const {rows}=await db.query(`SELECT t.* FROM construction_tasks t JOIN construction_projects p ON p.id=t.project_id WHERE t.id=$1 AND p.site_id=$2 FOR UPDATE OF t`,[id,siteId]);
+   if(!rows[0])throw constructionError(404,'Task not found');
+   const project=await assertConstructionProjectAccess(db,req.user,rows[0].project_id,siteId,{lock:true});editableProject(project);
+   if((await db.query('SELECT 1 FROM inventory_movements WHERE task_id=$1 LIMIT 1',[id])).rows[0])throw constructionError(409,'Tasks with material history cannot be deleted');
+   await db.query('DELETE FROM construction_tasks WHERE id=$1',[id]);
+   await recordConstructionActivity(db,{projectId:project.id,actorId:req.user.id,action:'task_deleted',entityType:'task',entityId:id,details:{name:rows[0].name}});
+ });res.json({success:true});
 });
 
 // ── Material requests ───────────────────────────────────────
@@ -488,11 +546,13 @@ export const createMaterialRequest = asyncHandler(async (req, res) => {
   const clean = items
     .map((i) => ({ material_id: parseInt(i.material_id, 10), qty: Number(i.qty ?? i.qty_requested) }))
     .filter((i) => i.material_id && Number.isFinite(i.qty) && i.qty > 0);
-  if (clean.length === 0) return res.status(400).json({ message: 'Items must have a material and a positive qty' });
+  if (clean.length !== items.length || clean.length === 0) return res.status(400).json({ message: 'Every item must have a material and a positive qty' });
+  if(new Set(clean.map(item=>item.material_id)).size!==clean.length) throw constructionError(400,'Each material can appear only once in a request');
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const project=await assertConstructionProjectAccess(client,req.user,projectId,requestedSiteId,{lock:true});editableProject(project);
     const proj = await client.query('SELECT site_id FROM construction_projects WHERE id = $1 AND site_id = $2', [projectId, requestedSiteId]);
     if (!proj.rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Project not found' }); }
     const siteId = proj.rows[0].site_id;
@@ -532,6 +592,7 @@ export const createMaterialRequest = asyncHandler(async (req, res) => {
        VALUES ${itemPlaceholders.join(',')}`,
       itemValues
     );
+    await recordConstructionActivity(client,{projectId,actorId:req.user.id,action:'material_requested',entityType:'material_request',entityId:request.id,details:{item_count:clean.length}});
     await client.query('COMMIT');
     res.status(201).json({ request });
   } catch (err) {
@@ -595,7 +656,9 @@ export const issueMaterialRequest = asyncHandler(async (req, res) => {
     const r = await client.query('SELECT * FROM construction_material_requests WHERE id = $1 AND site_id = $2 FOR UPDATE', [id, siteId]);
     const request = r.rows[0];
     if (!request) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Request not found' }); }
-    if (request.status === 'CANCELLED') { await client.query('ROLLBACK'); return res.status(400).json({ message: 'Request is cancelled' }); }
+    if (request.status === 'CANCELLED' || request.status === 'DRAFT') { await client.query('ROLLBACK'); return res.status(409).json({ message: 'Submit the material request before issuing stock' }); }
+    const project=await assertConstructionProjectAccess(client,req.user,request.project_id,siteId,{lock:true});editableProject(project);
+    if(['NEED','PLANNING','REVIEW','COMPLETED'].includes(project.status))throw constructionError(409,'Materials can be issued only for approved work');
 
     // Take material locks in a stable order so simultaneous multi-item issues
     // cannot deadlock by locking the same materials in opposite orders.
@@ -628,6 +691,7 @@ export const issueMaterialRequest = asyncHandler(async (req, res) => {
     const status = deriveRequestStatus(fresh.rows);
     await client.query('UPDATE construction_material_requests SET status = $1, updated_at = NOW() WHERE id = $2', [status, id]);
 
+    await recordConstructionActivity(client,{projectId:request.project_id,actorId:req.user.id,action:'materials_issued',entityType:'material_request',entityId:request.id,details:{issued,status}});
     await client.query('COMMIT');
     const shortages = fresh.rows
       .map((i) => Number(i.qty_requested) - Number(i.qty_issued))
@@ -641,27 +705,19 @@ export const issueMaterialRequest = asyncHandler(async (req, res) => {
   }
 });
 
-export const updateMaterialRequest = asyncHandler(async (req, res) => {
-  const id = parseInt(req.params.reqId, 10);
-  const siteId = requireSite(req, res); if (!siteId) return;
-  const { status, note } = req.body;
-  const sets = [];
-  const params = [];
-  if (status !== undefined) {
-    const nextStatus = String(status).toUpperCase();
-    if (!REQUEST_STATUSES.has(nextStatus)) return res.status(400).json({ message: 'Invalid material request status' });
-    params.push(nextStatus); sets.push(`status = $${params.length}`);
-  }
-  if (note !== undefined) { params.push(note?.trim() || null); sets.push(`note = $${params.length}`); }
-  if (sets.length === 0) return res.status(400).json({ message: 'Nothing to update' });
-  params.push(id, siteId);
-  const { rows } = await pool.query(
-    `UPDATE construction_material_requests SET ${sets.join(', ')}, updated_at = NOW()
-      WHERE id = $${params.length - 1} AND site_id = $${params.length} RETURNING *`,
-    params
-  );
-  if (!rows[0]) return res.status(404).json({ message: 'Request not found' });
-  res.json({ request: rows[0] });
+export const updateMaterialRequest=asyncHandler(async(req,res)=> {
+ const siteId=requireSite(req,res);if(!siteId)return;
+ const request=await transaction(async db=> {
+   const {rows}=await db.query('SELECT * FROM construction_material_requests WHERE id=$1 AND site_id=$2 FOR UPDATE',[positiveId(req.params.reqId),siteId]);
+   const current=rows[0];if(!current)throw constructionError(404,'Request not found');
+   const project=await assertConstructionProjectAccess(db,req.user,current.project_id,siteId,{lock:true});editableProject(project);
+   const status=String(req.body.status||current.status).toUpperCase();
+   const transitions={DRAFT:['DRAFT','REQUESTED','CANCELLED'],REQUESTED:['REQUESTED','CANCELLED'],PARTIALLY_FULFILLED:['PARTIALLY_FULFILLED'],FULFILLED:['FULFILLED'],CANCELLED:['CANCELLED']};
+   if(!transitions[current.status]?.includes(status))throw constructionError(409,'Request fulfillment is derived from issued stock; issued requests cannot be cancelled or reset');
+   const updated=await db.query('UPDATE construction_material_requests SET status=$1,note=$2,updated_at=NOW() WHERE id=$3 RETURNING *',[status,req.body.note===undefined?current.note:textValue(req.body.note),current.id]);
+   await recordConstructionActivity(db,{projectId:project.id,actorId:req.user.id,action:'material_request_updated',entityType:'material_request',entityId:current.id,details:{from:current.status,to:status}});
+   return updated.rows[0];
+ });res.json({request});
 });
 
 // ── Consumption (draws stock, feeds actual cost) ────────────
@@ -689,18 +745,21 @@ export const consumeMaterial = asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const project=await assertConstructionProjectAccess(client,req.user,projectId,siteId,{lock:true});editableProject(project);
+    if(['NEED','PLANNING','REVIEW','COMPLETED'].includes(project.status))throw constructionError(409,'Materials can be consumed only for approved work');
     await client.query('SELECT pg_advisory_xact_lock($1, $2)', [141001, Number(material_id)]);
     const mat = await client.query('SELECT rate FROM inventory_materials WHERE id = $1 AND site_id = $2', [material_id, siteId]);
     if (!mat.rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Material not found for this site' }); }
     const stock = await inventoryModel.stockFor(material_id, client);
-    if (q > stock.on_hand) { await client.query('ROLLBACK'); return res.status(400).json({ message: `Only ${stock.on_hand} in stock — cannot consume ${q}` }); }
+    if (q > stock.available) { await client.query('ROLLBACK'); return res.status(400).json({ message: `Only ${stock.available} available in stock — cannot consume ${q}` }); }
 
     const movement = await inventoryModel.insertMovement({
       site_id: siteId, material_id, movement_type: 'CONSUMPTION', qty: q,
-      rate: rate !== undefined ? Number(rate) : parseFloat(mat.rows[0].rate) || 0,
+      rate: decimalAmount(rate !== undefined ? rate : mat.rows[0].rate,'Material rate',{allowZero:true}),
       project_id: projectId, task_id: task_id || null, location_id: locationId,
       ref_type: 'consumption', note: note?.trim() || null, created_by: req.user.id,
     }, client);
+    await recordConstructionActivity(client,{projectId,actorId:req.user.id,action:'material_consumed',entityType:'inventory_movement',entityId:movement.id,details:{material_id,qty:q}});
     await client.query('COMMIT');
     res.status(201).json({ movement });
   } catch (error) {
@@ -711,50 +770,119 @@ export const consumeMaterial = asyncHandler(async (req, res) => {
   }
 });
 
-// ── Dashboard summary ───────────────────────────────────────
+// ── Vendor quote review and selection ─────────────────────────────────────
+const cleanQuote = async (db,siteId,body,current={}) => {
+ const vendorId=body.vendor_member_id===undefined?current.vendor_member_id:positiveId(body.vendor_member_id);
+ let vendorName=textValue(body.vendor_name===undefined?current.vendor_name:body.vendor_name);
+ if(vendorId) {
+   const {rows}=await db.query("SELECT full_name FROM members WHERE id=$1 AND site_id=$2 AND (member_type='VENDOR' OR 'VENDOR'=ANY(COALESCE(member_types,ARRAY[]::text[])))",[vendorId,siteId]);
+   if(!rows[0])throw constructionError(400,'Selected vendor is invalid for this site');
+   vendorName=rows[0].full_name;
+ }
+ if(!vendorName)throw constructionError(400,'Vendor name is required');
+ const quoteDate=dateValue(body.quote_date===undefined?(current.quote_date||new Date().toISOString().slice(0,10)):body.quote_date);
+ if(!quoteDate)throw constructionError(400,'Quote date is required');
+ const validUntil=dateValue(body.valid_until===undefined?current.valid_until:body.valid_until);validateDateRange(quoteDate,validUntil);
+ return {vendor_member_id:vendorId||null,vendor_name:vendorName,amount:decimalAmount(body.amount===undefined?current.amount:body.amount,'Quote amount'),scope:textValue(body.scope===undefined?current.scope:body.scope),terms:textValue(body.terms===undefined?current.terms:body.terms),quote_date:quoteDate,valid_until:validUntil};
+};
+export const createQuote=asyncHandler(async(req,res)=> {
+ const siteId=requireSite(req,res);if(!siteId)return;
+ const projectId=positiveId(req.params.id);
+ const quote=await transaction(async db=> {
+   const project=await assertConstructionProjectAccess(db,req.user,projectId,siteId,{lock:true});editableProject(project);
+   const q=await cleanQuote(db,siteId,req.body);
+   const {rows}=await db.query(`INSERT INTO construction_project_quotes(project_id,vendor_member_id,vendor_name,amount,scope,terms,quote_date,valid_until,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9) RETURNING *`,[projectId,q.vendor_member_id,q.vendor_name,q.amount,q.scope,q.terms,q.quote_date,q.valid_until,req.user.id]);
+   await recordConstructionActivity(db,{projectId,actorId:req.user.id,action:'quote_received',entityType:'quote',entityId:rows[0].id,details:{vendor_name:q.vendor_name,amount:q.amount}});
+   return rows[0];
+ });res.status(201).json({quote});
+});
+export const updateQuote=asyncHandler(async(req,res)=> {
+ const siteId=requireSite(req,res);if(!siteId)return;
+ const quote=await transaction(async db=> {
+   const preliminary=await db.query('SELECT project_id FROM construction_project_quotes WHERE id=$1',[positiveId(req.params.quoteId)]);
+   if(!preliminary.rows[0])throw constructionError(404,'Quote not found');
+   const project=await assertConstructionProjectAccess(db,req.user,preliminary.rows[0].project_id,siteId,{lock:true});editableProject(project);
+   const {rows:existing}=await db.query('SELECT * FROM construction_project_quotes WHERE id=$1 FOR UPDATE',[positiveId(req.params.quoteId)]);
+   const current=existing[0];
+   if(current.status==='SELECTED')throw constructionError(409,'Selected quote is locked to its vendor commitment');
+   const status=String(req.body.status||current.status).toUpperCase();if(!['RECEIVED','SHORTLISTED','REJECTED'].includes(status))throw constructionError(400,'Invalid quote status; use Select to hire the vendor');
+   const q=await cleanQuote(db,siteId,req.body,current);
+   const {rows}=await db.query(`UPDATE construction_project_quotes SET vendor_member_id=$1,vendor_name=$2,amount=$3,scope=$4,terms=$5,quote_date=$6,valid_until=$7,status=$8,updated_by=$9,updated_at=NOW() WHERE id=$10 RETURNING *`,[q.vendor_member_id,q.vendor_name,q.amount,q.scope,q.terms,q.quote_date,q.valid_until,status,req.user.id,current.id]);
+   await recordConstructionActivity(db,{projectId:project.id,actorId:req.user.id,action:'quote_updated',entityType:'quote',entityId:current.id,details:{status,amount:q.amount,vendor_name:q.vendor_name}});
+   return rows[0];
+ });res.json({quote});
+});
+export const selectQuote=asyncHandler(async(req,res)=> {
+ const siteId=requireSite(req,res);if(!siteId)return;
+ const result=await transaction(async db=> {
+   // Lock the project before the quote to serialize budget checks and retries.
+   const preliminary=await db.query('SELECT project_id FROM construction_project_quotes WHERE id=$1',[positiveId(req.params.quoteId)]);
+   if(!preliminary.rows[0])throw constructionError(404,'Quote not found');
+   const project=await assertConstructionProjectAccess(db,req.user,preliminary.rows[0].project_id,siteId,{lock:true});editableProject(project);
+   const {rows}=await db.query('SELECT * FROM construction_project_quotes WHERE id=$1 FOR UPDATE',[positiveId(req.params.quoteId)]);const quote=rows[0];
+   if(quote.status==='SELECTED') {
+     const existing=await db.query('SELECT * FROM vendor_commitments WHERE id=$1',[quote.commitment_id]);
+     return {quote,commitment:existing.rows[0],replayed:true};
+   }
+   if(!isConstructionAdmin(req.user))throw constructionError(403,'Only administrators can hire and assign vendors');
+   if(!['APPROVED','COMMITTED','IN_PROGRESS','ON_HOLD','ACTIVE','DELAYED'].includes(project.status))throw constructionError(409,'Approve the project need before selecting a vendor');
+   if(quote.status==='REJECTED')throw constructionError(409,'A rejected quote cannot be selected');
+   if(quote.valid_until&&dateValue(quote.valid_until)<new Date().toISOString().slice(0,10))throw constructionError(409,'This quote has expired; obtain an updated quote first');
+   const check=await db.query("SELECT COALESCE(SUM(contract_amount),0)+$2::numeric>$3::numeric AS exceeded FROM vendor_commitments WHERE project_id=$1 AND status<>'cancelled'",[project.id,quote.amount,project.budget]);
+   if(check.rows[0].exceeded)throw constructionError(409,'Vendor commitment exceeds the remaining project budget');
+   const start=dateValue(req.body.start_date??project.start_date),due=dateValue(req.body.due_date??project.target_end_date);validateDateRange(start,due);
+   const headId=positiveId(req.body.head_id);let headName=textValue(req.body.head_name)||'Construction';
+   if(headId){const head=await db.query('SELECT name FROM vendor_heads WHERE id=$1 AND site_id=$2 AND is_active=true',[headId,siteId]);if(!head.rows[0])throw constructionError(400,'Selected head is invalid for this site');headName=head.rows[0].name;}
+   const workTitle=textValue(req.body.work_title)||project.name;if(workTitle.length>220)throw constructionError(400,'Work title must be at most 220 characters');
+   const financialApprover=await validateConstructionAssignment(db,siteId,req.body.assigned_admin_id,{approver:true});
+   const inserted=await db.query(`INSERT INTO vendor_commitments(site_id,vendor_member_id,vendor_name,head_id,head_name,work_title,contract_amount,start_date,due_date,note,terms,created_by,assigned_admin_id,project_id,selected_quote_id)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,[siteId,quote.vendor_member_id,quote.vendor_name,headId,headName,workTitle,quote.amount,start,due,quote.scope,textValue(req.body.terms)||quote.terms,req.user.id,financialApprover,project.id,quote.id]);
+   const commitment=inserted.rows[0];
+   const selected=await db.query("UPDATE construction_project_quotes SET status='SELECTED',commitment_id=$1,updated_by=$2,updated_at=NOW() WHERE id=$3 RETURNING *",[commitment.id,req.user.id,quote.id]);
+   await markProjectCommitted(db,req.user,project.id,siteId,commitment.id);
+   await recordConstructionActivity(db,{projectId:project.id,actorId:req.user.id,action:'quote_selected',entityType:'quote',entityId:quote.id,details:{commitment_id:commitment.id,vendor_name:quote.vendor_name,amount:quote.amount}});
+   return {quote:selected.rows[0],commitment};
+ });res.status(result.replayed?200:201).json(result);
+});
 
-export const constructionSummary = asyncHandler(async (req, res) => {
-  const siteId = requireSite(req, res); if (!siteId) return;
-  const { rows } = await pool.query(
-    `SELECT
-       COUNT(*) FILTER (WHERE status = 'ACTIVE')::int AS active_projects,
-       COUNT(*) FILTER (WHERE status = 'DELAYED' OR (target_end_date IS NOT NULL AND target_end_date < CURRENT_DATE AND status <> 'COMPLETED'))::int AS delayed_projects,
-       COALESCE(ROUND(AVG(progress_pct) FILTER (WHERE status IN ('ACTIVE','DELAYED'))), 0)::int AS avg_progress,
-       COALESCE(SUM(budget), 0) AS total_budget
-     FROM construction_projects WHERE site_id = $1`,
-    [siteId]
-  );
-  const [pendingReq, actual, structure, types, vendors] = await Promise.all([
-    pool.query(`SELECT COUNT(*)::int AS pending_material_requests FROM construction_material_requests WHERE site_id = $1 AND status IN ('REQUESTED','PARTIALLY_FULFILLED')`, [siteId]),
-    pool.query(`SELECT COALESCE(SUM(qty*rate),0) AS actual_cost FROM inventory_movements WHERE movement_type='CONSUMPTION' AND site_id = $1`, [siteId]),
-    pool.query(
-      `SELECT COUNT(*)::int AS total_locations,
-              COUNT(*) FILTER (WHERE l.status = 'ACTIVE')::int AS active_locations,
-              COUNT(*) FILTER (WHERE l.status = 'COMPLETED')::int AS completed_locations
-         FROM construction_locations l JOIN construction_projects p ON p.id = l.project_id
-        WHERE p.site_id = $1`,
-      [siteId]
-    ),
-    pool.query(
-      `SELECT project_type, COUNT(*)::int AS count
-         FROM construction_projects WHERE site_id = $1 GROUP BY project_type ORDER BY count DESC`,
-      [siteId]
-    ),
-    pool.query(
-      `SELECT COUNT(*) FILTER (WHERE status = 'open')::int AS active_vendor_commitments,
-              COALESCE(SUM(contract_amount) FILTER (WHERE status <> 'cancelled'), 0)::numeric(15,2) AS committed_value
-         FROM vendor_commitments WHERE site_id = $1 AND project_id IS NOT NULL`,
-      [siteId]
-    ),
-  ]);
-  res.json({
-    summary: {
-      ...rows[0],
-      pending_material_requests: pendingReq.rows[0].pending_material_requests,
-      total_actual_cost: parseFloat(actual.rows[0].actual_cost) || 0,
-      ...structure.rows[0],
-      ...vendors.rows[0],
-      project_type_counts: types.rows,
-    },
-  });
+// ── Dashboard summary ─────────────────────────────────────────────────────
+export async function getConstructionSummaryData({siteId,user,projectId=null,viewAll},db=pool) {
+ await assertConstructionSiteAccess(db,user,siteId);
+ const params=[siteId,user.id,viewAll??await constructionCanViewAll(db,user)];
+ let where=`p.site_id=$1 AND ${projectAccessPredicate('p','$2','$3')}`;
+ if(projectId){const id=positiveId(projectId);if(!id)throw constructionError(400,'Invalid project filter');params.push(id);where+=` AND p.id=$${params.length}`;}
+ const metrics=`${projectMetricsSql} WHERE ${where}`;
+ const paymentVisibility=await constructionPaymentVisibility(db,user);
+ const paymentParams=[...params,paymentVisibility.read,paymentVisibility.all,user.id];
+ const paymentWhere=`${where} AND $${params.length+1}::boolean AND ($${params.length+2}::boolean OR vp.created_by=$${params.length+3})`;
+ const activityWhere=`${where} AND (a.entity_type<>'vendor_payment' OR ($${params.length+1}::boolean AND ($${params.length+2}::boolean OR EXISTS(SELECT 1 FROM vendor_payments visible_payment WHERE visible_payment.id=a.entity_id AND visible_payment.created_by=$${params.length+3}))))`;
+ const [aggregate,projects,statuses,types,activity,payments]=await Promise.all([
+   db.query(`WITH metrics AS (${metrics}) SELECT
+    COUNT(*) FILTER(WHERE status IN ('COMMITTED','IN_PROGRESS','ACTIVE','DELAYED'))::int AS active_projects,
+    COUNT(*) FILTER(WHERE status='DELAYED' OR is_overdue)::int AS delayed_projects,
+    COUNT(*)::int AS total_projects,
+    COALESCE(ROUND(AVG(calculated_progress_pct) FILTER(WHERE status NOT IN ('CLOSED','CANCELLED'))),0)::int AS avg_progress,
+    COALESCE(SUM(budget),0)::numeric(15,2) AS total_budget,COALESCE(SUM(committed_value),0)::numeric(15,2) AS committed_value,
+    COALESCE(SUM(paid_amount),0)::numeric(15,2) AS paid_amount,COALESCE(SUM(approved_amount),0)::numeric(15,2) AS approved_amount,
+    COALESCE(SUM(gross_settled_amount),0)::numeric(15,2) AS gross_settled_amount,COALESCE(SUM(contractual_outstanding_amount),0)::numeric(15,2) AS contractual_outstanding_amount,
+    COALESCE(SUM(pending_amount),0)::numeric(15,2) AS pending_amount,COALESCE(SUM(remaining_budget),0)::numeric(15,2) AS remaining_budget,
+    COALESCE(SUM(outstanding_amount),0)::numeric(15,2) AS outstanding_amount,COALESCE(SUM(overdue_tasks),0)::int AS overdue_tasks,
+    COALESCE(SUM(actual_cost),0)::numeric(15,2) AS total_actual_cost,COALESCE(SUM(pending_requests),0)::int AS pending_material_requests,
+    COALESCE(SUM(location_count),0)::int AS total_locations,COALESCE(SUM(completed_location_count),0)::int AS completed_locations,COALESCE(SUM(active_locations),0)::int AS active_locations,
+    COALESCE(SUM(active_vendor_commitments),0)::int AS active_vendor_commitments
+    FROM metrics`,params),
+   db.query(`${metrics} ORDER BY p.target_end_date NULLS LAST,p.id DESC`,params),
+   db.query(`SELECT p.status,COUNT(*)::int AS count FROM construction_projects p WHERE ${where} GROUP BY p.status ORDER BY p.status`,params),
+   db.query(`SELECT p.project_type,COUNT(*)::int AS count FROM construction_projects p WHERE ${where} GROUP BY p.project_type ORDER BY count DESC`,params),
+   db.query(`SELECT a.*,u.name AS actor_name,p.name AS project_name FROM construction_project_activity a JOIN construction_projects p ON p.id=a.project_id LEFT JOIN users u ON u.id=a.actor_id WHERE ${activityWhere} ORDER BY a.id DESC LIMIT 12`,paymentParams),
+   db.query(`SELECT vp.id,vp.commitment_id,vp.site_id,vp.payment_date,vp.amount,vp.payment_mode,vp.status,vp.cheque_status,vc.vendor_name,vc.project_id,p.name AS project_name,
+    COALESCE(posted.paid_amount,0)::numeric(15,2) AS posted_amount FROM vendor_payments vp JOIN vendor_commitments vc ON vc.id=vp.commitment_id JOIN construction_projects p ON p.id=vc.project_id
+    LEFT JOIN LATERAL(SELECT SUM(le.debit-le.credit) paid_amount FROM ledger_entries le WHERE le.source_key='vendor_payments' AND le.source_id=vp.id AND le.ledger_type='site' AND le.site_id=p.site_id) posted ON true
+    WHERE ${paymentWhere} ORDER BY vp.payment_date DESC,vp.id DESC LIMIT 12`,paymentParams),
+ ]);
+ return {summary:{...aggregate.rows[0],project_status_counts:statuses.rows,project_type_counts:types.rows,recent_activity:activity.rows,recent_payments:payments.rows,payment_history_restricted:!paymentVisibility.read||!paymentVisibility.all,projects:projects.rows.map(projectResponse)},projects:projects.rows.map(projectResponse)};
+}
+export const constructionSummary=asyncHandler(async(req,res)=> {
+ const siteId=requireSite(req,res);if(!siteId)return;
+ res.json(await getConstructionSummaryData({siteId,user:req.user,projectId:req.query.project_id,viewAll:req.constructionViewAll}));
 });

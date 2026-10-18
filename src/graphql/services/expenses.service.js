@@ -28,6 +28,12 @@ function normalizeFilters(filters = {}) {
     created_by: Number.isInteger(Number(filters.created_by)) && Number(filters.created_by) > 0
       ? Number(filters.created_by)
       : undefined,
+    vendor_payment_id: filters.vendor_payment_id,
+    include_vendor: filters.include_vendor,
+    vendor_user_id: filters.vendor_user_id,
+    vendor_all: filters.vendor_all,
+    vendor_site_all: filters.vendor_site_all,
+    vendor_rows_all: filters.vendor_rows_all,
     entry_origin: ['original', 'transfer'].includes(filters.entry_origin) ? filters.entry_origin : undefined,
   };
 
@@ -92,8 +98,8 @@ export async function getExpensesPageData(siteId, { filters = {}, page = 1, limi
     // treats any truthy source as "lives in another module", so null it out.
     source: e.source === 'expenses' ? null : e.source,
     verifyUrl: buildVerifyUrl({
-      t: ReceiptType.EXPENSE,
-      i: e.id,
+      t: e.source === 'vendor_payment' ? ReceiptType.VENDOR : ReceiptType.EXPENSE,
+      i: e.source === 'vendor_payment' ? e.original_id : e.id,
       a: parseFloat(e.debit) || parseFloat(e.credit) || 0,
       dr: (parseFloat(e.debit) || 0) > 0 ? 'OUT' : 'IN',
       d: e.date,
