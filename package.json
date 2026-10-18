@@ -215,7 +215,9 @@
     "migrate:construction-payment-integrity": "node src/migrations/220_construction_payment_integrity.js",
     "test:construction-workflow": "node --test test/construction-workflow*.test.mjs test/construction-payment-integrity-db.test.mjs test/construction-expenses-db.test.mjs test/construction-expense-access.test.mjs test/construction-portfolio-contract.test.mjs",
     "check:construction-payments": "node src/checks/construction-payments.mjs",
-    "test:vendor-stock-summary": "node --test test/vendor-stock-summary-db.test.mjs"
+    "test:vendor-stock-summary": "node --test test/vendor-stock-summary-db.test.mjs",
+    "test:construction-dashboard": "node --test test/construction-dashboard-legacy-db.test.mjs",
+    "test:construction-startup": "node --test test/construction-startup-db.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

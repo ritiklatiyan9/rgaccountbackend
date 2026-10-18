@@ -99,7 +99,14 @@ export async function markProjectCommitted(db, user, projectId, siteId, commitme
 
 // Read financial amounts only from canonical site ledger rows. Pending and approved
 // workflow amounts describe source states and are never added to ledger paid.
-export const projectMetricsSql = `
+export function buildProjectMetricsSql({ legacySafe = false, locationsAvailable = true } = {}) {
+ const ownerId = legacySafe ? "(to_jsonb(p)->>'owner_user_id')::integer" : 'p.owner_user_id';
+ const approverId = legacySafe ? "(to_jsonb(p)->>'assigned_approver_id')::integer" : 'p.assigned_approver_id';
+ const commitmentProjectId = legacySafe ? "(to_jsonb(vc)->>'project_id')::integer" : 'vc.project_id';
+ const locationMetrics = locationsAvailable
+   ? "SELECT COUNT(*) location_count,COUNT(*) FILTER(WHERE status='COMPLETED') completed_locations,COUNT(*) FILTER(WHERE status='ACTIVE') active_locations FROM construction_locations WHERE project_id=p.id"
+   : 'SELECT 0::int location_count,0::int completed_locations,0::int active_locations';
+ return `
  SELECT p.*,
    COALESCE(t.task_count,0)::int AS task_count, COALESCE(t.done_count,0)::int AS done_task_count,
    COALESCE(t.overdue_tasks,0)::int AS overdue_tasks,
@@ -123,19 +130,22 @@ export const projectMetricsSql = `
    owner.name AS owner_name, approver.name AS assigned_approver_name, aa.name AS assigned_admin_name,
    (p.target_end_date<CURRENT_DATE AND p.status NOT IN ('COMPLETED','CLOSED','CANCELLED')) AS is_overdue
  FROM construction_projects p
- LEFT JOIN users owner ON owner.id=p.owner_user_id LEFT JOIN users approver ON approver.id=p.assigned_approver_id LEFT JOIN users aa ON aa.id=p.assigned_admin_id
+ LEFT JOIN users owner ON owner.id=${ownerId} LEFT JOIN users approver ON approver.id=${approverId} LEFT JOIN users aa ON aa.id=p.assigned_admin_id
  LEFT JOIN LATERAL (SELECT COUNT(*) task_count, COUNT(*) FILTER(WHERE status='DONE') done_count,
     COUNT(*) FILTER(WHERE due_date<CURRENT_DATE AND status<>'DONE') overdue_tasks,
     ROUND(AVG(CASE WHEN status='DONE' THEN 100 ELSE progress_pct END)) task_progress FROM construction_tasks WHERE project_id=p.id) t ON true
- LEFT JOIN LATERAL (SELECT COUNT(*) vendor_count,COUNT(*) FILTER(WHERE status='open') active_vendor_commitments,SUM(contract_amount) committed_value FROM vendor_commitments WHERE project_id=p.id AND status<>'cancelled') c ON true
+ LEFT JOIN LATERAL (SELECT COUNT(*) vendor_count,COUNT(*) FILTER(WHERE status='open') active_vendor_commitments,SUM(contract_amount) committed_value FROM vendor_commitments vc WHERE ${commitmentProjectId}=p.id AND status<>'cancelled') c ON true
  LEFT JOIN LATERAL (SELECT SUM(lp.paid_amount) paid_amount,
     SUM(vp.amount+COALESCE(vp.tds_amount,0)) FILTER(WHERE financial_transaction_posts('debit',vp.status,vp.payment_mode,vp.cheque_status)) gross_settled_amount,
     SUM(vp.amount) FILTER(WHERE vp.status='approved') approved_amount,
     SUM(vp.amount) FILTER(WHERE vp.status='pending') pending_amount
     FROM vendor_payments vp JOIN vendor_commitments vc ON vc.id=vp.commitment_id
     LEFT JOIN LATERAL (SELECT SUM(le.debit-le.credit) paid_amount FROM ledger_entries le WHERE le.source_key='vendor_payments' AND le.source_id=vp.id AND le.ledger_type='site' AND le.site_id=p.site_id) lp ON true
-    WHERE vc.project_id=p.id) pay ON true
+    WHERE ${commitmentProjectId}=p.id) pay ON true
  LEFT JOIN LATERAL (SELECT SUM(qty*rate) actual_cost FROM inventory_movements WHERE project_id=p.id AND movement_type='CONSUMPTION') cost ON true
- LEFT JOIN LATERAL (SELECT COUNT(*) location_count,COUNT(*) FILTER(WHERE status='COMPLETED') completed_locations,COUNT(*) FILTER(WHERE status='ACTIVE') active_locations FROM construction_locations WHERE project_id=p.id) loc ON true
+ LEFT JOIN LATERAL (${locationMetrics}) loc ON true
  LEFT JOIN LATERAL (SELECT COUNT(*) pending_requests FROM construction_material_requests WHERE project_id=p.id AND status IN ('REQUESTED','PARTIALLY_FULFILLED')) mr ON true
 `;
+}
+
+export const projectMetricsSql = buildProjectMetricsSql();

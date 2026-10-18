@@ -1,4 +1,5 @@
 import { ensureWalletStartup } from './services/walletStartup.service.js';
+import { ensureConstructionStartup } from './services/constructionStartup.service.js';
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
@@ -62,6 +63,10 @@ connectDB().then(async () => {
   await migrateExistingVoucherGaps(pool);
   await migrateImprestApprovalIndexes(pool);
   await migrateTransactionDocumentation(pool);
+  const constructionStartup = await ensureConstructionStartup(pool);
+  console.log(constructionStartup.current
+    ? '[startup] Construction schema current; installed migrations skipped'
+    : `[startup] Construction migrations applied: ${constructionStartup.applied.join(', ')}`);
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

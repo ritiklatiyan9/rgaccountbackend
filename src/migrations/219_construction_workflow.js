@@ -43,7 +43,7 @@ CREATE INDEX IF NOT EXISTS construction_task_owner ON construction_tasks(project
 `;
 export async function up(pool) {
  const client=await pool.connect();
- try { await client.query('BEGIN');await client.query("SELECT pg_advisory_xact_lock(hashtext('219_construction_workflow'))");await client.query(constructionWorkflowSchemaSql);await client.query("INSERT INTO app_schema_migrations(version) VALUES('219_construction_workflow') ON CONFLICT DO NOTHING");await client.query('COMMIT'); }
+ try { await client.query('BEGIN');await client.query("SET LOCAL lock_timeout='5s'");await client.query("SELECT pg_advisory_xact_lock(hashtext('219_construction_workflow'))");await client.query(constructionWorkflowSchemaSql);await client.query("INSERT INTO app_schema_migrations(version) VALUES('219_construction_workflow') ON CONFLICT DO NOTHING");await client.query('COMMIT'); }
  catch(error) { await client.query('ROLLBACK');throw error; } finally {client.release();}
 }
 if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {

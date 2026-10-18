@@ -5,7 +5,7 @@ import {
   constructionError, isConstructionAdmin, positiveId, PROJECT_TRANSITIONS, validateProjectTransition,
   decimalAmount, dateValue, validateDateRange, progressValue,
   assertConstructionSiteAccess, assertConstructionProjectAccess, constructionCanViewAll, constructionPaymentVisibility, projectAccessPredicate,
-  validateConstructionAssignment, recordConstructionActivity, markProjectCommitted, projectMetricsSql,
+  validateConstructionAssignment, recordConstructionActivity, markProjectCommitted, projectMetricsSql, buildProjectMetricsSql,
 } from '../services/constructionWorkflow.service.js';
 
 const transaction = async fn => {
@@ -107,11 +107,13 @@ const deriveRequestStatus = (items) => {
 export const listProjects = asyncHandler(async (req, res) => {
   const siteId = requireSite(req, res); if (!siteId) return;
   const params = [siteId,req.user.id,req.constructionViewAll ?? await constructionCanViewAll(pool,req.user)];
-  let where = `WHERE p.site_id=$1 AND ${projectAccessPredicate('p','$2','$3')}`;
+  let where = `WHERE p.site_id=$1 AND ${projectAccessPredicate('p','$2','$3',{legacySafe:true})}`;
   if(req.query.status && req.query.status!=='all') {params.push(req.query.status.toUpperCase());where+=` AND p.status=$${params.length}`;}
-  if(req.query.project_type && req.query.project_type!=='all') {params.push(req.query.project_type.toUpperCase());where+=` AND p.project_type=$${params.length}`;}
+  if(req.query.project_type && req.query.project_type!=='all') {params.push(req.query.project_type.toUpperCase());where+=` AND COALESCE(to_jsonb(p)->>'project_type','GENERAL')=$${params.length}`;}
   if(req.query.search?.trim()) {params.push(`%${req.query.search.trim()}%`);where+=` AND (p.name ILIKE $${params.length} OR p.code ILIKE $${params.length})`;}
-  const {rows}=await pool.query(`${projectMetricsSql} ${where} ORDER BY p.created_at DESC`,params);
+  const capabilities=(await pool.query("SELECT to_regclass('public.construction_locations') IS NOT NULL AS locations")).rows[0];
+  const metrics=buildProjectMetricsSql({legacySafe:true,locationsAvailable:capabilities.locations});
+  const {rows}=await pool.query(`${metrics} ${where} ORDER BY p.created_at DESC`,params);
   res.json({projects:rows.map(projectResponse)});
 });
 
@@ -849,9 +851,17 @@ export const selectQuote=asyncHandler(async(req,res)=> {
 export async function getConstructionSummaryData({siteId,user,projectId=null,viewAll},db=pool) {
  await assertConstructionSiteAccess(db,user,siteId);
  const params=[siteId,user.id,viewAll??await constructionCanViewAll(db,user)];
- let where=`p.site_id=$1 AND ${projectAccessPredicate('p','$2','$3')}`;
+ let where=`p.site_id=$1 AND ${projectAccessPredicate('p','$2','$3',{legacySafe:true})}`;
  if(projectId){const id=positiveId(projectId);if(!id)throw constructionError(400,'Invalid project filter');params.push(id);where+=` AND p.id=$${params.length}`;}
- const metrics=`${projectMetricsSql} WHERE ${where}`;
+ // Probe optional tables before constructing SQL, without swallowing actual
+ // database failures or weakening project/site authorization. Missing columns
+ // in pre-141/219 rows represent absent assignments/links, never new access.
+ const capabilities=(await db.query(`SELECT
+   to_regclass('public.construction_locations') IS NOT NULL AS locations,
+   to_regclass('public.construction_project_activity') IS NOT NULL AS activity`)).rows[0];
+ const metrics=`${buildProjectMetricsSql({legacySafe:true,locationsAvailable:capabilities.locations})} WHERE ${where}`;
+ const projectType="COALESCE(NULLIF(to_jsonb(p)->>'project_type',''),'GENERAL')";
+ const commitmentProjectId="(to_jsonb(vc)->>'project_id')::integer";
  const paymentVisibility=await constructionPaymentVisibility(db,user);
  const paymentParams=[...params,paymentVisibility.read,paymentVisibility.all,user.id];
  const paymentWhere=`${where} AND $${params.length+1}::boolean AND ($${params.length+2}::boolean OR vp.created_by=$${params.length+3})`;
@@ -873,10 +883,10 @@ export async function getConstructionSummaryData({siteId,user,projectId=null,vie
     FROM metrics`,params),
    db.query(`${metrics} ORDER BY p.target_end_date NULLS LAST,p.id DESC`,params),
    db.query(`SELECT p.status,COUNT(*)::int AS count FROM construction_projects p WHERE ${where} GROUP BY p.status ORDER BY p.status`,params),
-   db.query(`SELECT p.project_type,COUNT(*)::int AS count FROM construction_projects p WHERE ${where} GROUP BY p.project_type ORDER BY count DESC`,params),
-   db.query(`SELECT a.*,u.name AS actor_name,p.name AS project_name FROM construction_project_activity a JOIN construction_projects p ON p.id=a.project_id LEFT JOIN users u ON u.id=a.actor_id WHERE ${activityWhere} ORDER BY a.id DESC LIMIT 12`,paymentParams),
-   db.query(`SELECT vp.id,vp.commitment_id,vp.site_id,vp.payment_date,vp.amount,vp.payment_mode,vp.status,vp.cheque_status,vc.vendor_name,vc.project_id,p.name AS project_name,
-    COALESCE(posted.paid_amount,0)::numeric(15,2) AS posted_amount FROM vendor_payments vp JOIN vendor_commitments vc ON vc.id=vp.commitment_id JOIN construction_projects p ON p.id=vc.project_id
+   db.query(`SELECT ${projectType} AS project_type,COUNT(*)::int AS count FROM construction_projects p WHERE ${where} GROUP BY ${projectType} ORDER BY count DESC`,params),
+   capabilities.activity ? db.query(`SELECT a.*,u.name AS actor_name,p.name AS project_name FROM construction_project_activity a JOIN construction_projects p ON p.id=a.project_id LEFT JOIN users u ON u.id=a.actor_id WHERE ${activityWhere} ORDER BY a.id DESC LIMIT 12`,paymentParams) : Promise.resolve({rows:[]}),
+   db.query(`SELECT vp.id,vp.commitment_id,vp.site_id,vp.payment_date,vp.amount,vp.payment_mode,vp.status,vp.cheque_status,vc.vendor_name,${commitmentProjectId} AS project_id,p.name AS project_name,
+    COALESCE(posted.paid_amount,0)::numeric(15,2) AS posted_amount FROM vendor_payments vp JOIN vendor_commitments vc ON vc.id=vp.commitment_id JOIN construction_projects p ON p.id=${commitmentProjectId}
     LEFT JOIN LATERAL(SELECT SUM(le.debit-le.credit) paid_amount FROM ledger_entries le WHERE le.source_key='vendor_payments' AND le.source_id=vp.id AND le.ledger_type='site' AND le.site_id=p.site_id) posted ON true
     WHERE ${paymentWhere} ORDER BY vp.payment_date DESC,vp.id DESC LIMIT 12`,paymentParams),
  ]);

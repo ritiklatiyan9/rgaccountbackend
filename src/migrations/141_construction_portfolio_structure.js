@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import pool from '../config/db.js';
+import { pathToFileURL } from 'node:url';
 
 /**
  * Give Construction a reusable location hierarchy instead of baking one
@@ -8,10 +9,11 @@ import pool from '../config/db.js';
  * Operational records keep their project link and may optionally point at the
  * exact location where the work, material or vendor commitment belongs.
  */
-export async function up() {
-  const client = await pool.connect();
+export async function up(database = pool) {
+  const client = await database.connect();
   try {
     await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout='5s'");
     await client.query(`SELECT pg_advisory_xact_lock(hashtext('141_construction_portfolio_structure'))`);
 
     await client.query(`
@@ -118,6 +120,7 @@ export async function up() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_vendor_commitments_project ON vendor_commitments(project_id) WHERE project_id IS NOT NULL`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_vendor_orders_project ON vendor_inventory_orders(project_id) WHERE project_id IS NOT NULL`);
 
+    await client.query("INSERT INTO app_schema_migrations(version) VALUES('141_construction_portfolio_structure') ON CONFLICT DO NOTHING");
     await client.query('COMMIT');
     console.log('Migration 141: construction portfolio structure ready');
   } catch (error) {
@@ -128,7 +131,7 @@ export async function up() {
   }
 }
 
-up()
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) up()
   .catch((error) => {
     console.error('Migration 141 failed:', error.message);
     process.exitCode = 1;
