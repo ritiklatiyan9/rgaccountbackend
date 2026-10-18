@@ -410,6 +410,66 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       const lowRecorded=new Map([['user:2',{balance:'1.00'}]]);
       assert.equal(walletWithCashInHand({id:2,balance:'2.00'},lowRecorded).balance,'1.00');
     });
+    await t.test('incoming wallet cash is counted once through Imprest allocation and spending',async()=>{
+      await query(`INSERT INTO sites VALUES(14,'DG cash reconciliation',1);
+        INSERT INTO user_sites VALUES(1,14),(3,14);
+        INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(14,'cash',7661125);
+        INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(14,3,47105)`);
+      await query("SELECT loyalty_vault_apply_delta('user:2',1,7661125,'adjustment','DG opening cash','manual_wallet_site_cash_alignment',NULL,NULL,14,2)");
+      const base=7614020;
+      const state=async()=>(await adminWalletCashStates(1,14,db)).get('user:2');
+      const cash=async()=>Number((await state()).balance);
+      const handover=async(from,to,amount)=>{
+        const requested=await createVaultTransfer({id:from},transfer(String(amount),14,to),db);
+        await resolveVaultTransfer({id:to},requested.transfer.id,'accept',{site_id:14},db);
+      };
+      assert.equal(await cash(),base,'other sites held by the same users cannot reduce this site');
+      await entry({site_id:14,created_by:1,credit:2000000});
+      await query("INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(14,'cash',2000000)");
+      assert.equal(await cash(),base,'a staff receipt remains with its collector until handed over');
+      const incoming=await createVaultTransfer({id:1},transfer('2000000',14),db);
+      assert.equal(await cash(),base,'a pending incoming handover does not move cash');
+      await resolveVaultTransfer({id:2},incoming.transfer.id,'accept',{site_id:14},db);
+      assert.equal(await cash(),base+2000000,'accepted staff cash increases admin custody once');
+      await query('INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(14,1,2000000)');
+      assert.equal(await cash(),base,'issuing the received cash as Imprest reduces admin custody');
+      await query(`INSERT INTO ledger_entries(site_id,bucket,debit) VALUES(14,'cash',2000000);
+        INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(14,1,-2000000)`);
+      assert.equal(await cash(),base,'spending Imprest reduces both financial cash and staff float without restoring admin cash');
+      const projected=(await invoke(controller.summary,{site:14})).vault;
+      const holder=(await invoke(controller.holders,{site:14})).holders.find(h=>h.holder_type==='user'&&h.holder_id===2);
+      const profile=(await invoke(controller.userDetail,{site:14,params:{id:2}})).user;
+      for(const value of [projected,holder,profile]) {
+        assert.equal(Number(value.balance),base);
+        assert.equal(Number(value.available_balance),base);
+        assert.equal(Number(value.recorded_balance),9661125,'original wallet receipts and handovers remain recorded');
+      }
+      assert.equal(Number(projected.total_balance),base);
+      await assert.rejects(createVaultTransfer({id:2},transfer(String(base+0.01),14,1),db),status(409));
+
+      await handover(2,1,1000000);
+      assert.equal(await cash(),base-1000000,'outgoing accepted cash is no longer held by admin');
+      await entry({site_id:14,created_by:3,credit:1000000});
+      await query("INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(14,'cash',1000000)");
+      assert.equal(await cash(),base-1000000,'a separate receipt held by another collector cannot fund admin');
+      await handover(3,2,1000000);
+      assert.equal(await cash(),base,'an equal incoming handover does not erase cash still held by the outgoing recipient');
+      assert.equal(Number((await state()).site_cash_balance),8661125);
+      assert.equal(Number((await balance(14,'user:1')).balance),1000000);
+
+      const corrected=await entry({site_id:14,created_by:3,credit:250});
+      await query("INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(14,'cash',250)");
+      assert.equal(await cash(),base,'new cash is held by its collector');
+      await query('UPDATE cash_flow_entries SET credit=0 WHERE id=$1',[corrected]);
+      await query("INSERT INTO ledger_entries(site_id,bucket,debit) VALUES(14,'cash',250)");
+      assert.equal(await cash(),base,'signed receipt corrections are netted per holder before held cash is deducted');
+      await query(`INSERT INTO users VALUES(8,'Retired cash holder','sub_admin',1,false);
+        SELECT loyalty_vault_apply_delta('user:8',1,-500000,'adjustment','Historical deficit',NULL,NULL,NULL,14,2)`);
+      assert.equal(await cash(),base,'a retired holder deficit cannot offset another holder positive cash');
+      await query(`INSERT INTO members VALUES(3,14,'Client cash holder','7777777777');
+        SELECT loyalty_vault_apply_delta('member:3',1,250,'adjustment','Historical client custody',NULL,NULL,NULL,14,2)`);
+      assert.equal(await cash(),base-250,'positive client custody is deducted together with user custody');
+    });
     await t.test('delegated wallet viewers see the admin read surfaces without gaining site or transfer rights',async()=>{
       await query("INSERT INTO user_permissions VALUES(1,'wallet',true,true)");
       try {

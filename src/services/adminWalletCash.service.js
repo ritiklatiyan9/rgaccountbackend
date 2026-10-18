@@ -6,7 +6,9 @@ const inFlight = new WeakMap();
 
 // The earlier, explicit site-cash alignment identifies the site's cash wallet.
 // Read its current cash custody without rewriting receipts or replaying old
-// allocations. Staff spending reduces both site cash and imprest, once each.
+// allocations. Financial site cash already includes receipts handed to Admin;
+// only cash still held in another wallet is outside Admin's custody. Staff
+// spending reduces both site cash and imprest, once each.
 export function adminWalletCashStates(organizationId, siteId, database, siteDetail) {
   // Imprest already has a locked site snapshot; reuse it on that connection.
   if (siteDetail) return readStates(organizationId, siteId, database, siteDetail);
@@ -30,8 +32,13 @@ async function readStates(organizationId, siteId, database, siteDetail) {
     WHERE e.organization_id=$1 AND e.site_id=$2 AND u.organization_id=$1 AND u.role='admin'
       AND e.source_table='manual_wallet_site_cash_alignment'
     ORDER BY e.holder_key,e.id DESC
+  ), site_wallets AS (
+    SELECT holder_key,sum(amount) AS balance FROM loyalty_vault_entries
+    WHERE organization_id=$1 AND site_id=$2 GROUP BY holder_key
   ) SELECT a.holder_key,sum(e.amount)::text AS recorded_balance,
-    COALESCE(sum(e.amount) FILTER(WHERE e.id>a.id AND e.kind IN ('transfer_in','transfer_out')),0)::text AS transfer_net
+    COALESCE(sum(e.amount) FILTER(WHERE e.id>a.id AND e.kind IN ('transfer_in','transfer_out')),0)::text AS transfer_net,
+    (SELECT COALESCE(sum(GREATEST(w.balance,0)),0) FROM site_wallets w
+      WHERE w.holder_key<>a.holder_key)::text AS other_wallet_cash
     FROM aligned a JOIN loyalty_vault_entries e ON e.holder_key=a.holder_key AND e.organization_id=$1 AND e.site_id=$2
     GROUP BY a.holder_key,a.id`, [organizationId, siteId]);
   if (!rows.length) return new Map();
@@ -42,13 +49,15 @@ async function readStates(organizationId, siteId, database, siteDetail) {
   }
   return new Map(rows.map(row => {
     const recorded = money(row.recorded_balance), transfers = money(row.transfer_net);
-    const balance = money(Math.min(recorded, money(site.distributableBalance + transfers)));
+    const otherWalletCash = money(row.other_wallet_cash);
+    const balance = money(Math.min(recorded, money(site.distributableBalance - otherWalletCash)));
     return [row.holder_key, {
       balance: balance.toFixed(2), available_balance: balance.toFixed(2),
       recorded_balance: recorded.toFixed(2), cash_in_hand_basis: 'SITE_CASH_AFTER_IMPREST',
       cash_in_hand_adjustment: money(balance - recorded).toFixed(2),
       site_cash_balance: site.cashBalance, imprest_held: site.imprestHeld,
       pending_imprest_reservations: site.pendingImprestReservations, wallet_transfer_net: transfers,
+      wallet_cash_held_elsewhere: otherWalletCash,
     }];
   }));
 }
