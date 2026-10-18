@@ -27,6 +27,11 @@ const STOCK_AGG = `
   GROUP BY material_id
 `;
 
+export function stockBalancesSql(sitePlaceholder = '$1') {
+  if (!/^\$\d+$/.test(sitePlaceholder)) throw new Error('Invalid stock site placeholder');
+  return STOCK_AGG.replaceAll('$1', sitePlaceholder);
+}
+
 // Lots = every stock-in movement, FIFO-depleted by the material's total
 // stock-out: the oldest lots are consumed first, so qty_remaining is what is
 // still on the shelf from that receipt and an expiry date only matters while

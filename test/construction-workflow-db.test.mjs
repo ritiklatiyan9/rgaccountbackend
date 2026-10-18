@@ -4,7 +4,7 @@ import { PGlite } from '@electric-sql/pglite';
 import pool from '../src/config/db.js';
 import { constructionWorkflowSchemaSql, up } from '../src/migrations/219_construction_workflow.js';
 import { assertConstructionSiteAccess, assertConstructionProjectAccess, constructionCanViewAll, validateConstructionAssignment, validateProjectTransition, decimalAmount, dateValue, projectMetricsSql, projectAccessPredicate } from '../src/services/constructionWorkflow.service.js';
-import { createProject, updateProject, createTask, updateTask, createQuote, updateQuote, selectQuote, listProjects, constructionSummary, getProject, createMaterialRequest, issueMaterialRequest, updateMaterialRequest, consumeMaterial, requireConstructionAccess } from '../src/controllers/construction.controller.js';
+import { createProject, updateProject, deleteProject, createTask, updateTask, createQuote, updateQuote, selectQuote, listProjects, constructionSummary, getProject, getMaterialRequest, createMaterialRequest, issueMaterialRequest, updateMaterialRequest, consumeMaterial, requireConstructionAccess } from '../src/controllers/construction.controller.js';
 
 const admin={id:1,role:'admin',organization_id:1};
 const owner={id:2,role:'sub_admin',organization_id:1};
@@ -156,6 +156,74 @@ test('construction lifecycle, assigned access, quote selection and ledger-derive
    const closed=await invoke(updateProject,{params:{id:projectId},body:{status:'CLOSED'}});assert.equal(closed.project.progress_pct,100);
    await assert.rejects(invoke(updateProject,{params:{id:projectId},body:{name:'Rewrite'}}),/cannot be changed/);
    assert.ok((await pg.query('SELECT COUNT(*)::int n FROM construction_project_activity WHERE project_id=$1',[projectId])).rows[0].n>10);
+  });
+  await t.test('project deletion enforces assignment/site boundaries and retains financial and material sources',async()=>{
+   const before=(await pg.query('SELECT * FROM ledger_entries ORDER BY id')).rows;
+   await assert.rejects(invoke(deleteProject,{params:{id:projectId}}),error=>error.statusCode===409);
+   const made=await invoke(createProject,{body:{name:'Disposable need',budget:'100',owner_user_id:2}});const id=made.project.id;
+   await assert.rejects(invoke(deleteProject,{user:outsider,params:{id}}),error=>error.statusCode===404);
+   await assert.rejects(invoke(deleteProject,{user:owner,params:{id},query:{site_id:2}}),error=>error.statusCode===403);
+   await assert.rejects(invoke(deleteProject,{params:{id},query:{site_id:3}}),error=>error.statusCode===404);
+   await pg.exec('CREATE TABLE vendor_inventory_orders(id serial PRIMARY KEY,project_id int REFERENCES construction_projects(id))');
+   await pg.query('INSERT INTO vendor_inventory_orders(project_id) VALUES($1)',[id]);
+   await assert.rejects(invoke(deleteProject,{params:{id}}),/linked purchase orders/);
+   await pg.query('DELETE FROM vendor_inventory_orders WHERE project_id=$1',[id]);
+   await pg.query("INSERT INTO inventory_movements(project_id,movement_type,qty,rate) VALUES($1,'CONSUMPTION',1,10)",[id]);
+   await assert.rejects(invoke(deleteProject,{params:{id}}),/material history/);
+   await pg.query('DELETE FROM inventory_movements WHERE project_id=$1',[id]);
+   const task=await invoke(createTask,{params:{id},body:{name:'Plan task'}});
+   await invoke(createQuote,{params:{id},body:{vendor_name:'Quote only vendor',amount:'20'}});
+   const request=await invoke(createMaterialRequest,{params:{id},body:{items:[{material_id:1,qty:2}]}});
+   await pg.query('UPDATE construction_material_request_items SET qty_issued=1 WHERE request_id=$1',[request.request.id]);
+   await assert.rejects(invoke(deleteProject,{params:{id}}),/material history/);
+   await pg.query('UPDATE construction_material_request_items SET qty_issued=0 WHERE request_id=$1',[request.request.id]);
+   await pg.query("UPDATE construction_projects SET status='CANCELLED' WHERE id=$1",[id]);
+   await invoke(requireConstructionAccess,{user:owner,params:{id},method:'DELETE'});
+   const deleted=await invoke(deleteProject,{user:owner,params:{id}});assert.equal(deleted.deleted,id);
+   for(const table of ['construction_projects','construction_tasks','construction_material_requests','construction_project_quotes','construction_project_activity']) {
+    const key=table==='construction_projects'?'id':'project_id';
+    assert.equal((await pg.query(`SELECT COUNT(*)::int n FROM ${table} WHERE ${key}=$1`,[id])).rows[0].n,0,table);
+   }
+   assert.equal((await pg.query('SELECT COUNT(*)::int n FROM construction_material_request_items WHERE request_id=$1',[request.request.id])).rows[0].n,0);
+   assert.equal((await pg.query('SELECT COUNT(*)::int n FROM construction_tasks WHERE id=$1',[task.task.id])).rows[0].n,0);
+   assert.deepEqual((await pg.query('SELECT * FROM ledger_entries ORDER BY id')).rows,before);
+   await assert.rejects(invoke(deleteProject,{params:{id}}),error=>error.statusCode===404);
+  });
+  await t.test('project deletion rolls back all planning records when a child deletion fails',async()=>{
+   const made=await invoke(createProject,{body:{name:'Keep on failure',budget:'100'}});const id=made.project.id;
+   const task=await invoke(createTask,{params:{id},body:{name:'Keep task'}});
+   await pg.exec("CREATE FUNCTION fail_activity_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test deletion failure'; END $$; CREATE TRIGGER test_activity_failure BEFORE DELETE ON construction_project_activity FOR EACH ROW EXECUTE FUNCTION fail_activity_delete()");
+   await assert.rejects(invoke(deleteProject,{params:{id}}),/test deletion failure/);
+   assert.equal((await pg.query('SELECT COUNT(*)::int n FROM construction_projects WHERE id=$1',[id])).rows[0].n,1);
+   assert.equal((await pg.query('SELECT COUNT(*)::int n FROM construction_tasks WHERE id=$1',[task.task.id])).rows[0].n,1);
+   await pg.exec('DROP TRIGGER test_activity_failure ON construction_project_activity');
+  });
+  await t.test('material request shortages use site stock minus reservations rather than unissued quantities',async()=>{
+   const made=await invoke(createProject,{body:{name:'Stock balance case',budget:'100'}});const id=made.project.id;
+   await pg.query("INSERT INTO inventory_materials(id,site_id,name,unit,rate) VALUES(3,1,'Magazine test','PCS',1)");
+   await pg.query("INSERT INTO inventory_movements(site_id,material_id,movement_type,qty,rate) VALUES(1,3,'RECEIPT',110,1),(2,3,'RECEIPT',999,1)");
+   const request=(await invoke(createMaterialRequest,{params:{id},body:{items:[{material_id:3,qty:10}]}})).request;
+   const check=async(available,remaining,shortage)=>{
+    const single=(await invoke(getMaterialRequest,{params:{reqId:request.id}})).items[0];
+    const nested=(await invoke(getProject,{params:{id}})).material_requests[0].items[0];
+    for(const item of [single,nested]){
+     assert.equal(Number(item.on_hand),110);assert.equal(Number(item.available),available);
+     assert.equal(Number(item.qty_remaining),remaining);assert.equal(Number(item.qty_shortage),shortage);
+    }
+   };
+   await check(110,10,0);
+   const held=(await pg.query("INSERT INTO inventory_movements(site_id,material_id,movement_type,qty) VALUES(1,3,'RESERVE',105) RETURNING id")).rows[0].id;
+   await check(5,10,5);
+   await pg.query('UPDATE construction_material_request_items SET qty_issued=4 WHERE request_id=$1',[request.id]);
+   await check(5,6,1);
+   await pg.query('UPDATE inventory_movements SET qty=200 WHERE id=$1',[held]);await check(0,6,6);
+   await pg.query('DELETE FROM inventory_movements WHERE id=$1 OR (material_id=3 AND site_id=2)',[held]);
+   await pg.query('UPDATE construction_material_request_items SET qty_issued=0 WHERE request_id=$1',[request.id]);
+   await invoke(updateProject,{params:{id},body:{status:'REVIEW'}});await invoke(updateProject,{params:{id},body:{status:'APPROVED'}});
+   const issued=await invoke(issueMaterialRequest,{params:{reqId:request.id}});
+   assert.equal(issued.status,'FULFILLED');assert.equal(issued.has_shortage,false);assert.equal(issued.issued[0].qty,10);
+   const item=(await invoke(getMaterialRequest,{params:{reqId:request.id}})).items[0];
+   assert.equal(Number(item.available),100);assert.equal(Number(item.qty_issued),10);assert.equal(Number(item.qty_shortage),0);
   });
  }finally{pool.query=original.query;pool.connect=original.connect;await pg.close();}
 });

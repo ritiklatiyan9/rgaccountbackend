@@ -1,6 +1,6 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
-import { inventoryModel } from '../models/Inventory.model.js';
+import { inventoryModel, stockBalancesSql } from '../models/Inventory.model.js';
 import {
   constructionError, isConstructionAdmin, positiveId, PROJECT_TRANSITIONS, validateProjectTransition,
   decimalAmount, dateValue, validateDateRange, progressValue,
@@ -44,7 +44,7 @@ export const requireConstructionAccess = asyncHandler(async(req,res,next) => {
   }
   if(projectId) {
     req.constructionProject=await assertConstructionProjectAccess(pool,req.user,projectId,siteId);
-    if(!['GET','HEAD'].includes(req.method)) editableProject(req.constructionProject);
+    if(!['GET','HEAD'].includes(req.method) && !(req.method==='DELETE' && req.params.id)) editableProject(req.constructionProject);
   }
   next();
 });
@@ -173,17 +173,22 @@ export const getProject = asyncHandler(async (req, res) => {
          COALESCE(json_agg(json_build_object(
            'id', ri.id, 'material_id', ri.material_id, 'material_name', m.name, 'unit', m.unit,
            'qty_requested', ri.qty_requested, 'qty_issued', ri.qty_issued,
-           'qty_shortage', GREATEST(ri.qty_requested - ri.qty_issued, 0)
+           'qty_remaining', GREATEST(ri.qty_requested - ri.qty_issued, 0),
+           'on_hand', COALESCE(stock.on_hand,0),
+           'reserved', COALESCE(stock.reserved,0),
+           'available', GREATEST(COALESCE(stock.on_hand,0)-COALESCE(stock.reserved,0),0),
+           'qty_shortage', GREATEST(ri.qty_requested - ri.qty_issued - GREATEST(COALESCE(stock.on_hand,0)-COALESCE(stock.reserved,0),0), 0)
          ) ORDER BY ri.id) FILTER (WHERE ri.id IS NOT NULL), '[]') AS items
        FROM construction_material_requests r
        LEFT JOIN construction_material_request_items ri ON ri.request_id = r.id
        LEFT JOIN inventory_materials m ON m.id = ri.material_id
+       LEFT JOIN (${stockBalancesSql('$2')}) stock ON stock.material_id=ri.material_id
        LEFT JOIN users u ON u.id = r.requested_by
        LEFT JOIN construction_locations l ON l.id = r.location_id
        WHERE r.project_id = $1
        GROUP BY r.id, u.name, l.name, l.location_type
        ORDER BY r.created_at DESC`,
-      [id]
+      [id, siteId]
     ),
     pool.query(`SELECT COALESCE(SUM(qty*rate),0) AS actual_cost FROM inventory_movements WHERE movement_type='CONSUMPTION' AND project_id = $1`, [id]),
     pool.query(
@@ -305,9 +310,34 @@ export const updateProject = asyncHandler(async (req, res) => {
 });
 
 export const deleteProject = asyncHandler(async (req, res) => {
- // Project history and financial source links are retained. Cancellation is the
- // supported removal action; no historical payment is deleted or reversed.
- throw constructionError(409,'Projects retain their history. Cancel an uncommitted need or close completed work instead.');
+ const id=positiveId(req.params.id),siteId=positiveId(req.query.site_id||req.body?.site_id);
+ if(!id)throw constructionError(400,'Invalid project id');
+ await transaction(async db=>{
+   await assertConstructionProjectAccess(db,req.user,id,siteId,{lock:true});
+   // Never detach accounting or stock history through ON DELETE SET NULL or
+   // cascade away a payment source. Lock the project before checking children.
+   const linked=(await db.query(`SELECT
+     EXISTS(SELECT 1 FROM vendor_commitments vc WHERE (to_jsonb(vc)->>'project_id')::integer=$1)
+     OR EXISTS(SELECT 1 FROM inventory_movements WHERE project_id=$1)
+     OR EXISTS(SELECT 1 FROM construction_material_request_items item JOIN construction_material_requests request ON request.id=item.request_id WHERE request.project_id=$1 AND item.qty_issued>0) AS blocked`,[id])).rows[0].blocked;
+   if(linked)throw constructionError(409,'This project has linked vendor work or material history. Close or cancel it instead; its payments and stock records must be retained.');
+   const optional=(await db.query(`SELECT to_regclass('public.vendor_inventory_orders') IS NOT NULL AS orders,
+     to_regclass('public.construction_project_quotes') IS NOT NULL AS quotes,
+     to_regclass('public.construction_project_activity') IS NOT NULL AS activity,
+     to_regclass('public.construction_locations') IS NOT NULL AS locations`)).rows[0];
+   if(optional.orders && (await db.query("SELECT 1 FROM vendor_inventory_orders o WHERE (to_jsonb(o)->>'project_id')::integer=$1 LIMIT 1",[id])).rows.length)
+     throw constructionError(409,'This project has linked purchase orders. Resolve those orders before deleting the project.');
+   // Delete only the unlinked project and its planning records. Existing
+   // recycle-bin/audit triggers run normally inside this same transaction.
+   if(optional.quotes)await db.query('DELETE FROM construction_project_quotes WHERE project_id=$1',[id]);
+   await db.query('DELETE FROM construction_material_request_items WHERE request_id IN (SELECT id FROM construction_material_requests WHERE project_id=$1)',[id]);
+   await db.query('DELETE FROM construction_material_requests WHERE project_id=$1',[id]);
+   await db.query('DELETE FROM construction_tasks WHERE project_id=$1',[id]);
+   if(optional.locations)await db.query('DELETE FROM construction_locations WHERE project_id=$1',[id]);
+   if(optional.activity)await db.query('DELETE FROM construction_project_activity WHERE project_id=$1',[id]);
+   await db.query('DELETE FROM construction_projects WHERE id=$1 AND site_id=$2',[id,siteId]);
+ });
+ res.json({message:'Project deleted',deleted:id});
 });
 
 // ── Project structure (phase / tower / floor / flat / plot / zone) ─────────
@@ -620,21 +650,13 @@ export const getMaterialRequest = asyncHandler(async (req, res) => {
   if (!request) return res.status(404).json({ message: 'Request not found' });
 
   const items = await pool.query(
-    `WITH balances AS (
-       SELECT material_id,
-              COALESCE(SUM(CASE
-                WHEN movement_type IN ('RECEIPT','RETURN','TRANSFER_IN') THEN qty
-                WHEN movement_type IN ('ISSUE','CONSUMPTION','TRANSFER_OUT') THEN -qty
-                WHEN movement_type = 'ADJUSTMENT' THEN qty ELSE 0 END), 0) AS on_hand,
-              COALESCE(SUM(CASE
-                WHEN movement_type = 'RESERVE' THEN qty
-                WHEN movement_type = 'UNRESERVE' THEN -qty ELSE 0 END), 0) AS reserved
-         FROM inventory_movements WHERE site_id = $2 GROUP BY material_id
-     )
+    `WITH balances AS (${stockBalancesSql('$2')})
      SELECT ri.*, m.name AS material_name, m.unit,
-            GREATEST(ri.qty_requested - ri.qty_issued, 0) AS qty_shortage,
+            GREATEST(ri.qty_requested - ri.qty_issued, 0) AS qty_remaining,
+            GREATEST(ri.qty_requested - ri.qty_issued - GREATEST(COALESCE(b.on_hand,0)-COALESCE(b.reserved,0),0), 0) AS qty_shortage,
             COALESCE(b.on_hand, 0) AS on_hand,
-            COALESCE(b.on_hand, 0) - COALESCE(b.reserved, 0) AS available
+            COALESCE(b.reserved, 0) AS reserved,
+            GREATEST(COALESCE(b.on_hand, 0) - COALESCE(b.reserved, 0),0) AS available
        FROM construction_material_request_items ri
        JOIN inventory_materials m ON m.id = ri.material_id
        LEFT JOIN balances b ON b.material_id = ri.material_id

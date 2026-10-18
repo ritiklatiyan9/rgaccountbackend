@@ -23,7 +23,7 @@ const baseline=`
  CREATE TABLE construction_material_requests(id serial PRIMARY KEY,project_id int,status text,requested_by int,created_at timestamptz);
  CREATE TABLE construction_material_request_items(id serial PRIMARY KEY,request_id int,material_id int,qty_requested numeric,qty_issued numeric);
  CREATE TABLE inventory_materials(id int PRIMARY KEY,name text,unit text);
- CREATE TABLE inventory_movements(id serial PRIMARY KEY,project_id int,movement_type text,qty numeric,rate numeric,material_id int,created_by int,created_at timestamptz);
+ CREATE TABLE inventory_movements(id serial PRIMARY KEY,site_id int,project_id int,movement_type text,qty numeric,rate numeric,material_id int,created_by int,created_at timestamptz);
  CREATE TABLE vendor_commitments(id serial PRIMARY KEY,site_id int,vendor_member_id int,vendor_name text,work_title text,head_name text,
  contract_amount numeric,status text,start_date date,due_date date);
  INSERT INTO vendor_commitments(site_id,vendor_name,contract_amount,status) VALUES(1,'Existing vendor',100,'open');
