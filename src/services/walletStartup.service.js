@@ -8,6 +8,7 @@ import { up as details, cashWalletReceiptDetailsSql } from '../migrations/209_ca
 import { up as balances, walletBalanceGuardsSql } from '../migrations/210_wallet_balance_guards.js';
 import { up as collector } from '../migrations/211_locked_cash_collector.js';
 import { up as permanent } from '../migrations/212_wallet_permanent_balance_guard.js';
+import { up as adminCustody, adminCashCustodySql } from '../migrations/217_admin_cash_custody_guard.js';
 
 export const walletStartupMigrations = Object.freeze([
   ['199_loyalty_vault', vault],
@@ -19,11 +20,17 @@ export const walletStartupMigrations = Object.freeze([
   ['210_wallet_balance_guards', balances],
   ['211_locked_cash_collector', collector],
   ['212_wallet_permanent_balance_guard', permanent],
+  ['217_admin_cash_custody_guard', adminCustody],
 ]);
 
 export const walletRuntimeFunctions = [
   ['reconcile_loyalty_vault_entry', cashWalletReceiptDetailsSql],
   ['loyalty_vault_apply_delta', walletBalanceGuardsSql],
+  ['imprest_financial_site_cash', adminCashCustodySql],
+  ['cash_wallet_cap_admin_cash', adminCashCustodySql],
+  ['imprest_available_site_cash', adminCashCustodySql],
+  ['reconcile_site_cash_debit', adminCashCustodySql],
+  ['reconcile_imprest_debit', adminCashCustodySql],
 ].map(([name, source]) => {
   const start = source.indexOf(`CREATE OR REPLACE FUNCTION ${name}(`);
   const end = source.indexOf('$$;', start) + 3;
@@ -38,7 +45,8 @@ async function ensureRuntimeFunctions(database) {
   [walletRuntimeFunctions.map(fn => fn.name)]);
   const stale = walletRuntimeFunctions.filter(fn => !rows.some(row => row.name === fn.name && row.body.trim() === fn.body));
   if (!stale.length) return [];
-  // A previous boot can commit migration 199 and fail before 209/210. Repair
+  // A previous boot can commit an earlier repeatable migration and fail before
+  // the final receipt, balance or cash custody guard definitions. Repair
   // only those shared function definitions, without source-table ALTERs,
   // trigger rebuilds, reconciliation, or account updates.
   const db = await database.connect();

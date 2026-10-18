@@ -1,0 +1,37 @@
+name: Cash custody regression checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cash-custody-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cash-custody:
+    name: Wallet and Admin cash custody
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DB_HOST: 127.0.0.1
+      DB_NAME: isolated_tests_only
+      DB_USER: isolated_tests_only
+      DB_PASSWORD: isolated_tests_only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --include=dev --no-audit --no-fund
+      - run: npm run test:wallet-flow
+      - run: npm run test:cash-funding
+      - run: npm run test:admin-cash-custody
