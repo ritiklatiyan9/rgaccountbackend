@@ -2,7 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { inventoryModel, stockBalancesSql } from '../models/Inventory.model.js';
 import {
-  constructionError, isConstructionAdmin, positiveId, PROJECT_TRANSITIONS, validateProjectTransition,
+  constructionError, isConstructionAdmin, positiveId, PROJECT_TRANSITIONS, validateProjectTransition, ACTIVE_PROJECT_STATUSES_SQL,
   decimalAmount, dateValue, validateDateRange, progressValue,
   assertConstructionSiteAccess, assertConstructionProjectAccess, constructionCanViewAll, constructionPaymentVisibility, projectAccessPredicate,
   validateConstructionAssignment, recordConstructionActivity, markProjectCommitted, projectMetricsSql, buildProjectMetricsSql,
@@ -890,7 +890,7 @@ export async function getConstructionSummaryData({siteId,user,projectId=null,vie
  const activityWhere=`${where} AND (a.entity_type<>'vendor_payment' OR ($${params.length+1}::boolean AND ($${params.length+2}::boolean OR EXISTS(SELECT 1 FROM vendor_payments visible_payment WHERE visible_payment.id=a.entity_id AND visible_payment.created_by=$${params.length+3}))))`;
  const [aggregate,projects,statuses,types,activity,payments]=await Promise.all([
    db.query(`WITH metrics AS (${metrics}) SELECT
-    COUNT(*) FILTER(WHERE status IN ('COMMITTED','IN_PROGRESS','ACTIVE','DELAYED'))::int AS active_projects,
+    COUNT(*) FILTER(WHERE status IN (${ACTIVE_PROJECT_STATUSES_SQL}))::int AS active_projects,
     COUNT(*) FILTER(WHERE status='DELAYED' OR is_overdue)::int AS delayed_projects,
     COUNT(*)::int AS total_projects,
     COALESCE(ROUND(AVG(calculated_progress_pct) FILTER(WHERE status NOT IN ('CLOSED','CANCELLED'))),0)::int AS avg_progress,

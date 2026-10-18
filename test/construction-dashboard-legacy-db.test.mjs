@@ -44,6 +44,21 @@ async function fixture(t) {
 }
 const summary=(user=admin,projectId=null)=>getConstructionSummaryData({siteId:1,user,projectId});
 
+test('active projects include approved work across REST/GraphQL while review, paused and finished work stay separate',async t=>{
+ const pg=await fixture(t);
+ for(const [status,expected] of Object.entries({NEED:0,PLANNING:0,REVIEW:0,APPROVED:1,COMMITTED:1,IN_PROGRESS:1,ACTIVE:1,DELAYED:1,ON_HOLD:0,COMPLETED:0,CLOSED:0,CANCELLED:0})){
+  await pg.query('UPDATE construction_projects SET status=$1 WHERE id=1',[status]);
+  const result=(await summary(owner)).summary;
+  assert.equal(result.active_projects,expected,status);assert.equal(result.total_projects,1);
+  assert.equal(result.total_budget,'1000.00');assert.equal(result.paid_amount,'0.00');
+ }
+ await pg.query("UPDATE construction_projects SET status='APPROVED' WHERE id=1");
+ const response=await graphql({schema,source:'{constructionDashboard(siteId:1){activeProjects totalBudget}}',
+  contextValue:{user:owner,siteIds:new Set([1]),permissions:new Map([['construction',{can_read:true}]])}});
+ assert.equal(response.errors,undefined,JSON.stringify(response.errors));
+ assert.equal(response.data.constructionDashboard.activeProjects,1);assert.equal(response.data.constructionDashboard.totalBudget,1000);
+});
+
 test('pre-141/219 dashboard returns real project progress and material metrics without optional columns/tables',async t=>{
  const pg=await fixture(t);const before=(await pg.query('SELECT * FROM vendor_payments')).rows;
  const {summary:result}=await summary(owner);

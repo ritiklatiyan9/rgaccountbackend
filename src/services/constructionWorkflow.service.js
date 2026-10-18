@@ -1,6 +1,8 @@
 /** Shared construction authorization, validation and canonical financial projections. */
 export const constructionError = (statusCode, message) => Object.assign(new Error(message), { statusCode, status: statusCode });
 export const isConstructionAdmin = user => ['admin', 'super_admin'].includes(user?.role);
+// Approved work is active even before its first vendor commitment or stock issue.
+export const ACTIVE_PROJECT_STATUSES_SQL = "'APPROVED','COMMITTED','IN_PROGRESS','ACTIVE','DELAYED'";
 export const positiveId = value => {
   if(!/^\d+$/.test(String(value??'')))return null;
   const id = Number(value);

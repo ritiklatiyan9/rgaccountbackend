@@ -10,6 +10,7 @@ import { CLIENT_DEMOGRAPHICS_SCOPE, loadClientDemographics } from '../services/c
 import asyncHandler from '../utils/asyncHandler.js';
 import { cleanText } from '../services/openRouterStream.service.js';
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
+import { ACTIVE_PROJECT_STATUSES_SQL } from '../services/constructionWorkflow.service.js';
 
 export { cleanText };
 
@@ -940,7 +941,7 @@ const constructionAnalyticsData = async (siteId, { from, to }) => {
   const P = [siteId, from, to];
   const [summary, projectStatuses, taskStatuses, monthly, materials, requests, projects] = await Promise.all([
     q(`SELECT COUNT(*)::int AS projects,
-              COUNT(*) FILTER (WHERE status = 'ACTIVE')::int AS active_projects,
+              COUNT(*) FILTER (WHERE status IN (${ACTIVE_PROJECT_STATUSES_SQL}))::int AS active_projects,
               COUNT(*) FILTER (WHERE status = 'DELAYED' OR (target_end_date < CURRENT_DATE AND status NOT IN ('COMPLETED','CANCELLED')))::int AS delayed_projects,
               COALESCE(SUM(budget),0)::numeric(18,2) AS budget,
               COALESCE(ROUND(AVG(progress_pct) FILTER (WHERE status NOT IN ('COMPLETED','CANCELLED'))),0)::int AS avg_progress,
