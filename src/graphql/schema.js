@@ -413,6 +413,16 @@ const ExpenseCategoryBreakdownType = new GraphQLObjectType({
   },
 });
 
+const ExpenseRelatedPartyType = new GraphQLObjectType({
+  name: 'ExpenseRelatedParty',
+  fields: {
+    member_id: { type: new GraphQLNonNull(GraphQLInt) },
+    name: { type: GraphQLString },
+    phone: { type: GraphQLString },
+    direction: { type: GraphQLString },
+  },
+});
+
 const ExpenseEntryType = new GraphQLObjectType({
   name: 'ExpenseEntry',
   fields: {
@@ -437,6 +447,7 @@ const ExpenseEntryType = new GraphQLObjectType({
     approved_by_name:  { type: GraphQLString },
     created_by:        { type: GraphQLInt },
     created_by_name:   { type: GraphQLString },
+    related_party:     { type: ExpenseRelatedPartyType },
     created_at:        { type: GraphQLString },
     updated_at:        { type: GraphQLString },
     assigned_user_id:  { type: GraphQLInt },

@@ -555,12 +555,21 @@ class ExpenseModel extends MasterModel {
              us.name as approved_by_name,
              m.full_name as assigned_user_name,
              admin_u.name as assigned_admin_name,
-             COALESCE(NULLIF(TRIM(cu.name), ''), cu.email) AS created_by_name
+             COALESCE(NULLIF(TRIM(cu.name), ''), cu.email) AS created_by_name,
+             CASE WHEN party_member.id IS NOT NULL THEN jsonb_build_object(
+               'member_id', party_member.id, 'name', party_member.full_name,
+               'phone', party_member.phone, 'direction', party_link.direction
+             ) ELSE NULL END AS related_party
       FROM unified u
       LEFT JOIN users us ON u.approved_by = us.id
       LEFT JOIN members m ON u.assigned_user_id = m.id
       LEFT JOIN users admin_u ON u.assigned_admin_id = admin_u.id
       LEFT JOIN users cu ON cu.id = u.created_by
+      LEFT JOIN transaction_party_links party_link ON u.source = 'expenses'
+        AND party_link.source_key = 'expense' AND party_link.source_id = u.original_id
+        AND party_link.site_id = u.site_id
+      LEFT JOIN members party_member ON party_member.id = party_link.member_id
+        AND party_member.site_id = u.site_id
       WHERE 1=1 ${whereClause}
       ORDER BY u.date ${sortDir},
                COALESCE(u.display_order, 2147483647) ASC,

@@ -7,6 +7,7 @@ import pool from '../config/db.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { expenseDocumentColumns, signExpenseDocuments } from '../utils/expenseDocumentUrls.js';
+import { attachExpenseParty, saveExpenseWithParty } from '../services/expenseParty.service.js';
 import {
   postApprovedImprestDebit,
   reverseApprovedImprestDebit,
@@ -147,7 +148,14 @@ export const createExpense = asyncHandler(async (req, res) => {
     cheque_status: (payment_mode || '').trim().toUpperCase() === 'CHEQUE' ? 'PENDING' : null,
   };
 
-  const expense = await expenseModel.create(data, pool);
+  const expense = Object.hasOwn(req.body, 'related_member_id')
+    ? await saveExpenseWithParty({
+      siteId: data.site_id,
+      memberId: req.body.related_member_id,
+      userId: req.user.id,
+      write: (db) => expenseModel.create(data, db),
+    })
+    : await expenseModel.create(data, pool);
   res.status(201).json({ expense: await signExpenseDocuments(expense) });
 });
 
@@ -239,7 +247,7 @@ export const getExpense = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Expense not found' });
   }
   await attachModuleChequeDates([expense], pool, 'expenses');
-  res.json({ expense: await signExpenseDocuments(expense) });
+  res.json({ expense: await signExpenseDocuments(await attachExpenseParty(expense)) });
 });
 
 /**
@@ -302,7 +310,8 @@ export const updateExpense = asyncHandler(async (req, res) => {
   }
 
   Object.assign(data, vaultAssignmentFor('expenses') || {});
-  if (Object.keys(data).length === 0) {
+  const hasRelatedParty = Object.hasOwn(req.body, 'related_member_id');
+  if (Object.keys(data).length === 0 && !hasRelatedParty) {
     return res.status(400).json({ message: 'Nothing to update' });
   }
 
@@ -317,8 +326,20 @@ export const updateExpense = asyncHandler(async (req, res) => {
     data.approved_at = null;
   }
 
-  data.cheque_status = chequeStatusForPaymentEdit(existing, data);
-  const updated = await expenseModel.update(expenseId, data, pool);
+  // Changing this reporting hint alone must not resubmit or repost the expense.
+  const hasExpenseChanges = Object.keys(data).length > 0;
+  if (hasExpenseChanges) data.cheque_status = chequeStatusForPaymentEdit(existing, data);
+  const write = (db) => hasExpenseChanges
+    ? expenseModel.update(expenseId, data, db)
+    : expenseModel.findById(expenseId, db);
+  const updated = hasRelatedParty
+    ? await saveExpenseWithParty({
+      siteId: existing.site_id,
+      memberId: req.body.related_member_id,
+      userId: req.user.id,
+      write,
+    })
+    : await write(pool);
   if (!updated) return res.status(404).json({ message: 'Expense not found' });
   if (changesPostingData && existing.status === 'approved') {
     await reverseApprovedImprestDebit({
