@@ -1,7 +1,7 @@
 import express from 'express';
 const router = express.Router();
 
-import { listPartyLinks, savePartyLink, PARTY_TARGETS } from '../controllers/transactionParty.controller.js';
+import { listPartyLinks, preparePartyLinkReadScope, savePartyLink, PARTY_TARGETS } from '../controllers/transactionParty.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
@@ -25,6 +25,7 @@ const requireTargetPermission = (action) => (req, res, next) => {
 router.get(
   '/',
   requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' }),
+  preparePartyLinkReadScope,
   cacheResponse({ ttlSeconds: 30, namespace: 'transaction-parties' }),
   listPartyLinks
 );

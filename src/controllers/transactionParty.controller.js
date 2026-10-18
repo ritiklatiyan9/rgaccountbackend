@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import permissionModel from '../models/Permission.model.js';
+import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { SIGN_TARGETS, requireTargetSiteAccess } from './signature.controller.js';
 
 /**
@@ -43,10 +44,30 @@ const readableTargets = async (user, keys) => {
     const target = PARTY_TARGETS[key];
     if (target.adminOnly) return null;
     const permission = await permissionModel.getPermission(user.id, target.perm);
+    if (user.permissionsByModule instanceof Map) user.permissionsByModule.set(target.perm, permission);
     return permission?.can_read === true ? key : null;
   }));
   return verdicts.filter(Boolean);
 };
+
+const partyLinkReadScope = async (user, requested) => {
+  const keys = await readableTargets(user, requested);
+  const expenseVisibility = keys.includes('expense')
+    ? await resolveEntryVisibility(user, 'expenses', null)
+    : null;
+  return { keys, expenseVisibility };
+};
+
+// Resolve current grants before the response cache. Its scope key includes the
+// loaded permission rows, so old site-wide responses and changed view-all grants
+// cannot supply clients from expenses this user is not allowed to see.
+export const preparePartyLinkReadScope = asyncHandler(async (req, _res, next) => {
+  const requested = [...new Set(String(req.query.targets || '').split(',').map((key) => key.trim()).filter(Boolean))];
+  if (requested.length && requested.every((key) => PARTY_TARGETS[key])) {
+    req.partyLinkReadScope = await partyLinkReadScope(req.user, requested);
+  }
+  next();
+});
 
 /**
  * GET /transaction-parties?site_id=X&targets=expense,daybook
@@ -62,16 +83,26 @@ export const listPartyLinks = asyncHandler(async (req, res) => {
   const unknown = requested.find((key) => !PARTY_TARGETS[key]);
   if (unknown) return res.status(400).json({ message: `Unknown transaction target: ${unknown}` });
 
-  const keys = await readableTargets(req.user, [...new Set(requested)]);
+  const { keys, expenseVisibility } = req.partyLinkReadScope
+    || await partyLinkReadScope(req.user, [...new Set(requested)]);
   if (!keys.length) return res.json({ links: {} });
 
+  const params = [keys, siteId];
+  let expenseScope = '';
+  if (expenseVisibility && !expenseVisibility.canViewAll) {
+    params.push(expenseVisibility.creatorId);
+    expenseScope = ` AND (l.source_key <> 'expense' OR EXISTS (
+      SELECT 1 FROM expenses e
+       WHERE e.id = l.source_id AND e.site_id = l.site_id AND e.created_by = $3
+    ))`;
+  }
   const { rows } = await pool.query(
     `SELECT l.source_key, l.source_id, l.member_id, l.direction, m.full_name, m.phone
        FROM transaction_party_links l
-       JOIN members m ON m.id = l.member_id
-      WHERE l.source_key = ANY($1::varchar[]) AND l.site_id = $2
+       JOIN members m ON m.id = l.member_id AND m.site_id = l.site_id
+      WHERE l.source_key = ANY($1::varchar[]) AND l.site_id = $2${expenseScope}
       LIMIT ${MAX_LINKS}`,
-    [keys, siteId]
+    params
   );
 
   const links = {};

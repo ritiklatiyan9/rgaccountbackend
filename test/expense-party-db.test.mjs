@@ -9,6 +9,7 @@ import { listPartyLinks } from '../src/controllers/transactionParty.controller.j
 import { getExpensesPageData } from '../src/graphql/services/expenses.service.js';
 import { schema } from '../src/graphql/schema.js';
 import expenseRoutes from '../src/routes/expense.routes.js';
+import partyRoutes from '../src/routes/transactionParty.routes.js';
 import { transactionTimeMiddleware } from '../src/services/transactionTime.service.js';
 import { loyaltyVaultMiddleware } from '../src/services/loyaltyVaultContext.service.js';
 import errorMiddleware from '../src/middlewares/error.middleware.js';
@@ -200,4 +201,87 @@ test('the full expense route keeps client-only saves outside financial updates d
     assert.deepEqual((await query('SELECT * FROM expenses WHERE id=$1', [expense.id])).rows[0], before);
   }
   assert.deepEqual((await query('SELECT * FROM ledger_entries')).rows, [{ id: 1, debit: '1000', credit: '50' }]);
+});
+
+async function partyVisibilityFixture(t) {
+  const db = await fixture(t);
+  await db.pg.exec(`CREATE TABLE user_permissions(user_id integer, module text, can_read boolean,
+      can_write boolean DEFAULT true, can_update boolean DEFAULT true,
+      can_delete boolean DEFAULT false, can_restore boolean DEFAULT false,
+      can_view_all boolean DEFAULT false, PRIMARY KEY(user_id,module));
+    INSERT INTO user_permissions(user_id,module,can_read) VALUES (12,'expenses',true),(12,'daybook',true);`);
+  const own = (await invoke(createExpense, { body: expenseBody() })).expense;
+  const other = (await invoke(createExpense, { user: admin, body: expenseBody({ related_member_id: 21 }) })).expense;
+  await db.query(`INSERT INTO transaction_party_links(source_key,source_id,site_id,member_id,direction,created_by)
+    VALUES ('daybook',$1,5,21,'debit',1)`, [other.id]);
+  return { ...db, own, other };
+}
+const freshPartyReader = () => ({ id: 12, role: 'sub_admin', organization_id: 1, permissionsByModule: new Map() });
+
+test('expense party rosters follow creator visibility while admin, read-all and mixed targets keep their scope', async t => {
+  const { query, own, other } = await partyVisibilityFixture(t);
+  const read = (user, targets = 'expense,daybook') => invoke(listPartyLinks, { user, query: { site_id: 5, targets } });
+  const keys = result => Object.keys(result.links).sort();
+  assert.deepEqual(keys(await read(freshPartyReader())), [`daybook:${other.id}`, `expense:${own.id}`].sort(),
+    'another creator’s expense client must not appear in a restricted reader’s filter');
+  assert.deepEqual(keys(await read(admin)), [`daybook:${other.id}`, `expense:${own.id}`, `expense:${other.id}`].sort());
+  await query("UPDATE user_permissions SET can_view_all=true WHERE user_id=12 AND module='expenses'");
+  assert.deepEqual(keys(await read(freshPartyReader())), [`daybook:${other.id}`, `expense:${own.id}`, `expense:${other.id}`].sort());
+  await query("UPDATE user_permissions SET can_view_all=false WHERE user_id=12 AND module='expenses'");
+  await query("DELETE FROM transaction_party_links WHERE source_key='expense' AND source_id=$1", [own.id]);
+  assert.deepEqual(keys(await read(freshPartyReader(), 'expense')), [],
+    'a user with no linked expenses must not see other creators’ client choices');
+  assert.deepEqual(keys(await read(freshPartyReader())), [`daybook:${other.id}`],
+    'expense restrictions must not remove independently readable non-expense links');
+  assert.deepEqual(keys(await read(admin, 'expense')), [`expense:${other.id}`]);
+  await query("UPDATE user_permissions SET can_read=false WHERE user_id=12 AND module='daybook'");
+  assert.deepEqual(keys(await read(freshPartyReader())), [], 'unreadable mixed targets stay excluded');
+});
+
+test('a revoked expense read-all grant cannot reuse a cached site-wide party roster', async t => {
+  const { pg, query, own, other } = await partyVisibilityFixture(t);
+  await pg.exec(`ALTER TABLE users ADD COLUMN role text, ADD COLUMN token_version integer DEFAULT 0,
+      ADD COLUMN is_active boolean DEFAULT true, ADD COLUMN organization_id integer DEFAULT 1;
+    UPDATE users SET role = CASE WHEN id=1 THEN 'admin' ELSE 'sub_admin' END;
+    CREATE TABLE user_sessions(id integer, user_id integer, logout_time timestamptz);
+    CREATE TABLE user_sites(user_id integer, site_id integer);
+    INSERT INTO user_sites VALUES(12,5);
+    UPDATE user_permissions SET can_view_all=true WHERE user_id=12 AND module='expenses';`);
+  t.mock.method(jwt, 'verify', () => ({ id: 12, role: 'sub_admin', version: 0 }));
+  const previousCacheEnabled = process.env.CACHE_ENABLED;
+  process.env.CACHE_ENABLED = 'true';
+  t.after(() => {
+    if (previousCacheEnabled === undefined) delete process.env.CACHE_ENABLED;
+    else process.env.CACHE_ENABLED = previousCacheEnabled;
+  });
+  const app = express();
+  app.use('/transaction-parties', partyRoutes);
+  app.use(errorMiddleware);
+  const server = await new Promise((resolve, reject) => {
+    const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+    listener.once('error', reject);
+  });
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const read = async () => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/transaction-parties?site_id=5&targets=expense,daybook`, {
+      headers: { Authorization: 'Bearer fixture-only' },
+    });
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    return { keys: Object.keys(result.links).sort(), cache: response.headers.get('x-cache') };
+  };
+  const allKeys = [`daybook:${other.id}`, `expense:${own.id}`, `expense:${other.id}`].sort();
+  assert.deepEqual((await read()).keys, allKeys);
+  const cached = await read();
+  assert.equal(cached.cache, 'HIT');
+  assert.deepEqual(cached.keys, allKeys);
+  // Deliberately do not invalidate cache: authorization must be reloaded before
+  // deciding which cache key may be used by this same authenticated account.
+  await query("UPDATE user_permissions SET can_view_all=false WHERE user_id=12 AND module='expenses'");
+  const restricted = await read();
+  assert.equal(restricted.cache, 'MISS');
+  assert.deepEqual(restricted.keys, [`daybook:${other.id}`, `expense:${own.id}`].sort());
+  const cachedRestricted = await read();
+  assert.equal(cachedRestricted.cache, 'HIT');
+  assert.deepEqual(cachedRestricted.keys, restricted.keys);
 });
