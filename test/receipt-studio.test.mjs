@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeReceiptDesign, getReceiptDesign, saveReceiptDesign, RECEIPT_DESIGN_KEY } from '../src/services/receiptDesign.service.js';
+import { normalizeReceiptDesign, getReceiptDesign, getReceiptDesignWithScope, saveReceiptDesign, RECEIPT_DESIGN_KEY, RECEIPT_SITE_DESIGN_KEY } from '../src/services/receiptDesign.service.js';
 import settings from '../src/models/ApplicationSetting.model.js';
 import pool from '../src/config/db.js';
 
@@ -38,18 +38,40 @@ test('layout validation bounds geometry and excludes executable element types an
   assert.equal(saved.cash.elements[0].color, '#222222'); assert.equal(saved.cash.elements[1].src, '');
 });
 test('the same global design is returned from every site and saves use global storage', async () => {
-  const get = settings.getGlobalJson, set = settings.setGlobalJson;
+  const get = settings.getGlobalJson, set = settings.setGlobalJson, own = settings.getJson, retire = settings.deleteJsonForAllSites;
   const expected = normalizeReceiptDesign({ cash: { content: { title: 'Global format' } } });
+  let retired = '';
   settings.getGlobalJson = async key => { assert.equal(key, RECEIPT_DESIGN_KEY); return expected; };
   settings.setGlobalJson = async (key,value,by) => { assert.equal(key, RECEIPT_DESIGN_KEY); assert.equal(by, 7); return value; };
-  try { assert.deepEqual(await getReceiptDesign(1), await getReceiptDesign(5)); assert.deepEqual(await saveReceiptDesign(99, expected, 7), expected); }
-  finally { settings.getGlobalJson = get; settings.setGlobalJson = set; }
+  settings.getJson = async () => null;
+  settings.deleteJsonForAllSites = async key => { retired = key; };
+  try {
+    assert.deepEqual(await getReceiptDesign(1), await getReceiptDesign(5)); assert.deepEqual(await saveReceiptDesign(99, expected, 7), expected);
+    assert.equal(retired, RECEIPT_SITE_DESIGN_KEY, 'saving for all sites retires site-only designs');
+  }
+  finally { settings.getGlobalJson = get; settings.setGlobalJson = set; settings.getJson = own; settings.deleteJsonForAllSites = retire; }
 });
 test('unconfigured sites inherit OM ASSOCIATES without mutating its legacy design', async () => {
-  const get = settings.getGlobalJson, query = pool.query;
+  const get = settings.getGlobalJson, query = pool.query, own = settings.getJson;
   const legacy = { cash: { content: { title: 'OM receipt' } } };
   settings.getGlobalJson = async () => null;
+  settings.getJson = async () => null;
   pool.query = async (sql,params) => { assert.match(sql, /OM ASSOCIATES/); assert.deepEqual(params,[RECEIPT_DESIGN_KEY]); return { rows: [{ setting_value: legacy }] }; };
   try { assert.equal((await getReceiptDesign(999)).cash.content.title, 'OM receipt'); assert.deepEqual(legacy, { cash: { content: { title: 'OM receipt' } } }); }
-  finally { settings.getGlobalJson = get; pool.query = query; }
+  finally { settings.getGlobalJson = get; pool.query = query; settings.getJson = own; }
+});
+
+test('a site design overrides the shared design only for that site and saves under its own key', async () => {
+  const get = settings.getGlobalJson, own = settings.getJson, setOwn = settings.setJson, setGlobal = settings.setGlobalJson;
+  settings.getGlobalJson = async () => ({ cash: { content: { title: 'Shared' } } });
+  settings.getJson = async (siteId, key) => { assert.equal(key, RECEIPT_SITE_DESIGN_KEY); return siteId === 3 ? { cash: { content: { title: 'Site 3' } } } : null; };
+  let stored;
+  settings.setJson = async (siteId, key, value) => { stored = { siteId, key }; return value; };
+  settings.setGlobalJson = async () => { throw new Error('a site save must not touch the shared design'); };
+  try {
+    assert.deepEqual([(await getReceiptDesignWithScope(3)).scope, (await getReceiptDesign(3)).cash.content.title], ['site', 'Site 3']);
+    assert.deepEqual([(await getReceiptDesignWithScope(4)).scope, (await getReceiptDesign(4)).cash.content.title], ['global', 'Shared']);
+    await saveReceiptDesign(3, {}, 7, 'site');
+    assert.deepEqual(stored, { siteId: 3, key: RECEIPT_SITE_DESIGN_KEY });
+  } finally { settings.getGlobalJson = get; settings.getJson = own; settings.setJson = setOwn; settings.setGlobalJson = setGlobal; }
 });

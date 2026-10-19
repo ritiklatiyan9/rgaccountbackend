@@ -1,0 +1,194 @@
+{
+  "reason": "User approved undo of six-payment reclassification",
+  "undoneAt": "2026-10-19T07:53:16.728Z",
+  "before": [
+    {
+      "id": 452,
+      "site_id": 8,
+      "date": "2025-11-19",
+      "payment_mode": "BANK",
+      "amount": "500000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "500000.00"
+    },
+    {
+      "id": 453,
+      "site_id": 8,
+      "date": "2025-11-19",
+      "payment_mode": "BANK",
+      "amount": "500000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "500000.00"
+    },
+    {
+      "id": 515,
+      "site_id": 8,
+      "date": "2024-05-04",
+      "payment_mode": "BANK",
+      "amount": "-450000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "-450000.00"
+    },
+    {
+      "id": 517,
+      "site_id": 8,
+      "date": "2024-05-07",
+      "payment_mode": "BANK",
+      "amount": "-50000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "-50000.00"
+    },
+    {
+      "id": 518,
+      "site_id": 8,
+      "date": "2024-05-05",
+      "payment_mode": "BANK",
+      "amount": "-450000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "-450000.00"
+    },
+    {
+      "id": 556,
+      "site_id": 8,
+      "date": "2026-01-25",
+      "payment_mode": "BANK",
+      "amount": "1000000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "1000000.00"
+    }
+  ],
+  "restored": [
+    {
+      "id": 452,
+      "site_id": 8,
+      "date": "2025-11-19",
+      "payment_mode": "CASH",
+      "amount": "500000.00",
+      "cash_amount": "500000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 453,
+      "site_id": 8,
+      "date": "2025-11-19",
+      "payment_mode": "CASH",
+      "amount": "500000.00",
+      "cash_amount": "500000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 515,
+      "site_id": 8,
+      "date": "2024-05-04",
+      "payment_mode": "CASH",
+      "amount": "-450000.00",
+      "cash_amount": "-450000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 517,
+      "site_id": 8,
+      "date": "2024-05-07",
+      "payment_mode": "CASH",
+      "amount": "-50000.00",
+      "cash_amount": "-50000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 518,
+      "site_id": 8,
+      "date": "2024-05-05",
+      "payment_mode": "CASH",
+      "amount": "-450000.00",
+      "cash_amount": "-450000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 556,
+      "site_id": 8,
+      "date": "2026-01-25",
+      "payment_mode": "CASH",
+      "amount": "1000000.00",
+      "cash_amount": "1000000.00",
+      "bank_amount": "0.00"
+    }
+  ],
+  "ledger": [
+    {
+      "source_id": 452,
+      "bucket": "cash",
+      "bank_account_id": 18,
+      "debit": "500000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 453,
+      "bucket": "cash",
+      "bank_account_id": 18,
+      "debit": "500000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 515,
+      "bucket": "cash",
+      "bank_account_id": 18,
+      "debit": "-450000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 517,
+      "bucket": "cash",
+      "bank_account_id": 18,
+      "debit": "-50000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 518,
+      "bucket": "cash",
+      "bank_account_id": 18,
+      "debit": "-450000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 556,
+      "bucket": "cash",
+      "bank_account_id": 18,
+      "debit": "1000000.00",
+      "credit": "0.00"
+    }
+  ],
+  "totalsBefore": [
+    {
+      "bucket": "bank",
+      "balance": "744630.30"
+    },
+    {
+      "bucket": "cash",
+      "balance": "8711125.00"
+    }
+  ],
+  "totalsAfter": [
+    {
+      "bucket": "bank",
+      "balance": "1794630.30"
+    },
+    {
+      "bucket": "cash",
+      "balance": "7661125.00"
+    }
+  ],
+  "banks": [
+    {
+      "name": "ICICI BANK DG",
+      "balance": "1580391.80"
+    },
+    {
+      "name": "ICICI BANK NEW DG",
+      "balance": "214238.50"
+    },
+    {
+      "name": "OM ADJUST BANK",
+      "balance": "0"
+    }
+  ]
+}

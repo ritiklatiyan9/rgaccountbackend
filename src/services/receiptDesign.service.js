@@ -3,6 +3,9 @@ import pool from '../config/db.js';
 import applicationSettingModel from '../models/ApplicationSetting.model.js';
 
 export const RECEIPT_DESIGN_KEY = 'receipt_design_v1';
+// A site's own design. Separate key: legacy per-site rows of RECEIPT_DESIGN_KEY
+// are kept only for rollback and must never start applying again.
+export const RECEIPT_SITE_DESIGN_KEY = 'receipt_design_site_v1';
 
 export const RECEIPT_TEMPLATE_IDS = Object.freeze([
   'cash-plain-note', 'cash-plain-slip', 'cash-plain-letter',
@@ -14,12 +17,14 @@ export const RECEIPT_TEMPLATE_IDS = Object.freeze([
   'ruby-banner', 'clean-borderless', 'navy-watermark', 'compact-dual',
   'simple-office', 'simple-green', 'fine-line', 'receipt-book',
   'crafted-heritage', 'artisan-copper', 'sage-letterpress', 'royal-certificate',
+  'official-corporate', 'official-corporate-mono', 'official-government',
+  'official-counterfoil', 'official-legal', 'official-invoice',
 ]);
 
 export const RECEIPT_FIELD_KEYS = Object.freeze([
   'cheque_notice', 'title', 'amount', 'copy_label', 'organization', 'address', 'broker_name', 'broker_phone', 'broker_team', 'receipt_number', 'date', 'party', 'amount_words',
   'payment_mode', 'details', 'declaration', 'qr', 'customer_signature',
-  'authority_signature', 'printed_at', 'evidence',
+  'authority_signature', 'printed_at', 'evidence', 'seal',
 ]);
 
 export const RECEIPT_DETAIL_ITEM_DEFAULTS = Object.freeze([
@@ -95,7 +100,20 @@ const COMMON_FIELDS = Object.freeze({
   authority_signature: true,
   printed_at: true,
   evidence: true,
+  seal: true,
 });
+
+// Mirrors rgaccount/src/lib/receiptDesigner.js DEFAULT_RECEIPT_TERMS.
+const DEFAULT_RECEIPT_TERMS = [
+  'This receipt is valid subject to realisation of the cheque, draft or online transfer.',
+  'Please verify all particulars at the time of receiving this receipt. No claim will be entertained later.',
+  'Payments are adjusted against the booking as per the terms of the allotment letter or agreement.',
+  'Cancellation and refund, if any, are governed by the company policy and applicable law.',
+  'This receipt by itself does not confer any title or ownership in the property.',
+  'A dishonoured cheque attracts charges as applicable and may lead to action under Section 138 of the Negotiable Instruments Act, 1881.',
+  'Quote the receipt number in all correspondence. A duplicate is issued only on written request.',
+  'All disputes are subject to the jurisdiction of the local courts only. E. & O.E.',
+].join('\n');
 
 const modeDefaults = (mode) => {
   const base = baseModeDefaults(mode);
@@ -163,6 +181,12 @@ const baseModeDefaults = (mode) => ({
     evidence: mode !== 'cash',
   },
   name_items: RECEIPT_NAME_ITEM_DEFAULTS.map((item) => ({ ...item })),
+  info_lines: [],
+  back_page: {
+    enabled: false, title: 'Terms & Conditions', intro: '', terms: DEFAULT_RECEIPT_TERMS, two_columns: false,
+    acknowledgement: 'I/We have read and understood the above terms and conditions and accept them.',
+    signature_label: 'Signature of customer', footer: '',
+  },
   detail_items: [
     ...[
       { key: 'plot_no', label: 'Plot No.', sample: 'A-18', enabled: true },
@@ -195,7 +219,9 @@ const baseModeDefaults = (mode) => ({
     original_label: 'ORIGINAL', duplicate_label: 'DUPLICATE', copy_separator: ' · #',
     cheque_status_label: 'Cheque status', cheque_pending_note: 'Pending realization. This is an acknowledgement of the cheque instrument.',
     organization_text: '', address_text: '', broker_empty_label: 'No broker assigned', contact_separator: ' · ',
-
+    seal_label: '(Signature & Seal)', counterfoil_label: 'Counterfoil · Office copy', counterfoil_sign_label: 'Cashier',
+    received_text: 'Received with thanks from', paid_text: 'Paid to', sum_text: 'the sum of', by_text: 'by', towards_text: 'towards',
+    for_text: 'For', note_label: 'Note', sno_label: 'S.No.', details_col_label: 'Details', description_label: 'Description', total_label: 'Total', words_label: 'Amount in words',
   },
 });
 
@@ -233,6 +259,8 @@ const normalizeMode = (value, mode) => {
     ? detailItems
     : detailItems.map((item) => item?.key === 'particulars' ? { ...item, enabled: false } : item);
   const nameItems = Array.isArray(input.name_items) ? input.name_items : [];
+  const infoLines = Array.isArray(input.info_lines) ? input.info_lines : [];
+  const backPage = isObject(input.back_page) ? input.back_page : {};
   const plainCashTemplate = ['cash-plain-note', 'cash-plain-slip', 'cash-plain-letter'].includes(input.template_id);
   const isPlainCash = mode === 'cash' && plainCashTemplate;
 
@@ -275,6 +303,19 @@ const normalizeMode = (value, mode) => {
       .slice(0, 120).map((item) => ({ key: item.key,
         label: cleanText(item.label, item.key, 80), sample: cleanText(item.sample, '', 300), enabled: item.enabled !== false,
       })),
+    info_lines: infoLines.filter(isObject).slice(0, 12).map((line) => ({
+      label: cleanText(line.label, '', 60), value: cleanText(line.value, '', 200),
+    })),
+    back_page: {
+      enabled: backPage.enabled === true,
+      two_columns: backPage.two_columns === true,
+      title: cleanText(backPage.title, defaults.back_page.title, 120),
+      intro: cleanText(backPage.intro, defaults.back_page.intro, 1000),
+      terms: cleanText(backPage.terms, defaults.back_page.terms, 6000),
+      acknowledgement: cleanText(backPage.acknowledgement, defaults.back_page.acknowledgement, 500),
+      signature_label: cleanText(backPage.signature_label, defaults.back_page.signature_label, 80),
+      footer: cleanText(backPage.footer, defaults.back_page.footer, 300),
+    },
     content: Object.fromEntries(Object.entries(defaults.content).map(([key, fallback]) => [key,
       typeof content[key] === 'string' ? content[key].replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').slice(0, 2000) : fallback,
     ])),
@@ -290,8 +331,16 @@ export const normalizeReceiptDesign = (value) => ({
       .filter(mode => isObject(modes[mode])).map(mode => [mode, normalizeMode(modes[mode], mode)]))])),
 });
 
-// Every site reads one app-wide design. Legacy site settings stay intact for rollback.
-export const getReceiptDesign = async () => {
+// A site prints its own design when it has one, otherwise the app-wide design.
+export const getReceiptDesignWithScope = async (siteId) => {
+  const own = siteId ? await applicationSettingModel.getJson(siteId, RECEIPT_SITE_DESIGN_KEY, null) : null;
+  return own ? { design: normalizeReceiptDesign(own), scope: 'site' } : { design: await getSharedReceiptDesign(), scope: 'global' };
+};
+
+export const getReceiptDesign = async (siteId) => (await getReceiptDesignWithScope(siteId)).design;
+
+// Legacy site settings stay intact for rollback.
+const getSharedReceiptDesign = async () => {
   const shared = await applicationSettingModel.getGlobalJson(RECEIPT_DESIGN_KEY, null);
   if (shared) return normalizeReceiptDesign(shared);
   const { rows } = await pool.query(`SELECT a.setting_value FROM application_settings a
@@ -300,7 +349,15 @@ export const getReceiptDesign = async () => {
   return normalizeReceiptDesign(rows[0]?.setting_value || DEFAULT_RECEIPT_DESIGN);
 };
 
-export const saveReceiptDesign = async (_siteId, value, updatedBy) => {
+// scope 'site' saves for one site; 'all' replaces the shared design and retires
+// every site's own design so all sites really print it.
+export const saveReceiptDesign = async (siteId, value, updatedBy, scope = 'all') => {
   const normalized = normalizeReceiptDesign(value);
-  return applicationSettingModel.setGlobalJson(RECEIPT_DESIGN_KEY, normalized, updatedBy);
+  if (scope === 'site') return applicationSettingModel.setJson(siteId, RECEIPT_SITE_DESIGN_KEY, normalized, updatedBy);
+  const saved = await applicationSettingModel.setGlobalJson(RECEIPT_DESIGN_KEY, normalized, updatedBy);
+  await applicationSettingModel.deleteJsonForAllSites(RECEIPT_SITE_DESIGN_KEY);
+  return saved;
 };
+
+export const clearSiteReceiptDesign = (siteId) => applicationSettingModel.deleteJson(siteId, RECEIPT_SITE_DESIGN_KEY);
+export const countSiteReceiptDesigns = () => applicationSettingModel.countJsonSites(RECEIPT_SITE_DESIGN_KEY);

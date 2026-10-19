@@ -10,6 +10,7 @@ import {
   updateSmsReminderSettings,
   getReceiptDesign,
   updateReceiptDesign,
+  deleteSiteReceiptDesign,
   updateFeature,
   getPaymentNotificationSettings,
   updatePaymentNotificationSettings,
@@ -69,5 +70,6 @@ router.put('/payment-notifications', authMiddleware, requireRole('admin'), updat
 // user can read the active site design. Organisation-level edits remain admin-only.
 router.get('/receipt-design', authMiddleware, getReceiptDesign);
 router.put('/receipt-design', authMiddleware, requireRole('admin'), updateReceiptDesign);
+router.delete('/receipt-design', authMiddleware, requireRole('admin'), deleteSiteReceiptDesign);
 
 export default router;

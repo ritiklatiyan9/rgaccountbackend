@@ -113,6 +113,20 @@ class ApplicationSettingModel {
     return rows[0].setting_value;
   }
 
+  async deleteJson(siteId, key) {
+    await pool.query('DELETE FROM application_settings WHERE site_id = $1 AND setting_key = $2', [siteId, key]);
+  }
+
+  /** Remove a per-site JSON setting from every site. */
+  async deleteJsonForAllSites(key) {
+    await pool.query('DELETE FROM application_settings WHERE site_id IS NOT NULL AND setting_key = $1', [key]);
+  }
+
+  async countJsonSites(key) {
+    const { rows } = await pool.query('SELECT count(*)::int AS count FROM application_settings WHERE site_id IS NOT NULL AND setting_key = $1', [key]);
+    return rows[0].count;
+  }
+
   /** Upsert an arbitrary JSON setting. */
   async setJson(siteId, key, value, updatedBy) {
     const { rows } = await pool.query(

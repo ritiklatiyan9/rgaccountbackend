@@ -11,8 +11,10 @@ import {
   PAYMENT_NOTIFICATION_PLACEHOLDERS,
 } from '../services/plotPaymentNotification.service.js';
 import {
-  getReceiptDesign as readReceiptDesign,
+  getReceiptDesignWithScope,
   saveReceiptDesign,
+  clearSiteReceiptDesign,
+  countSiteReceiptDesigns,
   RECEIPT_TEMPLATE_IDS,
   RECEIPT_FIELD_KEYS,
 } from '../services/receiptDesign.service.js';
@@ -265,16 +267,18 @@ export const getReceiptDesign = asyncHandler(async (req, res) => {
   const siteId = await getAccessibleSiteId(req, res, req.query.site_id);
   if (!siteId) return;
 
+  const [{ design, scope }, siteDesigns] = await Promise.all([getReceiptDesignWithScope(siteId), countSiteReceiptDesigns()]);
   res.json({
     site_id: siteId,
-    scope: 'global',
-    design: await readReceiptDesign(siteId),
+    scope,
+    site_designs: siteDesigns,
+    design,
     template_ids: RECEIPT_TEMPLATE_IDS,
     field_keys: RECEIPT_FIELD_KEYS,
   });
 });
 
-/** PUT /settings/receipt-design  Body: { site_id, design } */
+/** PUT /settings/receipt-design  Body: { site_id, design, scope: 'site' | 'all' } */
 export const updateReceiptDesign = asyncHandler(async (req, res) => {
   const siteId = await getAccessibleSiteId(req, res, req.body.site_id);
   if (!siteId) return;
@@ -283,6 +287,19 @@ export const updateReceiptDesign = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'design must be an object' });
   }
 
-  const design = await saveReceiptDesign(siteId, req.body.design, req.user.id);
-  res.json({ site_id: siteId, design, message: 'Receipt designs saved for all sites' });
+  const scope = req.body.scope === 'site' ? 'site' : 'all';
+  const design = await saveReceiptDesign(siteId, req.body.design, req.user.id, scope);
+  res.json({
+    site_id: siteId, scope: scope === 'site' ? 'site' : 'global', site_designs: await countSiteReceiptDesigns(), design,
+    message: scope === 'site' ? 'Receipt design saved for this site' : 'Receipt designs saved for all sites',
+  });
+});
+
+/** DELETE /settings/receipt-design?site_id=123 — the site goes back to the shared design. */
+export const deleteSiteReceiptDesign = asyncHandler(async (req, res) => {
+  const siteId = await getAccessibleSiteId(req, res, req.query.site_id);
+  if (!siteId) return;
+  await clearSiteReceiptDesign(siteId);
+  const [{ design, scope }, siteDesigns] = await Promise.all([getReceiptDesignWithScope(siteId), countSiteReceiptDesigns()]);
+  res.json({ site_id: siteId, scope, site_designs: siteDesigns, design, message: 'This site now uses the shared receipt design' });
 });
