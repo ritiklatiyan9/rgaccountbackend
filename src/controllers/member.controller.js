@@ -634,11 +634,19 @@ export const getMember = asyncHandler(async (req, res) => {
   if (!member) return res.status(404).json({ message: 'Member not found' });
   const site = await assertMemberSiteAccess(pool, req.user, member.site_id);
   if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
-  const plots = await findMemberPlots(member.site_id, pool);
-  const documentUrls = await Promise.all(DOC_FIELDS.map(async (field) => [
-    field, await signMemberDocumentUrl(member[field]),
-  ]));
-  res.json({ member: { ...member, ...Object.fromEntries(documentUrls), plots: plots.get(String(member.id)) || [] } });
+  // Member codes (BRK-00114…) belong to the person, not the per-site copy: the
+  // lowest id among every record with the same mobile, so all sites agree.
+  const [plots, documentUrls, { rows: [code] }] = await Promise.all([
+    findMemberPlots(member.site_id, pool),
+    Promise.all(DOC_FIELDS.map(async (field) => [field, await signMemberDocumentUrl(member[field])])),
+    pool.query(
+      `SELECT MIN(id)::int AS code_id FROM members
+        WHERE LENGTH(RIGHT(REGEXP_REPLACE(COALESCE($1, ''), '[^0-9]', '', 'g'), 10)) = 10
+          AND RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '[^0-9]', '', 'g'), 10)`,
+      [member.phone]
+    ),
+  ]);
+  res.json({ member: { ...member, ...Object.fromEntries(documentUrls), code_id: code?.code_id || member.id, plots: plots.get(String(member.id)) || [] } });
 });
 
 /** GET /members/:id/links?site_id=X&scope=all */
