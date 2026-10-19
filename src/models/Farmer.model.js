@@ -16,7 +16,8 @@ class FarmerModel extends MasterModel {
    */
   async findBySiteId(siteId, pool, creatorId = null) {
     const query = `
-      SELECT f.*,
+      SELECT f.*, f.name AS registered_name,
+        COALESCE(NULLIF(BTRIM(m.full_name), ''), f.name) AS name,
         COALESCE(SUM(fp.amount + fp.tds_amount), 0) AS total_paid,
         COALESCE(SUM(
           CASE
@@ -36,6 +37,7 @@ class FarmerModel extends MasterModel {
         ), 0) AS bank_paid,
         COUNT(fp.id) AS payment_count
       FROM farmers f
+      LEFT JOIN members m ON m.id = f.member_id AND m.site_id = f.site_id
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
         AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
         -- Same sanity window the ledger applies, so a typo'd year cannot make
@@ -43,7 +45,7 @@ class FarmerModel extends MasterModel {
         AND fp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
         AND ($2::text IS NULL OR fp.created_by = ANY(string_to_array($2::text, ',')::int[]))
       WHERE f.site_id = $1
-      GROUP BY f.id
+      GROUP BY f.id, m.id
       ORDER BY f.created_at DESC
     `;
     const result = await pool.query(query, [siteId, creatorId]);
@@ -53,15 +55,17 @@ class FarmerModel extends MasterModel {
   /** Single farmer with payment summary */
   async findByIdWithSummary(id, pool) {
     const query = `
-      SELECT f.*,
+      SELECT f.*, f.name AS registered_name,
+        COALESCE(NULLIF(BTRIM(m.full_name), ''), f.name) AS name,
         COALESCE(SUM(fp.amount + fp.tds_amount), 0) AS total_paid,
         COALESCE(SUM(fp.interest_amount), 0) AS total_interest,
         COUNT(fp.id) AS payment_count
       FROM farmers f
+      LEFT JOIN members m ON m.id = f.member_id AND m.site_id = f.site_id
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
         AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
       WHERE f.id = $1
-      GROUP BY f.id
+      GROUP BY f.id, m.id
     `;
     const result = await pool.query(query, [id]);
     return result.rows[0];
@@ -70,14 +74,16 @@ class FarmerModel extends MasterModel {
   /** All farmers created by a specific user (admin) */
   async findByCreator(userId, pool) {
     const query = `
-      SELECT f.*,
+      SELECT f.*, f.name AS registered_name,
+        COALESCE(NULLIF(BTRIM(m.full_name), ''), f.name) AS name,
         COALESCE(SUM(fp.amount + fp.tds_amount), 0) AS total_paid,
         COUNT(fp.id) AS payment_count
       FROM farmers f
+      LEFT JOIN members m ON m.id = f.member_id AND m.site_id = f.site_id
       LEFT JOIN farmer_payments fp ON fp.farmer_id = f.id
         AND financial_transaction_posts(CASE WHEN fp.amount < 0 THEN 'credit' ELSE 'debit' END, fp.status, fp.payment_mode, fp.cheque_status)
       WHERE f.created_by = $1
-      GROUP BY f.id
+      GROUP BY f.id, m.id
       ORDER BY f.created_at DESC
     `;
     const result = await pool.query(query, [userId]);
