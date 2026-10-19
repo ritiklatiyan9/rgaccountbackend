@@ -1,0 +1,107 @@
+{
+  "reason": "User confirmed these six payments are BANK, not CASH",
+  "before": [
+    {
+      "id": 452,
+      "site_id": 8,
+      "date": "2025-11-19",
+      "payment_mode": "CASH",
+      "amount": "500000.00",
+      "cash_amount": "500000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 453,
+      "site_id": 8,
+      "date": "2025-11-19",
+      "payment_mode": "CASH",
+      "amount": "500000.00",
+      "cash_amount": "500000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 515,
+      "site_id": 8,
+      "date": "2024-05-04",
+      "payment_mode": "CASH",
+      "amount": "-450000.00",
+      "cash_amount": "-450000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 517,
+      "site_id": 8,
+      "date": "2024-05-07",
+      "payment_mode": "CASH",
+      "amount": "-50000.00",
+      "cash_amount": "-50000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 518,
+      "site_id": 8,
+      "date": "2024-05-05",
+      "payment_mode": "CASH",
+      "amount": "-450000.00",
+      "cash_amount": "-450000.00",
+      "bank_amount": "0.00"
+    },
+    {
+      "id": 556,
+      "site_id": 8,
+      "date": "2026-01-25",
+      "payment_mode": "CASH",
+      "amount": "1000000.00",
+      "cash_amount": "1000000.00",
+      "bank_amount": "0.00"
+    }
+  ],
+  "mappingsBefore": [
+    {
+      "source_id": 452,
+      "bank_account_id": 18,
+      "id": 26079,
+      "cash_type": "cash"
+    },
+    {
+      "source_id": 453,
+      "bank_account_id": 18,
+      "id": 26080,
+      "cash_type": "cash"
+    },
+    {
+      "source_id": 515,
+      "bank_account_id": 18,
+      "id": 26148,
+      "cash_type": "cash"
+    },
+    {
+      "source_id": 517,
+      "bank_account_id": 18,
+      "id": 26150,
+      "cash_type": "cash"
+    },
+    {
+      "source_id": 518,
+      "bank_account_id": 18,
+      "id": 26151,
+      "cash_type": "cash"
+    },
+    {
+      "source_id": 556,
+      "bank_account_id": 18,
+      "id": 26190,
+      "cash_type": "cash"
+    }
+  ],
+  "totalsBefore": [
+    {
+      "bucket": "bank",
+      "balance": "1794630.30"
+    },
+    {
+      "bucket": "cash",
+      "balance": "7661125.00"
+    }
+  ]
+}

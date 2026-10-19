@@ -1,0 +1,110 @@
+{
+  "after": [
+    {
+      "id": 453,
+      "payment_mode": "BANK",
+      "amount": "500000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "500000.00"
+    },
+    {
+      "id": 556,
+      "payment_mode": "BANK",
+      "amount": "1000000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "1000000.00"
+    },
+    {
+      "id": 452,
+      "payment_mode": "BANK",
+      "amount": "500000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "500000.00"
+    },
+    {
+      "id": 515,
+      "payment_mode": "BANK",
+      "amount": "-450000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "-450000.00"
+    },
+    {
+      "id": 518,
+      "payment_mode": "BANK",
+      "amount": "-450000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "-450000.00"
+    },
+    {
+      "id": 517,
+      "payment_mode": "BANK",
+      "amount": "-50000.00",
+      "cash_amount": "0.00",
+      "bank_amount": "-50000.00"
+    }
+  ],
+  "ledgerAfter": [
+    {
+      "source_id": 452,
+      "bucket": "bank",
+      "bank_account_id": 18,
+      "debit": "500000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 453,
+      "bucket": "bank",
+      "bank_account_id": 18,
+      "debit": "500000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 515,
+      "bucket": "bank",
+      "bank_account_id": 18,
+      "debit": "-450000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 517,
+      "bucket": "bank",
+      "bank_account_id": 18,
+      "debit": "-50000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 518,
+      "bucket": "bank",
+      "bank_account_id": 18,
+      "debit": "-450000.00",
+      "credit": "0.00"
+    },
+    {
+      "source_id": 556,
+      "bucket": "bank",
+      "bank_account_id": 18,
+      "debit": "1000000.00",
+      "credit": "0.00"
+    }
+  ],
+  "totalsBefore": [
+    {
+      "bucket": "bank",
+      "balance": "1794630.30"
+    },
+    {
+      "bucket": "cash",
+      "balance": "7661125.00"
+    }
+  ],
+  "totalsAfter": [
+    {
+      "bucket": "bank",
+      "balance": "744630.30"
+    },
+    {
+      "bucket": "cash",
+      "balance": "8711125.00"
+    }
+  ]
+}

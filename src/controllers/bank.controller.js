@@ -130,10 +130,15 @@ export const listBankAccounts = asyncHandler(async (req, res) => {
     `SELECT ba.*,
             COALESCE(le.entries, 0)::int      AS entries,
             COALESCE(le.total_debit, 0)::numeric  AS total_debit,
-            COALESCE(le.total_credit, 0)::numeric AS total_credit
+            COALESCE(le.total_credit, 0)::numeric AS total_credit,
+            COALESCE(le.current_bank_balance, 0)::numeric AS current_bank_balance
        FROM bank_accounts ba
        LEFT JOIN LATERAL (
-         SELECT COUNT(*) AS entries, SUM(le.debit) AS total_debit, SUM(le.credit) AS total_credit
+         SELECT COUNT(*) AS entries, SUM(le.debit) AS total_debit, SUM(le.credit) AS total_credit,
+                SUM(le.credit - le.debit) FILTER (
+                  WHERE le.bucket <> 'cash'
+                    AND le.entry_date < ((now() AT TIME ZONE 'Asia/Kolkata')::date + 1)
+                ) AS current_bank_balance
            FROM ledger_entries le
           WHERE le.bank_account_id = ba.id AND le.site_id = ba.site_id
        ) le ON TRUE
