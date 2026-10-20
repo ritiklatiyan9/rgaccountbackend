@@ -21,7 +21,12 @@ class MemberModel extends MasterModel {
 
   /** Lightweight list – only columns needed for the table view */
   async findBySiteIdList(siteId, pool, memberType = null) {
-    let query = `SELECT m.id, m.member_type, COALESCE(m.member_types, ARRAY[m.member_type]) AS member_types, m.full_name, m.father_name, m.phone, m.email,
+    let query = `SELECT m.id,
+      COALESCE((SELECT MIN(code_member.id)::int FROM members code_member
+        WHERE LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(m.phone, ''), '[^0-9]', '', 'g'), 10)) = 10
+          AND RIGHT(REGEXP_REPLACE(COALESCE(code_member.phone, ''), '[^0-9]', '', 'g'), 10)
+            = RIGHT(REGEXP_REPLACE(m.phone, '[^0-9]', '', 'g'), 10)), m.id) AS code_id,
+      m.member_type, COALESCE(m.member_types, ARRAY[m.member_type]) AS member_types, m.full_name, m.father_name, m.phone, m.email,
       m.city, m.state, m.status, m.photo, m.alt_phone, m.whatsapp, m.address, m.pincode,
       m.aadhar_no, m.pan_no, m.voter_id, m.passport_no, m.driving_license_no,
       m.aadhar_front_url, m.aadhar_back_url, m.pan_card_url, m.voter_id_url,
