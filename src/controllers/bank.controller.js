@@ -122,31 +122,38 @@ async function entryTarget(db, sourceKey, sourceId) {
   return result.rows[0];
 }
 
-export const listBankAccounts = asyncHandler(async (req, res) => {
-  const site = await assertSiteAccess(pool, req.user, req.query.site_id);
-  // Per-bank usage figures come from ledger_entries — same policy (approved,
-  // not bounced, sane dates) as every other balance in the app.
-  const { rows } = await pool.query(
-    `SELECT ba.*,
+// Per-bank usage figures come from ledger_entries — same policy (approved,
+// not bounced, sane dates) as every other balance in the app. One grouped
+// pass over the view; a per-bank LATERAL re-scanned it once per account.
+export async function siteBankAccounts(db, siteId) {
+  const { rows } = await db.query(
+    `WITH usage AS (
+       SELECT le.bank_account_id, COUNT(*) AS entries, SUM(le.debit) AS total_debit, SUM(le.credit) AS total_credit,
+              SUM(le.credit - le.debit) FILTER (
+                WHERE le.bucket <> 'cash'
+                  AND le.entry_date < ((now() AT TIME ZONE 'Asia/Kolkata')::date + 1)
+              ) AS current_bank_balance
+         FROM ledger_entries le
+        WHERE le.site_id = $1 AND le.bank_account_id IS NOT NULL
+        GROUP BY le.bank_account_id
+     )
+     SELECT ba.*,
             COALESCE(le.entries, 0)::int      AS entries,
             COALESCE(le.total_debit, 0)::numeric  AS total_debit,
             COALESCE(le.total_credit, 0)::numeric AS total_credit,
             COALESCE(le.current_bank_balance, 0)::numeric AS current_bank_balance
        FROM bank_accounts ba
-       LEFT JOIN LATERAL (
-         SELECT COUNT(*) AS entries, SUM(le.debit) AS total_debit, SUM(le.credit) AS total_credit,
-                SUM(le.credit - le.debit) FILTER (
-                  WHERE le.bucket <> 'cash'
-                    AND le.entry_date < ((now() AT TIME ZONE 'Asia/Kolkata')::date + 1)
-                ) AS current_bank_balance
-           FROM ledger_entries le
-          WHERE le.bank_account_id = ba.id AND le.site_id = ba.site_id
-       ) le ON TRUE
+       LEFT JOIN usage le ON le.bank_account_id = ba.id
       WHERE ba.site_id = $1
       ORDER BY ba.is_active DESC, ba.name ASC`,
-    [site.id]
+    [siteId]
   );
-  res.json({ banks: rows });
+  return rows;
+}
+
+export const listBankAccounts = asyncHandler(async (req, res) => {
+  const site = await assertSiteAccess(pool, req.user, req.query.site_id);
+  res.json({ banks: await siteBankAccounts(pool, site.id) });
 });
 
 export const createBankAccount = asyncHandler(async (req, res) => {

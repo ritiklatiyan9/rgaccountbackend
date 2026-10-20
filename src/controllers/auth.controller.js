@@ -28,6 +28,10 @@ const maskEmail = (email) => {
 /** OTP is opt-in so a broken mail transport cannot lock every admin out. */
 const needsOtp = (user) => LOGIN_OTP_ENABLED && mailerEnabled() && OTP_ROLES.has(user.role);
 
+// Per-app switch from User ID Management (migration 221). Gates sign-in only:
+// the Accountancy copy inside dgbooking.com reuses Booking sessions on purpose.
+const ACCOUNTS_LOGIN_DENIED = 'This ID is not allowed to sign in to Defence Garden Accounts. Contact your admin.';
+
 /**
  * Everything a successful sign-in returns (tokens + sites + permissions + session).
  * Shared by password login, Google login and the OTP verification step so all three
@@ -179,6 +183,9 @@ export const login = asyncHandler(async (req, res) => {
   if (!user.is_active) {
     return res.status(403).json({ message: 'Account is deactivated. Contact your admin.' });
   }
+  if (user.can_login_accounts === false) {
+    return res.status(403).json({ message: ACCOUNTS_LOGIN_DENIED });
+  }
 
   // Admin-class roles confirm a 6-digit code emailed to the account's address
   // before any tokens are issued (second authentication step).
@@ -231,6 +238,9 @@ export const googleLogin = asyncHandler(async (req, res) => {
   if (!user.is_active) {
     return res.status(403).json({ message: 'Account is deactivated. Contact your admin.' });
   }
+  if (user.can_login_accounts === false) {
+    return res.status(403).json({ message: ACCOUNTS_LOGIN_DENIED });
+  }
 
   if (needsOtp(user)) return startOtpChallenge(user, res);
 
@@ -277,6 +287,10 @@ export const verifyLoginOtp = asyncHandler(async (req, res) => {
   if (!user || !user.is_active) {
     await pool.query('DELETE FROM login_otps WHERE id = $1', [challenge.id]);
     return res.status(403).json({ message: 'Account is deactivated. Contact your admin.' });
+  }
+  if (user.can_login_accounts === false) {
+    await pool.query('DELETE FROM login_otps WHERE id = $1', [challenge.id]);
+    return res.status(403).json({ message: ACCOUNTS_LOGIN_DENIED });
   }
 
   await pool.query('UPDATE login_otps SET consumed_at = now() WHERE id = $1', [challenge.id]);

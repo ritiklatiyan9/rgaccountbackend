@@ -6,6 +6,7 @@ import {
 	listSubAdmins,
 	updateSubAdmin,
 	deleteSubAdmin,
+	permanentlyDeleteManagedUser,
 	listApprovers,
 	updateManagedUserAccess,
 	resetManagedUserPassword,
@@ -34,6 +35,7 @@ router.post('/sub-admins', bustAdminCache, createSubAdmin);
 router.get('/sub-admins', adminReadCache, listSubAdmins);
 router.put('/sub-admins/:id', bustAdminCache, updateSubAdmin);
 router.delete('/sub-admins/:id', bustAdminCache, deleteSubAdmin);
+router.delete('/sub-admins/:id/permanent', bustAdminCache, permanentlyDeleteManagedUser);
 router.patch('/sub-admins/:id/access', bustAdminCache, updateManagedUserAccess);
 router.post('/sub-admins/:id/reset-password', bustAdminCache, resetManagedUserPassword);
 

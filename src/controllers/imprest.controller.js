@@ -17,6 +17,7 @@ import { uploadPlotDoc, getPlotDocUrl, deletePlotDoc } from '../utils/plotDocSto
 import pool from '../config/db.js';
 import { getAccessibleSiteBalances, getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 import { adminWalletCashStates } from '../services/adminWalletCash.service.js';
+import { siteBankAccounts } from './bank.controller.js';
 
 // ── Camera-proof helpers (same S3/local store as document imprest) ──
 const IMPREST_PROOF_PREFIX = 'imprest';
@@ -79,16 +80,20 @@ const indiaTomorrow = () => {
     .toISOString().slice(0, 10);
 };
 /** What the Admin can hand out right now, after every custody reservation. */
-const siteDistributable = async (db, siteId) => {
+const siteDistributable = async (db, siteId, onWalletStates = null) => {
   // Use the caller's connection so the advisory lock, ledger snapshot and
   // reservations are all observed inside the same transaction. Stop after
   // today in the business timezone so future-dated transactions cannot fund
   // (or block) an imprest distribution prematurely.
-  const detail = await getSiteBalanceDetail(siteId, '1900-01-01', indiaTomorrow(), db);
+  const [detail, site] = await Promise.all([
+    getSiteBalanceDetail(siteId, '1900-01-01', indiaTomorrow(), db),
+    db.query('SELECT organization_id FROM sites WHERE id=$1', [siteId]),
+  ]);
   const round2 = (v) => Math.round(v * 100) / 100;
   const pendingReservations = round2(detail.pendingImprestReservations);
-  const organizationId = (await db.query('SELECT organization_id FROM sites WHERE id=$1', [siteId])).rows[0]?.organization_id;
+  const organizationId = site.rows[0]?.organization_id;
   const wallets = organizationId ? await adminWalletCashStates(organizationId, siteId, db, detail) : new Map();
+  onWalletStates?.(wallets);
   // Cash accepted out of the site's cash wallet cannot also fund imprest.
   const distributableBalance = round2(Math.min(detail.distributableBalance,
     ...[...wallets.values()].map(wallet => Number(wallet.available_balance))));
@@ -108,13 +113,55 @@ const siteDistributable = async (db, siteId) => {
   };
 };
 
-/** GET /imprest/site-balance?site_id=X — the pool imprest is distributed from. */
+// Who physically holds the site's cash. Raw wallet sums per holder; the
+// aligned Admin wallet is replaced by its cash-in-hand state so the rows plus
+// imprest plus pending handovers reconcile to ledger Cash. Other wallets count
+// only when positive, exactly as adminWalletCashStates' other_wallet_cash.
+const siteCashHolders = async (siteId) => {
+  const { rows } = await pool.query(
+    `SELECT e.holder_key, u.role,
+            COALESCE(NULLIF(TRIM(u.name), ''), NULLIF(TRIM(m.full_name), ''), e.holder_key) AS name,
+            SUM(e.amount)::numeric AS balance
+       FROM loyalty_vault_entries e
+       LEFT JOIN users u ON e.holder_type = 'user' AND u.id = e.holder_id
+       LEFT JOIN members m ON e.holder_type = 'member' AND m.id = e.holder_id
+      WHERE e.site_id = $1 AND e.organization_id = (SELECT organization_id FROM sites WHERE id = $1)
+      GROUP BY e.holder_key, u.role, u.name, m.full_name
+     HAVING SUM(e.amount) <> 0`,
+    [siteId]
+  );
+  return rows;
+};
+
+/** GET /imprest/site-balance?site_id=X — the pool imprest is distributed from.
+ *  `detail=1` (Admin roles) adds the Dashboard breakdown — cash holders,
+ *  staff imprest accounts and bank balances — in this one round trip. */
 export const getSiteBalance = asyncHandler(async (req, res) => {
   const siteId = req.imprestSiteId || parseInt(req.query.site_id);
   if (!siteId) return res.status(400).json({ message: 'Site is required' });
-  const numbers = await siteDistributable(pool, siteId);
+  const withDetail = req.query.detail === '1' && ADMIN_ROLES.has(req.user.role);
+  let states = new Map();
+  const [numbers, holders, imprestAccounts, banks] = await Promise.all([
+    siteDistributable(pool, siteId, (wallets) => { states = wallets; }),
+    withDetail ? siteCashHolders(siteId) : null,
+    withDetail ? imprestLedgerModel.getAllBalances(siteId, pool) : null,
+    withDetail ? siteBankAccounts(pool, siteId) : null,
+  ]);
+  const breakdown = withDetail ? {
+    cash_holders: holders
+      .map(({ holder_key, name, role, balance }) => ({
+        holder_key, name, role,
+        admin_wallet: states.has(holder_key),
+        balance: Math.round(Number(states.get(holder_key)?.balance ?? balance) * 100) / 100,
+      }))
+      .filter((row) => row.admin_wallet || row.balance > 0)
+      .sort((a, b) => b.admin_wallet - a.admin_wallet || b.balance - a.balance),
+    imprest_accounts: imprestAccounts,
+    banks,
+  } : {};
   res.json({
     ...numbers,
+    ...breakdown,
     can_distribute: DISTRIBUTOR_ROLES.has(req.user.role),
     observer: req.user.role === 'super_admin',
     funding_hint: numbers.available <= 0 ? FUNDING_HINT : null,

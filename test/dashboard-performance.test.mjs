@@ -18,7 +18,7 @@ const querySource = name => frontendQueries.match(new RegExp(`export const ${nam
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function fixture(sql) {
-  if (sql.includes('source_key AS source_type')) return [{ source_type: 'expenses', total_debit: 300, txn_count: 2 }];
+  if (sql.includes('source_key AS source_type')) return [{ source_type: 'expenses', total_debit: 300, txn_count: 2, period_rows: 2, running_total: 300 }];
   if (sql.includes('AS final_sale_value')) return [{ final_sale_value: 1000, sale_value: 1000,
     received: 600, matched_received: 600, remaining: 400, plot_count: 1 }];
   if (sql.includes('FROM sold_deals')) return [{ sale_value: 100, purchase_cost: 50, book_profit: 50,
@@ -31,7 +31,7 @@ function fixture(sql) {
   return [{ total: 300 }];
 }
 
-test('the actual dashboard query runs seven KPI groups and preserves the financial formulas', async () => {
+test('the actual dashboard query runs six KPI groups and preserves the financial formulas', async () => {
   await clearCacheByPrefixes(['dashboard:']);
   const originalQuery = pool.query;
   const originalRegistries = plotRegistryModel.findBySiteId;
@@ -42,7 +42,7 @@ test('the actual dashboard query runs seven KPI groups and preserves the financi
     const execute = () => graphql({ schema, source: querySource('GET_KPI_CARDS'), contextValue, variableValues });
     const result = await execute();
     assert.equal(result.errors, undefined);
-    assert.equal(reads.length, 7, 'unused KPI groups and duplicated TDS/partner summaries do not run');
+    assert.equal(reads.length, 6, 'unused KPI groups, duplicated TDS/partner summaries and a second expense pass do not run');
     assert.ok(reads.every(read => read.params[0] === 5));
     const kpi = result.data.kpiCards;
     assert.equal(kpi.expectedProfit, 770);
@@ -54,11 +54,11 @@ test('the actual dashboard query runs seven KPI groups and preserves the financi
     assert.equal(kpi.breakdown, undefined, 'expense details are loaded only when opened');
     assert.equal(kpi.imprestDistribution, undefined);
     assert.deepEqual(await execute(), result);
-    assert.equal(reads.length, 7, 'a repeat load is served without more SQL');
+    assert.equal(reads.length, 6, 'a repeat load is served without more SQL');
 
     await clearCacheByPrefixes(['dashboard:']);
     await execute();
-    assert.equal(reads.length, 14, 'a successful mutation invalidates the report');
+    assert.equal(reads.length, 12, 'a successful mutation invalidates the report');
   } finally {
     pool.query = originalQuery;
     plotRegistryModel.findBySiteId = originalRegistries;

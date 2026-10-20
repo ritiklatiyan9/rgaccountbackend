@@ -109,7 +109,7 @@ export const createSubAdmin = asyncHandler(async (req, res) => {
 export const listSubAdmins = asyncHandler(async (req, res) => {
   // Show all non-super_admin users
   const result = await pool.query(
-    `SELECT id, name, email, phone, photo, role, is_active, created_at, updated_at
+    `SELECT id, name, email, phone, photo, role, is_active, can_login_accounts, can_login_booking, created_at, updated_at
      FROM users
      WHERE role IN ('admin', 'sub_admin')
      ORDER BY created_at DESC`
@@ -139,25 +139,39 @@ export const updateSubAdmin = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Managed user not found' });
   }
 
+  const updateData = {};
   if (role !== undefined) {
     const normalizedRole = normalizeRole(role);
     if (!normalizedRole) {
       return res.status(400).json({ message: 'Role must be admin or sub_admin' });
     }
+    if (normalizedRole !== managedUser.role) {
+      if (managedUser.id === req.user.id) {
+        return res.status(400).json({ message: 'You cannot change your own role' });
+      }
+      updateData.role = normalizedRole;
+      // Role is carried in the JWT, so end old sessions for it to apply at once.
+      updateData.token_version = (managedUser.token_version || 1) + 1;
+    }
   }
 
-  const updateData = {};
+  if (email) {
+    const clash = await userModel.findByEmail(email, pool);
+    if (clash && clash.id !== managedUser.id) {
+      return res.status(400).json({ message: 'Another user already uses this email' });
+    }
+    updateData.email = String(email).trim();
+  }
   if (name) updateData.name = name;
-  if (email) updateData.email = email;
   if (phone !== undefined) updateData.phone = phone;
   if (password) updateData.password = await hashPassword(password);
   if (typeof is_active === 'boolean') updateData.is_active = is_active;
-  if (role !== undefined) updateData.role = normalizeRole(role);
 
   let updatedUser = managedUser;
   if (Object.keys(updateData).length > 0) {
     updatedUser = await userModel.update(parseInt(id, 10), updateData, pool);
   }
+  if (updateData.role === 'sub_admin') await permissionModel.createDefaults(managedUser.id);
 
   if (Array.isArray(site_ids)) {
     await pool.query('DELETE FROM user_sites WHERE user_id = $1', [parseInt(id, 10)]);
@@ -188,18 +202,29 @@ export const deleteSubAdmin = asyncHandler(async (req, res) => {
 
 /**
  * PATCH /admin/sub-admins/:id/access
- * Block or unblock managed user access.
+ * Body: any of { is_active, can_login_accounts, can_login_booking } (booleans).
+ * is_active blocks the ID everywhere; the other two gate sign-in per frontend:
+ * Accounts = dgdefence.com (this backend), Booking = dgbooking.com (sales-backend).
  */
+const ACCESS_FIELDS = ['is_active', 'can_login_accounts', 'can_login_booking'];
+
 export const updateManagedUserAccess = asyncHandler(async (req, res) => {
   const targetUserId = parseInt(req.params.id, 10);
-  const { is_active } = req.body;
 
   if (!Number.isInteger(targetUserId)) {
     return res.status(400).json({ message: 'Invalid user id' });
   }
 
-  if (typeof is_active !== 'boolean') {
-    return res.status(400).json({ message: 'is_active must be boolean' });
+  const updates = {};
+  for (const field of ACCESS_FIELDS) {
+    if (req.body[field] === undefined) continue;
+    if (typeof req.body[field] !== 'boolean') {
+      return res.status(400).json({ message: `${field} must be boolean` });
+    }
+    updates[field] = req.body[field];
+  }
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ message: `Send one of ${ACCESS_FIELDS.join(', ')}` });
   }
 
   if (targetUserId === req.user.id) {
@@ -211,17 +236,91 @@ export const updateManagedUserAccess = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: 'Managed user not found' });
   }
 
-  const updated = await userModel.update(targetUserId, { is_active }, pool);
+  const updated = await userModel.update(targetUserId, updates, pool);
 
-  // If blocked, close active sessions immediately.
-  if (!is_active) {
+  // Blocking, or closing Accounts sign-in, ends open dgdefence.com sessions now.
+  // Booking sessions end on their next request (sales-backend checks can_login_booking).
+  if (updates.is_active === false || updates.can_login_accounts === false) {
     await pool.query(
       'UPDATE user_sessions SET logout_time = CURRENT_TIMESTAMP WHERE user_id = $1 AND logout_time IS NULL',
       [targetUserId]
     );
   }
 
-  res.json({ user: userModel.sanitize(updated), message: is_active ? 'User unblocked successfully' : 'User blocked successfully' });
+  const message = updates.is_active === undefined
+    ? 'Login access updated'
+    : updates.is_active ? 'User unblocked successfully' : 'User blocked successfully';
+  res.json({ user: userModel.sanitize(updated), message });
+});
+
+// Rows that only describe the login itself; they are removed with the user
+// (all ON DELETE CASCADE). Any other row pointing at the user is history.
+const LOGIN_ONLY_TABLES = new Set([
+  'user_sites', 'user_permissions', 'user_sessions', 'user_approval_modules',
+  'dashboard_component_permissions', 'user_home_layouts', 'login_otps',
+  'user_push_tokens', 'booking_staff_identities', 'booking_user_kyc_links',
+]);
+
+/**
+ * DELETE /admin/sub-admins/:id/permanent
+ * Hard-deletes an ID that has never touched data. Many FKs to users CASCADE
+ * (imprest ledger, chats) or SET NULL (created_by/approved_by on every money
+ * table), so deleting an ID with history would silently erase or orphan it —
+ * those are refused with 409 and should be blocked instead.
+ */
+export const permanentlyDeleteManagedUser = asyncHandler(async (req, res) => {
+  const targetUserId = parseInt(req.params.id, 10);
+  if (!Number.isInteger(targetUserId)) {
+    return res.status(400).json({ message: 'Invalid user id' });
+  }
+  if (targetUserId === req.user.id) {
+    return res.status(400).json({ message: 'You cannot delete your own ID' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // FOR UPDATE also blocks new rows referencing this user until we finish.
+    const { rows: [user] } = await client.query(
+      "SELECT id, name, role FROM users WHERE id = $1 AND role IN ('admin', 'sub_admin') FOR UPDATE",
+      [targetUserId]
+    );
+    if (!user) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Managed user not found' });
+    }
+
+    // ponytail: one EXISTS probe per FK column (~280, some unindexed) — fine for a rare admin action.
+    const { rows: refs } = await client.query(`
+      SELECT c.conrelid::regclass::text AS tbl,
+             format('SELECT %L AS tbl WHERE EXISTS (SELECT 1 FROM %s WHERE %I = $1)',
+                    c.conrelid::regclass::text, c.conrelid::regclass, a.attname) AS probe
+        FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+       WHERE c.contype = 'f' AND c.confrelid = 'users'::regclass`);
+    const probes = refs.filter((r) => !LOGIN_ONLY_TABLES.has(r.tbl)).map((r) => r.probe);
+    const { rows: used } = probes.length
+      ? await client.query(probes.join(' UNION ALL '), [targetUserId])
+      : { rows: [] };
+
+    if (used.length) {
+      await client.query('ROLLBACK');
+      const tables = [...new Set(used.map((r) => r.tbl.replace(/_/g, ' ')))];
+      return res.status(409).json({
+        message: `${user.name} (#${user.id}) has records in ${tables.slice(0, 5).join(', ')}${tables.length > 5 ? ` and ${tables.length - 5} more` : ''}. IDs with history cannot be deleted — block it instead.`,
+        tables,
+      });
+    }
+
+    await client.query('DELETE FROM users WHERE id = $1', [targetUserId]);
+    await client.query('COMMIT');
+    res.json({ message: `${user.name} (#${user.id}) deleted permanently` });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 /**

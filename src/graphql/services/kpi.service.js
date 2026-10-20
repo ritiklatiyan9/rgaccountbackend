@@ -267,12 +267,15 @@ export async function getLandRevenue(siteId, start, end) {
 // Refunds and transfer offsets can use either a signed debit or a positive
 // credit. Net both columns so the operating cost agrees with the module's
 // remaining payment balance and with the shared site ledger.
-export async function getExpenseBreakdown(siteId, start, end) {
+// `withRunning` also returns getRunningExpense's total (same rows, no lower
+// date bound) from this one ledger pass instead of a second one.
+export async function getExpenseBreakdown(siteId, start, end, withRunning = false) {
+  const from = (alias) => (withRunning ? '' : `AND ${alias}.entry_date >= $2`);
   const { rows } = await pool.query(
     `WITH expenses AS (
        SELECT le.source_key, le.site_id, le.entry_date, le.debit - le.credit AS cost, 1 AS txn_count
          FROM ledger_entries le
-        WHERE le.site_id = $1 AND le.entry_date >= $2 AND le.entry_date < $3
+        WHERE le.site_id = $1 ${from('le')} AND le.entry_date < $3
           AND (le.debit <> 0 OR le.credit <> 0)
           AND le.source_key NOT IN (
             'firm_transactions', 'personal_ledger', 'plot_payments',
@@ -283,22 +286,28 @@ export async function getExpenseBreakdown(siteId, start, end) {
        UNION ALL
        SELECT t.source_key, t.site_id, t.entry_date, t.tds_amount AS cost, 0 AS txn_count
          FROM (${OPERATING_TDS_SQL}) t
-        WHERE t.site_id = $1 AND t.entry_date >= $2 AND t.entry_date < $3
+        WHERE t.site_id = $1 ${from('t')} AND t.entry_date < $3
      )
-     SELECT source_key AS source_type, COALESCE(SUM(cost), 0)::numeric AS total_debit,
-            SUM(txn_count)::int AS txn_count
+     SELECT source_key AS source_type,
+            COALESCE(SUM(cost) FILTER (WHERE entry_date >= $2), 0)::numeric AS total_debit,
+            COALESCE(SUM(txn_count) FILTER (WHERE entry_date >= $2), 0)::int AS txn_count,
+            COUNT(*) FILTER (WHERE entry_date >= $2)::int AS period_rows,
+            COALESCE(SUM(cost), 0)::numeric AS running_total
        FROM expenses GROUP BY source_key`,
     [siteId, start, end]
   );
 
   const breakdown = {};
   let total = 0;
+  let running = 0;
   for (const r of rows) {
+    running += parseFloat(r.running_total) || 0;
+    if (!r.period_rows) continue;
     const val = parseFloat(r.total_debit) || 0;
     breakdown[r.source_type] = { debit: val, count: parseInt(r.txn_count) || 0 };
     total += val;
   }
-  return { total, breakdown };
+  return withRunning ? { total, breakdown, running: roundMoney(running) } : { total, breakdown };
 }
 
 // Expense stock through the selected end. This intentionally shares the exact
@@ -813,6 +822,8 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false, re
     || [...requestedFields].some(field => field.startsWith('registryPayments') || field.startsWith('registryRo'));
   const needsTds = needs('tds', 'siteBalanceDetail.tdsPayable', 'siteBalanceDetail.tdsWithCa',
     'siteBalanceDetail.tdsReserve', 'siteBalanceDetail.availableBalance');
+  const needsExpenses = needs('totalExpense', 'netProfit', 'profitMargin', 'breakdown');
+  const needsRunning = needs('runningExpense', ...profitFields);
   const [
     revenue,
     expData,
@@ -827,14 +838,13 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false, re
     miscIncome,
     plotIncoming,
     landProfitDetail,
-    runningExpense,
+    runningOnly,
     landRevenue,
     partnerProfitPaid,
     tds,
   ] = await Promise.all([
     needs(...periodProfitFields) ? getRevenue(siteId, start, end, excludeOldPlots) : 0,
-    needs('totalExpense', 'netProfit', 'profitMargin', 'breakdown')
-      ? getExpenseBreakdown(siteId, start, end) : { total: 0, breakdown: {} },
+    needsExpenses ? getExpenseBreakdown(siteId, start, end, needsRunning) : { total: 0, breakdown: {} },
     needs('cashflow', 'cashflowDetail') ? getSiteCashflow(siteId, start, end) : {},
     needs('outstanding', 'outstandingDetail') ? getOutstanding(siteId, start, end) : {},
     needs('personalLedgerCredit') ? getPersonalLedgerCredit(siteId, start, end) : 0,
@@ -848,13 +858,14 @@ export async function getAllKpis(siteId, start, end, excludeOldPlots = false, re
       : { finalSaleValue: 0, received: 0 },
     needs('landProfitDetail', ...profitFields) ? getLandProfitDetail(siteId, end)
       : { bookProfit: 0, purchaseCostAlreadyExpensed: 0, received: 0 },
-    needs('runningExpense', ...profitFields) ? getRunningExpense(siteId, end) : 0,
+    needsRunning && !needsExpenses ? getRunningExpense(siteId, end) : 0,
     needs(...periodProfitFields) ? getLandRevenue(siteId, start, end) : { credit: 0 },
     needs('partnerProfitPaid') ? getPartnerProfitPaid(siteId, end, pool) : 0,
     needsTds ? getTdsSummary(siteId, { asOf: tdsCutoff(end), dateFrom: start, dateTo: tdsCutoff(end) }, pool)
       : { payable: 0, with_ca: 0, reserve: 0 },
   ]);
 
+  const runningExpense = expData.running ?? runningOnly;
   const { expectedProfit, currentProfit } = profitFrom(plotIncoming, landProfitDetail, runningExpense);
   const currentReceipts = plotIncoming.received + landProfitDetail.received;
   const currentProfitMargin = currentReceipts > 0 ? (currentProfit / currentReceipts) * 100 : 0;

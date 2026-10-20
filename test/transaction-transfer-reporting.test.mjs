@@ -165,6 +165,11 @@ test('transfer offsets reconcile module summaries and the dated site balance', {
       assert.equal(expense.breakdown.plot_commission_payments.debit, 400);
       assert.equal(expense.breakdown.expenses.debit, 300);
       assert.equal(await getRunningExpense(1, '2026-11-01'), 1800);
+      // The dashboard's single pass returns the same period rows plus the running stock.
+      const merged = await getExpenseBreakdown(1, '2026-10-25', '2026-11-01', true);
+      assert.equal(merged.running, 1800);
+      assert.equal(merged.total, -1100);
+      assert.deepEqual(merged.breakdown, (await getExpenseBreakdown(1, '2026-10-25', '2026-11-01')).breakdown);
     });
 
     await t.test('land revenue and profit use net buyer receipts and net farmer payments', async () => {
