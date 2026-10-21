@@ -17,7 +17,8 @@ if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
 
 const s3Client = new S3Client(s3Config);
 
-export const uploadToS3 = async (filePath, fileName, contentType) => {
+// `folderOverride` keeps a module's files under its own prefix (signing is prefix-checked).
+export const uploadToS3 = async (filePath, fileName, contentType, folderOverride) => {
   const fileStream = fs.createReadStream(filePath);
   const bucket = process.env.AWS_S3_BUCKET_NAME || process.env.AWS_S3_BUCKET;
   const region = process.env.AWS_REGION || 'ap-south-1';
@@ -25,7 +26,7 @@ export const uploadToS3 = async (filePath, fileName, contentType) => {
   let folder = 'uploads';
   if (['jpg','jpeg','png','webp'].includes(ext)) folder = 'vouchers';
   else if (['pdf'].includes(ext)) folder = 'vouchers';
-  const uniqueKey = `${folder}/${Date.now()}-${fileName}`;
+  const uniqueKey = `${folderOverride || folder}/${Date.now()}-${fileName}`;
 
   // Use multipart upload to avoid MaxMessageLengthExceeded
   const upload = new Upload({
