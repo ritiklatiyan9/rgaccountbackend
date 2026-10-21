@@ -259,6 +259,7 @@ const LOGIN_ONLY_TABLES = new Set([
   'user_sites', 'user_permissions', 'user_sessions', 'user_approval_modules',
   'dashboard_component_permissions', 'user_home_layouts', 'login_otps',
   'user_push_tokens', 'booking_staff_identities', 'booking_user_kyc_links',
+  'seek_permission_access',
 ]);
 
 /**

@@ -69,6 +69,7 @@ import walletRoutes from './wallet.routes.js';
 import loyaltyVaultRoutes from './loyaltyVault.routes.js';
 import backupRoutes from './backup.routes.js';
 import transactionDocumentationRoutes from './transactionDocumentation.routes.js';
+import seekPermissionRoutes from './seekPermission.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -145,4 +146,5 @@ router.use('/wallet', walletRoutes);
 router.use('/loyalty-vault', loyaltyVaultRoutes);
 router.use('/backups', backupRoutes);
 router.use('/transaction-documentation', transactionDocumentationRoutes);
+router.use('/seek-permissions', seekPermissionRoutes);
 export default router;
