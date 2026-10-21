@@ -8,7 +8,7 @@ import authMiddleware from '../middlewares/auth.middleware.js';
 
 const router = express.Router();
 
-// Public destination used by defencegarden.com after a receipt QR is scanned.
+// Public JSON check behind a receipt QR (the page itself lives on dgbooking.com/verify-receipt).
 // Keep this before any authenticated receipt routes.
 router.get('/verify', verifyPublicReceipt);
 
