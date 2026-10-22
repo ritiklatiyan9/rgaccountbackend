@@ -18,7 +18,9 @@ import requireRole from '../middlewares/role.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const siteReadCache = cacheResponse({ ttlSeconds: 60, namespace: 'sites' });
-const bustSiteCache = invalidateCacheOnSuccess(['/sites']);
+// A site's "Show in overall" switch also changes the all-sites commission and
+// personal-ledger portfolios (site-profit and dashboard are always busted).
+const bustSiteCache = invalidateCacheOnSuccess(['/sites', 'plot-commissions|', 'cashflow|']);
 
 // All site routes require auth
 router.use(authMiddleware);

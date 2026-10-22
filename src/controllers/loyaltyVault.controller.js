@@ -11,6 +11,7 @@ import { walletHistoryJoins as historyJoins, walletHistorySelect as historySelec
 import { adminWalletCashStates, walletWithCashInHand } from '../services/adminWalletCash.service.js';
 import { canViewAllWallets, withWalletVisibility } from '../services/walletVisibility.service.js';
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
+import { getOverallWalletOverview } from '../services/overallWallet.service.js';
 
 async function walletReadActor(req) {
   const user = req.authenticatedUser && Number(req.authenticatedUser.id) === Number(req.user?.id)
@@ -23,6 +24,11 @@ async function walletReadActor(req) {
   if (actor.wallet_can_read === false && !sourcePicker) throw walletError('Cash Wallet access is disabled for your account.', 403);
   return actor;
 }
+
+export const overall = asyncHandler(async (req, res) => {
+  const actor = await walletReadActor(req);
+  res.set('Cache-Control', 'no-store').json(await getOverallWalletOverview(actor));
+});
 
 export const siteBalance = asyncHandler(async (req, res) => {
   const actor = await walletReadActor(req);

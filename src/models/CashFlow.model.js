@@ -69,6 +69,9 @@ class CashFlowMonthModel extends MasterModel {
       ) agg ON TRUE
       WHERE (cfm.site_id = $1 OR ($1::int IS NULL AND $3::boolean))
         AND (NOT $3::boolean OR cfm.ledger_type = 'person')
+        -- The all-sites portfolio (no site given) leaves out sites switched off on
+        -- the Sites page; a site's own Personal Ledger report keeps them.
+        AND ($1::int IS NOT NULL OR s.include_in_overall)
       ORDER BY cfm.year DESC, cfm.month DESC, cfm.ledger_name ASC
     `;
     const result = await pool.query(query, [siteId, creatorId, personalPortfolio]);

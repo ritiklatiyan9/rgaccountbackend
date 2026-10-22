@@ -2,7 +2,7 @@ import { Router } from 'express';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
-import { summary,siteBalance,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer,userDetail,assignedTransactions } from '../controllers/loyaltyVault.controller.js';
+import { summary,overall,siteBalance,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer,userDetail,assignedTransactions } from '../controllers/loyaltyVault.controller.js';
 const router=Router();
 let ready = false;
 let readiness = null;
@@ -22,6 +22,7 @@ router.use(asyncHandler(async(req,res,next)=>{
   next();
 }));
 router.get('/',summary);
+router.get('/overall',overall);
 router.get('/site-balance',siteBalance);
 router.get('/holders',holders);
 router.get('/users/:id',userDetail);

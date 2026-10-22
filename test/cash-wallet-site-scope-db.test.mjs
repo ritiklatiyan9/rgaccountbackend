@@ -378,6 +378,11 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
         assert.equal(Number(value.recorded_balance),4500000);assert.equal(value.cash_in_hand_basis,'SITE_CASH_AFTER_IMPREST');
       }
       assert.equal(Number(projected.total_balance),4300000);
+      const overallWallet=await invoke(controller.overall,{site:null});
+      const overallSite=overallWallet.sites.find(site=>site.site_id===12);
+      assert.equal(overallSite.holders.find(user=>user.holder_id===2).balance,holder.balance,'all-site balances reuse the current cash-in-hand correction');
+      assert.equal(overallSite.balance,'4300000.00');
+      assert.equal(overallWallet.sites.find(site=>site.site_id===13).holders.find(user=>user.holder_id===2).balance,'150.00');
       await assert.rejects(createVaultTransfer({id:2},transfer('4300000.01',12,1),db),status(409));
       const requested=await createVaultTransfer({id:2},transfer('4300000',12,1),db);
       await query('INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,100000)');

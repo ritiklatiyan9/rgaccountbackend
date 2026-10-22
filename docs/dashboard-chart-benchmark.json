@@ -1,0 +1,442 @@
+{
+  "generated_at": "2026-10-22T17:44:40.570Z",
+  "engine": "PGlite 0.3.15 (isolated PostgreSQL WASM)",
+  "fixture": {
+    "source_tables": 8,
+    "rows_per_source": 30000,
+    "sites": 3,
+    "ledger_rows": 30000,
+    "table_rows_total": 360000,
+    "network_latency_ms": 0,
+    "concurrent_queries": 1
+  },
+  "cache": "3 warm-up executions per variant; application cache bypassed; alternating baseline/optimized order",
+  "caveat": "Synthetic SQL latency and plan comparison, not production API latency. The ledger is a fixture table, not the application view. PGlite uses one execution worker. No configured application database connection or migration is used.",
+  "baseline": {
+    "samples": 48,
+    "p50_ms": 73.84,
+    "p95_ms": 89.63,
+    "minimum_ms": 66.89,
+    "maximum_ms": 108.87
+  },
+  "optimized": {
+    "samples": 48,
+    "p50_ms": 42.69,
+    "p95_ms": 53.5,
+    "minimum_ms": 38.86,
+    "maximum_ms": 66.45
+  },
+  "identical_chart_rows": 6,
+  "payload_bytes": 564,
+  "plans": {
+    "baseline": {
+      "planning_ms": 2.54,
+      "execution_ms": 127.56,
+      "scans": [
+        {
+          "relation": "plots",
+          "type": "Index Only Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "plot_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 179
+        },
+        {
+          "relation": "plot_installment_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "plots",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "land_deal_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "land_deals",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "farmer_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "farmers",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 216
+        },
+        {
+          "relation": "expenses",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "plot_commission_payments",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "vendor_payments",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "vendor_inventory_payments",
+          "type": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "plots",
+          "type": "Index Only Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "plot_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 179
+        },
+        {
+          "relation": "plot_installment_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "plots",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "land_deal_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "land_deals",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "farmer_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "farmers",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 216
+        },
+        {
+          "relation": "expenses",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "plot_commission_payments",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "vendor_payments",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "vendor_inventory_payments",
+          "type": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "ledger_entries",
+          "type": "Seq Scan",
+          "rows": 5000,
+          "loops": 1,
+          "shared_hit_blocks": 281
+        },
+        {
+          "relation": "tds_settlements",
+          "type": "Seq Scan",
+          "rows": 0,
+          "loops": 1,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "tds_accounting_deductions",
+          "type": "Seq Scan",
+          "rows": 0,
+          "loops": 1,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "ledger_entries",
+          "type": "Seq Scan",
+          "rows": 0,
+          "loops": 0,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "tds_settlements",
+          "type": "Seq Scan",
+          "rows": 0,
+          "loops": 0,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "ledger_entries",
+          "type": "Seq Scan",
+          "rows": 5000,
+          "loops": 1,
+          "shared_hit_blocks": 281
+        },
+        {
+          "relation": "land_deal_payments",
+          "type": "Index Scan",
+          "rows": 0,
+          "loops": 0,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "land_deals",
+          "type": "Index Scan",
+          "rows": 0,
+          "loops": 0,
+          "shared_hit_blocks": 0
+        }
+      ]
+    },
+    "optimized": {
+      "planning_ms": 1.74,
+      "execution_ms": 74.15,
+      "scans": [
+        {
+          "relation": "plots",
+          "type": "Index Only Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "plot_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 179
+        },
+        {
+          "relation": "plot_installment_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "plots",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "land_deal_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "land_deals",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "farmer_payments",
+          "type": "Bitmap Heap Scan",
+          "rows": 30000,
+          "loops": 1,
+          "shared_hit_blocks": 246
+        },
+        {
+          "relation": "farmers",
+          "type": "Index Scan",
+          "rows": 10000,
+          "loops": 1,
+          "shared_hit_blocks": 216
+        },
+        {
+          "relation": "expenses",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "expenses",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "plot_commission_payments",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "plot_commission_payments",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "vendor_payments",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "vendor_payments",
+          "type": "Index Only Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "vendor_inventory_payments",
+          "type": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "vendor_inventory_payments",
+          "type": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "shared_hit_blocks": 3
+        },
+        {
+          "relation": "ledger_entries",
+          "type": "Seq Scan",
+          "rows": 5000,
+          "loops": 1,
+          "shared_hit_blocks": 281
+        },
+        {
+          "relation": "tds_settlements",
+          "type": "Seq Scan",
+          "rows": 0,
+          "loops": 1,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "tds_accounting_deductions",
+          "type": "Seq Scan",
+          "rows": 0,
+          "loops": 1,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "ledger_entries",
+          "type": "Seq Scan",
+          "rows": 0,
+          "loops": 0,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "tds_settlements",
+          "type": "Seq Scan",
+          "rows": 0,
+          "loops": 0,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "ledger_entries",
+          "type": "Seq Scan",
+          "rows": 5000,
+          "loops": 1,
+          "shared_hit_blocks": 281
+        },
+        {
+          "relation": "land_deal_payments",
+          "type": "Index Scan",
+          "rows": 0,
+          "loops": 0,
+          "shared_hit_blocks": 0
+        },
+        {
+          "relation": "land_deals",
+          "type": "Index Scan",
+          "rows": 0,
+          "loops": 0,
+          "shared_hit_blocks": 0
+        }
+      ]
+    }
+  },
+  "memory": {
+    "heap_used_mb": 13.66,
+    "rss_mb": 519.97,
+    "note": "Fixture database plus benchmark process, not server memory."
+  }
+}

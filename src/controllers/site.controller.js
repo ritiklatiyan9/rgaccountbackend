@@ -99,6 +99,11 @@ export const updateSite = asyncHandler(async (req, res) => {
   if (state !== undefined) updateData.state = state;
   if (description !== undefined) updateData.description = description;
   if (status) updateData.status = status;
+  // Sites page "Show in overall" switch (migration 224).
+  if (req.body.include_in_overall !== undefined) {
+    if (typeof req.body.include_in_overall !== 'boolean') return res.status(400).json({ message: 'include_in_overall must be true or false' });
+    updateData.include_in_overall = req.body.include_in_overall;
+  }
 
   if (req.body.project_profile !== undefined) {
     updateData.project_profile = validateProjectProfile(req.body.project_profile);

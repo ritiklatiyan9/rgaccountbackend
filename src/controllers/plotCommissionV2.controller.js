@@ -292,6 +292,7 @@ export const listAllSitesCommissions = asyncHandler(async (req, res) => {
        LEFT JOIN land_deals d ON d.id = pc.land_deal_id
        LEFT JOIN farmers df ON df.id = d.farmer_id
        LEFT JOIN payment_rollup pr ON pr.plot_commission_id = pc.id
+      WHERE s.include_in_overall -- sites switched off on the Sites page stay out
       ORDER BY m.full_name ASC, s.name ASC, pc.created_at DESC, pc.id DESC`,
     [date_from || null, date_to || null],
   );
