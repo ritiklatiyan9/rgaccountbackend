@@ -13,10 +13,29 @@ import {
   listAccountWhatsAppRemoteTemplates,
   getAccountWhatsAppRemoteTemplate,
   importAccountWhatsAppTemplate,
+  previewAccountWhatsAppReceipt,
 } from "../services/accountWhatsApp.service.js";
 
 const router = express.Router();
 router.use(authMiddleware, requireRole("admin"));
+router.get(
+  "/documents/payment-receipt/sample",
+  asyncHandler(async (req, res) => {
+    const buffer = await previewAccountWhatsAppReceipt(
+      req.user,
+      req.query.site_id,
+      req.query.event,
+    );
+    res
+      .set("Cache-Control", "no-store")
+      .type("application/pdf")
+      .set(
+        "Content-Disposition",
+        'inline; filename="sample-payment-receipt.pdf"',
+      )
+      .send(buffer);
+  }),
+);
 router.get(
   "/remote-templates",
   asyncHandler(async (req, res) =>

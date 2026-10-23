@@ -224,7 +224,7 @@
     "test:construction-dashboard": "node --test test/construction-dashboard-legacy-db.test.mjs",
     "test:construction-startup": "node --test test/construction-startup-db.test.mjs",
     "dev:studio-api": "node --watch scripts/studio-api.mjs",
-    "migrate:account-whatsapp": "node src/migrations/225_account_whatsapp_studio.js",
+    "migrate:account-whatsapp": "node src/migrations/225_account_whatsapp_studio.js && node src/migrations/226_account_whatsapp_documents.js",
     "test:account-whatsapp": "node --test test/account-whatsapp-*.test.mjs"
   },
   "dependencies": {
@@ -252,6 +252,7 @@
     "multer": "^2.1.1",
     "node-cache": "^5.1.2",
     "nodemailer": "^9.0.3",
+    "pdfkit": "0.20.2",
     "pg": "^8.11.3",
     "react-dropzone": "^15.0.0",
     "socket.io": "^4.8.3",

@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
-import { up } from "../src/migrations/225_account_whatsapp_studio.js";
+import { up as baseUp } from "../src/migrations/225_account_whatsapp_studio.js";
+import { up as documentUp } from "../src/migrations/226_account_whatsapp_documents.js";
+const up = async (db) => {
+  const base = await baseUp(db);
+  const documents = await documentUp(db);
+  return base || documents;
+};
 import {
   createRequestTransaction,
   installRequestTransactionAdapter,
@@ -213,9 +219,15 @@ test("approved AWS parsing preserves positional order and repeated variables; me
     );
   const media = approvedAwsRegistration();
   media.components.unshift({ type: "HEADER", format: "DOCUMENT" });
-  assert.match(
-    inspectAccountWhatsAppRemoteTemplate(media).unsupported_reason,
-    /attachment/,
+  assert.equal(inspectAccountWhatsAppRemoteTemplate(media).has_document, true);
+  assert.throws(
+    () =>
+      mapAccountWhatsAppRemoteBody(
+        inspectAccountWhatsAppRemoteTemplate(media),
+        "CLIENT_ONBOARDED",
+        importInput().fields,
+      ),
+    /PDF receipt templates/,
   );
   const broken = approvedAwsRegistration();
   broken.components[0].text = "Hello {{2}}, thank you.";
@@ -324,7 +336,7 @@ test("AWS imports revalidate authorization, approval, component compatibility an
   });
   await assert.rejects(
     importAccountWhatsAppTemplate(admin, importInput(), { db, transport }),
-    /attachment/,
+    /PDF receipt templates/,
   );
   transport.definition.components.shift();
   await assert.rejects(
@@ -1146,4 +1158,237 @@ test("accepted messages are never resent after log failure; expired and interrup
     ).rows.map((row) => row.status),
     ["FAILED", "EXPIRED"],
   );
+});
+
+const approvedAwsPayment = () => ({
+  ...approvedAwsRegistration(),
+  id: "1134147355654836",
+  name: "dgg_payment_received_v1",
+  components: [
+    { type: "HEADER", format: "DOCUMENT" },
+    {
+      type: "BODY",
+      text: "Dear {{1}}, payment for {{2}} received. Amount: {{3}}. Receipt: {{4}}. Date: {{5}}. Mode: {{6}}. Registration: {{7}}. Your receipt is attached.",
+      example: {
+        body_text: [
+          [
+            "Rahul Sharma",
+            "Defence Garden",
+            "Rs. 1,000.00",
+            "ACK-40",
+            "23 Oct 2026",
+            "BANK",
+            "CLT-10",
+          ],
+        ],
+      },
+    },
+  ],
+});
+const paymentImport = () => ({
+  site_id: 1,
+  event: "PAYMENT_RECEIVED",
+  meta_template_id: "1134147355654836",
+  title: "Approved payment with receipt",
+  fields: [
+    "customer_name",
+    "project",
+    "amount",
+    "receipt_no",
+    "payment_date",
+    "payment_mode",
+    "registration_no",
+  ],
+});
+
+test("document migration preserves existing template assignments and stays idempotent", async (t) => {
+  const { db } = await fixture(t);
+  await baseUp(db);
+  await db.query(
+    "INSERT INTO account_whatsapp_templates(site_id,event,name,title,body,status) VALUES(1,'CLIENT_ONBOARDED','existing','Existing','Existing message','APPROVED')",
+  );
+  await db.query(
+    "INSERT INTO account_whatsapp_stage_settings(site_id,event,template_name,enabled) VALUES(1,'CLIENT_ONBOARDED','existing',false)",
+  );
+  assert.equal(await documentUp(db), true);
+  assert.equal(await documentUp(db), false);
+  assert.deepEqual(
+    (await db.query("SELECT name,has_document FROM account_whatsapp_templates"))
+      .rows,
+    [{ name: "existing", has_document: false }],
+  );
+  assert.deepEqual(
+    (
+      await db.query(
+        "SELECT enabled,template_name FROM account_whatsapp_stage_settings",
+      )
+    ).rows,
+    [{ enabled: false, template_name: "existing" }],
+  );
+});
+
+test("approved PDF imports preserve seven variables, attach the canonical receipt and never submit to Meta", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const transport = importedTransport(approvedAwsPayment());
+  const template = await importAccountWhatsAppTemplate(admin, paymentImport(), {
+    db,
+    transport,
+  });
+  assert.equal(template.has_document, true);
+  assert.equal(transport.calls.create, 0);
+  await saveAccountWhatsAppStage(
+    admin,
+    "PAYMENT_RECEIVED",
+    { site_id: 1, template_name: template.name, enabled: true },
+    { db },
+  );
+  await queueAccountWhatsApp("PAYMENT_RECEIVED", 40, { siteId: 1, db });
+  let uploads = 0;
+  const sent = [];
+  const upload = async (buffer, filename) => {
+    uploads++;
+    assert.equal(buffer.subarray(0, 5).toString(), "%PDF-");
+    assert.equal(filename, "payment-receipt-ACK-40.pdf");
+    return "test-media-id";
+  };
+  await drainAccountWhatsApp({
+    db,
+    transport,
+    upload,
+    send: async (...args) => {
+      sent.push(args);
+      return "accepted";
+    },
+  });
+  assert.equal(uploads, 1);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][1], "dgg_payment_received_v1");
+  assert.equal(sent[0][2].length, 7);
+  assert.deepEqual(sent[0][2].slice(0, 4), [
+    "Rahul Sharma",
+    "Defence Garden",
+    "₹1,000.00",
+    "ACK-40",
+  ]);
+  assert.deepEqual(sent[0][2].slice(5), ["BANK", "CLT-10"]);
+  assert.deepEqual(sent[0][3].media, {
+    type: "document",
+    id: "test-media-id",
+    filename: "payment-receipt-ACK-40.pdf",
+  });
+  assert.equal(
+    (await db.query("SELECT status FROM account_whatsapp_messages")).rows[0]
+      .status,
+    "SENT",
+  );
+  const image = approvedAwsPayment();
+  image.components[0].format = "IMAGE";
+  assert.equal(inspectAccountWhatsAppRemoteTemplate(image).supported, false);
+});
+
+test("cash changes and attachment failures never send a payment message without its correct receipt", async (t) => {
+  for (const scenario of [
+    "cash_before",
+    "cash_during",
+    "amount_during",
+    "upload_failed",
+  ]) {
+    const { db } = await fixture(t);
+    await up(db);
+    const transport = importedTransport(approvedAwsPayment());
+    const template = await importAccountWhatsAppTemplate(
+      admin,
+      paymentImport(),
+      { db, transport },
+    );
+    await saveAccountWhatsAppStage(
+      admin,
+      "PAYMENT_RECEIVED",
+      { site_id: 1, template_name: template.name, enabled: true },
+      { db },
+    );
+    await queueAccountWhatsApp("PAYMENT_RECEIVED", 40, { siteId: 1, db });
+    if (scenario === "cash_before")
+      await db.query(
+        "UPDATE plot_payments SET payment_type='CASH',payment_from='CASH' WHERE id=40",
+      );
+    let uploads = 0,
+      sends = 0;
+    const upload = async () => {
+      uploads++;
+      if (scenario === "upload_failed") throw new Error("Storage unavailable");
+      if (scenario === "cash_during")
+        await db.query(
+          "UPDATE plot_payments SET payment_type='CASH',payment_from='CASH' WHERE id=40",
+        );
+      if (scenario === "amount_during")
+        await db.query("UPDATE plot_payments SET amount=2000 WHERE id=40");
+      return "test-media";
+    };
+    await drainAccountWhatsApp({
+      db,
+      transport,
+      upload,
+      send: async () => {
+        sends++;
+      },
+    });
+    assert.equal(sends, 0, scenario);
+    assert.equal(uploads, scenario === "cash_before" ? 0 : 1, scenario);
+    const row = (
+      await db.query("SELECT status,error FROM account_whatsapp_messages")
+    ).rows[0];
+    assert.equal(
+      row.status,
+      scenario === "upload_failed" ? "FAILED" : "SKIPPED",
+      scenario,
+    );
+    assert.match(
+      row.error,
+      scenario === "upload_failed"
+        ? /Storage unavailable/
+        : scenario === "cash_before"
+          ? /policy/
+          : /Payment changed/,
+    );
+  }
+});
+
+test("document samples contain only fictional values and use an explicit media header", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const transport = importedTransport(approvedAwsPayment());
+  const template = await importAccountWhatsAppTemplate(admin, paymentImport(), {
+    db,
+    transport,
+  });
+  await saveAccountWhatsAppStage(
+    admin,
+    "PAYMENT_RECEIVED",
+    { site_id: 1, template_name: template.name },
+    { db },
+  );
+  const sent = [];
+  let filename;
+  await testAccountWhatsAppTemplate(
+    admin,
+    { site_id: 1, event: "PAYMENT_RECEIVED", phone: "9876543210" },
+    {
+      db,
+      transport,
+      upload: async (buffer, name) => {
+        filename = name;
+        assert.equal(buffer.subarray(0, 5).toString(), "%PDF-");
+        return "sample-media";
+      },
+      send: async (...args) => {
+        sent.push(args);
+        return "sample-accepted";
+      },
+    },
+  );
+  assert.equal(filename, "payment-receipt-ACK-100123.pdf");
+  assert.equal(sent[0][3].media.id, "sample-media");
+  assert.equal(sent[0][2][3], "ACK-100123");
 });

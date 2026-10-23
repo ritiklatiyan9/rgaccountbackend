@@ -5,6 +5,12 @@ import { registryDeedScopeSql } from "../utils/registryDocuments.js";
 import { allocateInstallmentPayments } from "./installmentAllocation.service.js";
 import { classifyAccountWhatsAppPayment } from "./accountWhatsAppWorkflow.policy.js";
 import {
+  ACCOUNT_WHATSAPP_DOCUMENT_EVENTS,
+  accountWhatsAppReceiptSample,
+  accountWhatsAppReceiptFilename,
+  renderAccountWhatsAppReceipt,
+} from "./accountWhatsAppDocuments.js";
+import {
   accountWhatsAppProviderName,
   accountWhatsAppTemplateView,
   isImportedAccountWhatsAppTemplate,
@@ -102,7 +108,7 @@ export async function sendAccountWhatsAppTemplate(
   to,
   template,
   params = [],
-  { language: code = language(), ref } = {},
+  { language: code = language(), ref, media } = {},
 ) {
   const { sdk, client } = await aws();
   const message = {
@@ -113,13 +119,33 @@ export async function sendAccountWhatsAppTemplate(
     template: {
       name: template,
       language: { code },
-      ...(params.length
+      ...(params.length || media
         ? {
             components: [
-              {
-                type: "body",
-                parameters: params.map((text) => ({ type: "text", text })),
-              },
+              ...(media
+                ? [
+                    {
+                      type: "header",
+                      parameters: [
+                        {
+                          type: "document",
+                          document: { id: media.id, filename: media.filename },
+                        },
+                      ],
+                    },
+                  ]
+                : []),
+              ...(params.length
+                ? [
+                    {
+                      type: "body",
+                      parameters: params.map((text) => ({
+                        type: "text",
+                        text,
+                      })),
+                    },
+                  ]
+                : []),
             ],
           }
         : {}),
@@ -136,6 +162,80 @@ export async function sendAccountWhatsAppTemplate(
     ),
   );
   return out.messageId;
+}
+let mediaStorage;
+export async function uploadAccountWhatsAppDocument(buffer, filename) {
+  const bucketName = process.env.WHATSAPP_MEDIA_BUCKET;
+  if (!bucketName)
+    throw fail(
+      "Configure WHATSAPP_MEDIA_BUCKET before sending receipt PDFs",
+      409,
+    );
+  const { sdk, client } = await aws();
+  if (!mediaStorage) {
+    const { S3Client } = await import("@aws-sdk/client-s3");
+    mediaStorage = new S3Client({
+      region:
+        process.env.WHATSAPP_AWS_REGION ||
+        process.env.AWS_REGION ||
+        "ap-south-1",
+      ...(process.env.WHATSAPP_AWS_ACCESS_KEY_ID
+        ? {
+            credentials: {
+              accessKeyId: process.env.WHATSAPP_AWS_ACCESS_KEY_ID,
+              secretAccessKey: process.env.WHATSAPP_AWS_SECRET_ACCESS_KEY,
+            },
+          }
+        : {}),
+    });
+  }
+  const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+  const key = `whatsapp/accountancy/${new Date().toISOString().slice(0, 7)}/${randomUUID()}-${filename}`;
+  await awsError(
+    mediaStorage.send(
+      new PutObjectCommand({
+        Bucket: bucketName,
+        Key: key,
+        Body: buffer,
+        ContentType: "application/pdf",
+      }),
+    ),
+  );
+  const result = await awsError(
+    client.send(
+      new sdk.PostWhatsAppMessageMediaCommand({
+        originationPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID,
+        sourceS3File: { bucketName, key },
+      }),
+    ),
+  );
+  if (!result.mediaId)
+    throw fail("AWS did not return the receipt media ID", 502);
+  return result.mediaId;
+}
+async function receiptMedia(event, data, upload, sample = false) {
+  const filename = accountWhatsAppReceiptFilename(data);
+  return {
+    type: "document",
+    filename,
+    id: await upload(
+      await renderAccountWhatsAppReceipt(event, data, { sample }),
+      filename,
+    ),
+  };
+}
+export async function previewAccountWhatsAppReceipt(
+  user,
+  requestedSiteId,
+  event,
+  { db = pool } = {},
+) {
+  await assertAccountWhatsAppSite(user, requestedSiteId, db);
+  return renderAccountWhatsAppReceipt(
+    event,
+    accountWhatsAppReceiptSample(event),
+    { sample: true },
+  );
 }
 const remoteTransport = {
   sender,
@@ -236,14 +336,14 @@ export async function accountWhatsAppSchemaReady(db = pool) {
   const {
     rows: [row],
   } = await db.query(
-    "SELECT to_regclass('public.account_whatsapp_templates') IS NOT NULL AND to_regclass('public.account_whatsapp_stage_settings') IS NOT NULL AND to_regclass('public.account_whatsapp_messages') IS NOT NULL AS ready",
+    "SELECT to_regclass('public.account_whatsapp_templates') IS NOT NULL AND to_regclass('public.account_whatsapp_stage_settings') IS NOT NULL AND to_regclass('public.account_whatsapp_messages') IS NOT NULL AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='account_whatsapp_templates' AND column_name='has_document') AS ready",
   );
   return Boolean(row?.ready);
 }
 async function requireSchema(db) {
   if (!(await accountWhatsAppSchemaReady(db)))
     throw fail(
-      "WhatsApp Studio needs migration 225_account_whatsapp_studio. No messages have been enabled.",
+      "WhatsApp Studio needs migrations 225_account_whatsapp_studio and 226_account_whatsapp_documents. No messages have been enabled.",
       503,
     );
 }
@@ -431,14 +531,15 @@ export async function importAccountWhatsAppTemplate(
       (existing.body !== body ||
         existing.language !== remote.language ||
         existing.category !== remote.category ||
+        Boolean(existing.has_document) !== remote.has_document ||
         JSON.stringify(existing.fields) !== JSON.stringify(input.fields))
     )
       await assertUnused(existing, client);
     const row = (
       await client.query(
-        `INSERT INTO account_whatsapp_templates(site_id,event,name,title,body,fields,language,status,category,meta_template_id,created_by)
-      VALUES($1,$2,$3,$4,$5,$6,$7,'APPROVED',$8,$9,$10)
-      ON CONFLICT(name) DO UPDATE SET title=EXCLUDED.title,body=EXCLUDED.body,fields=EXCLUDED.fields,language=EXCLUDED.language,status='APPROVED',category=EXCLUDED.category,meta_template_id=EXCLUDED.meta_template_id,archived_at=NULL,rejected_reason=NULL,updated_at=now() RETURNING *`,
+        `INSERT INTO account_whatsapp_templates(site_id,event,name,title,body,fields,language,status,category,meta_template_id,created_by,has_document)
+      VALUES($1,$2,$3,$4,$5,$6,$7,'APPROVED',$8,$9,$10,$11)
+      ON CONFLICT(name) DO UPDATE SET title=EXCLUDED.title,body=EXCLUDED.body,fields=EXCLUDED.fields,language=EXCLUDED.language,status='APPROVED',category=EXCLUDED.category,meta_template_id=EXCLUDED.meta_template_id,has_document=EXCLUDED.has_document,archived_at=NULL,rejected_reason=NULL,updated_at=now() RETURNING *`,
         [
           siteId,
           input.event,
@@ -450,6 +551,7 @@ export async function importAccountWhatsAppTemplate(
           remote.category,
           remote.meta_template_id,
           user.id,
+          remote.has_document,
         ],
       )
     ).rows[0];
@@ -537,7 +639,9 @@ export async function accountWhatsAppStudio(
           label: f.label,
           sample: f.sample,
         })),
-        documents: [],
+        documents: ACCOUNT_WHATSAPP_DOCUMENT_EVENTS.includes(key)
+          ? [{ key: "PAYMENT_RECEIPT", label: "Payment receipt PDF" }]
+          : [],
         settings: saved,
         active_template:
           own.find(
@@ -837,6 +941,7 @@ export async function testAccountWhatsAppTemplate(
   {
     db = pool,
     send = sendAccountWhatsAppTemplate,
+    upload = uploadAccountWhatsAppDocument,
     transport = remoteTransport,
   } = {},
 ) {
@@ -884,7 +989,20 @@ export async function testAccountWhatsAppTemplate(
       template.fields.map((key) =>
         cleanAccountWhatsAppParameter(EVENTS[input.event].fields[key]?.sample),
       ),
-      { language: template.language, ref: `account-wa-test:${row.id}` },
+      {
+        language: template.language,
+        ref: `account-wa-test:${row.id}`,
+        ...(template.has_document
+          ? {
+              media: await receiptMedia(
+                input.event,
+                accountWhatsAppReceiptSample(input.event),
+                upload,
+                true,
+              ),
+            }
+          : {}),
+      },
     );
   } catch (error) {
     await db.query(
@@ -932,9 +1050,9 @@ export async function loadAccountWhatsAppContext(
   else if (event === "PLOT_BOOKED")
     query = `SELECT ${PLOT_COLUMNS} FROM plots p JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE p.id=$1 AND p.site_id=$2 AND UPPER(p.status)='BOOKED' AND LOWER(COALESCE(to_jsonb(p)->>'approval_status',''))='approved' AND ${PLOT_CLIENT_PREDICATE}`;
   else if (["PAYMENT_RECEIVED", "PAYMENT_SENT"].includes(event))
-    query = `SELECT ${PLOT_COLUMNS},pp.amount,pp.payment_type,pp.payment_type AS payment_mode,pp.payment_from,to_jsonb(pp)->>'money_transfer_id' AS money_transfer_id,to_jsonb(pp)->>'money_transfer_role' AS money_transfer_role,to_jsonb(pp)->>'entry_transfer_id' AS entry_transfer_id,pp.date AS payment_date,'RG-' || pp.id::text AS receipt_no,pp.status,pp.cheque_status FROM plot_payments pp JOIN plots p ON p.id=pp.plot_id AND p.site_id=pp.site_id JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pp.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
+    query = `SELECT ${PLOT_COLUMNS},pp.amount,pp.payment_type,pp.payment_type AS payment_mode,pp.payment_from,to_jsonb(pp)->>'money_transfer_id' AS money_transfer_id,to_jsonb(pp)->>'money_transfer_role' AS money_transfer_role,to_jsonb(pp)->>'entry_transfer_id' AS entry_transfer_id,pp.date AS payment_date,'ACK-' || pp.id::text AS receipt_no,pp.status,pp.cheque_status FROM plot_payments pp JOIN plots p ON p.id=pp.plot_id AND p.site_id=pp.site_id JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pp.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "INSTALLMENT_RECEIVED")
-    query = `SELECT ${PLOT_COLUMNS},pip.amount,pip.payment_mode,pip.payment_date,'INS-' || pip.id::text AS receipt_no,pip.status,pip.cheque_status,to_jsonb(pip)->>'entry_transfer_id' AS entry_transfer_id,pi.installment_name FROM plot_installment_payments pip JOIN plots p ON p.id=pip.plot_id JOIN sites s ON s.id=p.site_id LEFT JOIN plot_installments pi ON pi.id=pip.installment_id AND pi.plot_id=p.id ${PLOT_BUYER_MEMBER_JOIN} WHERE pip.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
+    query = `SELECT ${PLOT_COLUMNS},pip.amount,pip.payment_mode,pip.payment_date,'ACK-' || pip.id::text AS receipt_no,pip.status,pip.cheque_status,to_jsonb(pip)->>'entry_transfer_id' AS entry_transfer_id,pi.installment_name FROM plot_installment_payments pip JOIN plots p ON p.id=pip.plot_id JOIN sites s ON s.id=p.site_id LEFT JOIN plot_installments pi ON pi.id=pip.installment_id AND pi.plot_id=p.id ${PLOT_BUYER_MEMBER_JOIN} WHERE pip.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "INSTALLMENT_DUE")
     query = `SELECT ${PLOT_COLUMNS},pi.id AS installment_id,p.id AS plot_id,pi.installment_name,pi.amount,pi.due_date FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pi.id=$1 AND p.site_id=$2 AND ${ACTIVE_INSTALLMENT_PLOT} AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "REGISTRY_COMPLETED")
@@ -1099,6 +1217,7 @@ export async function deliverAccountWhatsApp(
   {
     db = pool,
     send = sendAccountWhatsAppTemplate,
+    upload = uploadAccountWhatsAppDocument,
     transport = remoteTransport,
   } = {},
 ) {
@@ -1198,13 +1317,46 @@ export async function deliverAccountWhatsApp(
       return finish("SKIPPED", "Client has no valid Indian mobile number");
     if (template.fields.some((key) => !spec.fields[key]))
       return finish("SKIPPED", "Template contains an unsupported field");
+    let media;
+    if (template.has_document) {
+      media = await receiptMedia(row.event, data, upload);
+      const current = await loadAccountWhatsAppContext(
+        row.event,
+        row.ref_id,
+        row.site_id,
+        db,
+      );
+      const snapshot = (value) =>
+        JSON.stringify(
+          [
+            "full_name",
+            "site_name",
+            "member_code",
+            "plot_no",
+            "amount",
+            "payment_date",
+            "payment_mode",
+            "receipt_no",
+            "installment_name",
+          ].map((key) => value?.[key] ?? null),
+        );
+      if (!current || snapshot(current) !== snapshot(data))
+        return finish(
+          "SKIPPED",
+          "Payment changed while preparing the receipt; no message was sent.",
+        );
+    }
     messageId = await send(
       phone,
       accountWhatsAppProviderName(template),
       template.fields.map((key) =>
         cleanAccountWhatsAppParameter(spec.fields[key].value(data)),
       ),
-      { language: template.language, ref: `account-wa:${row.id}` },
+      {
+        language: template.language,
+        ref: `account-wa:${row.id}`,
+        ...(media ? { media } : {}),
+      },
     );
   } catch (error) {
     return finish("FAILED", `${error.name}: ${error.message}`).catch(() => {});
@@ -1220,6 +1372,7 @@ export async function deliverAccountWhatsApp(
 export async function drainAccountWhatsApp({
   db = pool,
   send = sendAccountWhatsAppTemplate,
+  upload = uploadAccountWhatsAppDocument,
   transport = remoteTransport,
   max = 20,
 } = {}) {
@@ -1263,7 +1416,7 @@ export async function drainAccountWhatsApp({
     }
     if (!row) break;
     if (row.status === "SENDING")
-      await deliverAccountWhatsApp(row, { db, send, transport });
+      await deliverAccountWhatsApp(row, { db, send, transport, upload });
   }
   return count;
 }

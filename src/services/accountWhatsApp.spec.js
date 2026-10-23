@@ -50,12 +50,15 @@ const PLOT = {
 };
 const PAYMENT = {
   ...PLOT,
+  registration_no: field("Client registration (Member ID)", "CLT-00123", (d) =>
+    clean(d.member_code),
+  ),
   amount: field("Amount", "₹1,00,000.00", (d) => money(d.amount)),
   payment_mode: field("Payment mode", "BANK", (d) => clean(d.payment_mode)),
   payment_date: field("Payment date", "23 Oct 2026", (d) =>
     date(d.payment_date),
   ),
-  receipt_no: field("Receipt / reference number", "RG-100123", (d) =>
+  receipt_no: field("Receipt / reference number", "ACK-100123", (d) =>
     clean(d.receipt_no),
   ),
 };

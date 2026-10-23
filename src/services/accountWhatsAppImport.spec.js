@@ -2,6 +2,7 @@ import {
   ACCOUNT_WHATSAPP_EVENTS,
   accountWhatsAppError,
 } from "./accountWhatsApp.spec.js";
+import { ACCOUNT_WHATSAPP_DOCUMENT_EVENTS } from "./accountWhatsAppDocuments.js";
 
 // Namespaced local references let one approved AWS template serve several
 // projects/events without changing the existing schema or the shared AWS asset.
@@ -43,12 +44,14 @@ export function inspectAccountWhatsAppRemoteTemplate(definition) {
     ),
   ].sort((a, b) => a - b);
   let unsupported_reason = null;
-  if (components.some((component) => component.type === "HEADER"))
+  const headers = components.filter((component) => component.type === "HEADER");
+  const has_document = headers.length === 1 && headers[0].format === "DOCUMENT";
+  if (headers.length && !has_document)
     unsupported_reason =
-      "This template requires a header or attachment. Import currently supports text-only templates.";
+      "This header is not supported. Use a text-only template or a PDF document header.";
   else if (
     bodies.length !== 1 ||
-    components.some((component) => component.type !== "BODY")
+    components.some((component) => !["BODY", "HEADER"].includes(component.type))
   )
     unsupported_reason =
       "This template has buttons, a footer or other components. Import currently supports text-only message bodies.";
@@ -72,6 +75,7 @@ export function inspectAccountWhatsAppRemoteTemplate(definition) {
     category: definition.category,
     language: definition.language,
     body,
+    has_document,
     parameters: positions.map((position) => ({
       position,
       example: String(bodies[0]?.example?.body_text?.[0]?.[position - 1] ?? ""),
@@ -84,6 +88,11 @@ export function mapAccountWhatsAppRemoteBody(remote, event, fields) {
   const spec = ACCOUNT_WHATSAPP_EVENTS[event];
   if (!remote.supported)
     throw accountWhatsAppError(remote.unsupported_reason, 409);
+  if (remote.has_document && !ACCOUNT_WHATSAPP_DOCUMENT_EVENTS.includes(event))
+    throw accountWhatsAppError(
+      "PDF receipt templates can only be used for received payments, sent payments or installment receipts",
+      409,
+    );
   if (
     !spec ||
     !Array.isArray(fields) ||
@@ -116,6 +125,7 @@ export function assertAccountWhatsAppImportedDefinition(template, definition) {
     !remote.supported ||
     remote.language !== template.language ||
     remote.category !== template.category ||
+    remote.has_document !== Boolean(template.has_document) ||
     mapAccountWhatsAppRemoteBody(remote, template.event, template.fields) !==
       template.body
   )
