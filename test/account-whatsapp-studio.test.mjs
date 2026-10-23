@@ -27,6 +27,7 @@ import {
 import {
   compileAccountWhatsAppBody,
   isAccountWhatsAppPaymentEligible,
+  accountWhatsAppCategory,
 } from "../src/services/accountWhatsApp.spec.js";
 
 const admin = { id: 1, role: "admin", organization_id: 1 };
@@ -117,6 +118,90 @@ test("every default template meets Meta body constraints and uses event-scoped s
       "CLIENT_ONBOARDED",
       "Hello 😀😀😀😀😀😀😀😀😀😀😀 there.",
     ),
+  );
+});
+
+test("only supported explicit template categories are accepted", () => {
+  assert.equal(accountWhatsAppCategory(), "UTILITY");
+  assert.equal(accountWhatsAppCategory(" marketing "), "MARKETING");
+  for (const value of ["", "AUTHENTICATION", "SYSTEM", null, true, []])
+    assert.throws(() => accountWhatsAppCategory(value), /Utility or Marketing/);
+  assert.doesNotMatch(
+    ACCOUNT_WHATSAPP_EVENTS.CLIENT_ONBOARDED.body,
+    /welcome/i,
+  );
+});
+
+test("the chosen category reaches Meta, persists on drafts and preserves rejection details", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const input = {
+    site_id: 1,
+    event: "CLIENT_ONBOARDED",
+    title: "Welcome",
+    body: ACCOUNT_WHATSAPP_EVENTS.CLIENT_ONBOARDED.body,
+    category: "MARKETING",
+  };
+  let submitted;
+  const transport = {
+    ...localTransport(),
+    create: async (definition) => {
+      submitted = definition;
+      return {
+        templateStatus: "REJECTED",
+        metaTemplateId: "rejected-category",
+      };
+    },
+    rejection: async () => "INCORRECT_CATEGORY",
+  };
+  const rejected = await createAccountWhatsAppTemplate(admin, input, {
+    db,
+    transport,
+  });
+  assert.equal(submitted.category, "MARKETING");
+  assert.equal(rejected.category, "MARKETING");
+  assert.equal(rejected.status, "REJECTED");
+  assert.equal(rejected.rejected_reason, "INCORRECT_CATEGORY");
+  await assert.rejects(
+    saveAccountWhatsAppStage(
+      admin,
+      input.event,
+      { site_id: 1, template_name: rejected.name, enabled: true },
+      { db },
+    ),
+    /approved/,
+  );
+  const previousPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  delete process.env.WHATSAPP_PHONE_NUMBER_ID;
+  try {
+    const draft = await createAccountWhatsAppTemplate(admin, input, { db });
+    assert.equal(draft.status, "DRAFT");
+    assert.equal(draft.category, "MARKETING");
+  } finally {
+    if (previousPhoneId === undefined)
+      delete process.env.WHATSAPP_PHONE_NUMBER_ID;
+    else process.env.WHATSAPP_PHONE_NUMBER_ID = previousPhoneId;
+  }
+  const count = (
+    await db.query(
+      "SELECT COUNT(*)::int AS count FROM account_whatsapp_templates",
+    )
+  ).rows[0].count;
+  await assert.rejects(
+    createAccountWhatsAppTemplate(
+      admin,
+      { ...input, category: "AUTHENTICATION" },
+      { db, transport },
+    ),
+    /Utility or Marketing/,
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT COUNT(*)::int AS count FROM account_whatsapp_templates",
+      )
+    ).rows[0].count,
+    count,
   );
 });
 

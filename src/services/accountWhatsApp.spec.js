@@ -1,6 +1,19 @@
 /** Accountancy-only WhatsApp event contracts. No I/O, credentials or customer data. */
 export const accountWhatsAppError = (message, status = 400) =>
   Object.assign(new Error(message), { status, statusCode: status });
+export function accountWhatsAppCategory(value) {
+  const category =
+    value === undefined
+      ? "UTILITY"
+      : typeof value === "string"
+        ? value.trim().toUpperCase()
+        : "";
+  if (!["UTILITY", "MARKETING"].includes(category))
+    throw accountWhatsAppError(
+      "Choose Utility or Marketing as the message category",
+    );
+  return category;
+}
 const field = (label, sample, value) => ({ label, sample, value });
 const clean = (value) =>
   String(value ?? "")
@@ -67,13 +80,9 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
     "Clients",
     "Onboarding",
     "New client registration saved",
-    "Welcome a newly registered client with their Member ID.",
+    "Confirm a completed client registration with its Member ID.",
     CUSTOMER,
-    branded(
-      "Dear {customer_name},",
-      "Welcome to {project}. Your client registration has been completed.\n*Member ID:* {member_id}",
-      "Please quote this Member ID for KYC, bookings and payments.",
-    ),
+    "*Client registration confirmation*\n\nDear {customer_name},\n\nYour client registration for {project} is complete.\n*Member ID:* {member_id}\n\nUse this ID when contacting our office about your account.\n\nDefence Garden Group",
   ),
   KYC_VERIFIED: event(
     "KYC verified",

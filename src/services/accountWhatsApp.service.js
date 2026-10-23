@@ -8,6 +8,7 @@ import {
   ACCOUNT_WHATSAPP_EVENTS as EVENTS,
   ACCOUNT_WHATSAPP_POLICY as POLICY,
   accountWhatsAppError as fail,
+  accountWhatsAppCategory,
   accountWhatsAppPhone,
   compileAccountWhatsAppBody,
   cleanAccountWhatsAppParameter,
@@ -490,13 +491,14 @@ export async function createAccountWhatsAppTemplate(
   const siteId = await assertAccountWhatsAppSite(user, input.site_id, db);
   await requireSchema(db);
   const title = titleFor(input.title);
+  const category = accountWhatsAppCategory(input.category);
   const compiled = compileAccountWhatsAppBody(input.event, input.body);
   const name = `dgg_acc_s${siteId}_${input.event.toLowerCase()}_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
   // Save a draft first: provider or connection failures never lose the edited text.
   let template = (
     await db.query(
-      `INSERT INTO account_whatsapp_templates(site_id,event,name,title,body,fields,language,status,created_by)
-    VALUES($1,$2,$3,$4,$5,$6,$7,'DRAFT',$8) RETURNING *`,
+      `INSERT INTO account_whatsapp_templates(site_id,event,name,title,body,fields,language,status,created_by,category)
+    VALUES($1,$2,$3,$4,$5,$6,$7,'DRAFT',$8,$9) RETURNING *`,
       [
         siteId,
         input.event,
@@ -506,6 +508,7 @@ export async function createAccountWhatsAppTemplate(
         compiled.fields,
         language(),
         user.id,
+        category,
       ],
     )
   ).rows[0];
@@ -519,7 +522,7 @@ export async function createAccountWhatsAppTemplate(
     const created = await transport.create({
       name,
       language: template.language,
-      category: "UTILITY",
+      category,
       allow_category_change: true,
       parameter_format: "positional",
       components: [
@@ -551,7 +554,7 @@ export async function createAccountWhatsAppTemplate(
         [
           template.id,
           status,
-          created.category || "UTILITY",
+          created.category || category,
           created.metaTemplateId || null,
           reason,
         ],
