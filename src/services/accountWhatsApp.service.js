@@ -5,6 +5,15 @@ import { registryDeedScopeSql } from "../utils/registryDocuments.js";
 import { allocateInstallmentPayments } from "./installmentAllocation.service.js";
 import { classifyAccountWhatsAppPayment } from "./accountWhatsAppWorkflow.policy.js";
 import {
+  accountWhatsAppProviderName,
+  accountWhatsAppTemplateView,
+  isImportedAccountWhatsAppTemplate,
+  inspectAccountWhatsAppRemoteTemplate,
+  mapAccountWhatsAppRemoteBody,
+  accountTemplateStatesPendingKyc,
+  assertAccountWhatsAppImportedDefinition,
+} from "./accountWhatsAppImport.spec.js";
+import {
   ACCOUNT_WHATSAPP_EVENTS as EVENTS,
   ACCOUNT_WHATSAPP_POLICY as POLICY,
   accountWhatsAppError as fail,
@@ -130,6 +139,19 @@ export async function sendAccountWhatsAppTemplate(
 }
 const remoteTransport = {
   sender,
+  async get(metaId) {
+    const { sdk, client } = await aws();
+    const { wabaId } = await sender();
+    const out = await awsError(
+      client.send(
+        new sdk.GetWhatsAppMessageTemplateCommand({
+          id: wabaId,
+          metaTemplateId: metaId,
+        }),
+      ),
+    );
+    return JSON.parse(out.template);
+  },
   async create(definition) {
     const { sdk, client } = await aws();
     const { wabaId } = await sender();
@@ -279,14 +301,15 @@ export async function refreshAccountWhatsAppTemplates(
 ) {
   if (inTest() && transport === remoteTransport) return;
   const remote = new Map(
-    (await transport.list()).map((t) => [t.templateName, t]),
+    (await transport.list()).map((t) => [String(t.metaTemplateId), t]),
   );
   const { rows } = await db.query(
-    "SELECT id,name,status,rejected_reason FROM account_whatsapp_templates WHERE meta_template_id IS NOT NULL AND status <> 'DELETED' AND ($1::integer IS NULL OR site_id=$1)",
+    "SELECT * FROM account_whatsapp_templates WHERE meta_template_id IS NOT NULL AND status <> 'DELETED' AND ($1::integer IS NULL OR site_id=$1)",
     [siteId],
   );
+  const importedDetails = new Map();
   for (const row of rows) {
-    const found = remote.get(row.name);
+    const found = remote.get(String(row.meta_template_id));
     if (!found) {
       // A template deleted externally must never remain locally APPROVED.
       await db.query(
@@ -296,6 +319,23 @@ export async function refreshAccountWhatsAppTemplates(
       continue;
     }
     let reason = null;
+    let status = found.templateStatus || "PENDING";
+    if (isImportedAccountWhatsAppTemplate(row) && status === "APPROVED") {
+      if (!importedDetails.has(found.metaTemplateId))
+        importedDetails.set(
+          found.metaTemplateId,
+          await transport.get(found.metaTemplateId),
+        );
+      try {
+        assertAccountWhatsAppImportedDefinition(
+          row,
+          importedDetails.get(found.metaTemplateId),
+        );
+      } catch (error) {
+        status = "CHANGED";
+        reason = error.message;
+      }
+    }
     if (found.templateStatus === "REJECTED")
       reason =
         row.rejected_reason ||
@@ -304,13 +344,121 @@ export async function refreshAccountWhatsAppTemplates(
       "UPDATE account_whatsapp_templates SET status=$2,category=$3,rejected_reason=$4,meta_template_id=$5,updated_at=now() WHERE id=$1",
       [
         row.id,
-        found.templateStatus || "PENDING",
-        found.templateCategory || "UTILITY",
+        status,
+        status === "CHANGED"
+          ? row.category
+          : found.templateCategory || "UTILITY",
         reason,
         found.metaTemplateId || null,
       ],
     );
   }
+}
+export async function listAccountWhatsAppRemoteTemplates(
+  user,
+  requestedSiteId,
+  { db = pool, transport = remoteTransport } = {},
+) {
+  const siteId = await assertAccountWhatsAppSite(user, requestedSiteId, db);
+  await requireSchema(db);
+  const [remote, local] = await Promise.all([
+    transport.list(),
+    db.query(
+      "SELECT name,event,status,meta_template_id,archived_at FROM account_whatsapp_templates WHERE site_id=$1 AND status<>'DELETED'",
+      [siteId],
+    ),
+  ]);
+  return {
+    templates: remote.map((template) => ({
+      name: template.templateName,
+      meta_template_id: template.metaTemplateId,
+      status: template.templateStatus,
+      category: template.templateCategory,
+      imported_events: local.rows
+        .filter(
+          (row) =>
+            String(row.meta_template_id) === String(template.metaTemplateId) &&
+            row.status === "APPROVED" &&
+            !row.archived_at,
+        )
+        .map((row) => row.event),
+    })),
+  };
+}
+export async function getAccountWhatsAppRemoteTemplate(
+  user,
+  requestedSiteId,
+  metaId,
+  { db = pool, transport = remoteTransport } = {},
+) {
+  await assertAccountWhatsAppSite(user, requestedSiteId, db);
+  if (!/^\d+$/.test(String(metaId))) throw fail("Choose an AWS template");
+  return inspectAccountWhatsAppRemoteTemplate(
+    await transport.get(String(metaId)),
+  );
+}
+export async function importAccountWhatsAppTemplate(
+  user,
+  input,
+  { db = pool, transport = remoteTransport } = {},
+) {
+  assertEvent(input.event);
+  const siteId = await assertAccountWhatsAppSite(user, input.site_id, db);
+  await requireSchema(db);
+  if (!/^\d+$/.test(String(input.meta_template_id)))
+    throw fail("Choose an AWS template");
+  const remote = inspectAccountWhatsAppRemoteTemplate(
+    await transport.get(String(input.meta_template_id)),
+  );
+  if (remote.meta_template_id !== String(input.meta_template_id))
+    throw fail("AWS returned a different template identity", 409);
+  if (remote.status !== "APPROVED")
+    throw fail("Only currently approved AWS templates can be imported", 409);
+  const body = mapAccountWhatsAppRemoteBody(remote, input.event, input.fields);
+  const title = titleFor(
+    input.title || remote.name.replaceAll("_", " ").slice(0, 80),
+  );
+  const name = `aws:${siteId}:${input.event}:${remote.meta_template_id}:${remote.name}`;
+  return transaction(db, siteId, async (client) => {
+    const existing = (
+      await client.query(
+        "SELECT * FROM account_whatsapp_templates WHERE name=$1 FOR UPDATE",
+        [name],
+      )
+    ).rows[0];
+    if (
+      existing &&
+      (existing.body !== body ||
+        existing.language !== remote.language ||
+        existing.category !== remote.category ||
+        JSON.stringify(existing.fields) !== JSON.stringify(input.fields))
+    )
+      await assertUnused(existing, client);
+    const row = (
+      await client.query(
+        `INSERT INTO account_whatsapp_templates(site_id,event,name,title,body,fields,language,status,category,meta_template_id,created_by)
+      VALUES($1,$2,$3,$4,$5,$6,$7,'APPROVED',$8,$9,$10)
+      ON CONFLICT(name) DO UPDATE SET title=EXCLUDED.title,body=EXCLUDED.body,fields=EXCLUDED.fields,language=EXCLUDED.language,status='APPROVED',category=EXCLUDED.category,meta_template_id=EXCLUDED.meta_template_id,archived_at=NULL,rejected_reason=NULL,updated_at=now() RETURNING *`,
+        [
+          siteId,
+          input.event,
+          name,
+          title,
+          body,
+          input.fields,
+          remote.language,
+          remote.category,
+          remote.meta_template_id,
+          user.id,
+        ],
+      )
+    ).rows[0];
+    return {
+      ...accountWhatsAppTemplateView(row),
+      notice:
+        "Approved AWS template added to this project. No new Meta submission was created.",
+    };
+  });
 }
 export async function accountWhatsAppStudio(
   user,
@@ -337,7 +485,7 @@ export async function accountWhatsAppStudio(
           "SELECT * FROM account_whatsapp_templates WHERE site_id=$1 AND status <> 'DELETED' ORDER BY created_at DESC,id DESC",
           [siteId],
         )
-      ).rows
+      ).rows.map(accountWhatsAppTemplateView)
     : [];
   const settings = ready
     ? (
@@ -649,7 +797,21 @@ export async function deleteAccountWhatsAppTemplate(
     ).rows[0];
     if (!row) throw fail("Template not found", 404);
     await assertUnused(row, client);
-    if (row.meta_template_id)
+    if (
+      row.meta_template_id &&
+      !isImportedAccountWhatsAppTemplate(row) &&
+      (
+        await client.query(
+          "SELECT 1 FROM account_whatsapp_templates WHERE meta_template_id=$1 AND id<>$2 AND status<>'DELETED' LIMIT 1",
+          [row.meta_template_id, row.id],
+        )
+      ).rows.length
+    )
+      throw fail(
+        "This AWS template is reused in another project or event. Remove those references before deleting the provider template.",
+        409,
+      );
+    if (row.meta_template_id && !isImportedAccountWhatsAppTemplate(row))
       await transport.remove(name).catch((error) => {
         if (!/ResourceNotFound/.test(`${error.name}: ${error.message}`))
           throw error;
@@ -672,7 +834,11 @@ export async function previewAccountWhatsAppTemplate(
 export async function testAccountWhatsAppTemplate(
   user,
   input,
-  { db = pool, send = sendAccountWhatsAppTemplate } = {},
+  {
+    db = pool,
+    send = sendAccountWhatsAppTemplate,
+    transport = remoteTransport,
+  } = {},
 ) {
   assertEvent(input.event);
   const siteId = await assertAccountWhatsAppSite(user, input.site_id, db);
@@ -691,16 +857,30 @@ export async function testAccountWhatsAppTemplate(
     const claimed = (
       await client.query(
         "INSERT INTO account_whatsapp_messages(site_id,event,ref_id,dedupe_key,is_test,status,phone,template) VALUES($1,$2,0,$3,true,'SENDING',$4,$5) RETURNING *",
-        [siteId, input.event, `test:${randomUUID()}`, to, selected.name],
+        [
+          siteId,
+          input.event,
+          `test:${randomUUID()}`,
+          to,
+          accountWhatsAppProviderName(selected),
+        ],
       )
     ).rows[0];
     return { template: selected, row: claimed };
   });
   let messageId;
   try {
+    if (
+      isImportedAccountWhatsAppTemplate(template) &&
+      (send === sendAccountWhatsAppTemplate || transport !== remoteTransport)
+    )
+      assertAccountWhatsAppImportedDefinition(
+        template,
+        await transport.get(template.meta_template_id),
+      );
     messageId = await send(
       to,
-      template.name,
+      accountWhatsAppProviderName(template),
       template.fields.map((key) =>
         cleanAccountWhatsAppParameter(EVENTS[input.event].fields[key]?.sample),
       ),
@@ -726,7 +906,7 @@ export async function testAccountWhatsAppTemplate(
     );
   return {
     to,
-    template: template.name,
+    template: accountWhatsAppProviderName(template),
     message_id: messageId,
     sample_only: true,
   };
@@ -746,7 +926,7 @@ export async function loadAccountWhatsAppContext(
 ) {
   let query;
   if (event === "CLIENT_ONBOARDED")
-    query = `SELECT ${MEMBER_COLUMNS},m.site_id FROM members m JOIN sites s ON s.id=m.site_id WHERE m.id=$1 AND m.site_id=$2 AND ${CLIENT_PREDICATE}`;
+    query = `SELECT ${MEMBER_COLUMNS},m.site_id,EXISTS(SELECT 1 FROM kyc_cases k WHERE k.client_member_id=m.id AND k.site_id=m.site_id AND k.status='VERIFIED') AS kyc_verified FROM members m JOIN sites s ON s.id=m.site_id WHERE m.id=$1 AND m.site_id=$2 AND ${CLIENT_PREDICATE}`;
   else if (event === "KYC_VERIFIED")
     query = `SELECT ${MEMBER_COLUMNS},k.site_id FROM kyc_cases k JOIN members m ON m.id=k.client_member_id AND m.site_id=k.site_id JOIN sites s ON s.id=k.site_id WHERE k.id=$1 AND k.site_id=$2 AND k.status='VERIFIED' AND ${CLIENT_PREDICATE}`;
   else if (event === "PLOT_BOOKED")
@@ -916,7 +1096,11 @@ export async function scheduleAccountWhatsAppReminders({
 }
 export async function deliverAccountWhatsApp(
   row,
-  { db = pool, send = sendAccountWhatsAppTemplate } = {},
+  {
+    db = pool,
+    send = sendAccountWhatsAppTemplate,
+    transport = remoteTransport,
+  } = {},
 ) {
   let template = null;
   let phone = null;
@@ -928,7 +1112,7 @@ export async function deliverAccountWhatsApp(
         row.id,
         status,
         phone,
-        template?.name || null,
+        template ? accountWhatsAppProviderName(template) : null,
         messageId || null,
         error && String(error).slice(0, 500),
       ],
@@ -952,6 +1136,14 @@ export async function deliverAccountWhatsApp(
     template = await activeTemplate(row.site_id, row.event, db);
     if (!template)
       return finish("SKIPPED", "No approved, unarchived template is applied");
+    if (
+      isImportedAccountWhatsAppTemplate(template) &&
+      (send === sendAccountWhatsAppTemplate || transport !== remoteTransport)
+    )
+      assertAccountWhatsAppImportedDefinition(
+        template,
+        await transport.get(template.meta_template_id),
+      );
     const data = await loadAccountWhatsAppContext(
       row.event,
       row.ref_id,
@@ -962,6 +1154,15 @@ export async function deliverAccountWhatsApp(
       return finish(
         "SKIPPED",
         "Current record is missing or blocked by payment / completion policy",
+      );
+    if (
+      row.event === "CLIENT_ONBOARDED" &&
+      data.kyc_verified &&
+      accountTemplateStatesPendingKyc(template.body)
+    )
+      return finish(
+        "SKIPPED",
+        "Client KYC is already verified; this template states KYC Pending.",
       );
     if (row.event === "INSTALLMENT_DUE") {
       const today = new Intl.DateTimeFormat("en-CA", {
@@ -999,7 +1200,7 @@ export async function deliverAccountWhatsApp(
       return finish("SKIPPED", "Template contains an unsupported field");
     messageId = await send(
       phone,
-      template.name,
+      accountWhatsAppProviderName(template),
       template.fields.map((key) =>
         cleanAccountWhatsAppParameter(spec.fields[key].value(data)),
       ),
@@ -1019,6 +1220,7 @@ export async function deliverAccountWhatsApp(
 export async function drainAccountWhatsApp({
   db = pool,
   send = sendAccountWhatsAppTemplate,
+  transport = remoteTransport,
   max = 20,
 } = {}) {
   if (
@@ -1061,7 +1263,7 @@ export async function drainAccountWhatsApp({
     }
     if (!row) break;
     if (row.status === "SENDING")
-      await deliverAccountWhatsApp(row, { db, send });
+      await deliverAccountWhatsApp(row, { db, send, transport });
   }
   return count;
 }

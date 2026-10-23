@@ -23,14 +23,71 @@ import {
   scheduleAccountWhatsAppReminders,
   startAccountWhatsAppWorker,
   stopAccountWhatsAppWorker,
+  listAccountWhatsAppRemoteTemplates,
+  getAccountWhatsAppRemoteTemplate,
+  importAccountWhatsAppTemplate,
 } from "../src/services/accountWhatsApp.service.js";
 import {
   compileAccountWhatsAppBody,
   isAccountWhatsAppPaymentEligible,
   accountWhatsAppCategory,
 } from "../src/services/accountWhatsApp.spec.js";
+import {
+  inspectAccountWhatsAppRemoteTemplate,
+  mapAccountWhatsAppRemoteBody,
+  accountWhatsAppProviderName,
+  accountTemplateStatesPendingKyc,
+} from "../src/services/accountWhatsAppImport.spec.js";
 
 const admin = { id: 1, role: "admin", organization_id: 1 };
+const approvedAwsRegistration = () => ({
+  id: "1139360278456197",
+  name: "dgg_registered_v2",
+  status: "APPROVED",
+  category: "UTILITY",
+  language: "en",
+  components: [
+    {
+      type: "BODY",
+      text: "Dear *{{1}}*, your customer record has been created at *{{2}}*.\n\n*Member ID:* {{3}}\n*KYC Status:* Pending\n\nPlease quote this Member ID. Thank you, {{1}}.",
+      example: { body_text: [["Rahul Sharma", "Defence Garden", "CLT-00123"]] },
+    },
+  ],
+});
+const importInput = () => ({
+  site_id: 1,
+  event: "CLIENT_ONBOARDED",
+  meta_template_id: "1139360278456197",
+  title: "Approved registration",
+  fields: ["customer_name", "project", "member_id"],
+});
+function importedTransport(definition = approvedAwsRegistration()) {
+  const calls = { create: 0, remove: 0, get: 0 };
+  return {
+    calls,
+    definition,
+    create: async () => {
+      calls.create++;
+      throw new Error("Import must never create a Meta submission");
+    },
+    remove: async () => {
+      calls.remove++;
+    },
+    get: async (id) => {
+      calls.get++;
+      assert.equal(id, String(definition.id));
+      return structuredClone(definition);
+    },
+    list: async () => [
+      {
+        templateName: definition.name,
+        metaTemplateId: definition.id,
+        templateStatus: definition.status,
+        templateCategory: definition.category,
+      },
+    ],
+  };
+}
 const baseline = `
 CREATE TABLE sites(id integer PRIMARY KEY,name text,organization_id integer);
 CREATE TABLE users(id integer PRIMARY KEY);
@@ -129,6 +186,318 @@ test("only supported explicit template categories are accepted", () => {
   assert.doesNotMatch(
     ACCOUNT_WHATSAPP_EVENTS.CLIENT_ONBOARDED.body,
     /welcome/i,
+  );
+});
+
+test("approved AWS parsing preserves positional order and repeated variables; media and missing indices are blocked", () => {
+  const remote = inspectAccountWhatsAppRemoteTemplate(
+    approvedAwsRegistration(),
+  );
+  assert.equal(remote.parameters.length, 3);
+  const body = mapAccountWhatsAppRemoteBody(
+    remote,
+    "CLIENT_ONBOARDED",
+    importInput().fields,
+  );
+  assert.match(body, /created at \*\{project\}\*/);
+  assert.equal((body.match(/\{customer_name\}/g) || []).length, 2);
+  assert.equal(accountTemplateStatesPendingKyc(body), true);
+  for (const fields of [
+    [],
+    ["customer_name", "member_id"],
+    ["customer_name", "project", "amount"],
+  ])
+    assert.throws(
+      () => mapAccountWhatsAppRemoteBody(remote, "CLIENT_ONBOARDED", fields),
+      /Map every/,
+    );
+  const media = approvedAwsRegistration();
+  media.components.unshift({ type: "HEADER", format: "DOCUMENT" });
+  assert.match(
+    inspectAccountWhatsAppRemoteTemplate(media).unsupported_reason,
+    /attachment/,
+  );
+  const broken = approvedAwsRegistration();
+  broken.components[0].text = "Hello {{2}}, thank you.";
+  assert.equal(inspectAccountWhatsAppRemoteTemplate(broken).supported, false);
+  assert.throws(
+    () =>
+      accountWhatsAppProviderName({
+        name: "aws:1:CLIENT_ONBOARDED:1139360278456197:dgg_registered_v2",
+        site_id: 2,
+      }),
+    /Invalid/,
+  );
+});
+
+test("approved imports are idempotent, project-scoped references and never submit to Meta", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const transport = importedTransport();
+  const first = await importAccountWhatsAppTemplate(admin, importInput(), {
+    db,
+    transport,
+  });
+  const again = await importAccountWhatsAppTemplate(admin, importInput(), {
+    db,
+    transport,
+  });
+  const second = await importAccountWhatsAppTemplate(
+    admin,
+    { ...importInput(), site_id: 2 },
+    { db, transport },
+  );
+  assert.equal(first.id, again.id);
+  assert.notEqual(first.name, second.name);
+  assert.equal(first.provider_name, "dgg_registered_v2");
+  assert.equal(first.imported, true);
+  assert.equal(first.status, "APPROVED");
+  assert.equal(accountWhatsAppProviderName(second), "dgg_registered_v2");
+  assert.equal(transport.calls.create, 0);
+  assert.equal(
+    (await accountWhatsAppStudio(admin, 1, { db })).stages[0].settings.enabled,
+    false,
+  );
+  assert.deepEqual(
+    (await listAccountWhatsAppRemoteTemplates(admin, 1, { db, transport }))
+      .templates[0].imported_events,
+    ["CLIENT_ONBOARDED"],
+  );
+  await assert.rejects(
+    saveAccountWhatsAppStage(
+      admin,
+      "CLIENT_ONBOARDED",
+      { site_id: 1, template_name: second.name },
+      { db },
+    ),
+    /approved/,
+  );
+  assert.equal(
+    (
+      await getAccountWhatsAppRemoteTemplate(
+        admin,
+        1,
+        transport.definition.id,
+        { db, transport },
+      )
+    ).supported,
+    true,
+  );
+});
+
+test("AWS imports revalidate authorization, approval, component compatibility and field mapping before writing", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const transport = importedTransport();
+  for (const actor of [
+    { ...admin, role: "sub_admin" },
+    { ...admin, organization_id: 2 },
+  ]) {
+    await assert.rejects(
+      importAccountWhatsAppTemplate(actor, importInput(), { db, transport }),
+      (error) => error.status === 403,
+    );
+    await assert.rejects(
+      listAccountWhatsAppRemoteTemplates(actor, 1, { db, transport }),
+      (error) => error.status === 403,
+    );
+    await assert.rejects(
+      getAccountWhatsAppRemoteTemplate(actor, 1, transport.definition.id, {
+        db,
+        transport,
+      }),
+      (error) => error.status === 403,
+    );
+  }
+  assert.equal(transport.calls.get, 0);
+  for (const status of ["REJECTED", "PENDING", "PAUSED"]) {
+    transport.definition.status = status;
+    await assert.rejects(
+      importAccountWhatsAppTemplate(admin, importInput(), { db, transport }),
+      /currently approved/,
+    );
+  }
+  transport.definition.status = "APPROVED";
+  transport.definition.components.unshift({
+    type: "HEADER",
+    format: "DOCUMENT",
+  });
+  await assert.rejects(
+    importAccountWhatsAppTemplate(admin, importInput(), { db, transport }),
+    /attachment/,
+  );
+  transport.definition.components.shift();
+  await assert.rejects(
+    importAccountWhatsAppTemplate(
+      admin,
+      { ...importInput(), fields: ["customer_name"] },
+      { db, transport },
+    ),
+    /Map every/,
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT COUNT(*)::int AS count FROM account_whatsapp_templates",
+      )
+    ).rows[0].count,
+    0,
+  );
+});
+
+test("removing imported references never deletes the shared AWS template and assigned references stay protected", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const transport = importedTransport();
+  const row = await importAccountWhatsAppTemplate(admin, importInput(), {
+    db,
+    transport,
+  });
+  await saveAccountWhatsAppStage(
+    admin,
+    "CLIENT_ONBOARDED",
+    { site_id: 1, template_name: row.name },
+    { db },
+  );
+  await assert.rejects(
+    deleteAccountWhatsAppTemplate(admin, row.name, 1, { db, transport }),
+    /Unapply/,
+  );
+  await assert.rejects(
+    importAccountWhatsAppTemplate(
+      admin,
+      { ...importInput(), fields: ["customer_name", "member_id", "project"] },
+      { db, transport },
+    ),
+    /Unapply/,
+  );
+  await saveAccountWhatsAppStage(
+    admin,
+    "CLIENT_ONBOARDED",
+    { site_id: 1, template_name: null, enabled: false },
+    { db },
+  );
+  await deleteAccountWhatsAppTemplate(admin, row.name, 1, { db, transport });
+  assert.equal(transport.calls.remove, 0);
+  assert.equal(transport.calls.create, 0);
+});
+
+test("imported delivery uses the real AWS name and exact variable order; verified KYC never receives Pending wording", async (t) => {
+  const { pg, db } = await fixture(t);
+  await up(db);
+  const transport = importedTransport();
+  const row = await importAccountWhatsAppTemplate(admin, importInput(), {
+    db,
+    transport,
+  });
+  await saveAccountWhatsAppStage(
+    admin,
+    "CLIENT_ONBOARDED",
+    { site_id: 1, template_name: row.name, enabled: true },
+    { db },
+  );
+  await pg.exec(
+    "INSERT INTO members VALUES(12,1,'New Client','9876543212',NULL,'CLIENT',ARRAY['CLIENT'],'CLT-12','ACTIVE')",
+  );
+  await queueAccountWhatsApp("CLIENT_ONBOARDED", 10, { siteId: 1, db });
+  await queueAccountWhatsApp("CLIENT_ONBOARDED", 12, { siteId: 1, db });
+  const sent = [];
+  await drainAccountWhatsApp({
+    db,
+    transport,
+    send: async (...args) => {
+      sent.push(args);
+      return "accepted";
+    },
+  });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][1], "dgg_registered_v2");
+  assert.deepEqual(sent[0][2], ["New Client", "Defence Garden", "CLT-12"]);
+  assert.deepEqual(
+    (
+      await db.query(
+        "SELECT status,template,error FROM account_whatsapp_messages ORDER BY id",
+      )
+    ).rows.map((item) => item.status),
+    ["SKIPPED", "SENT"],
+  );
+  assert.match(
+    (
+      await db.query(
+        "SELECT error FROM account_whatsapp_messages ORDER BY id LIMIT 1",
+      )
+    ).rows[0].error,
+    /KYC is already verified/,
+  );
+  const sample = [];
+  await testAccountWhatsAppTemplate(
+    admin,
+    { site_id: 1, event: "CLIENT_ONBOARDED", phone: "9876543210" },
+    {
+      db,
+      transport,
+      send: async (...args) => {
+        sample.push(args);
+        return "sample";
+      },
+    },
+  );
+  assert.equal(sample[0][1], "dgg_registered_v2");
+});
+
+test("a changed shared AWS template blocks delivery and requires explicit mapping review", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const transport = importedTransport();
+  const row = await importAccountWhatsAppTemplate(admin, importInput(), {
+    db,
+    transport,
+  });
+  await saveAccountWhatsAppStage(
+    admin,
+    "CLIENT_ONBOARDED",
+    { site_id: 1, template_name: row.name, enabled: true },
+    { db },
+  );
+  await queueAccountWhatsApp("CLIENT_ONBOARDED", 10, { siteId: 1, db });
+  transport.definition.components[0].text += " Content changed.";
+  let sent = 0;
+  await drainAccountWhatsApp({
+    db,
+    transport,
+    send: async () => {
+      sent++;
+    },
+  });
+  assert.equal(sent, 0);
+  assert.match(
+    (await db.query("SELECT error FROM account_whatsapp_messages")).rows[0]
+      .error,
+    /content changed/,
+  );
+  await refreshAccountWhatsAppTemplates(db, transport, 1);
+  assert.equal(
+    (await db.query("SELECT status FROM account_whatsapp_templates")).rows[0]
+      .status,
+    "CHANGED",
+  );
+  assert.equal(
+    (await listAccountWhatsAppRemoteTemplates(admin, 1, { db, transport }))
+      .templates[0].imported_events.length,
+    0,
+  );
+  transport.definition.components[0].text =
+    approvedAwsRegistration().components[0].text;
+  transport.definition.category = "MARKETING";
+  await refreshAccountWhatsAppTemplates(db, transport, 1);
+  await refreshAccountWhatsAppTemplates(db, transport, 1);
+  const changed = (
+    await db.query("SELECT status,category FROM account_whatsapp_templates")
+  ).rows[0];
+  assert.deepEqual(changed, { status: "CHANGED", category: "UTILITY" });
+  await assert.rejects(
+    importAccountWhatsAppTemplate(admin, importInput(), { db, transport }),
+    /Unapply/,
   );
 });
 

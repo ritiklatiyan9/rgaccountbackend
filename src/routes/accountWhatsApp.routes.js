@@ -10,10 +10,41 @@ import {
   deleteAccountWhatsAppTemplate,
   previewAccountWhatsAppTemplate,
   testAccountWhatsAppTemplate,
+  listAccountWhatsAppRemoteTemplates,
+  getAccountWhatsAppRemoteTemplate,
+  importAccountWhatsAppTemplate,
 } from "../services/accountWhatsApp.service.js";
 
 const router = express.Router();
 router.use(authMiddleware, requireRole("admin"));
+router.get(
+  "/remote-templates",
+  asyncHandler(async (req, res) =>
+    res.json(
+      await listAccountWhatsAppRemoteTemplates(req.user, req.query.site_id),
+    ),
+  ),
+);
+router.get(
+  "/remote-templates/:id",
+  asyncHandler(async (req, res) =>
+    res.json(
+      await getAccountWhatsAppRemoteTemplate(
+        req.user,
+        req.query.site_id,
+        req.params.id,
+      ),
+    ),
+  ),
+);
+router.post(
+  "/templates/import",
+  asyncHandler(async (req, res) =>
+    res
+      .status(201)
+      .json(await importAccountWhatsAppTemplate(req.user, req.body || {})),
+  ),
+);
 router.get(
   "/studio",
   asyncHandler(async (req, res) =>
