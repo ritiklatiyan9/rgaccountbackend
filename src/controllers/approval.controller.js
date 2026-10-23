@@ -1,4 +1,5 @@
 import { attachModuleChequeDates } from '../services/chequeDates.service.js';
+import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { chequeReadyForApproval, chequeReadySql } from '../utils/chequeWorkflow.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
@@ -1109,6 +1110,13 @@ export const approveEntry = asyncHandler(async (req, res) => {
       }
   }
 
+  await accountWhatsAppHooks.paymentApproved(source, entry);
+  if (source === 'plot_status') {
+    await accountWhatsAppHooks.plotBooked(
+      { ...entry, status: entry.plot_status, approval_status: entry.status },
+      entry.approval_original_data,
+    );
+  }
   res.json({ entry, message: `${source} approved successfully` });
 });
 
@@ -1366,6 +1374,15 @@ export const bulkApprove = asyncHandler(async (req, res) => {
         if (row.plot_commission_id) {
           affectedCommissions.add(row.plot_commission_id);
         }
+      }
+    }
+    for (const row of result.rows) {
+      await accountWhatsAppHooks.paymentApproved(sourceKey, row);
+      if (sourceKey === 'plot_status') {
+        await accountWhatsAppHooks.plotBooked(
+          { ...row, status: row.plot_status, approval_status: row.status },
+          row.approval_original_data,
+        );
       }
     }
     totalApproved += result.rowCount;
@@ -1772,6 +1789,7 @@ export const updateChequeStatus = asyncHandler(async (req, res) => {
       },
     });
     await client.query('COMMIT');
+    await accountWhatsAppHooks.chequeCommitted(source, result);
     res.json({ entry: result.after, message: `Cheque status updated to ${normalizedStatus}` });
   } catch (error) {
     await client.query('ROLLBACK');

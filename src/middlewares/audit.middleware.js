@@ -27,6 +27,7 @@ const MODULE_MAP = {
   'transaction-transfers': 'transaction_transfers', upload: 'uploads',
   'bank-reconciliation': 'bank_reconciliation', 'management-analytics': 'management_analytics',
   'recycle-bin': 'recycle_bin',
+  'account-whatsapp': 'whatsapp_studio',
 };
 
 const labelize = (value) => String(value || '')

@@ -1,6 +1,6 @@
 import pool from '../config/db.js';
 import applicationSettingModel from '../models/ApplicationSetting.model.js';
-import { normalisePhone, notifyPlotPaymentRecorded } from '../utils/notify.js';
+import { normalisePhone } from '../utils/notify.js';
 import { enqueueSms, isSmsQueueConfigured } from '../utils/sqs.js';
 import { allocateInstallmentPayments } from './installmentAllocation.service.js';
 
@@ -193,9 +193,8 @@ const loadNotificationContext = async (payment) => {
 };
 
 /**
- * Approval-time dispatcher. Installment-plan plots obey the Settings switches
- * and use custom SMS copy; plots without a plan retain the existing WhatsApp
- * receipt behavior unchanged.
+ * Approval-time SMS dispatcher. WhatsApp receipts are exclusively managed by
+ * Accountancy Studio, including its hard exclusion of CASH transactions.
  */
 export const notifyApprovedPlotPayment = async (payment) => {
   try {
@@ -203,8 +202,7 @@ export const notifyApprovedPlotPayment = async (payment) => {
     const context = await loadNotificationContext(payment);
     if (!context?.plot) return { queued: false, reason: 'plot_not_found' };
     if (!context.installmentPlan) {
-      await notifyPlotPaymentRecorded(payment);
-      return { queued: false, legacy: true };
+      return { queued: false, reason: 'no_installment_sms_plan' };
     }
 
     const config = await getPaymentNotificationConfig(context.plot.site_id);

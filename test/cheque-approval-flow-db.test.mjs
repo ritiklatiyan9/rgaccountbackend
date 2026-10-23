@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import pool from '../src/config/db.js';
 import { up } from '../src/migrations/171_cheque_clearance_before_approval.js';
 import { CHEQUE_SOURCE_CONFIG, updateChequeStatusRecord } from '../src/services/chequeStatus.service.js';
+import { createAccountWhatsAppHooks } from '../src/services/accountWhatsAppHooks.service.js';
 import { chequeReadyForApproval, chequeReadySql } from '../src/utils/chequeWorkflow.js';
 
 // All schema/data changes roll back. Fixtures have explicit IDs and never use
@@ -44,12 +45,17 @@ test('PostgreSQL: pending → cleared → approved posts exactly once; rejected/
     await db.query("INSERT INTO sites VALUES (9, 'Test site')");
     await db.query("INSERT INTO plots VALUES (3, 'A1', 'Test buyer')");
     let notifications = 0;
+    const whatsappEvents = [];
+    const accountWhatsAppHooks = createAccountWhatsAppHooks(async (event, id) => {
+      whatsappEvents.push({ event, id });
+      return { queued: true };
+    });
     const controller = readFileSync(new URL('../src/controllers/approval.controller.js', import.meta.url), 'utf8')
       .replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
     const context = { constructionCanViewAll:async()=>false,projectAccessPredicate:()=> 'true',attachModuleChequeDates, pool: {query: (sql, params) => {
       if (/COUNT\(\*\)/.test(sql) && !sql.includes('FROM plot_payments pp')) return {rows:[{count:0}]};
       return db.query(sql, params);
-    }}, asyncHandler: fn => fn, console, chequeReadyForApproval, chequeReadySql,
+    }}, asyncHandler: fn => fn, console, chequeReadyForApproval, chequeReadySql, accountWhatsAppHooks,
       hasRelation: async () => false, notifyApprovedPlotPayment: async () => { notifications++; } };
     vm.createContext(context);
     vm.runInContext(`${controller}\nthis.handlers = {listAllPending,getPendingCounts,approveEntry,bulkApprove};`,context);
@@ -80,6 +86,7 @@ test('PostgreSQL: pending → cleared → approved posts exactly once; rejected/
     assert.equal((await invoke('approveEntry')).code,409);
     assert.equal((await invoke('bulkApprove',{body:{items:[{id:1,source:'plot_payment'}]}})).body.count,0);
     assert.equal(notifications,0);
+    assert.deepEqual(whatsappEvents, []);
     await db.query('SAVEPOINT early_approval');
     await assert.rejects(db.query("UPDATE plot_payments SET status='approved' WHERE id=1"), e => e.constraint === 'cheque_clearance_before_approval');
     await db.query('ROLLBACK TO SAVEPOINT early_approval');
@@ -97,9 +104,11 @@ test('PostgreSQL: pending → cleared → approved posts exactly once; rejected/
     assert.equal((await db.query('SELECT assigned_admin_id FROM plot_payments WHERE id=1')).rows[0].assigned_admin_id,12);
     assert.equal((await invoke('approveEntry')).code,200);
     assert.equal(notifications,1);
+    assert.deepEqual(whatsappEvents, [{ event: 'PAYMENT_RECEIVED', id: 1 }]);
     assert.equal(await balance(), 25000);
     assert.equal((await invoke('approveEntry')).code,400);
     assert.equal(notifications,1,'repeat approval sends no duplicate notification');
+    assert.equal(whatsappEvents.length,1,'repeat approval cannot queue duplicate WhatsApp receipts');
     assert.equal(await balance(), 25000);
     await updateChequeStatusRecord(db,{source:'plot_payment',entryId:1,status:'BOUNCED'});
     assert.equal(await balance(), 0);

@@ -1,4 +1,5 @@
 import { attachModuleChequeDates } from '../services/chequeDates.service.js';
+import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
 import { linkMemberSiteRegistration, lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
 import { reviewMemberIdentity, linkMemberIdentity } from '../services/memberIdentityLink.service.js';
@@ -317,6 +318,7 @@ export const createMember = asyncHandler(async (req, res) => {
     Object.assign(data, docUrls);
 
     const member = await memberModel.create(data, client);
+    let reusedKycCaseId = null;
     await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId: member.id, siteId });
     if (reuseSource) {
       const {rows:cases}=await client.query(
@@ -333,12 +335,15 @@ export const createMember = asyncHandler(async (req, res) => {
           reuseSource.verified_kyc_case_id,
         ]
       );
+      reusedKycCaseId = cases[0].id;
       await copyIncorporatedKycDocuments(client,{sourceCaseId:reuseSource.verified_kyc_case_id,targetCaseId:cases[0].id,
         memberId:member.id,siteId,userId:req.user.id,organizationId:req.user.organization_id});
     }
     const registration=await registerMemberAcrossSites(client,{memberId:member.id,user:req.user});
     member.shared_profile_id=registration.shared_profile_id;
     await client.query('COMMIT');
+    await accountWhatsAppHooks.clientOnboarded(member);
+    if (reusedKycCaseId) await accountWhatsAppHooks.kycVerified({ id: reusedKycCaseId, site_id: siteId });
     return res.status(201).json({
       member,
       kyc_reused: Boolean(reuseSource),

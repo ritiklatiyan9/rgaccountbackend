@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { writeAuditLog } from '../services/auditLog.service.js';
 import { parseBankStatement } from '../services/bankStatementParser.service.js';
 import {
@@ -576,6 +577,8 @@ export async function manuallyUpdateChequeStatus(req, res) {
     }, client);
     await client.query('COMMIT');
 
+    await accountWhatsAppHooks.chequeCommitted(source, changed);
+
     return res.json({
       entry: changed.after,
       cheque: { ...candidate, cheque_status: status, cheque_transaction_date: changed.after?.cheque_transaction_date ?? null },
@@ -647,6 +650,7 @@ export async function confirmMatches(req, res) {
     const candidateMap = new Map(candidates.map((candidate) => [candidate.id, candidate]));
     const overrides = new Map((req.body.overrides || []).map((override) => [Number(override.suggestion_id), override]));
     const effects = [];
+    const committedCheques = [];
 
     for (const suggestion of suggestionResult.rows) {
       if (Array.isArray(suggestion.parse_errors) && suggestion.parse_errors.length) {
@@ -762,11 +766,15 @@ export async function confirmMatches(req, res) {
         cheque_apply_date: changed.after?.cheque_apply_date ?? candidate.cheque_apply_date,
         cheque_transaction_date: changed.after?.cheque_transaction_date ?? null,
       });
+      committedCheques.push({ source, changed });
     }
 
     await client.query(`UPDATE bank_reconciliation_runs SET status = 'CONFIRMED', completed_at = COALESCE(completed_at, NOW()) WHERE id = $1`, [runId]);
     await client.query(`UPDATE bank_statement_uploads SET processing_state = 'CONFIRMED', updated_at = NOW() WHERE id = $1`, [run.upload_id]);
     await client.query('COMMIT');
+    for (const cheque of committedCheques) {
+      await accountWhatsAppHooks.chequeCommitted(cheque.source, cheque.changed);
+    }
     return res.json({
       message: `${effects.length} cheque${effects.length === 1 ? '' : 's'} updated successfully.`,
       effects,

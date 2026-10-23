@@ -1,4 +1,5 @@
 import { chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
+import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet, vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { attachChequeDates } from '../services/chequeDates.service.js';
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
@@ -398,6 +399,7 @@ export const createPlot = asyncHandler(async (req, res) => {
     if (err?.code !== '42P01') throw err;
   }
 
+  await accountWhatsAppHooks.plotBooked(plot);
   res.status(201).json({ plot, auto_commission: autoCommission, auto_registry: null });
 });
 
@@ -622,6 +624,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
     if (err?.code !== '42P01') throw err;
   }
 
+  await accountWhatsAppHooks.plotBooked(updated, existing);
   res.json({ plot: updated, auto_commission: autoCommission, auto_registry: null });
 });
 
@@ -767,6 +770,9 @@ export const createPayment = asyncHandler(async (req, res) => {
     return res.status(409).json({ code: 'PLOT_BOOKING_CHANGED', message: 'The plot is unavailable or needs booking. Select it again before saving.' });
   }
   if (!payment) return res.status(404).json({ message: 'Plot not found' });
+  // Pending payments never issue receipts. A quick booking is notified only
+  // if its plot is already approved; normally its review queues the event.
+  if (bookedPlot) await accountWhatsAppHooks.plotBooked(bookedPlot);
   res.status(201).json({ payment, ...(bookedPlot ? { plot: bookedPlot } : {}) });
 
 });

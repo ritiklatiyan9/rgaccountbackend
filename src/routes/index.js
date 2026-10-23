@@ -70,6 +70,7 @@ import loyaltyVaultRoutes from './loyaltyVault.routes.js';
 import backupRoutes from './backup.routes.js';
 import transactionDocumentationRoutes from './transactionDocumentation.routes.js';
 import seekPermissionRoutes from './seekPermission.routes.js';
+import accountWhatsAppRoutes from './accountWhatsApp.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -147,4 +148,5 @@ router.use('/loyalty-vault', loyaltyVaultRoutes);
 router.use('/backups', backupRoutes);
 router.use('/transaction-documentation', transactionDocumentationRoutes);
 router.use('/seek-permissions', seekPermissionRoutes);
+router.use('/account-whatsapp', accountWhatsAppRoutes);
 export default router;

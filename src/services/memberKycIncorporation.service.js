@@ -1,4 +1,5 @@
 import { lockMemberDirectory, syncSharedMemberProfile } from './memberSiteSharing.service.js';
+import { accountWhatsAppHooks } from './accountWhatsAppHooks.service.js';
 import { copyIncorporatedKycDocuments } from './memberKycDocuments.service.js';
 export { copyIncorporatedKycDocuments } from './memberKycDocuments.service.js';
 import {
@@ -256,6 +257,7 @@ export const incorporateMemberKyc = async (pool, { user, memberId, sourceMemberI
     }
     if(result.kycReused && target.shared_profile_id) await syncSharedMemberProfile(db,{memberId:target.id,user,verified:true,previousProfile:target});
     await db.query('COMMIT');
+    if (result.kycReused) await accountWhatsAppHooks.kycVerified({ id: result.kycCaseId, site_id: target.site_id });
     return {
       kyc_reused: result.kycReused, kyc_case_id: result.kycCaseId,
       source_site_name: source.source_site_name,

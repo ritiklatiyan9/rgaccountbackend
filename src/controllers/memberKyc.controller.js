@@ -1,4 +1,5 @@
 import { readPendingMemberKycCases } from '../services/pendingMemberKyc.service.js';
+import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { DOCUMENT_FIELDS_BY_TYPE, selectActiveDocuments } from '../services/memberKycDocumentSelection.js';
 import { assertMemberSiteAccess } from '../services/memberPhoneReuse.service.js';
 import { lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
@@ -770,14 +771,9 @@ export const verifyCase = asyncHandler(async (req, res) => {
   } finally {
     client.release();
   }
-  // Customer WhatsApp "KYC verified": queued here, sent by the Booking API worker
-  // (Bookings/sales-backend/src/services/whatsapp.service.js; same dedupe key as booking-side verifies).
-  if (process.env.WHATSAPP_ENABLED === 'true' && !process.env.NODE_TEST_CONTEXT) {
-    pool.query(
-      `INSERT INTO whatsapp_messages (dedupe_key, event, ref_id) VALUES ($1, 'KYC_VERIFIED', $2) ON CONFLICT (dedupe_key) DO NOTHING`,
-      [`KYC_VERIFIED:${access.kycCase.id}`, access.kycCase.id],
-    ).catch((error) => console.error('[whatsapp] queue failed:', error.message));
-  }
+  // Accounting notifications belong to Accountancy Studio's outbox. Do not
+  // also enqueue the Booking worker's KYC notification for this same action.
+  await accountWhatsAppHooks.kycVerified(access.kycCase);
   await clearCacheByPrefixes(['members|','member-kyc-pending|','plots|','plots:pageData:']);
   res.json({ message: 'KYC verified and reviewed profile shared', caseId: access.kycCase.id,sharing });
 });

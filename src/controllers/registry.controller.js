@@ -1,4 +1,5 @@
 import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
+import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { registrySizeFromPlot, registryFinanceFromPlot } from '../utils/registrySize.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { registryCoverageSql } from '../utils/registryCashAllocation.js';
@@ -1773,5 +1774,8 @@ export const createRegistryHandover = asyncHandler(async (req, res) => {
   );
   const handover = rows[0];
   handover.given_by_name = req.user.name || req.user.email || null;
+  // NOC preparation is not legal completion. Queue congratulations once the
+  // deed has actually been handed over; the worker rechecks date and deed.
+  await accountWhatsAppHooks.registryCompleted(registry);
   res.status(201).json({ handover, workflow_unlocked: workflowUnlocked });
 });

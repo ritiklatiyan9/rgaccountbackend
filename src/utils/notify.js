@@ -1,4 +1,4 @@
-import pool from '../config/db.js';
+import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 
 // MSG91 WhatsApp Business API (v5) — bulk template endpoint.
 // Mirrors the proven Make-Andaman-Trip setup (whatsappService.js +
@@ -124,76 +124,9 @@ export async function sendWATemplate(to, templateName, components = {}) {
   }
 }
 
-/**
- * Notify the plot owner over WhatsApp that a payment was recorded.
- * Resolves the owner's number from the members (clients) table by matching the
- * plot's buyer name within the site (whatsapp → phone → alt_phone), builds the
- * message via `msg.plotPaymentRecorded`, and dispatches through `sendWATemplate`.
- *
- * `payment` needs: plot_id, amount, date, payment_from|payment_type, [buyer_name].
- * Never throws — safe to fire-and-forget.
- */
+/** Backward-compatible entry point. Payment WhatsApp now always obeys the
+ * Accountancy Studio assignment, approval and non-CASH policy. Generic MSG91
+ * helpers above remain available for the separate compliance scheduler. */
 export async function notifyPlotPaymentRecorded(payment) {
-  try {
-    if (!payment?.plot_id || !isWhatsAppConfigured()) return;
-
-    const { rows: plotRows } = await pool.query(
-      `SELECT p.id, p.plot_no, p.block, p.buyer_name, p.site_id, p.sale_price,
-              COALESCE(pp.total, 0) + COALESCE(ip.total, 0) AS total_received
-         FROM plots p
-         LEFT JOIN LATERAL (
-           SELECT SUM(ppx.amount) FILTER (
-             WHERE financial_transaction_posts('credit', ppx.status, ppx.payment_type, ppx.cheque_status)
-           ) AS total
-           FROM plot_payments ppx WHERE ppx.plot_id = p.id
-         ) pp ON TRUE
-         LEFT JOIN LATERAL (
-           SELECT SUM(pipx.amount) FILTER (
-             WHERE financial_transaction_posts('credit', pipx.status, pipx.payment_mode, pipx.cheque_status)
-           ) AS total
-           FROM plot_installment_payments pipx WHERE pipx.plot_id = p.id
-         ) ip ON TRUE
-        WHERE p.id = $1`,
-      [payment.plot_id]
-    );
-    const plot = plotRows[0];
-    if (!plot) return;
-
-    const ownerName = (plot.buyer_name || payment.buyer_name || '').trim();
-    if (!ownerName) {
-      console.warn(`[notify] plot ${plot.id} has no buyer/owner name; skipping`);
-      return;
-    }
-
-    const { rows: memberRows } = await pool.query(
-      `SELECT whatsapp, phone, alt_phone
-         FROM members
-        WHERE site_id = $1 AND UPPER(TRIM(full_name)) = UPPER(TRIM($2))
-        ORDER BY id LIMIT 1`,
-      [plot.site_id, ownerName]
-    );
-    const member = memberRows[0];
-    const to = member?.whatsapp || member?.phone || member?.alt_phone;
-    if (!normalisePhone(to)) {
-      console.warn(`[notify] no WhatsApp/phone for plot owner "${ownerName}"; skipping`);
-      return;
-    }
-
-    const saleP = parseFloat(plot.sale_price) || 0;
-    const received = parseFloat(plot.total_received) || 0;
-    const { template, components } = msg.plotPaymentRecorded({
-      ownerName,
-      plotLabel: `${plot.plot_no || ''}${plot.block ? ` (Block ${plot.block})` : ''}`.trim(),
-      receiptNo: payment.id ? `RG-${payment.id}` : `RG-P${plot.id}`,
-      amount: payment.amount,
-      mode: String(payment.payment_from || payment.payment_type || 'PAYMENT').toUpperCase(),
-      received,
-      balance: saleP - received,
-      date: payment.date,
-    });
-
-    return await sendWATemplate(to, template, components);
-  } catch (err) {
-    console.error('[notify] WhatsApp payment alert failed:', err?.message || err);
-  }
+  return accountWhatsAppHooks.paymentApproved('plot_payment', payment);
 }

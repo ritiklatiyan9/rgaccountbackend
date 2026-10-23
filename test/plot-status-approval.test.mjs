@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { validatePlotApprover } from '../src/services/plotApproval.service.js';
+import { createAccountWhatsAppHooks } from '../src/services/accountWhatsAppHooks.service.js';
 import { requireApprovalAccess } from '../src/middlewares/permission.middleware.js';
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
 
@@ -62,7 +63,8 @@ test('migration and shared single/bulk approvals preserve the plot lifecycle', {
       return { ...r, rowCount: r.affectedRows ?? r.rows.length };
     };
     const controller = read('../src/controllers/approval.controller.js').replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
-    const ctx = { constructionCanViewAll:async()=>false,projectAccessPredicate:()=> 'true', attachModuleChequeDates, chequeReadyForApproval, chequeReadySql, pool: { query }, asyncHandler: fn => fn, console,
+    const accountWhatsAppHooks = createAccountWhatsAppHooks(async () => ({ queued: true }));
+    const ctx = { constructionCanViewAll:async()=>false,projectAccessPredicate:()=> 'true', attachModuleChequeDates, chequeReadyForApproval, chequeReadySql, accountWhatsAppHooks, pool: { query }, asyncHandler: fn => fn, console,
       hasRelation: async name => (await db.query('SELECT to_regclass($1) IS NOT NULL AS present', [name])).rows[0].present };
     vm.createContext(ctx);
     vm.runInContext(`${controller}\nthis.handlers = { approveEntry, rejectEntry, bulkApprove, bulkReject, listAllPending, getPendingCounts };`, ctx);
