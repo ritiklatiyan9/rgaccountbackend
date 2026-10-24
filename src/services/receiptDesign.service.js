@@ -332,18 +332,21 @@ export const normalizeReceiptDesign = (value) => ({
 });
 
 // A site prints its own design when it has one, otherwise the app-wide design.
-export const getReceiptDesignWithScope = async (siteId) => {
-  const own = siteId ? await applicationSettingModel.getJson(siteId, RECEIPT_SITE_DESIGN_KEY, null) : null;
-  return own ? { design: normalizeReceiptDesign(own), scope: 'site' } : { design: await getSharedReceiptDesign(), scope: 'global' };
+export const getReceiptDesignWithScope = async (siteId, db = pool) => {
+  const own = siteId ? db === pool
+    ? await applicationSettingModel.getJson(siteId, RECEIPT_SITE_DESIGN_KEY, null)
+    : (await db.query('SELECT setting_value FROM application_settings WHERE site_id = $1 AND setting_key = $2 LIMIT 1', [siteId, RECEIPT_SITE_DESIGN_KEY])).rows[0]?.setting_value : null;
+  return own ? { design: normalizeReceiptDesign(own), scope: 'site' } : { design: await getSharedReceiptDesign(db), scope: 'global' };
 };
 
-export const getReceiptDesign = async (siteId) => (await getReceiptDesignWithScope(siteId)).design;
+export const getReceiptDesign = async (siteId, db = pool) => (await getReceiptDesignWithScope(siteId, db)).design;
 
 // Legacy site settings stay intact for rollback.
-const getSharedReceiptDesign = async () => {
-  const shared = await applicationSettingModel.getGlobalJson(RECEIPT_DESIGN_KEY, null);
+const getSharedReceiptDesign = async (db = pool) => {
+  const shared = db === pool ? await applicationSettingModel.getGlobalJson(RECEIPT_DESIGN_KEY, null)
+    : (await db.query('SELECT setting_value FROM application_settings WHERE site_id IS NULL AND setting_key = $1 LIMIT 1', [RECEIPT_DESIGN_KEY])).rows[0]?.setting_value;
   if (shared) return normalizeReceiptDesign(shared);
-  const { rows } = await pool.query(`SELECT a.setting_value FROM application_settings a
+  const { rows } = await db.query(`SELECT a.setting_value FROM application_settings a
     JOIN sites s ON s.id = a.site_id WHERE a.setting_key = $1 AND upper(trim(s.name)) = 'OM ASSOCIATES'
     ORDER BY a.updated_at DESC, a.id DESC LIMIT 1`, [RECEIPT_DESIGN_KEY]);
   return normalizeReceiptDesign(rows[0]?.setting_value || DEFAULT_RECEIPT_DESIGN);

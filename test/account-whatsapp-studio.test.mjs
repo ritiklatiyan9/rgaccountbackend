@@ -99,6 +99,7 @@ CREATE TABLE sites(id integer PRIMARY KEY,name text,organization_id integer);
 CREATE TABLE users(id integer PRIMARY KEY);
 INSERT INTO sites VALUES(1,'Defence Garden',1),(2,'Second Site',1),(3,'Other Company',2);
 INSERT INTO users VALUES(1);
+CREATE TABLE application_settings(id serial PRIMARY KEY,site_id integer,setting_key text,setting_value jsonb,updated_at timestamptz DEFAULT now());
 CREATE FUNCTION pg_advisory_xact_lock(integer) RETURNS void LANGUAGE SQL AS $$SELECT$$;
 CREATE FUNCTION financial_transaction_posts(text,text,text,text) RETURNS boolean LANGUAGE SQL AS $$SELECT $2='approved' AND ($3<>'CHEQUE' OR $4='CLEARED')$$;
 CREATE TABLE members(id integer PRIMARY KEY,site_id integer,full_name text,phone text,whatsapp text,member_type text,member_types text[],member_code text,status text DEFAULT 'ACTIVE');
@@ -133,6 +134,7 @@ async function fixture(t) {
   return { pg, db };
 }
 const localTransport = (status = "APPROVED") => ({
+  uploadTemplateMedia: async () => "sample-header-handle",
   create: async () => ({
     templateStatus: status,
     metaTemplateId: "meta-" + Math.random(),
@@ -821,7 +823,7 @@ test("worker rereads current mode, amount, approval, cheque and site; queue dedu
     calls.push(args);
     return "aws-accepted";
   };
-  await drainAccountWhatsApp({ db, send });
+  await drainAccountWhatsApp({ db, send, upload: async () => "test-media" });
   assert.equal(calls.length, 0);
   assert.equal(
     (await pg.query("SELECT status FROM account_whatsapp_messages")).rows[0]
@@ -864,7 +866,7 @@ test("worker rereads current mode, amount, approval, cheque and site; queue dedu
     true,
     "installment site is derived from current plot",
   );
-  await drainAccountWhatsApp({ db, send });
+  await drainAccountWhatsApp({ db, send, upload: async () => "test-media" });
   assert.equal(calls.length, 2);
   assert.equal(calls[0][0], "+919876543210");
   assert.equal(
@@ -986,6 +988,7 @@ test("sample action uses fictional values, protects in-flight version and logs p
     { site_id: 1, event: "PAYMENT_RECEIVED", phone: "9876543212" },
     {
       db,
+      upload: async () => "test-media",
       send: async (to, name, params) => {
         assert.equal(to, "+919876543212");
         assert.equal(name, template.name);
@@ -1123,6 +1126,7 @@ test("accepted messages are never resent after log failure; expired and interrup
   try {
     await drainAccountWhatsApp({
       db,
+      upload: async () => "test-media",
       send: async () => {
         sends++;
         return "accepted-once";
@@ -1292,10 +1296,13 @@ test("cash changes and attachment failures never send a payment message without 
     "cash_before",
     "cash_during",
     "amount_during",
+    "recipient_during",
+    "reference_during",
     "upload_failed",
   ]) {
     const { db } = await fixture(t);
     await up(db);
+    await db.query("ALTER TABLE plot_payments ADD COLUMN bank_reference text");
     const transport = importedTransport(approvedAwsPayment());
     const template = await importAccountWhatsAppTemplate(
       admin,
@@ -1324,6 +1331,10 @@ test("cash changes and attachment failures never send a payment message without 
         );
       if (scenario === "amount_during")
         await db.query("UPDATE plot_payments SET amount=2000 WHERE id=40");
+      if (scenario === "recipient_during")
+        await db.query("UPDATE members SET whatsapp='9876543219' WHERE id=10");
+      if (scenario === "reference_during")
+        await db.query("UPDATE plot_payments SET bank_reference='changed-reference' WHERE id=40");
       return "test-media";
     };
     await drainAccountWhatsApp({
@@ -1353,6 +1364,115 @@ test("cash changes and attachment failures never send a payment message without 
           : /Payment changed/,
     );
   }
+});
+
+test("new payment versions include a fictional PDF approval sample and a required document header", async (t) => {
+  const { pg, db } = await fixture(t);
+  await pg.query("UPDATE sites SET name='OM ASSOCIATES' WHERE id=1");
+  await up(db);
+  const definitions = [];
+  let samples = 0;
+  const transport = {
+    ...localTransport(),
+    uploadTemplateMedia: async (buffer, filename) => {
+      samples++;
+      assert.equal(buffer.subarray(0, 5).toString(), "%PDF-");
+      assert.equal(filename, "payment-receipt-ACK-100123.pdf");
+      return "approval-sample-handle";
+    },
+    create: async (definition) => {
+      definitions.push(definition);
+      return { templateStatus: "PENDING", metaTemplateId: "test-template" };
+    },
+  };
+  for (const event of ["PAYMENT_RECEIVED", "PAYMENT_SENT", "INSTALLMENT_RECEIVED", "CLIENT_ONBOARDED"]) {
+    const template = await createAccountWhatsAppTemplate(admin, {
+      site_id: 1, event, title: event, body: ACCOUNT_WHATSAPP_EVENTS[event].body,
+    }, { db, transport });
+    const payment = event !== "CLIENT_ONBOARDED";
+    assert.equal(template.has_document, payment);
+    assert.equal(definitions.at(-1).components.some((component) => component.type === "HEADER"), payment);
+    if (payment) assert.deepEqual(definitions.at(-1).components[0], {
+      type: "HEADER", format: "DOCUMENT", example: { header_handle: ["approval-sample-handle"] },
+    });
+    if (payment) {
+      const examples = definitions.at(-1).components.find((component) => component.type === "BODY").example.body_text[0];
+      assert.ok(examples.includes("OM ASSOCIATES"), "the body sample and its receipt use the same selected project");
+      assert.ok(!examples.includes("Defence Garden"));
+    }
+  }
+  assert.equal(samples, 3);
+});
+
+test("PDF sample upload failure saves the payment version without submitting a body-only template", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  let submissions = 0;
+  await assert.rejects(createAccountWhatsAppTemplate(admin, {
+    site_id: 1, event: "PAYMENT_RECEIVED", title: "Payment receipt", body: ACCOUNT_WHATSAPP_EVENTS.PAYMENT_RECEIVED.body,
+  }, { db, transport: {
+    ...localTransport(),
+    uploadTemplateMedia: async () => { throw new Error("Sample storage unavailable"); },
+    create: async () => { submissions++; },
+  } }), /Sample storage unavailable/);
+  assert.equal(submissions, 0);
+  assert.deepEqual((await db.query("SELECT status,has_document FROM account_whatsapp_templates")).rows, [
+    { status: "SUBMISSION_FAILED", has_document: true },
+  ]);
+});
+
+test("legacy text-only payment assignments are never sent without a PDF and can still be switched off", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const textOnlyDefinition = approvedAwsPayment();
+  textOnlyDefinition.components.shift();
+  await assert.rejects(importAccountWhatsAppTemplate(admin, paymentImport(), {
+    db, transport: importedTransport(textOnlyDefinition),
+  }), /PDF document-header/);
+  assert.equal((await db.query("SELECT COUNT(*)::int AS total FROM account_whatsapp_templates")).rows[0].total, 0);
+  const template = await apply(db, "PAYMENT_RECEIVED");
+  await db.query("UPDATE account_whatsapp_templates SET has_document=false WHERE id=$1", [template.id]);
+  await assert.rejects(saveAccountWhatsAppStage(admin, "PAYMENT_RECEIVED", {
+    site_id: 1, enabled: true,
+  }, { db }), /PDF document-header/);
+  await assert.rejects(testAccountWhatsAppTemplate(admin, {
+    site_id: 1, event: "PAYMENT_RECEIVED", phone: "9876543210",
+  }, { db, send: async () => assert.fail("must not send") }), /PDF document-header/);
+  assert.equal((await queueAccountWhatsApp("PAYMENT_RECEIVED", 40, { siteId: 1, db })).queued, true);
+  await drainAccountWhatsApp({ db, send: async () => assert.fail("must not send"), upload: async () => assert.fail("must not upload") });
+  assert.deepEqual((await db.query("SELECT status FROM account_whatsapp_messages")).rows, [{ status: "SKIPPED" }]);
+  assert.match((await db.query("SELECT error FROM account_whatsapp_messages")).rows[0].error, /document-header/);
+  assert.equal((await saveAccountWhatsAppStage(admin, "PAYMENT_RECEIVED", { site_id: 1, enabled: false }, { db })).enabled, false);
+});
+
+test("receipt context reads the exact transaction and site-owned printable facts without member KYC", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  await db.query("ALTER TABLE plot_payments ADD COLUMN bank_reference text,ADD COLUMN narration text");
+  await db.query("ALTER TABLE plots ADD COLUMN plot_size numeric,ADD COLUMN plot_rate numeric,ADD COLUMN booking_by text");
+  await db.query("ALTER TABLE members ADD COLUMN team text,ADD COLUMN aadhar_no text");
+  await db.query("UPDATE plot_payments SET bank_reference='REF-40',narration='First installment' WHERE id=40");
+  await db.query("UPDATE plots SET plot_size=120,plot_rate=2000,booking_by='Sample Broker' WHERE id=20");
+  await db.query("INSERT INTO members(id,site_id,full_name,phone,member_type,member_types,team) VALUES(12,1,'Sample Broker','9876543298','AGENT',ARRAY['AGENT'],'Site team'),(13,2,'Sample Broker','9876543299','AGENT',ARRAY['AGENT'],'Other team')");
+  await db.query("CREATE TABLE bank_accounts(id integer,site_id integer,name text); CREATE TABLE cash_flow_entries(id integer,site_id integer,source_module text,source_id integer,bank_account_id integer)");
+  await db.query("INSERT INTO bank_accounts VALUES(1,1,'Site bank'),(2,2,'Wrong site bank'); INSERT INTO cash_flow_entries VALUES(1,1,'plot_payments',40,1),(2,2,'plot_payments',40,2),(3,1,'plot_installment_payments',40,2)");
+  const data = await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 1, db);
+  assert.equal(data.receipt_module, "plot_payment");
+  assert.equal(data.source_id, 40);
+  assert.equal(data.bank_reference, "REF-40");
+  assert.equal(data.narration, "First installment");
+  assert.equal(data.bank_account_name, "Site bank");
+  assert.equal(data.plot_size, "120");
+  assert.equal(data.plot_rate, "2000");
+  assert.equal(data.broker_phone, "9876543298");
+  assert.equal(data.broker_team, "Site team");
+  assert.equal(Object.hasOwn(data, "aadhar_no"), false);
+  assert.equal(await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 2, db), null);
+  const installment = await loadAccountWhatsAppContext("INSTALLMENT_RECEIVED", 60, 1, db);
+  assert.equal(installment.receipt_module, "plot_installment_payment");
+  assert.equal(installment.receipt_no, "ACK-60");
+  await db.query("INSERT INTO members(id,site_id,full_name,phone,member_type) VALUES(14,1,'Sample Broker','9876543297','AGENT')");
+  assert.equal((await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 1, db)).broker_phone, null, "ambiguous name never selects a broker's contact details");
 });
 
 test("document samples contain only fictional values and use an explicit media header", async (t) => {
@@ -1391,4 +1511,50 @@ test("document samples contain only fictional values and use an explicit media h
   assert.equal(filename, "payment-receipt-ACK-100123.pdf");
   assert.equal(sent[0][3].media.id, "sample-media");
   assert.equal(sent[0][2][3], "ACK-100123");
+});
+
+test("receipt enrichment resolves buyer, related client, approver and full bank facts from the exact site and module", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  await db.query("ALTER TABLE plots ADD COLUMN buyer_phone text");
+  await db.query("ALTER TABLE plot_payments ADD COLUMN assigned_admin_id integer,ADD COLUMN booking_reference text,ADD COLUMN booking_no text,ADD COLUMN plot_reference text,ADD COLUMN bank_account_no text,ADD COLUMN account_no text");
+  await db.query("ALTER TABLE plot_installment_payments ADD COLUMN assigned_admin_id integer");
+  await db.query("ALTER TABLE users ADD COLUMN name text,ADD COLUMN organization_id integer");
+  await db.query("UPDATE users SET name='Site Approver',organization_id=1 WHERE id=1");
+  await db.query("INSERT INTO users VALUES(2,'Other Organization Approver',2)");
+  await db.query("UPDATE plots SET buyer_phone='9876543280' WHERE id=20");
+  await db.query("UPDATE plot_payments SET assigned_admin_id=1,booking_reference='BK-40',booking_no='BOOK-40',plot_reference='UNIT-A12',bank_account_no='OLD-ACCOUNT',account_no='OLD-ACCOUNT' WHERE id=40");
+  await db.query("UPDATE plot_installment_payments SET assigned_admin_id=1 WHERE id=60");
+  await db.query("INSERT INTO members(id,site_id,full_name,phone,member_type) VALUES(14,1,'Linked Client','9876543281','CLIENT')");
+  await db.query("CREATE TABLE transaction_party_links(source_key text,source_id integer,site_id integer,member_id integer)");
+  await db.query("INSERT INTO transaction_party_links VALUES('plot_payment',40,2,11),('plot_installment_payment',40,1,10),('plot_payment',40,1,14),('plot_installment_payment',60,1,10)");
+  await db.query("CREATE TABLE bank_accounts(id integer,site_id integer,name text,account_no text,ifsc text,branch text); CREATE TABLE cash_flow_entries(id integer,site_id integer,source_module text,source_id integer,bank_account_id integer)");
+  await db.query("INSERT INTO bank_accounts VALUES(1,1,'Mapped Bank','SITE-ACCOUNT','SITE0001234','Site Branch'),(2,2,'Foreign Bank','FOREIGN-ACCOUNT','OTHER000123','Other Branch'); INSERT INTO cash_flow_entries VALUES(1,1,'plot_payments',40,1),(2,2,'plot_payments',40,2),(3,1,'plot_installment_payments',60,2)");
+  const data = await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 1, db);
+  assert.equal(data.buyer_phone, "9876543280");
+  assert.equal(data.related_party, "Linked Client");
+  assert.equal(data.assigned_to, "Site Approver");
+  assert.equal(data.booking_reference, "BK-40");
+  assert.equal(data.booking_no, "BOOK-40");
+  assert.equal(data.plot_reference, "UNIT-A12");
+  assert.equal(data.bank_account_name, "Mapped Bank");
+  assert.equal(data.bank_name, "Mapped Bank");
+  assert.equal(data.bank_account_no, "SITE-ACCOUNT");
+  assert.equal(data.account_no, "SITE-ACCOUNT");
+  assert.equal(data.bank_ifsc, "SITE0001234");
+  assert.equal(data.ifsc, "SITE0001234");
+  assert.equal(data.branch, "Site Branch");
+  const installment = await loadAccountWhatsAppContext("INSTALLMENT_RECEIVED", 60, 1, db);
+  assert.equal(installment.related_party, "Rahul Sharma", "installment identity resolves its own related-client link");
+  assert.equal(installment.assigned_to, "Site Approver");
+  assert.equal(installment.bank_account_name, null, "foreign-site bank mapping is ignored");
+  await db.query("UPDATE plots SET buyer_phone=' ' WHERE id=20; UPDATE plot_payments SET assigned_admin_id=2 WHERE id=40; UPDATE transaction_party_links SET member_id=11 WHERE source_key='plot_payment' AND source_id=40 AND site_id=1; UPDATE bank_accounts SET account_no=NULL,ifsc=NULL,branch=NULL WHERE id=1");
+  const changed = await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 1, db);
+  assert.equal(changed.buyer_phone, "9876543210", "blank plot phone falls back to the linked buyer member");
+  assert.equal(changed.related_party, "", "foreign-site clients cannot supply a printed related-party name");
+  assert.equal(changed.assigned_to, "", "foreign-organization users cannot supply the approver name");
+  assert.equal(changed.bank_account_no, null, "mapped banks do not inherit a stale source account number");
+  assert.equal(changed.account_no, null);
+  assert.equal(changed.ifsc, null);
+  assert.equal(changed.branch, null);
 });

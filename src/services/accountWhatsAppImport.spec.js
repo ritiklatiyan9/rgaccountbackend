@@ -93,6 +93,11 @@ export function mapAccountWhatsAppRemoteBody(remote, event, fields) {
       "PDF receipt templates can only be used for received payments, sent payments or installment receipts",
       409,
     );
+  if (!remote.has_document && ACCOUNT_WHATSAPP_DOCUMENT_EVENTS.includes(event))
+    throw accountWhatsAppError(
+      "Payment messages require a PDF document-header template. Choose an approved DOCUMENT template or create a new payment version with a receipt attachment.",
+      409,
+    );
   if (
     !spec ||
     !Array.isArray(fields) ||

@@ -4,6 +4,7 @@ import { PLOT_BUYER_MEMBER_JOIN } from "./plotMemberLinks.service.js";
 import { registryDeedScopeSql } from "../utils/registryDocuments.js";
 import { allocateInstallmentPayments } from "./installmentAllocation.service.js";
 import { classifyAccountWhatsAppPayment } from "./accountWhatsAppWorkflow.policy.js";
+import { getReceiptDesign } from "./receiptDesign.service.js";
 import {
   ACCOUNT_WHATSAPP_DOCUMENT_EVENTS,
   accountWhatsAppReceiptSample,
@@ -41,6 +42,15 @@ const inTest = () => Boolean(process.env.NODE_TEST_CONTEXT);
 const assertEvent = (event) => {
   if (!EVENTS[event]) throw fail("Unknown module event", 404);
   return EVENTS[event];
+};
+const requiresPaymentReceipt = (event) =>
+  ACCOUNT_WHATSAPP_DOCUMENT_EVENTS.includes(event);
+const assertPaymentReceiptTemplate = (event, template) => {
+  if (requiresPaymentReceipt(event) && !template?.has_document)
+    throw fail(
+      "Payment messages require a PDF document-header template. Import an approved PDF template or create a new version with its receipt attachment before enabling this automation.",
+      409,
+    );
 };
 const titleFor = (title) => {
   if (typeof title !== "string" || !title.trim() || title.trim().length > 80)
@@ -164,14 +174,14 @@ export async function sendAccountWhatsAppTemplate(
   return out.messageId;
 }
 let mediaStorage;
-export async function uploadAccountWhatsAppDocument(buffer, filename) {
+async function storeAccountWhatsAppDocument(buffer, filename) {
   const bucketName = process.env.WHATSAPP_MEDIA_BUCKET;
   if (!bucketName)
     throw fail(
       "Configure WHATSAPP_MEDIA_BUCKET before sending receipt PDFs",
       409,
     );
-  const { sdk, client } = await aws();
+  await aws();
   if (!mediaStorage) {
     const { S3Client } = await import("@aws-sdk/client-s3");
     mediaStorage = new S3Client({
@@ -201,11 +211,16 @@ export async function uploadAccountWhatsAppDocument(buffer, filename) {
       }),
     ),
   );
+  return { bucketName, key };
+}
+export async function uploadAccountWhatsAppDocument(buffer, filename) {
+  const sourceS3File = await storeAccountWhatsAppDocument(buffer, filename);
+  const { sdk, client } = await aws();
   const result = await awsError(
     client.send(
       new sdk.PostWhatsAppMessageMediaCommand({
         originationPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID,
-        sourceS3File: { bucketName, key },
+        sourceS3File,
       }),
     ),
   );
@@ -213,15 +228,44 @@ export async function uploadAccountWhatsAppDocument(buffer, filename) {
     throw fail("AWS did not return the receipt media ID", 502);
   return result.mediaId;
 }
-async function receiptMedia(event, data, upload, sample = false) {
+export async function uploadAccountWhatsAppTemplateDocument(
+  buffer,
+  filename,
+  { store = storeAccountWhatsAppDocument, context = aws, senderDetails = sender } = {},
+) {
+  // Approval uploads return a Meta header handle; delivery uploads return a media ID.
+  const sourceS3File = await store(buffer, filename);
+  const { sdk, client } = await context();
+  const { wabaId } = await senderDetails();
+  const result = await awsError(client.send(
+    new sdk.CreateWhatsAppMessageTemplateMediaCommand({ id: wabaId, sourceS3File }),
+  ));
+  if (!result.metaHeaderHandle)
+    throw fail("AWS did not return the sample receipt header handle", 502);
+  return result.metaHeaderHandle;
+}
+async function receiptMedia(event, data, upload, { sample = false, db = pool } = {}) {
   const filename = accountWhatsAppReceiptFilename(data);
+  const design = await getReceiptDesign(data.site_id, db);
   return {
     type: "document",
     filename,
     id: await upload(
-      await renderAccountWhatsAppReceipt(event, data, { sample }),
+      await renderAccountWhatsAppReceipt(event, data, { sample, design }),
       filename,
     ),
+  };
+}
+async function receiptSampleForSite(event, siteId, db) {
+  const site = (await db.query(
+    "SELECT name,concat_ws(', ',NULLIF(to_jsonb(s)->>'address',''),NULLIF(to_jsonb(s)->>'city',''),NULLIF(to_jsonb(s)->>'state','')) AS address FROM sites s WHERE id=$1",
+    [siteId],
+  )).rows[0];
+  return {
+    ...accountWhatsAppReceiptSample(event),
+    site_id: siteId,
+    site_name: site?.name || "Sample project",
+    site_address: site?.address || "",
   };
 }
 export async function previewAccountWhatsAppReceipt(
@@ -230,15 +274,16 @@ export async function previewAccountWhatsAppReceipt(
   event,
   { db = pool } = {},
 ) {
-  await assertAccountWhatsAppSite(user, requestedSiteId, db);
+  const siteId = await assertAccountWhatsAppSite(user, requestedSiteId, db);
   return renderAccountWhatsAppReceipt(
     event,
-    accountWhatsAppReceiptSample(event),
-    { sample: true },
+    await receiptSampleForSite(event, siteId, db),
+    { sample: true, design: await getReceiptDesign(siteId, db) },
   );
 }
 const remoteTransport = {
   sender,
+  uploadTemplateMedia: uploadAccountWhatsAppTemplateDocument,
   async get(metaId) {
     const { sdk, client } = await aws();
     const { wabaId } = await sender();
@@ -711,6 +756,9 @@ export async function saveAccountWhatsAppStage(
           "Apply an approved, unarchived template created for this module",
           409,
         );
+      // An administrator can still switch off a legacy text-only assignment.
+      if (nextEnabled || input.template_name !== undefined)
+        assertPaymentReceiptTemplate(event, template);
     }
     if (nextEnabled && !name)
       throw fail(
@@ -744,13 +792,14 @@ export async function createAccountWhatsAppTemplate(
   await requireSchema(db);
   const title = titleFor(input.title);
   const category = accountWhatsAppCategory(input.category);
+  const hasDocument = requiresPaymentReceipt(input.event);
   const compiled = compileAccountWhatsAppBody(input.event, input.body);
   const name = `dgg_acc_s${siteId}_${input.event.toLowerCase()}_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
   // Save a draft first: provider or connection failures never lose the edited text.
   let template = (
     await db.query(
-      `INSERT INTO account_whatsapp_templates(site_id,event,name,title,body,fields,language,status,created_by,category)
-    VALUES($1,$2,$3,$4,$5,$6,$7,'DRAFT',$8,$9) RETURNING *`,
+      `INSERT INTO account_whatsapp_templates(site_id,event,name,title,body,fields,language,status,created_by,category,has_document)
+    VALUES($1,$2,$3,$4,$5,$6,$7,'DRAFT',$8,$9,$10) RETURNING *`,
       [
         siteId,
         input.event,
@@ -761,6 +810,7 @@ export async function createAccountWhatsAppTemplate(
         language(),
         user.id,
         category,
+        hasDocument,
       ],
     )
   ).rows[0];
@@ -771,6 +821,28 @@ export async function createAccountWhatsAppTemplate(
         "Saved as draft. Configure the WhatsApp sender, then submit a new version for approval.",
     };
   try {
+    let receiptHeader;
+    let receiptSample;
+    if (hasDocument) {
+      if (typeof transport.uploadTemplateMedia !== "function")
+        throw fail("The WhatsApp provider does not support PDF template sample uploads", 409);
+      const sample = await receiptSampleForSite(input.event, siteId, db);
+      receiptSample = sample;
+      const headerHandle = await transport.uploadTemplateMedia(
+        await renderAccountWhatsAppReceipt(input.event, sample, {
+          sample: true,
+          design: await getReceiptDesign(siteId, db),
+        }),
+        accountWhatsAppReceiptFilename(sample),
+      );
+      if (typeof headerHandle !== "string" || !headerHandle.trim())
+        throw fail("The WhatsApp provider did not return a PDF sample header handle", 502);
+      receiptHeader = {
+        type: "HEADER",
+        format: "DOCUMENT",
+        example: { header_handle: [headerHandle] },
+      };
+    }
     const created = await transport.create({
       name,
       language: template.language,
@@ -778,6 +850,7 @@ export async function createAccountWhatsAppTemplate(
       allow_category_change: true,
       parameter_format: "positional",
       components: [
+        ...(receiptHeader ? [receiptHeader] : []),
         {
           type: "BODY",
           text: compiled.text,
@@ -786,7 +859,9 @@ export async function createAccountWhatsAppTemplate(
                 example: {
                   body_text: [
                     compiled.fields.map(
-                      (key) => EVENTS[input.event].fields[key].sample,
+                      (key) => receiptSample
+                        ? cleanAccountWhatsAppParameter(EVENTS[input.event].fields[key].value(receiptSample))
+                        : EVENTS[input.event].fields[key].sample,
                     ),
                   ],
                 },
@@ -959,6 +1034,7 @@ export async function testAccountWhatsAppTemplate(
     const selected = await activeTemplate(siteId, input.event, client);
     if (!selected)
       throw fail("Apply an approved template before sending a sample", 409);
+    assertPaymentReceiptTemplate(input.event, selected);
     const claimed = (
       await client.query(
         "INSERT INTO account_whatsapp_messages(site_id,event,ref_id,dedupe_key,is_test,status,phone,template) VALUES($1,$2,0,$3,true,'SENDING',$4,$5) RETURNING *",
@@ -975,6 +1051,9 @@ export async function testAccountWhatsAppTemplate(
   });
   let messageId;
   try {
+    const sample = requiresPaymentReceipt(input.event)
+      ? await receiptSampleForSite(input.event, siteId, db)
+      : null;
     if (
       isImportedAccountWhatsAppTemplate(template) &&
       (send === sendAccountWhatsAppTemplate || transport !== remoteTransport)
@@ -987,7 +1066,9 @@ export async function testAccountWhatsAppTemplate(
       to,
       accountWhatsAppProviderName(template),
       template.fields.map((key) =>
-        cleanAccountWhatsAppParameter(EVENTS[input.event].fields[key]?.sample),
+        cleanAccountWhatsAppParameter(sample
+          ? EVENTS[input.event].fields[key]?.value(sample)
+          : EVENTS[input.event].fields[key]?.sample),
       ),
       {
         language: template.language,
@@ -996,9 +1077,9 @@ export async function testAccountWhatsAppTemplate(
           ? {
               media: await receiptMedia(
                 input.event,
-                accountWhatsAppReceiptSample(input.event),
+                sample,
                 upload,
-                true,
+                { sample: true, db },
               ),
             }
           : {}),
@@ -1032,6 +1113,22 @@ export async function testAccountWhatsAppTemplate(
 
 const MEMBER_COLUMNS = `m.full_name,m.phone,m.whatsapp,COALESCE(to_jsonb(m)->>'member_code','CLT-' || m.id::text) AS member_code,s.name AS site_name`;
 const PLOT_COLUMNS = `plot_buyer.full_name,plot_buyer.phone,plot_buyer.whatsapp,COALESCE(to_jsonb(plot_buyer)->>'member_code','CLT-' || plot_buyer.id::text) AS member_code,p.plot_no,p.site_id,s.name AS site_name`;
+// Explicit printable facts only: never include KYC documents or arbitrary member columns.
+const RECEIPT_RECORD_FIELDS = [
+  "bank_reference", "reference_no", "transaction_no", "reference", "utr",
+  "bank_details", "bank_account_name", "bank_name", "bank_account_no", "account_no", "branch", "bank_ifsc", "ifsc",
+  "cheque_no", "cheque_apply_date", "cheque_transaction_date", "transaction_time",
+  "narration", "particular", "particulars", "description", "details", "note", "notes", "purpose", "by_note", "remarks", "remark", "remark2", "received_by",
+  "booking_reference", "booking_no", "plot_reference", "assigned_admin_id",
+  "customer_signature_url", "authority_signature_url", "evidence_photo_url", "voucher_url",
+];
+const receiptRecordColumns = (alias) => RECEIPT_RECORD_FIELDS
+  .map((key) => `to_jsonb(${alias})->>'${key}' AS ${key}`).join(",");
+const RECEIPT_PLOT_COLUMNS = `to_jsonb(p)->>'plot_size' AS plot_size,to_jsonb(p)->>'plot_rate' AS plot_rate,to_jsonb(p)->>'unit_type' AS unit_type,to_jsonb(p)->'unit_details' AS unit_details,to_jsonb(p)->>'project_type' AS project_type,to_jsonb(p)->>'booking_by' AS broker_name,
+  COALESCE(NULLIF(BTRIM(to_jsonb(p)->>'buyer_phone'),''),NULLIF(BTRIM(plot_buyer.phone),'')) AS buyer_phone,
+  concat_ws(', ',NULLIF(to_jsonb(s)->>'address',''),NULLIF(to_jsonb(s)->>'city',''),NULLIF(to_jsonb(s)->>'state','')) AS site_address,
+  (SELECT CASE WHEN COUNT(*)=1 THEN MIN(m.phone) END FROM members m WHERE m.site_id=p.site_id AND UPPER(BTRIM(m.full_name))=UPPER(BTRIM(to_jsonb(p)->>'booking_by'))) AS broker_phone,
+  (SELECT CASE WHEN COUNT(*)=1 THEN MIN(to_jsonb(m)->>'team') END FROM members m WHERE m.site_id=p.site_id AND UPPER(BTRIM(m.full_name))=UPPER(BTRIM(to_jsonb(p)->>'booking_by'))) AS broker_team`;
 const CLIENT_PREDICATE = `'CLIENT'=ANY(COALESCE(m.member_types,ARRAY[m.member_type])) AND UPPER(COALESCE(to_jsonb(m)->>'status','ACTIVE'))='ACTIVE'`;
 const PLOT_CLIENT_PREDICATE = `'CLIENT'=ANY(COALESCE(plot_buyer.member_types,ARRAY[plot_buyer.member_type])) AND UPPER(COALESCE(to_jsonb(plot_buyer)->>'status','ACTIVE'))='ACTIVE'`;
 const ACTIVE_INSTALLMENT_PLOT = `UPPER(TRIM(p.status)) IN ('BOOKED','REGISTRY') AND LOWER(COALESCE(to_jsonb(p)->>'approval_status',''))='approved' AND UPPER(COALESCE(to_jsonb(p)->>'plot_tag','')) <> 'OLD'`;
@@ -1050,9 +1147,9 @@ export async function loadAccountWhatsAppContext(
   else if (event === "PLOT_BOOKED")
     query = `SELECT ${PLOT_COLUMNS} FROM plots p JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE p.id=$1 AND p.site_id=$2 AND UPPER(p.status)='BOOKED' AND LOWER(COALESCE(to_jsonb(p)->>'approval_status',''))='approved' AND ${PLOT_CLIENT_PREDICATE}`;
   else if (["PAYMENT_RECEIVED", "PAYMENT_SENT"].includes(event))
-    query = `SELECT ${PLOT_COLUMNS},pp.amount,pp.payment_type,pp.payment_type AS payment_mode,pp.payment_from,to_jsonb(pp)->>'money_transfer_id' AS money_transfer_id,to_jsonb(pp)->>'money_transfer_role' AS money_transfer_role,to_jsonb(pp)->>'entry_transfer_id' AS entry_transfer_id,pp.date AS payment_date,'ACK-' || pp.id::text AS receipt_no,pp.status,pp.cheque_status FROM plot_payments pp JOIN plots p ON p.id=pp.plot_id AND p.site_id=pp.site_id JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pp.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
+    query = `SELECT ${PLOT_COLUMNS},${RECEIPT_PLOT_COLUMNS},${receiptRecordColumns("pp")},pp.id AS source_id,'plot_payment' AS receipt_module,pp.amount,pp.payment_type,pp.payment_type AS payment_mode,pp.payment_from,to_jsonb(pp)->>'money_transfer_id' AS money_transfer_id,to_jsonb(pp)->>'money_transfer_role' AS money_transfer_role,to_jsonb(pp)->>'entry_transfer_id' AS entry_transfer_id,pp.date AS payment_date,'ACK-' || pp.id::text AS receipt_no,pp.status,pp.cheque_status FROM plot_payments pp JOIN plots p ON p.id=pp.plot_id AND p.site_id=pp.site_id JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pp.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "INSTALLMENT_RECEIVED")
-    query = `SELECT ${PLOT_COLUMNS},pip.amount,pip.payment_mode,pip.payment_date,'ACK-' || pip.id::text AS receipt_no,pip.status,pip.cheque_status,to_jsonb(pip)->>'entry_transfer_id' AS entry_transfer_id,pi.installment_name FROM plot_installment_payments pip JOIN plots p ON p.id=pip.plot_id JOIN sites s ON s.id=p.site_id LEFT JOIN plot_installments pi ON pi.id=pip.installment_id AND pi.plot_id=p.id ${PLOT_BUYER_MEMBER_JOIN} WHERE pip.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
+    query = `SELECT ${PLOT_COLUMNS},${RECEIPT_PLOT_COLUMNS},${receiptRecordColumns("pip")},pip.id AS source_id,'plot_installment_payment' AS receipt_module,pip.amount,pip.payment_mode,pip.payment_date,'ACK-' || pip.id::text AS receipt_no,pip.status,pip.cheque_status,to_jsonb(pip)->>'entry_transfer_id' AS entry_transfer_id,pi.installment_name FROM plot_installment_payments pip JOIN plots p ON p.id=pip.plot_id JOIN sites s ON s.id=p.site_id LEFT JOIN plot_installments pi ON pi.id=pip.installment_id AND pi.plot_id=p.id ${PLOT_BUYER_MEMBER_JOIN} WHERE pip.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "INSTALLMENT_DUE")
     query = `SELECT ${PLOT_COLUMNS},pi.id AS installment_id,p.id AS plot_id,pi.installment_name,pi.amount,pi.due_date FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pi.id=$1 AND p.site_id=$2 AND ${ACTIVE_INSTALLMENT_PLOT} AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "REGISTRY_COMPLETED")
@@ -1070,6 +1167,47 @@ export async function loadAccountWhatsAppContext(
       data.money_transfer_role)
   )
     return null;
+  if (requiresPaymentReceipt(event)) {
+    // The non-cash account assignment belongs to the canonical ledger mirror.
+    // Legacy installations without bank mapping retain their recorded text.
+    const available = (await db.query("SELECT to_regclass('public.cash_flow_entries') IS NOT NULL AND to_regclass('public.bank_accounts') IS NOT NULL AS banks,to_regclass('public.transaction_party_links') IS NOT NULL AS parties")).rows[0] || {};
+    if (available.banks) {
+      const bank = (await db.query(
+        `SELECT ba.name AS bank_account_name,COALESCE(NULLIF(to_jsonb(ba)->>'bank_name',''),ba.name) AS bank_name,
+          to_jsonb(ba)->>'account_no' AS bank_account_no,to_jsonb(ba)->>'account_no' AS account_no,
+          to_jsonb(ba)->>'ifsc' AS bank_ifsc,to_jsonb(ba)->>'ifsc' AS ifsc,to_jsonb(ba)->>'branch' AS branch
+          FROM cash_flow_entries cfe
+          JOIN bank_accounts ba ON ba.id=cfe.bank_account_id AND ba.site_id=cfe.site_id
+          WHERE cfe.site_id=$1 AND cfe.source_module=$2 AND cfe.source_id=$3
+          ORDER BY cfe.id DESC LIMIT 1`,
+        [siteId, event === "INSTALLMENT_RECEIVED" ? "plot_installment_payments" : "plot_payments", refId],
+      )).rows[0];
+      if (bank) Object.assign(data, bank);
+    }
+    // Related-party notes use the native receipt identity, never an overlapping
+    // payment ID from a different module or site.
+    data.related_party = "";
+    if (available.parties) {
+      const party = (await db.query(
+        `SELECT m.full_name FROM transaction_party_links l
+          JOIN members m ON m.id=l.member_id AND m.site_id=l.site_id
+          WHERE l.site_id=$1 AND l.source_key=$2 AND l.source_id=$3 LIMIT 1`,
+        [siteId, data.receipt_module, refId],
+      )).rows[0];
+      data.related_party = party?.full_name || "";
+    }
+    data.assigned_to = "";
+    const approverId = Number(data.assigned_admin_id);
+    if (Number.isSafeInteger(approverId) && approverId > 0) {
+      const approver = (await db.query(
+        `SELECT to_jsonb(u)->>'name' AS name FROM users u
+          JOIN sites s ON s.id=$2
+          WHERE u.id=$1 AND (to_jsonb(u)->>'organization_id' IS NULL OR to_jsonb(u)->>'organization_id'=to_jsonb(s)->>'organization_id')`,
+        [approverId, siteId],
+      )).rows[0];
+      data.assigned_to = approver?.name || "";
+    }
+  }
   if (event === "INSTALLMENT_DUE") {
     const [{ rows: installments }, { rows: generic }, { rows: direct }] =
       await Promise.all([
@@ -1255,6 +1393,8 @@ export async function deliverAccountWhatsApp(
     template = await activeTemplate(row.site_id, row.event, db);
     if (!template)
       return finish("SKIPPED", "No approved, unarchived template is applied");
+    if (requiresPaymentReceipt(row.event) && !template.has_document)
+      return finish("SKIPPED", "Payment receipt PDF requires an approved document-header template. Create or import a PDF template in WhatsApp Studio before enabling payment messages.");
     if (
       isImportedAccountWhatsAppTemplate(template) &&
       (send === sendAccountWhatsAppTemplate || transport !== remoteTransport)
@@ -1319,27 +1459,15 @@ export async function deliverAccountWhatsApp(
       return finish("SKIPPED", "Template contains an unsupported field");
     let media;
     if (template.has_document) {
-      media = await receiptMedia(row.event, data, upload);
+      media = await receiptMedia(row.event, data, upload, { db });
       const current = await loadAccountWhatsAppContext(
         row.event,
         row.ref_id,
         row.site_id,
         db,
       );
-      const snapshot = (value) =>
-        JSON.stringify(
-          [
-            "full_name",
-            "site_name",
-            "member_code",
-            "plot_no",
-            "amount",
-            "payment_date",
-            "payment_mode",
-            "receipt_no",
-            "installment_name",
-          ].map((key) => value?.[key] ?? null),
-        );
+      const snapshot = (value) => JSON.stringify(Object.keys(value || {}).sort()
+        .map((key) => [key, value[key] ?? null]));
       if (!current || snapshot(current) !== snapshot(data))
         return finish(
           "SKIPPED",
