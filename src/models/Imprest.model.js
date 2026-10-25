@@ -206,7 +206,8 @@ class ImprestLedgerModel extends MasterModel {
    */
   async findByUserId(userId, siteId, limit = null, offset = null, pool) {
     let query = `
-      SELECT il.*, u.name as created_by_name, aa.name as assigned_admin_name
+      SELECT il.*, u.name as created_by_name, aa.name as assigned_admin_name,
+        COALESCE(to_jsonb(ia)->>'approved_by',to_jsonb(ex)->>'approved_by',to_jsonb(ir)->>'approved_by') AS approved_by
       FROM imprest_ledger il
       LEFT JOIN users u ON il.created_by = u.id
       LEFT JOIN imprest_allocations ia ON il.type = 'ALLOCATION' AND ia.id = il.reference_id
@@ -243,7 +244,8 @@ class ImprestLedgerModel extends MasterModel {
    */
   async findByUserIdAndDateRange(userId, siteId, dateFrom, dateTo, limit = null, offset = null, pool) {
     let query = `
-      SELECT il.*, u.name as created_by_name, aa.name as assigned_admin_name
+      SELECT il.*, u.name as created_by_name, aa.name as assigned_admin_name,
+        COALESCE(to_jsonb(ia)->>'approved_by',to_jsonb(ex)->>'approved_by',to_jsonb(ir)->>'approved_by') AS approved_by
       FROM imprest_ledger il
       LEFT JOIN users u ON il.created_by = u.id
       LEFT JOIN imprest_allocations ia ON il.type = 'ALLOCATION' AND ia.id = il.reference_id

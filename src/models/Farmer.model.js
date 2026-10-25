@@ -99,10 +99,11 @@ class FarmerPaymentModel extends MasterModel {
   /** All payments for a farmer, ordered by date */
   async findByFarmerId(farmerId, pool, creatorId = null) {
     const query = `
-      SELECT fp.*, u.name AS created_by_name,
+      SELECT fp.*, u.name AS created_by_name, approver.name AS approved_by_name,
              aa.name AS assigned_admin_name
       FROM farmer_payments fp
       LEFT JOIN users u ON u.id = fp.created_by
+      LEFT JOIN users approver ON approver.id = fp.approved_by
       LEFT JOIN users aa ON aa.id = fp.assigned_admin_id
       WHERE fp.farmer_id = $1
         AND ($2::text IS NULL OR fp.created_by = ANY(string_to_array($2::text, ',')::int[]))

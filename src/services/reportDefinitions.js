@@ -409,3 +409,16 @@ export const reportList = () =>
     key, label: r.label, description: r.description, permission: r.permission, icon: r.icon,
     has_amount: Boolean(r.amount),
   }));
+
+// Detail reports use the same explicit creator / approver columns as native
+// transaction tables. JSON extraction tolerates sources without an approval field.
+for (const key of ['plot_payments', 'expenses', 'vendor_payments', 'farmer_payments', 'daybook', 'cashflow', 'firm_transactions', 'imprest']) {
+  const report = REPORTS[key];
+  const alias = report.from.match(/^\w+\s+(\w+)/)[1];
+  report.columns = report.columns.filter(column => !['created_by_name', 'approved_by_name'].includes(column.key));
+  for (const field of ['created_by', 'approved_by']) report.columns.push({
+    key: `${field}_name`, label: field === 'created_by' ? 'Created By' : 'Approved By',
+    expr: `(SELECT attribution_user.name FROM users attribution_user
+      WHERE attribution_user.id=NULLIF(to_jsonb(${alias})->>'${field}','')::integer)`,
+  });
+}

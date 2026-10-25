@@ -843,7 +843,7 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
 
   // Explicit client links take precedence; legacy names must be unique in the site.
   const expensesQuery = `
-    SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
+    SELECT e.id, to_jsonb(e)->>'created_by' AS created_by, to_jsonb(e)->>'approved_by' AS approved_by, e.date, e.from_entity, e.to_entity, e.payment_mode,
            e.debit, e.credit, e.remark, e.category, e.account_no, e.branch,
            e.voucher_url, e.status, e.created_at, e.site_id, e.cheque_status, e.cheque_no,
            'EXPENSE' as source
@@ -855,7 +855,7 @@ export const getMemberTransactions = asyncHandler(async (req, res) => {
 
   // Apply the same client identity rules to daybook entries.
   const daybookQuery = `
-    SELECT d.id, d.date, d.from_entity, d.to_entity, d.payment_mode,
+    SELECT d.id, to_jsonb(d)->>'created_by' AS created_by, to_jsonb(d)->>'approved_by' AS approved_by, d.date, d.from_entity, d.to_entity, d.payment_mode,
            d.debit, d.credit, d.remarks AS remark, d.category, d.account_no, d.branch,
            d.entry_type, d.status, d.created_at, d.site_id, d.cheque_status, d.cheque_no,
            d.farmer_payment_id, d.commission_id, d.cash_flow_entry_id, d.firm_transaction_id, d.plot_payment_id, d.vendor_payment_id,
@@ -912,7 +912,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
   const [expRes, commRes, plotPayRes, farmerPayRes, firmRes, commPayRes, identityRes] = await Promise.all([
     // 1. Expenses — assigned/mapped client, then an unambiguous legacy name.
     pool.query(
-      `SELECT e.id, e.date, e.from_entity, e.to_entity, e.payment_mode,
+      `SELECT e.id, to_jsonb(e)->>'created_by' AS created_by, to_jsonb(e)->>'approved_by' AS approved_by, e.date, e.from_entity, e.to_entity, e.payment_mode,
               e.debit, e.credit, e.remark, e.category, e.status, e.voucher_url, e.cheque_status, e.cheque_no
        FROM expenses e
        WHERE e.site_id = $1
@@ -922,7 +922,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     ),
     // 2. Plot Commissions (legacy v1) — by particular (person name)
     pool.query(
-      `SELECT pc.id, pc.date, pc.particular, pc.amount, pc.plot_no, pc.plot_size,
+      `SELECT pc.id, to_jsonb(pc)->>'created_by' AS created_by, to_jsonb(pc)->>'approved_by' AS approved_by, pc.date, pc.particular, pc.amount, pc.plot_no, pc.plot_size,
               pc.by_note, pc.remarks, pc.status, pc.voucher_url, pc.cheque_status, pc.cheque_no
        FROM plot_commissions pc
        WHERE pc.site_id = $1 AND ${uniqueMemberNameMatch('pc.particular')}
@@ -935,7 +935,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     // matching a person's name against it dragged in unrelated plots — e.g. a
     // broker typed there on someone else's plot.
     pool.query(
-      `SELECT pp.id, pp.date, pp.amount, pp.payment_type, pp.bank_details,
+      `SELECT pp.id, to_jsonb(pp)->>'created_by' AS created_by, to_jsonb(pp)->>'approved_by' AS approved_by, pp.date, pp.amount, pp.payment_type, pp.bank_details,
               pp.bank_name, pp.narration, pp.payment_from, pp.received_by,
               pp.status, pp.cheque_no, pp.cheque_status,
               p.id AS plot_id, p.plot_no, p.plot_tag, p.block, COALESCE(pp.buyer_name, p.buyer_name) AS buyer_name
@@ -949,7 +949,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     ),
     // 4. Farmer Payments — via farmers.member_id
     pool.query(
-      `SELECT fp.id, fp.date, fp.amount, fp.particular, fp.payment_mode,
+      `SELECT fp.id, to_jsonb(fp)->>'created_by' AS created_by, to_jsonb(fp)->>'approved_by' AS approved_by, fp.date, fp.amount, fp.particular, fp.payment_mode,
               fp.cash_amount, fp.bank_amount, fp.remarks, fp.by_note, fp.status, fp.cheque_status, fp.cheque_no,
               f.name AS farmer_name
        FROM farmer_payments fp
@@ -960,7 +960,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     ),
     // 5. Firm Transactions — mapped client, then an unambiguous legacy name.
     pool.query(
-      `SELECT ft.id, ft.date, ft.debit, ft.credit, ft.description, ft.purpose,
+      `SELECT ft.id, to_jsonb(ft)->>'created_by' AS created_by, to_jsonb(ft)->>'approved_by' AS approved_by, ft.date, ft.debit, ft.credit, ft.description, ft.purpose,
               ft.payment_mode,
               ft.remark, ft.cheque_no, ft.cheque_status, ft.status, ft.name,
               fi.name AS firm_name
@@ -972,7 +972,7 @@ export const getMemberFinancialInfo = asyncHandler(async (req, res) => {
     ),
     // 6. Commission Payments (v2) — member is the plot's commission agent
     pool.query(
-      `SELECT pcp.id, pcp.date, pcp.amount, pcp.payment_mode, pcp.bank_name,
+      `SELECT pcp.id, to_jsonb(pcp)->>'created_by' AS created_by, to_jsonb(pcp)->>'approved_by' AS approved_by, pcp.date, pcp.amount, pcp.payment_mode, pcp.bank_name,
               pcp.transaction_id, pcp.remarks, pcp.status, pcp.voucher_url, pcp.cheque_status, pcp.cheque_no,
               p.plot_no, p.block
        FROM plot_commission_payments pcp
