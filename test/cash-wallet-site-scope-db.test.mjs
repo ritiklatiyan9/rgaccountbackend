@@ -499,7 +499,24 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       const replay=await planWalletReportingOpening(db,scope);
       assert.equal(replay.replayed,true);
       assert.equal((await saveWalletReportingOpening(db,replay,{actorId:2})).replayed,true);
+      const batchReplay=await planWalletReportingOpening(db,{...scope,operationKey:'all-sites-opening-operation'});
+      assert.equal(batchReplay.replayed,true,'a later all-sites request preserves an earlier individual opening');
+      assert.deepEqual(batchReplay.prior,result.opening);
+      await saveWalletReportingOpening(db,batchReplay,{actorId:2,writeSnapshot:async()=>{throw new Error('Existing opening must not be rewritten');}});
       assert.equal((await query('SELECT count(*)::int AS n FROM application_settings')).rows[0].n,1);
+      await query(`INSERT INTO sites VALUES(16,'Deficit opening',1),(17,'Empty wallet opening',1);
+        INSERT INTO user_sites VALUES(1,16);
+        INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(16,'cash',50);
+        INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(16,1,100)`);
+      await query("SELECT loyalty_vault_apply_delta('user:2',1,50,'adjustment','Deficit fixture','manual_wallet_site_cash_alignment',NULL,NULL,16,2)");
+      const deficit=await planWalletReportingOpening(db,{...scope,siteId:16});
+      assert.equal(deficit.opening.opening_cash,'-50.00','a reporting deficit must not be clamped or hidden');
+      await saveWalletReportingOpening(db,deficit,{actorId:2,writeSnapshot:async()=>{}});
+      await assert.rejects(createVaultTransfer({id:2},{...transfer('1',16,1)},db),status(409),'a reporting opening must not make a deficit spendable');
+      const empty=await planWalletReportingOpening(db,{...scope,siteId:17});
+      assert.equal(Number(empty.opening.opening_cash),0);
+      await saveWalletReportingOpening(db,empty,{actorId:2,writeSnapshot:async()=>{}});
+      assert.equal((await readWalletReportingOpenings(1,17,db))[0].holder_id,2);
     });
     await t.test('delegated wallet viewers see the admin read surfaces without gaining site or transfer rights',async()=>{
       await query("INSERT INTO user_permissions VALUES(1,'wallet',true,true)");

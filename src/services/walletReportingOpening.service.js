@@ -29,9 +29,11 @@ export async function planWalletReportingOpening(database,{organizationId,siteId
   const {rows}=await database.query(`WITH ${siteVaultAccountsCte('$1','$2')}
     SELECT total_received::text,total_handover::text,total_adjustments::text,balance::text
     FROM site_accounts WHERE holder_key=$3`,[organizationId,siteId,`user:${holderId}`]);
-  const totals=rows[0];
-  const cash=(await adminWalletCashStates(organizationId,siteId,database)).get(`user:${holderId}`);
-  if(!totals || !cash || Number(cash.balance)<0) throw new Error('A nonnegative reconciled Admin wallet is required.');
+  const totals=rows[0]||{total_received:'0.00',total_handover:'0.00',total_adjustments:'0.00',balance:'0.00'};
+  // Match the existing wallet read: aligned wallets use current custody;
+  // ordinary/empty wallets use their recorded balance. Preserve deficits.
+  const cash=(await adminWalletCashStates(organizationId,siteId,database)).get(`user:${holderId}`)
+    ||{balance:totals.balance,available_balance:totals.balance,cash_in_hand_basis:'RECORDED_WALLET'};
   const clock=(await database.query('SELECT now() AS started_at')).rows[0];
   const fingerprint=(await database.query(`SELECT count(*)::int AS count,md5(string_agg(to_jsonb(e)::text,'|' ORDER BY id)) AS hash
     FROM loyalty_vault_entries e WHERE organization_id=$1 AND site_id=$2`,[organizationId,siteId])).rows[0];
