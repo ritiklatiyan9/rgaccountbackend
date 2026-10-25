@@ -12,6 +12,7 @@ import { adminWalletCashStates, walletWithCashInHand } from '../services/adminWa
 import { canViewAllWallets, withWalletVisibility } from '../services/walletVisibility.service.js';
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 import { getOverallWalletOverview } from '../services/overallWallet.service.js';
+import { readWalletReportingOpenings } from '../services/walletReportingOpening.service.js';
 
 async function walletReadActor(req) {
   const user = req.authenticatedUser && Number(req.authenticatedUser.id) === Number(req.user?.id)
@@ -28,6 +29,12 @@ async function walletReadActor(req) {
 export const overall = asyncHandler(async (req, res) => {
   const actor = await walletReadActor(req);
   res.set('Cache-Control', 'no-store').json(await getOverallWalletOverview(actor));
+});
+
+export const reportingOpenings = asyncHandler(async(req,res)=>{
+  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id);
+  const openings=await readWalletReportingOpenings(actor.organization_id,siteId,pool);
+  res.set('Cache-Control','no-store').json({site_id:siteId,openings:openings.filter(row=>canViewAllWallets(actor)||row.holder_id===Number(actor.id))});
 });
 
 export const siteBalance = asyncHandler(async (req, res) => {
@@ -106,6 +113,8 @@ export const holders = asyncHandler(async(req,res)=>{
     ) SELECT h.*,(h.holder_type='member' OR h.can_receive_transfer) AS can_assign_custody,COALESCE(s.name,'') AS site_name,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.balance,0)::text ELSE NULL END AS balance,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_in,0)::text ELSE NULL END AS total_in,
+      CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_received,0)::text ELSE NULL END AS total_received,
+      CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_adjustments,0)::text ELSE NULL END AS total_adjustments,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_handover,0)::text ELSE NULL END AS total_handover,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.reserved_balance,0)::text ELSE NULL END AS reserved_balance,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text ELSE NULL END AS available_balance,
@@ -132,6 +141,7 @@ export const userDetail = asyncHandler(async(req,res)=>{
   ) SELECT u.id,u.name,to_jsonb(u)->>'email' AS email,u.role,u.is_active,to_jsonb(u)->>'phone' AS phone,
     COALESCE(a.balance,0)::text AS balance,COALESCE(a.reserved_balance,0)::text AS reserved_balance,
     COALESCE(a.total_in,0)::text AS total_in,COALESCE(a.total_handover,0)::text AS total_handover,
+    COALESCE(a.total_received,0)::text AS total_received,COALESCE(a.total_adjustments,0)::text AS total_adjustments,
     (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text AS available_balance,a.updated_at,pending.*
     FROM users u CROSS JOIN pending LEFT JOIN site_accounts a ON a.holder_key='user:'||u.id::text
     WHERE u.id=$1 AND u.organization_id=$2 AND (u.role IN ('super_admin','admin') OR (u.role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3)) OR a.holder_key IS NOT NULL)`,[id,actor.organization_id,siteId]);

@@ -15,6 +15,7 @@ import * as controller from '../src/controllers/loyaltyVault.controller.js';
 import pool from '../src/config/db.js';
 import { adminWalletCashStates, walletWithCashInHand } from '../src/services/adminWalletCash.service.js';
 import { createAllocation, getSiteBalance } from '../src/controllers/imprest.controller.js';
+import {planWalletReportingOpening,saveWalletReportingOpening,readWalletReportingOpenings} from '../src/services/walletReportingOpening.service.js';
 
 test('Cash Wallet separates real/test site custody and rejects cross-site spending and detail access', {skip:!process.env.PGLITE_MODULE},async t=>{
   const {PGlite}=await import(process.env.PGLITE_MODULE),pg=new PGlite();
@@ -248,7 +249,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       const directory=await invoke(controller.holders,{user:1,extraQuery:{purpose:'selection'}});
       assert.ok(directory.holders.some(h=>h.holder_id===3&&h.holder_type==='user'),'other recipients remain selectable');
       for(const other of directory.holders.filter(h=>h.holder_type!=='user'||h.holder_id!==1)) {
-        for(const field of ['balance','total_in','total_handover','available_balance','reserved_balance','pending_credit','pending_debit','pending_count','updated_at']) {
+        for(const field of ['balance','total_in','total_received','total_adjustments','total_handover','available_balance','reserved_balance','pending_credit','pending_debit','pending_count','updated_at']) {
           assert.equal(other[field],null,`recipient directory must hide ${field}`);
         }
         assert.equal(other.can_transfer_from,false);
@@ -282,11 +283,12 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       const profile=()=>invoke(controller.userDetail,{params:{id:7}});
       let cashbook=(await profile()).user;
       assert.equal(Number(cashbook.total_in),1400000);
+      assert.equal(Number(cashbook.total_received),1400000);assert.equal(Number(cashbook.total_adjustments),0);
       assert.equal(Number(cashbook.total_handover),1400000);
       assert.equal(Number(cashbook.balance),0);
       assert.equal(Number((await invoke(controller.summary)).vault.site_cash_incoming),siteIncomingBefore+1400000,'site receipts count each collection once across all holders');
       const directory=(await invoke(controller.holders)).holders.find(h=>h.holder_type==='user'&&h.holder_id===7);
-      for(const key of ['total_in','total_handover','balance'])assert.equal(directory[key],cashbook[key]);
+      for(const key of ['total_in','total_received','total_adjustments','total_handover','balance'])assert.equal(directory[key],cashbook[key]);
       const own=(await invoke(controller.holders,{user:7})).holders;
       assert.equal(own.length,1);assert.equal(Number(own[0].total_handover),1400000);
       const expected=[500000,700000,800000,300000,500000,900000,0];
@@ -376,6 +378,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       for(const value of [projected,holder,profile]) {
         assert.equal(Number(value.balance),4300000);assert.equal(Number(value.available_balance),4300000);
         assert.equal(Number(value.recorded_balance),4500000);assert.equal(value.cash_in_hand_basis,'SITE_CASH_AFTER_IMPREST');
+        if(value !== projected) {assert.equal(value.total_received,'0');assert.equal(Number(value.total_adjustments),4500000);assert.equal(Number(value.total_received)+Number(value.total_adjustments)-Number(value.total_handover),Number(value.recorded_balance));}
       }
       assert.equal(Number(projected.total_balance),4300000);
       const overallWallet=await invoke(controller.overall,{site:null});
@@ -474,6 +477,29 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       await query(`INSERT INTO members VALUES(3,14,'Client cash holder','7777777777');
         SELECT loyalty_vault_apply_delta('member:3',1,250,'adjustment','Historical client custody',NULL,NULL,NULL,14,2)`);
       assert.equal(await cash(),base-250,'positive client custody is deducted together with user custody');
+    });
+    await t.test('a reporting opening persists counters without changing wallet history and remains private',async()=>{
+      await query(`CREATE TABLE application_settings(site_id integer,setting_key text,setting_value jsonb,updated_by integer,updated_at timestamptz,UNIQUE(site_id,setting_key));
+        INSERT INTO sites VALUES(15,'Report opening',1); INSERT INTO user_sites VALUES(1,15);
+        INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(15,'cash',1000)`);
+      await query("SELECT loyalty_vault_apply_delta('user:2',1,1000,'adjustment','Opening fixture','manual_wallet_site_cash_alignment',NULL,NULL,15,2)");
+      const scope={organizationId:1,siteId:15,holderId:2,operationKey:'opening-test-operation'};
+      const before=(await query('SELECT * FROM loyalty_vault_entries ORDER BY id')).rows;
+      const plan=await planWalletReportingOpening(db,scope);
+      assert.equal(plan.opening.opening_cash,'1000.00');assert.equal(Number(plan.opening.received_at_start),0);
+      assert.equal((await query('SELECT count(*)::int AS n FROM application_settings')).rows[0].n,0,'preview does not write');
+      let savedBefore=false;
+      const result=await saveWalletReportingOpening(db,plan,{actorId:2,writeSnapshot:async()=>{savedBefore=true;}});
+      assert.equal(savedBefore,true);assert.equal(result.financial_postings_unchanged,true);
+      assert.deepEqual((await query('SELECT * FROM loyalty_vault_entries ORDER BY id')).rows,before);
+      assert.equal((await readWalletReportingOpenings(1,15,db)).length,1);
+      assert.equal((await readWalletReportingOpenings(2,15,db)).length,0);
+      assert.equal((await invoke(controller.reportingOpenings,{site:15})).openings.length,1);
+      assert.deepEqual((await invoke(controller.reportingOpenings,{user:1,site:15})).openings,[]);
+      const replay=await planWalletReportingOpening(db,scope);
+      assert.equal(replay.replayed,true);
+      assert.equal((await saveWalletReportingOpening(db,replay,{actorId:2})).replayed,true);
+      assert.equal((await query('SELECT count(*)::int AS n FROM application_settings')).rows[0].n,1);
     });
     await t.test('delegated wallet viewers see the admin read surfaces without gaining site or transfer rights',async()=>{
       await query("INSERT INTO user_permissions VALUES(1,'wallet',true,true)");

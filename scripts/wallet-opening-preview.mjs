@@ -1,0 +1,14 @@
+// Authenticated, loopback-only reader for reporting metadata. Financial modules
+// keep their normal API; there are no write endpoints or startup migrations.
+import express from 'express';
+import cors from 'cors';
+import pool from '../src/config/db.js';
+import auth from '../src/middlewares/auth.middleware.js';
+import {reportingOpenings} from '../src/controllers/loyaltyVault.controller.js';
+const app=express();
+app.use(cors({origin:['http://127.0.0.1:5174','http://localhost:5174'],credentials:true}));
+app.get('/health',(_req,res)=>res.json({service:'wallet-opening-reader',read_only:true}));
+app.get('/wallet/reporting-openings',auth,reportingOpenings);
+app.use((error,_req,res,_next)=>res.status(error.statusCode||500).json({message:error.statusCode?error.message:'Wallet reporting opening unavailable.'}));
+const server=app.listen(Number(process.env.WALLET_OPENING_PREVIEW_PORT||8003),'127.0.0.1',()=>console.log('Wallet opening reader ready on http://127.0.0.1:8003'));
+for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>server.close(()=>pool.end().finally(()=>process.exit(0))));
