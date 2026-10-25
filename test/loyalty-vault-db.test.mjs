@@ -185,6 +185,25 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         const pending=await createVaultTransfer(admin,req('5',{type:'user',id:2},3),db);
         const notices=(await invoke(controller.transfers,{user:{id:3},query:{direction:'incoming',status:'pending',limit:'1'}})).body;
         assert.equal(notices.total,1);assert.equal(notices.transfers[0].id,pending.transfer.id);assert.equal(notices.transfers[0].can_accept,true);
+        await query('BEGIN');
+        try {
+          await query(`INSERT INTO users VALUES(7,'Review admin','admin',1,true),(8,'Review owner','super_admin',1,true),(9,'Unrelated staff','sub_admin',1,true);
+            INSERT INTO user_sites VALUES(9,10);`);
+          for(const id of [7,8]) {
+            const review=(await invoke(controller.transfers,{user:{id},query:{direction:'all',status:'pending'}})).body;
+            const request=review.transfers.find(row=>row.id===pending.transfer.id);
+            assert.ok(request,'both admin roles can see pending requests between other users');
+            assert.equal(request.can_accept,false);assert.equal(request.can_cancel,false);
+            const personal=(await invoke(controller.transfers,{user:{id},query:{direction:'incoming',status:'pending'}})).body;
+            assert.equal(personal.total,0,'incoming notifications remain personal');
+            const otherSite=(await invoke(controller.transfers,{user:{id},query:{site_id:11,status:'pending'}})).body;
+            assert.ok(!otherSite.transfers.some(row=>row.id===pending.transfer.id));
+          }
+          const staff=(await invoke(controller.transfers,{user:{id:9},query:{direction:'all',status:'pending'}})).body;
+          assert.equal(staff.total,0,'staff cannot broaden their own transfer visibility');
+          const outside=(await invoke(controller.transfers,{user:{id:4},query:{site_id:20,status:'pending'}})).body;
+          assert.equal(outside.total,0,'requests remain organization-scoped');
+        } finally { await query('ROLLBACK'); }
         await resolveVaultTransfer({id:3},pending.transfer.id,'reject',{site_id:10},db);
         await query("INSERT INTO loyalty_vault_entries(organization_id,holder_key,holder_type,holder_id,amount,balance_after,kind,site_id,created_at) VALUES(1,'user:1','user',1,1,0,'adjustment',10,'2026-09-30T18:29:59Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-09-30T18:30:00Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-10-01T18:29:59Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-10-01T18:30:00Z')");
         const filtered=(await invoke(controller.history,{query:{type:'adjustment',from:'2026-10-01',to:'2026-10-01',limit:'1',page:'2'}})).body;assert.equal(filtered.total,2);assert.equal(new Date(filtered.entries[0].created_at).toISOString(),'2026-09-30T18:30:00.000Z');

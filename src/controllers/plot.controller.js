@@ -824,11 +824,12 @@ export const listPayments = asyncHandler(async (req, res) => {
     : '0::numeric';
   const [paymentsRes, plotRes, fromBreakdown, receivedByBreakdown] = await Promise.all([
     pool.query(
-      `SELECT pp.*, 'payment' AS source, u.name AS created_by_name,
+      `SELECT pp.*, 'payment' AS source, u.name AS created_by_name, a.name AS approved_by_name,
               ${transferred} AS money_transferred_amount,
               aa.name AS assigned_admin_name
          FROM plot_payments pp
          LEFT JOIN users u ON u.id = pp.created_by
+         LEFT JOIN users a ON a.id = pp.approved_by
          LEFT JOIN users aa ON aa.id = pp.assigned_admin_id
         WHERE pp.plot_id = $1
           AND ($2::text IS NULL OR pp.created_by = ANY(string_to_array($2::text, ',')::int[]))
