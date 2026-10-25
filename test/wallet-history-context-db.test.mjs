@@ -33,7 +33,7 @@ test('wallet history preserves module descriptions, transfer parties and site-on
         AS $$ SELECT NULLIF(source->>'site_id','')::int $$;`);
     for (const table of LOYALTY_VAULT_SOURCE_TABLES) await pg.exec(`CREATE TABLE ${table}(id int PRIMARY KEY,
       description text,particular text,narration text,remark text,remarks text,note text,reference_no text,
-      plot_id int,installment_id int,date date,payment_date date,site_id int DEFAULT 10,status text,approved_at timestamptz,approved_by int)`);
+      plot_id int,installment_id int,date date,payment_date date,site_id int DEFAULT 10,status text,approved_at timestamptz,approved_by int,created_by int)`);
     await pg.exec(walletHistoryParentsSql);
     await pg.exec(`INSERT INTO expenses(id,remark,reference_no) VALUES(20,'Unused material returned — cash received 15K','EXP-20'),
       (21,'Unrelated expense with no wallet custody','EXP-21');
@@ -49,9 +49,12 @@ test('wallet history preserves module descriptions, transfer parties and site-on
       (1,10,'user:1','user',1,2,-10000,95500,'transfer_out','Cash handed over','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
       (1,10,'user:2','user',2,2,10000,10000,'transfer_in','Cash received','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');`);
 
+    await pg.exec('UPDATE expenses SET created_by=2 WHERE id=20');
     const result = await invoke();
     assert.equal(result.total, 4, 'source finance rows never appear without a wallet movement');
     const expense = result.entries.find(row => row.source_id === 20);
+    assert.equal(expense.created_by_name, 'Kuldeep', 'source creator is distinct from the wallet posting actor');
+    assert.equal(expense.actor_name, 'Ravi');
     assert.equal(expense.source_details.source_description, 'Unused material returned — cash received 15K');
     assert.equal(expense.source_details.module_name, 'Expenses');
     assert.equal(expense.source_details.reference, 'EXP-20');
@@ -71,6 +74,8 @@ test('wallet history preserves module descriptions, transfer parties and site-on
       UPDATE expenses SET status='approved',approved_at='2026-10-15T09:26:36Z',approved_by=1 WHERE id=20`);
     const approved=(await invoke(historyDetail,{}, {id:expense.id})).entry;
     assert.equal(approved.current_source_status,'approved');
+    assert.equal(approved.approved_by_name,'Ravi');
+    assert.equal(approved.created_by_name,'Kuldeep');
     assert.equal(approved.details.status,'pending','immutable posting snapshot is preserved independently');
     assert.ok(approved.current_source_reviewed_at);
     await pg.exec("UPDATE expenses SET status='rejected' WHERE id=20");
@@ -91,6 +96,7 @@ test('wallet history preserves module descriptions, transfer parties and site-on
 
     const removed = result.entries.find(row => row.source_id === 22);
     assert.equal(removed.source_details.source_available, false);
+    assert.equal(removed.created_by_name, null, 'missing source creators are not inferred from the wallet holder or posting actor');
     assert.equal(removed.source_details.source_description, 'Original recorded particulars 100%');
     assert.equal(removed.source_details.notes, 'Saved receipt note');
     await pg.exec("INSERT INTO expenses(id,remark) VALUES(22,'Later replacement particulars')");
@@ -102,6 +108,8 @@ test('wallet history preserves module descriptions, transfer parties and site-on
     assert.equal(moved.source_details.reference, undefined);
     assert.equal(moved.current_source_status,null,'status from another site must not leak');
     assert.equal(moved.current_source_reviewed_at,null);
+    assert.equal(moved.created_by_name,null,'creator from another source site must not leak');
+    assert.equal(moved.approved_by_name,null,'approver from another source site must not leak');
     assert.equal((await invoke(history, { q: 'OTHER-PRIVATE' })).total, 0, 'moving a source never leaks the new site context');
     const own = await invoke(history, {}, {}, 2);
     assert.equal(own.total, 1); assert.equal(own.entries[0].holder_id, 2);

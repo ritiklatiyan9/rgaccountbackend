@@ -50,6 +50,10 @@ export const walletHistoryJoins = `FROM site_history e
   LEFT JOIN members sender_member ON t.from_holder_type='member' AND sender_member.id=t.from_holder_id
   LEFT JOIN users recipient ON recipient.id=t.to_holder_id LEFT JOIN users resolver ON resolver.id=t.resolved_by
   LEFT JOIN LATERAL (${sourceRows}) wallet_source ON true
+  LEFT JOIN users source_creator ON source_creator.id=NULLIF(COALESCE(e.details->>'created_by',wallet_source.record->>'created_by'),'')::integer
+    AND source_creator.organization_id=e.organization_id
+  LEFT JOIN users source_approver ON source_approver.id=NULLIF(wallet_source.record->>'approved_by','')::integer
+    AND source_approver.organization_id=e.organization_id
   LEFT JOIN cash_flow_entries cash ON cash.id=e.cash_flow_entry_id AND loyalty_vault_source_site('cash_flow_entries',to_jsonb(cash))=e.site_id
   LEFT JOIN plot_payments vault_pp ON e.source_table='plot_payments' AND vault_pp.id=e.source_id AND loyalty_vault_source_site('plot_payments',to_jsonb(vault_pp))=e.site_id
   LEFT JOIN plot_installment_payments vault_pip ON e.source_table='plot_installment_payments' AND vault_pip.id=e.source_id AND loyalty_vault_source_site('plot_installment_payments',to_jsonb(vault_pip))=e.site_id
@@ -71,6 +75,8 @@ export const walletHistoryJoins = `FROM site_history e
 export const walletHistorySelect = `e.*,
   COALESCE(e.details->>'holder_name',u.name,m.full_name,'Former holder') AS holder_name,
   s.name AS site_name,actor.name AS actor_name,context.module_name,
+  COALESCE(NULLIF(e.details->>'created_by_name',''),source_creator.name) AS created_by_name,
+  source_approver.name AS approved_by_name,
   wallet_source.record->>'status' AS current_source_status,
   wallet_source.record->>'approved_at' AS current_source_reviewed_at,
   wallet_source.record->>'approved_by' AS current_source_reviewed_by,
