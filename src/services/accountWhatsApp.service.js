@@ -1125,6 +1125,7 @@ const RECEIPT_RECORD_FIELDS = [
 const receiptRecordColumns = (alias) => RECEIPT_RECORD_FIELDS
   .map((key) => `to_jsonb(${alias})->>'${key}' AS ${key}`).join(",");
 const RECEIPT_PLOT_COLUMNS = `to_jsonb(p)->>'plot_size' AS plot_size,to_jsonb(p)->>'plot_rate' AS plot_rate,to_jsonb(p)->>'unit_type' AS unit_type,to_jsonb(p)->'unit_details' AS unit_details,to_jsonb(p)->>'project_type' AS project_type,to_jsonb(p)->>'booking_by' AS broker_name,
+  to_jsonb(s)->>'city' AS site_city,to_jsonb(s)->>'state' AS site_state,
   COALESCE(NULLIF(BTRIM(to_jsonb(p)->>'buyer_phone'),''),NULLIF(BTRIM(plot_buyer.phone),'')) AS buyer_phone,
   concat_ws(', ',NULLIF(to_jsonb(s)->>'address',''),NULLIF(to_jsonb(s)->>'city',''),NULLIF(to_jsonb(s)->>'state','')) AS site_address,
   (SELECT CASE WHEN COUNT(*)=1 THEN MIN(m.phone) END FROM members m WHERE m.site_id=p.site_id AND UPPER(BTRIM(m.full_name))=UPPER(BTRIM(to_jsonb(p)->>'booking_by'))) AS broker_phone,
@@ -1168,9 +1169,26 @@ export async function loadAccountWhatsAppContext(
   )
     return null;
   if (requiresPaymentReceipt(event)) {
+    const available = (await db.query("SELECT to_regclass('public.cash_flow_entries') IS NOT NULL AND to_regclass('public.bank_accounts') IS NOT NULL AS banks,to_regclass('public.transaction_party_links') IS NOT NULL AS parties,to_regclass('public.transaction_receipts') IS NOT NULL AS receipts")).rows[0] || {};
+    if (available.receipts) {
+      // Signing/printing can save images in receipt history without copying
+      // them to the payment row. Only that exact site's native receipt may
+      // supply a fallback; the payment's own recorded images take priority.
+      const saved = (await db.query(
+        `SELECT r.customer_signature_url,r.authority_signature_url,r.evidence_photo_url
+          FROM transaction_receipts r JOIN sites s ON s.id=$1
+          WHERE r.site_id=s.id AND r.organization_id=s.organization_id
+          AND r.module=$2 AND r.record_id=$3 LIMIT 1`,
+        [siteId, data.receipt_module, String(refId)],
+      )).rows[0];
+      for (const key of ["customer_signature_url", "authority_signature_url", "evidence_photo_url"]) {
+        if (!String(data[key] || "").trim() && saved?.[key] &&
+          (key !== "evidence_photo_url" || !String(data.voucher_url || "").trim()))
+          data[key] = saved[key];
+      }
+    }
     // The non-cash account assignment belongs to the canonical ledger mirror.
     // Legacy installations without bank mapping retain their recorded text.
-    const available = (await db.query("SELECT to_regclass('public.cash_flow_entries') IS NOT NULL AND to_regclass('public.bank_accounts') IS NOT NULL AS banks,to_regclass('public.transaction_party_links') IS NOT NULL AS parties")).rows[0] || {};
     if (available.banks) {
       const bank = (await db.query(
         `SELECT ba.name AS bank_account_name,COALESCE(NULLIF(to_jsonb(ba)->>'bank_name',''),ba.name) AS bank_name,

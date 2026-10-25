@@ -1,4 +1,6 @@
 import { configuredPaymentReceipt, renderConfiguredPaymentReceiptPdf } from "./receiptPdf.js";
+import QRCode from "qrcode";
+import { buildVerifyUrl, ReceiptType } from "../utils/receiptToken.js";
 import {
   accountWhatsAppError,
 } from "./accountWhatsApp.spec.js";
@@ -26,6 +28,26 @@ export const accountWhatsAppReceiptFilename = (data) =>
   `payment-receipt-${String(data.receipt_no || "sample")
     .replace(/[^a-z0-9_-]/gi, "_")
     .slice(0, 100)}.pdf`;
+/** Use the native receipt identity and recorded facts, as the print viewer does. */
+export function accountWhatsAppReceiptVerifyUrl(event, data) {
+  if (!ACCOUNT_WHATSAPP_DOCUMENT_EVENTS.includes(event)) return "";
+  const module = event === "INSTALLMENT_RECEIVED" ? "plot_installment_payment" : "plot_payment";
+  const sourceId = Number(data.source_id);
+  if (!Number.isSafeInteger(sourceId) || sourceId <= 0 || data.receipt_module !== module) return "";
+  return buildVerifyUrl({
+    t: ReceiptType.PLOT,
+    i: `${module}_${sourceId}`,
+    a: Math.abs(Number(data.amount)),
+    dr: event === "PAYMENT_SENT" ? "OUT" : "IN",
+    d: data.payment_date || null,
+    pm: data.payment_mode || data.payment_type || null,
+    pn: data.full_name || null,
+    pl: data.plot_no || null,
+    sn: data.site_name || null,
+    sy: data.site_city || null,
+    ss: data.site_state || null,
+  });
+}
 /** A customer copy rendered only from the canonical, policy-checked payment row. */
 export async function renderAccountWhatsAppReceipt(
   event,
@@ -45,5 +67,10 @@ export async function renderAccountWhatsAppReceipt(
       409,
     );
   const receipt = configuredPaymentReceipt(event, data, design);
-  return renderConfiguredPaymentReceiptPdf(receipt, data, { sample, qrDataUrl });
+  const verifyUrl = !sample && receipt.fields.qr && !qrDataUrl
+    ? accountWhatsAppReceiptVerifyUrl(event, data) : "";
+  const verificationQr = verifyUrl
+    ? await QRCode.toDataURL(verifyUrl, { width: 300, margin: 1, errorCorrectionLevel: "M" })
+    : qrDataUrl;
+  return renderConfiguredPaymentReceiptPdf(receipt, data, { sample, qrDataUrl: verificationQr });
 }

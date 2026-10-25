@@ -32,7 +32,12 @@ import {
   listAccountWhatsAppRemoteTemplates,
   getAccountWhatsAppRemoteTemplate,
   importAccountWhatsAppTemplate,
+  previewAccountWhatsAppReceipt,
 } from "../src/services/accountWhatsApp.service.js";
+import {
+  RECEIPT_DESIGN_KEY,
+  RECEIPT_SITE_DESIGN_KEY,
+} from "../src/services/receiptDesign.service.js";
 import {
   compileAccountWhatsAppBody,
   isAccountWhatsAppPaymentEligible,
@@ -1404,6 +1409,78 @@ test("new payment versions include a fictional PDF approval sample and a require
   assert.equal(samples, 3);
 });
 
+test("a mapped text payment becomes a separate PDF approval version using the current site's design", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  const source = approvedAwsPayment();
+  source.components.shift();
+  const original = structuredClone(source);
+  const fields = paymentImport().fields;
+  const body = source.components[0].text.replace(/\{\{(\d+)\}\}/g, (_, position) => `{${fields[Number(position) - 1]}}`);
+  await db.query(
+    "INSERT INTO application_settings(site_id,setting_key,setting_value) VALUES(NULL,$1,$2),(1,$3,$4),(2,$3,$2)",
+    [RECEIPT_DESIGN_KEY, { non_cash: { page_size: "A4" } }, RECEIPT_SITE_DESIGN_KEY, {
+      non_cash: { page_size: "A4" },
+      modules: { plot_payment: { non_cash: { page_size: "A5", content: { title: "Current Site Receipt" } } } },
+    }],
+  );
+  const preview = await previewAccountWhatsAppReceipt(admin, 1, "PAYMENT_RECEIVED", { db });
+  assert.match(preview.toString("latin1"), /\/MediaBox \[0 0 419\.5\d* 595\.2\d*\]/, "preview uses the selected site's module override, ahead of shared and other-site formats");
+  let definition;
+  const template = await createAccountWhatsAppTemplate(admin, {
+    site_id: 1, event: "PAYMENT_RECEIVED", title: "Approved payment with PDF receipt", body,
+  }, { db, transport: {
+    ...localTransport(),
+    uploadTemplateMedia: async (buffer) => {
+      assert.match(buffer.toString("latin1"), /\/MediaBox \[0 0 419\.5\d* 595\.2\d*\]/, "the Meta approval sample uses the same applied site design as preview");
+      return "site-design-header";
+    },
+    create: async (value) => {
+      definition = value;
+      return { templateStatus: "PENDING", metaTemplateId: "new-document-version" };
+    },
+  } });
+  assert.notEqual(template.name, source.name);
+  assert.equal(template.has_document, true);
+  assert.equal(template.status, "PENDING");
+  assert.equal(template.body, body);
+  assert.deepEqual(template.fields, fields);
+  assert.deepEqual(definition.components[0], {
+    type: "HEADER", format: "DOCUMENT", example: { header_handle: ["site-design-header"] },
+  });
+  assert.equal(definition.components[1].text, source.components[0].text);
+  assert.deepEqual(source, original, "the already-approved AWS text template is untouched");
+  await assert.rejects(saveAccountWhatsAppStage(admin, "PAYMENT_RECEIVED", {
+    site_id: 1, template_name: template.name, enabled: true,
+  }, { db }), /approved/i);
+
+  // Model Meta approval in the isolated database, then change the applied design.
+  // Delivery must load that new design instead of freezing the approval sample.
+  await db.query("UPDATE account_whatsapp_templates SET status='APPROVED' WHERE id=$1", [template.id]);
+  await db.query("UPDATE application_settings SET setting_value=$1 WHERE site_id=1 AND setting_key=$2", [
+    { non_cash: { page_size: "A4" } }, RECEIPT_SITE_DESIGN_KEY,
+  ]);
+  await saveAccountWhatsAppStage(admin, "PAYMENT_RECEIVED", {
+    site_id: 1, template_name: template.name, enabled: true,
+  }, { db });
+  await queueAccountWhatsApp("PAYMENT_RECEIVED", 40, { siteId: 1, db });
+  let sends = 0;
+  await drainAccountWhatsApp({ db,
+    upload: async (buffer, filename) => {
+      assert.match(buffer.toString("latin1"), /\/MediaBox \[0 0 595\.2\d* 841\.8\d*\]/, "the transaction attachment uses the latest applied site design");
+      assert.equal(filename, "payment-receipt-ACK-40.pdf");
+      return "current-design-media";
+    },
+    send: async (_phone, name, _params, options) => {
+      sends++;
+      assert.equal(name, template.name);
+      assert.equal(options.media.id, "current-design-media");
+      return "accepted-new-version";
+    },
+  });
+  assert.equal(sends, 1);
+});
+
 test("PDF sample upload failure saves the payment version without submitting a body-only template", async (t) => {
   const { db } = await fixture(t);
   await up(db);
@@ -1473,6 +1550,32 @@ test("receipt context reads the exact transaction and site-owned printable facts
   assert.equal(installment.receipt_no, "ACK-60");
   await db.query("INSERT INTO members(id,site_id,full_name,phone,member_type) VALUES(14,1,'Sample Broker','9876543297','AGENT')");
   assert.equal((await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 1, db)).broker_phone, null, "ambiguous name never selects a broker's contact details");
+});
+
+test("receipt images use saved print history only for the same organization, site and native transaction", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  await db.query("ALTER TABLE plot_payments ADD COLUMN customer_signature_url text,ADD COLUMN authority_signature_url text,ADD COLUMN evidence_photo_url text,ADD COLUMN voucher_url text");
+  await db.query(`CREATE TABLE transaction_receipts(organization_id integer,site_id integer,module text,record_id text,customer_signature_url text,authority_signature_url text,evidence_photo_url text);
+    INSERT INTO transaction_receipts VALUES
+    (1,2,'plot_payment','40','wrong-site','wrong-site','wrong-site'),
+    (2,1,'plot_payment','40','wrong-company','wrong-company','wrong-company'),
+    (1,1,'plot_installment_payment','40','wrong-module','wrong-module','wrong-module'),
+    (1,1,'plot_payment','41','wrong-record','wrong-record','wrong-record'),
+    (1,1,'plot_payment','40','saved-customer','saved-authority','saved-proof')`);
+  const saved = await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 1, db);
+  assert.equal(saved.customer_signature_url, "saved-customer");
+  assert.equal(saved.authority_signature_url, "saved-authority");
+  assert.equal(saved.evidence_photo_url, "saved-proof");
+  await db.query("UPDATE plot_payments SET customer_signature_url='recorded-customer',authority_signature_url=' ',voucher_url='recorded-proof' WHERE id=40");
+  const recorded = await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 1, db);
+  assert.equal(recorded.customer_signature_url, "recorded-customer", "the native payment's signature takes precedence");
+  assert.equal(recorded.authority_signature_url, "saved-authority", "blank source signatures allow the saved image fallback");
+  assert.equal(recorded.evidence_photo_url, null, "a recorded voucher takes precedence over history evidence");
+  assert.equal(recorded.voucher_url, "recorded-proof");
+  await db.query("DELETE FROM transaction_receipts WHERE organization_id=1 AND site_id=1 AND module='plot_payment' AND record_id='40'");
+  const isolated = await loadAccountWhatsAppContext("PAYMENT_RECEIVED", 40, 1, db);
+  assert.equal(isolated.authority_signature_url, " ", "other site, company, module and record IDs never supply receipt images");
 });
 
 test("document samples contain only fictional values and use an explicit media header", async (t) => {

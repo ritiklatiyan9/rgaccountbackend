@@ -157,6 +157,8 @@ function pagePlan(doc, receipt) {
 }
 
 function presetFront(doc, receipt, assets, { sample, qrDataUrl }) {
+  if (receipt.design.template_id.startsWith('official-'))
+    return officialFront(doc, receipt, assets, { sample, qrDataUrl });
   const p = pagePlan(doc, receipt);
   const { design: d, content: c, fields: f } = receipt;
   const A5 = d.page_size === 'A5';
@@ -313,6 +315,195 @@ function presetFront(doc, receipt, assets, { sample, qrDataUrl }) {
     paragraph(`${c.footer}${c.printed_label}${receipt.printedAt}`, base * (plain ? 1 : 0.6), { color: color.muted, align: plain ? 'left' : 'center' }, 0);
   }
   return { operations: p.operations, width: W, height: H, naturalHeight: Math.max(H, y + mm(A5 ? 11 : 16)) };
+}
+
+// The same six document variants as Receipt Design Studio's DOC_VARIANTS.
+// Keep their statement/invoice/counterfoil structure and editable labels when
+// rendering on the server, rather than falling back to the generic receipt.
+function officialFront(doc, receipt, assets, { sample, qrDataUrl }) {
+  const p = pagePlan(doc, receipt), { design: d, content: c, fields: f } = receipt;
+  const variant = d.template_id.slice('official-'.length);
+  const invoice = variant === 'invoice', government = variant === 'government';
+  const legal = variant === 'legal', centered = government || legal;
+  const A5 = d.page_size === 'A5', W = mm(A5 ? 148 : 210), H = mm(A5 ? 210 : 297);
+  const left = mm(A5 ? 10 : 15), width = W - left * 2, base = px(d.base_font_size);
+  const gap = (value) => mm(value) * d.line_spacing / 100;
+  const border = government ? d.colors.primary : '#9ca3af';
+  let y = mm(A5 ? 10 : 14);
+  const paragraph = (value, size = base, options = {}, after = 2) => {
+    y += p.text(value, left, y, width, size, options) + gap(after);
+  };
+  const tableRow = (cells, fractions, { header = false, minHeight = 0, fill = '' } = {}) => {
+    const top = y, start = p.operations.length, padding = mm(2.5);
+    let x = left, height = minHeight;
+    cells.forEach((cell, index) => {
+      const item = typeof cell === 'object' ? cell : { value: cell };
+      const cellWidth = width * fractions[index];
+      height = Math.max(height, p.text(item.value || '', x + padding, top + gap(1.6), cellWidth - padding * 2,
+        base * (header ? 0.84 : 0.92), { bold: header || item.bold, align: item.align || 'left', color: item.color || d.colors.text }) + gap(3.2));
+      x += cellWidth;
+    });
+    const texts = p.operations.splice(start);
+    x = left;
+    cells.forEach((cell, index) => {
+      const cellWidth = width * fractions[index];
+      if (legal && !header) p.line(x, top + height, cellWidth, '#6b7280', 0.5);
+      else p.box(x, top, cellWidth, height, fill || (header ? '#f3f4f6' : ''), border, 0.55);
+      x += cellWidth;
+    });
+    p.operations.push(...texts);
+    y += height;
+  };
+  const entry = (key) => receipt.rows.find((row) => row.key === key)?.value || '';
+  const party = f.party ? receipt.party : '';
+  const payMode = f.payment_mode ? receipt.paymentMode : '';
+  const cheque = entry('cheque_no'), purpose = entry('module');
+  const instrument = `${payMode}${payMode && cheque ? ` No. ${cheque}` : ''}`;
+  const lead = receipt.direction === 'out' ? c.paid_text : c.received_text;
+  const broker = f.broker_name ? [receipt.broker.name || c.broker_empty_label,
+    f.broker_phone && receipt.broker.phone && `${receipt.nameConfig.broker_phone.label}${c.separator}${receipt.broker.phone}`,
+    f.broker_team && receipt.broker.team && `${receipt.nameConfig.broker_team.label}${c.separator}${receipt.broker.team}`,
+  ].filter(Boolean).join(c.contact_separator) : '';
+  const meta = [
+    f.receipt_number && [c.receipt_number_label, receipt.receiptNo],
+    f.date && [c.date_label, receipt.date],
+    payMode && [c.mode_label, instrument],
+    broker && [receipt.nameConfig.broker_name.label, broker],
+  ].filter(Boolean);
+  if (government) p.box(mm(A5 ? 6 : 9), mm(A5 ? 6 : 9), W - mm(A5 ? 12 : 18), H - mm(A5 ? 12 : 18), '', d.colors.primary);
+  if (variant === 'counterfoil') {
+    const header = y;
+    const nameHeight = f.organization ? p.text(receipt.organization, left, y, width * 0.55, base * 0.86, { bold: true }) : 0;
+    const labelHeight = p.text(c.counterfoil_label, left + width * 0.55, y, width * 0.45, base * 0.75, { bold: true, align: 'right', color: d.colors.muted });
+    y = header + Math.max(nameHeight, labelHeight) + gap(1.5);
+    const stub = [f.receipt_number && [c.receipt_number_label, receipt.receiptNo], f.date && [c.date_label, receipt.date],
+      party && [c.party_label, party], f.amount && [c.amount_label, receipt.amountText], [c.counterfoil_sign_label, '']].filter(Boolean);
+    const fractions = stub.map(() => 1 / stub.length);
+    tableRow(stub.map(([label]) => label), fractions, { header: true });
+    tableRow(stub.map(([, value]) => value), fractions, { minHeight: mm(A5 ? 8 : 10) });
+    y += gap(4); p.line(left, y, width, '#6b7280', 0.5); y += gap(4);
+  }
+  const copy = sample ? 'SAMPLE - FICTIONAL RECEIPT' : f.copy_label ? c.original_label : '';
+  const headerTop = y, sideWidth = mm(A5 ? 52 : 70), headerGap = mm(6);
+  if (centered && copy) {
+    y += p.text(copy, left, y, width, base * 0.7, { bold: true, align: 'right' }) + gap(1.5);
+  }
+  const textWidth = invoice ? width - sideWidth - headerGap : centered ? width : width - (copy ? sideWidth : 0);
+  const align = centered ? 'center' : 'left';
+  if (f.organization) y += p.text(receipt.organization.toUpperCase(), left, y, textWidth, px(d.heading_size), { bold: true, color: d.colors.primary, align }) + gap(1);
+  if (f.address && receipt.address) y += p.text(receipt.address, left, y, textWidth, base * 0.86, { color: d.colors.muted, align }) + gap(1);
+  for (const info of d.info_lines) y += p.text(`${info.label}${info.label ? c.separator : ''}${info.value}`, left, y, textWidth, base * 0.8, { align }) + gap(0.8);
+  if (!centered) {
+    const x = W - left - sideWidth;
+    let sideY = headerTop;
+    if (copy) sideY += p.text(copy, x, sideY, sideWidth, base * 0.7, { bold: true, align: 'right' }) + gap(1.5);
+    if (invoice) {
+      if (f.title) {
+        const start = p.operations.length;
+        const height = p.text(c.title.toUpperCase(), x + mm(3), sideY + gap(1.6), sideWidth - mm(6), base, { bold: true, align: 'center', color: '#ffffff' }) + gap(3.2);
+        const titleText = p.operations.splice(start);
+        p.box(x, sideY, sideWidth, height, d.colors.primary, d.colors.primary);
+        p.operations.push(...titleText); sideY += height;
+      }
+      for (const [label, value] of meta) {
+        const rowTop = sideY;
+        const h1 = p.text(label, x + mm(2.5), sideY + gap(1.6), sideWidth * 0.4 - mm(4), base * 0.84, { bold: true });
+        const h2 = p.text(value, x + sideWidth * 0.4, sideY + gap(1.6), sideWidth * 0.6 - mm(2.5), base * 0.84, { bold: true, align: 'right' });
+        sideY += Math.max(h1, h2) + gap(3.2);
+        p.box(x, rowTop, sideWidth, sideY - rowTop, '', d.colors.primary, 0.55);
+      }
+    }
+    y = Math.max(y, sideY);
+  }
+  y += gap(3); p.line(left, y, width, d.colors.primary, legal ? 1.5 : 1.1); y += gap(3);
+  if (!invoice && f.title) {
+    if (government) tableRow([{ value: c.title.toUpperCase(), align: 'center' }], [1], { header: true });
+    else { paragraph(c.title.toUpperCase(), base * 1.2, { bold: true, align: 'center' }, 3); }
+  }
+  if (!invoice && meta.length) {
+    if (legal) paragraph(meta.map(([label, value]) => `${label}${c.separator}${value}`).join('     '), base * 0.92, {}, 3);
+    else { const fractions = meta.map(() => 1 / meta.length); tableRow(meta.map(([label]) => label), fractions, { header: true }); tableRow(meta.map(([, value]) => ({ value, bold: true })), fractions); }
+  }
+  y += gap(3);
+  if (invoice) {
+    if (party) { tableRow([`${lead}${c.separator}${party}`], [1]); y += gap(3); }
+    tableRow([c.sno_label, c.description_label, { value: c.amount_label, align: 'right' }], [0.1, 0.56, 0.34], { header: true });
+    tableRow(['1', [purpose, entry('narration')].filter(Boolean).join(' - ') || c.title,
+      { value: f.amount ? receipt.amountText : '', align: 'right' }], [0.1, 0.56, 0.34]);
+    tableRow(['', { value: c.total_label, align: 'right', bold: true },
+      { value: f.amount ? receipt.amountText : '', align: 'right', bold: true }], [0.1, 0.56, 0.34], { fill: '#f3f4f6' });
+    if (f.amount_words) tableRow([`${c.words_label}${c.separator}${c.words_prefix}${receipt.amountWords}${c.words_suffix}`], [1]);
+  } else {
+    const sum = [f.amount_words && `${c.words_prefix}${receipt.amountWords}${c.words_suffix}`, f.amount && `(${receipt.amountText})`].filter(Boolean).join(' ');
+    const statement = `${lead}${party ? ` ${party}` : ''}${sum ? ` ${c.sum_text} ${sum}` : ''}${payMode ? ` ${c.by_text} ${instrument}` : ''}${purpose ? ` ${c.towards_text} ${purpose}` : ''}.`;
+    if (government) tableRow([statement], [1]);
+    else paragraph(statement, base * (legal ? 1.06 : 1.02), { lineHeight: legal ? 2 : 1.8 }, 3);
+  }
+  const rows = receipt.rows.filter((row) => !['module', 'payment_mode', ...(invoice ? ['narration'] : [])].includes(row.key));
+  if (f.details && rows.length) {
+    y += gap(3);
+    if (government) {
+      tableRow([c.sno_label, c.details_label, c.details_col_label], [0.1, 0.4, 0.5], { header: true });
+      rows.forEach((row, index) => tableRow([String(index + 1), { value: row.label, bold: true }, row.value], [0.1, 0.4, 0.5]));
+    } else {
+      paragraph(c.details_label.toUpperCase(), base * 0.82, { bold: true, color: d.colors.primary }, 1.5);
+      for (let index = 0; index < rows.length; index += legal ? 1 : 2) {
+        const row = rows[index], next = rows[index + 1];
+        if (legal || !next) tableRow([{ value: row.label, bold: true }, row.value], [legal ? 0.35 : 0.19, legal ? 0.65 : 0.81]);
+        else tableRow([{ value: row.label, bold: true }, row.value, { value: next.label, bold: true }, next.value], [0.19, 0.31, 0.19, 0.31]);
+      }
+    }
+  }
+  if (f.evidence && assets.evidence) {
+    y += gap(4); const imageHeight = mm(A5 ? 24 : 30), imageWidth = mm(A5 ? 36 : 46);
+    p.image(assets.evidence, left, y, imageWidth, imageHeight);
+    const labelHeight = p.text(`${c.evidence_label}\n${c.evidence_note}`, left + imageWidth + mm(4), y + mm(2), width - imageWidth - mm(4), base * 0.75);
+    y += Math.max(imageHeight, labelHeight);
+  }
+  if ((f.amount && !invoice) || f.qr) {
+    y += gap(4); const top = y, qrSize = mm(A5 ? 20 : 24), amountWidth = width - (f.qr ? qrSize + mm(6) : 0);
+    if (f.amount && !invoice) {
+      doc.font('Bold').fontSize(px(d.amount_size));
+      const labelWidth = Math.min(mm(38), amountWidth * 0.34);
+      const boxWidth = Math.min(amountWidth, labelWidth + doc.widthOfString(receipt.amountText) + mm(8));
+      const start = p.operations.length;
+      const numberWidth = boxWidth - labelWidth - mm(8);
+      const amountSize = Math.min(px(d.amount_size), px(d.amount_size) * numberWidth / doc.widthOfString(receipt.amountText) * 0.99);
+      const amountHeight = p.text(receipt.amountText, left + labelWidth + mm(4), top + mm(1.5), numberWidth, amountSize, { bold: true });
+      const labelHeight = p.text(c.amount_label.toUpperCase(), left + mm(3), top + mm(2), labelWidth - mm(6), base * 0.78, { bold: true });
+      const height = Math.max(amountHeight + mm(3), labelHeight + mm(4));
+      p.operations.at(-1).y = top + (height - labelHeight) / 2;
+      const labels = p.operations.splice(start);
+      p.box(left, top, labelWidth, height, '#f3f4f6', d.colors.text, 1);
+      p.box(left + labelWidth, top, boxWidth - labelWidth, height, '', d.colors.text, 1);
+      p.operations.push(...labels); y += height;
+    }
+    if (f.qr) {
+      const x = W - left - qrSize;
+      if (qrDataUrl) p.image(Buffer.from(qrDataUrl.slice(qrDataUrl.indexOf(',') + 1), 'base64'), x, top, qrSize, qrSize);
+      else { p.box(x, top, qrSize, qrSize, '', '#bac7be'); p.text(c.qr_placeholder, x, top + qrSize / 2 - base / 2, qrSize, base, { align: 'center' }); }
+      const labelHeight = p.text(qrDataUrl ? c.qr_label : c.qr_unavailable, x - mm(3), top + qrSize + mm(0.8), qrSize + mm(6), base * 0.62, { align: 'center', color: d.colors.muted });
+      y = Math.max(y, top + qrSize + mm(0.8) + labelHeight);
+    }
+  }
+  if (f.customer_signature || f.authority_signature) {
+    y += gap(A5 ? 8 : 12); const top = y, signatureWidth = mm(A5 ? 42 : 56), imageHeight = mm(A5 ? 9 : 12);
+    const forHeight = f.authority_signature && f.organization && receipt.organization
+      ? p.text(`${c.for_text} ${receipt.organization}`, W - left - signatureWidth, top, signatureWidth, base * 0.8, { align: 'center' }) + mm(1) : 0;
+    for (const key of ['customer', 'authority']) {
+      if (!f[`${key}_signature`]) continue;
+      const x = key === 'authority' || !f.authority_signature ? W - left - signatureWidth : left;
+      let signY = top + forHeight;
+      p.image(assets[key], x, signY, signatureWidth, imageHeight); signY += imageHeight + mm(1);
+      p.line(x, signY, signatureWidth, '#6b7280', 0.5); signY += mm(2);
+      signY += p.text(key === 'customer' ? c.customer_signature_label : c.authority_signature_label, x, signY, signatureWidth, base * 0.8, { align: 'center' });
+      if (key === 'authority' && f.seal) signY += mm(1) + p.text(c.seal_label, x, signY + mm(1), signatureWidth, base * 0.7, { align: 'center', color: d.colors.muted });
+      y = Math.max(y, signY);
+    }
+  }
+  if (f.declaration && c.declaration) { y += gap(4); paragraph(`${c.note_label}${c.separator}${c.declaration}`, base * 0.86, {}, 0); }
+  if (f.printed_at) { y += gap(4); paragraph(`${c.footer}${c.printed_label}${receipt.printedAt}`, base * 0.65, { color: d.colors.muted }, 0); }
+  return { operations: p.operations, width: W, height: H, naturalHeight: Math.max(H, y + mm(A5 ? 9 : 12)) };
 }
 
 function backPage(doc, receipt) {
