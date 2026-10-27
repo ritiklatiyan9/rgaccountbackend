@@ -1,0 +1,62 @@
+{
+  "site": {
+    "id": 2,
+    "name": "Mount Valley Residency"
+  },
+  "entries": [
+    {
+      "id": 2,
+      "site_id": 2,
+      "parent_id": null,
+      "kind": "folder",
+      "name": "Documents",
+      "storage_key": null,
+      "mime_type": null,
+      "file_size": null,
+      "created_by": 7,
+      "created_at": "2026-10-27T08:20:30.006Z",
+      "updated_at": "2026-10-27T08:20:30.006Z"
+    },
+    {
+      "id": 3,
+      "site_id": 2,
+      "parent_id": 2,
+      "kind": "folder",
+      "name": "Test",
+      "storage_key": null,
+      "mime_type": null,
+      "file_size": null,
+      "created_by": 7,
+      "created_at": "2026-10-27T08:29:02.582Z",
+      "updated_at": "2026-10-27T08:29:02.582Z"
+    },
+    {
+      "id": 4,
+      "site_id": 2,
+      "parent_id": 3,
+      "kind": "file",
+      "name": "OM ASSOCIATES BANK STATEMENT.xls",
+      "storage_key": "data_storage/2/4ef5cdf6-df9e-47ab-be46-361094a19d3d",
+      "mime_type": "application/vnd.ms-excel",
+      "file_size": "627200",
+      "created_by": 7,
+      "created_at": "2026-10-27T08:29:57.109Z",
+      "updated_at": "2026-10-27T08:29:57.109Z"
+    },
+    {
+      "id": 5,
+      "site_id": 2,
+      "parent_id": 3,
+      "kind": "folder",
+      "name": "Test Two",
+      "storage_key": null,
+      "mime_type": null,
+      "file_size": null,
+      "created_by": 7,
+      "created_at": "2026-10-27T08:30:11.678Z",
+      "updated_at": "2026-10-27T08:30:11.678Z"
+    }
+  ],
+  "createdAt": "2026-10-27T08:40:34.030Z",
+  "recovery": "Original stored objects are retained; restore these metadata rows to recover the workspace."
+}
