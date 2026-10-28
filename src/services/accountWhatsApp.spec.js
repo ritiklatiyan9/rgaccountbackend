@@ -94,11 +94,7 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
     "KYC verification completed",
     "Confirm that client verification has been completed.",
     CUSTOMER,
-    branded(
-      "Dear {customer_name},",
-      "Your KYC verification for {project} has been completed successfully.\n*Member ID:* {member_id}",
-      "Thank you for completing your verification.",
-    ),
+    "*KYC verification confirmation*\n\nDear {customer_name},\n\nYour KYC verification for {project} is complete.\n*Member ID:* {member_id}\n\nDefence Garden Group",
   ),
   PLOT_BOOKED: event(
     "Plot booking confirmed",

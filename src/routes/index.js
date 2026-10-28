@@ -71,7 +71,9 @@ import backupRoutes from './backup.routes.js';
 import transactionDocumentationRoutes from './transactionDocumentation.routes.js';
 import seekPermissionRoutes from './seekPermission.routes.js';
 import accountWhatsAppRoutes from './accountWhatsApp.routes.js';
+import mobilePortalRoutes from './mobilePortal.routes.js';
 
+router.use('/api/mobile', mobilePortalRoutes);
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
 router.use('/admin', adminRoutes);
