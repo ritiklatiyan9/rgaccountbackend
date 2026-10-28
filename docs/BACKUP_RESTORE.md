@@ -33,6 +33,8 @@ An application archive contains **data and schema fingerprints; it does not inst
 
 This repository's incremental migrations are not a complete empty-database installer. Foundational tables are shared with the Booking application, and its baseline migrations must also be present. Provision a matching schema from the source installation using a PostgreSQL administrator's normal deployment process. One option is a schema-only native dump:
 
+For both commands, configure the service entries to use the **direct, unpooled** database endpoint. PostgreSQL dump and restore tools use session settings such as `search_path`; transaction-pooled connections cannot safely preserve those settings and can expose other clients to an incorrect schema path. For Neon, use its direct hostname, without `-pooler`.
+
 ```sh
 pg_dump --dbname=service=accounts_source --schema-only --no-owner --no-privileges --file=accounts-schema.sql
 psql --dbname=service=accounts_target --set=ON_ERROR_STOP=on --single-transaction --file=accounts-schema.sql
