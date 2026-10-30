@@ -1,3 +1,7 @@
+import { up as migrateSeekPermissions } from './migrations/222_seek_permissions.js';
+import { up as migrateSeekTargets } from './migrations/223_seek_permission_targets.js';
+import { up as migrateSeekComments } from './migrations/230_seek_permission_comments.js';
+import { up as migrateSeekPriority } from './migrations/231_seek_permission_priority.js';
 import { up as migrateImprestVisibility } from './migrations/229_imprest_management_visibility.js';
 import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
 import 'dotenv/config';
@@ -35,6 +39,10 @@ initCache();
 connectDB().then(async () => {
   await migrateBookingAccountsLogin(pool);
   await migrateImprestVisibility(pool);
+  await migrateSeekPermissions(pool);
+  await migrateSeekTargets(pool);
+  await migrateSeekComments(pool);
+  await migrateSeekPriority(pool);
   await migratePlotAreaChanges(pool);
   await migratePlotBankRounding(pool);
   await migrateMemberSiteSharing(pool);

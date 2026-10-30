@@ -54,7 +54,8 @@ export async function generateRecurringItems(client, pendingSync = []) {
              category,subcategory,compliance_type,state,district,frequency,original_due_date,current_due_date,
              reminder_days,reviewing_manager_id,approving_authority_id,risk_level,priority,approval_required,
              generated_key,created_by,updated_by,metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$22,$19,$20,$21,$21,$23)
+           SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$22,$19,$20,$21,$21,$23
+         WHERE NOT EXISTS (SELECT 1 FROM compliance_items prior WHERE prior.organization_id=$1 AND prior.generated_key=$20)
            ON CONFLICT (organization_id,generated_key)
              WHERE generated_key IS NOT NULL AND deleted_at IS NULL
            DO NOTHING RETURNING id`,

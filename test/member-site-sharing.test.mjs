@@ -5,6 +5,7 @@ import pool from '../src/config/db.js';
 import { memberModel } from '../src/models/Member.model.js';
 import { MEMBER_FIELDS,DOC_FIELDS } from '../src/services/memberProfileFields.js';
 import { lockMemberDirectory,registerMemberAcrossSites,syncSharedMemberProfile } from '../src/services/memberSiteSharing.service.js';
+import { assertMemberSiteAccess } from '../src/services/memberPhoneReuse.service.js';
 import { up } from '../src/migrations/187_member_site_sharing.js';
 import { up as linkMigration } from '../src/migrations/192_member_identity_linking.js';
 import { up as consolidationMigration } from '../src/migrations/194_member_identity_consolidation.js';
@@ -103,9 +104,17 @@ test('adding from Clients automatically registers all organisation sites, preser
 });
 
 test('an authorised add from one assigned site shares globally within the organisation but cannot originate in an inaccessible site',async t=>{
-  const {query}=await fixture(t);const actor={id:8,role:'sub_admin',organization_id:1,permissionsByModule:new Map()};
+  const {db,query}=await fixture(t);const actor={id:8,role:'sub_admin',organization_id:1,permissionsByModule:new Map()};
+  await query('INSERT INTO user_sites VALUES(9,2)');
   const result=await invoke(createMember,{site_id:1,full_name:'Test Client',phone:'9876543210'},{},actor);
   assert.equal(result.status,201);assert.equal(result.data.registration.site_count,3);
+  const otherSubAdmin={id:9,role:'sub_admin',organization_id:1};
+  assert.ok(await assertMemberSiteAccess(db,otherSubAdmin,2));
+  const otherSiteMembers=await memberModel.findBySiteId(2,db,'CLIENT');
+  assert.equal(otherSiteMembers.length,1);
+  assert.equal(otherSiteMembers[0].shared_profile_id,result.data.registration.shared_profile_id);
+  assert.equal(otherSiteMembers[0].full_name,result.data.member.full_name);
+  assert.equal(await assertMemberSiteAccess(db,otherSubAdmin,1),null);
   const denied=await invoke(createMember,{site_id:2,full_name:'Another Client',phone:'9000000000'},{},actor);
   assert.equal(denied.status,403);assert.equal((await query('SELECT count(*)::int AS n FROM members')).rows[0].n,3);
 });

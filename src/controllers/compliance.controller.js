@@ -602,6 +602,7 @@ export const deleteComplianceItem = asyncHandler(async (req, res) => {
   const existing = id ? await getScopedComplianceEntity(req, 'compliance_items', id) : null;
   if (!existing) return res.status(404).json({ message: 'Compliance item not found' });
   const reason = requireReason(req.body.reason);
+  if (req.body.site_id !== undefined && String(req.body.site_id ?? '') !== String(existing.site_id ?? '')) return res.status(409).json({ message: 'This event moved to another site. Refresh the calendar before deleting it.' });
   await pool.query(`UPDATE compliance_items SET deleted_at=NOW(),updated_by=$1,updated_at=NOW() WHERE id=$2 AND organization_id=$3`, [req.user.id, id, req.user.organization_id]);
   await writeComplianceAudit(pool, req, { action: 'DELETE', entityType: 'COMPLIANCE', entityId: id, siteId: existing.site_id, previousValue: existing, reason });
   queueCalendarSync(req.user.organization_id, 'COMPLIANCE', id);
@@ -1267,7 +1268,8 @@ export async function generateTemplateItems({
            category,subcategory,compliance_type,state,district,frequency,original_due_date,current_due_date,
            reminder_days,reviewing_manager_id,approving_authority_id,risk_level,priority,approval_required,
            generated_key,created_by,updated_by,metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$22,$19,$20,$21,$21,$23)
+         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$22,$19,$20,$21,$21,$23
+         WHERE NOT EXISTS (SELECT 1 FROM compliance_items prior WHERE prior.organization_id=$1 AND prior.generated_key=$20)
          ON CONFLICT (organization_id,generated_key) WHERE generated_key IS NOT NULL AND deleted_at IS NULL DO NOTHING
          RETURNING *`,
         [req.user.organization_id, siteId, template.id, template.authority_id, codeFor('CMP'),
@@ -1685,6 +1687,7 @@ export const deleteComplianceEntity = (entity) => asyncHandler(async (req, res) 
   const existing = id ? await getScopedComplianceEntity(req, config.table, id) : null;
   if (!existing) return res.status(404).json({ message: `${config.label.replaceAll('_', ' ')} not found` });
   const reason = requireReason(req.body.reason);
+  if (req.body.site_id !== undefined && String(req.body.site_id ?? '') !== String(existing.site_id ?? '')) return res.status(409).json({ message: 'This event moved to another site. Refresh the calendar before deleting it.' });
   await pool.query(`UPDATE ${config.table} SET deleted_at=NOW(),updated_by=$1,updated_at=NOW() WHERE id=$2 AND organization_id=$3`, [req.user.id, id, req.user.organization_id]);
   await writeComplianceAudit(pool, req, { action: 'DELETE', entityType: config.label, entityId: id, siteId: existing.site_id, previousValue: existing, reason });
   if (CALENDAR_EVENT_TYPES[entity]) queueCalendarSync(req.user.organization_id, CALENDAR_EVENT_TYPES[entity], id);

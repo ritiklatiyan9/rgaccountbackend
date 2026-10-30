@@ -4,6 +4,7 @@ import pool from './db.js';
 import { requestAppContext, assertAppLoginAccess } from '../services/appLoginAccess.js';
 
 let io;
+let authorizeUserDelivery;
 
 // siteId -> (userId -> number of connected sockets)
 const sitePresence = new Map();
@@ -67,15 +68,17 @@ const onlineUsersForSite = (siteId) =>
         .filter(([, count]) => count > 0)
         .map(([userId]) => userId);
 
-export const initSocket = (server) => {
+export const initSocket = (server, options = {}) => {
+    authorizeUserDelivery = options.authorizeUserDelivery;
     io = new Server(server, {
-        cors: {
+        cors: options.cors || {
             origin: '*',
             methods: ['GET', 'POST']
-        }
+        },
+        ...(options.allowRequest ? { allowRequest: options.allowRequest } : {}),
     });
 
-    io.use(async (socket, next) => {
+    io.use(options.authenticate || (async (socket, next) => {
         const token = socket.handshake.auth.token;
         if (!token) return next(new Error('Authentication error'));
         try {
@@ -96,7 +99,7 @@ export const initSocket = (server) => {
         } catch {
             next(new Error('Authentication error'));
         }
-    });
+    }));
 
     io.on('connection', (socket) => {
         const userId = positiveId(socket.user.id);
@@ -221,7 +224,22 @@ export const emitNewMessage = (siteId, conversationId, message) => {
 /** Fire-and-forget to every open tab of one user; a no-op before init or in maintenance mode. */
 export const emitToUser = (userId, event, payload) => {
     const id = positiveId(userId);
-    if (io && id) io.to(userRoom(id)).emit(event, payload);
+    if (!io || !id) return;
+    // Normal production delivery keeps the existing room broadcast. A local
+    // session bridge may opt into a fresh check before each outgoing event,
+    // because production logout cannot disconnect a different local process.
+    if (!authorizeUserDelivery) return void io.to(userRoom(id)).emit(event, payload);
+    const check = authorizeUserDelivery;
+    for (const socketId of io.sockets.adapter.rooms.get(userRoom(id)) || []) {
+        const socket = io.sockets.sockets.get(socketId);
+        if (!socket?.connected) continue;
+        Promise.resolve().then(() => check(socket))
+            .then(allowed => {
+                if (allowed === true && socket.connected) socket.emit(event, payload);
+                else socket.disconnect(true);
+            })
+            .catch(() => socket.disconnect(true));
+    }
 };
 
 // Immediately stop events for a revoked app without disconnecting a user's

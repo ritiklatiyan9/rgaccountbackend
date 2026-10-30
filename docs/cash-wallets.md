@@ -1,5 +1,13 @@
 # Cash Wallet
 
+## Amount explanations
+
+The info buttons beside Received, Deductions and Handed over open `/wallet/users/:userId/breakdown/:section`. The read-only API is `GET /wallet/users/:id/breakdown?site_id=...&section=received|deductions|handed-over&page=1&limit=25`. It enforces the existing wallet read/view-all grants, organization and sidebar site access, and returns the summary and paginated entries from one repeatable-read snapshot. No migration or financial write is needed.
+
+Received separates the saved opening cash from subsequent signed receipts, corrections and accepted incoming handovers. Handed over includes only posted outgoing handovers since opening. Deductions use the same cash payment and positive staff-float calculations as the wallet table; each imprest row shows the change in positive cash held, so a staff expense and released imprest do not deduct the same cash twice. Manual wallet corrections are itemised. Any remaining custody difference is clearly marked as a calculated reconciliation, never as another payment. Totals cover every matching page; missing deduction support is unavailable rather than zero. Full historical postings remain accessible from each explanation page.
+
+For localhost the existing authenticated, loopback-only opening reader also serves this GET endpoint, selected by `VITE_WALLET_OPENING_API_URL`. Production uses the ordinary Wallet API and requires the updated backend and frontend. `node --test test/wallet-amount-breakdown.test.mjs test/wallet-cash-deductions.test.mjs` verifies reconciliation, corrections, pagination, visibility and site isolation against an isolated PGlite database.
+
 ## Deployment startup
 
 The Render entrypoint `node src/server.js` checks the installed wallet migration versions and shared runtime function definitions before running the wallet migration chain. When versions 199, 203, 204 and 207–212 are present and current, startup performs reads only and leaves the installed schema intact. This avoids replaying migration 199's source-table alterations against live reads, which can deadlock on `users` and a financial source table before the HTTP port opens. If a previous boot committed an older function before failing, startup restores the final receipt reconciliation and balance function definitions in one transaction, without rebuilding source tables or triggers, reconciling receipts, or updating accounts. `npm run ensure:wallet-startup` runs the same check independently. A missing migration runs the remaining chain in order so later shared SQL definitions and guards are restored. Errors still stop startup; readiness is never reported after a failed upgrade.

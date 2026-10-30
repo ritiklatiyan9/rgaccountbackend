@@ -54,8 +54,10 @@ test('calendar creation and later scheduler runs preserve time and do not duplic
   let rows=(await query('SELECT * FROM compliance_items ORDER BY current_due_date')).rows;
   assert.deepEqual(rows.map(row=>dateKey(row.current_due_date)),['2040-01-31','2040-02-29','2040-03-31','2040-04-30']);
   for(const row of rows){assert.equal(row.title,'Monthly review');assert.equal(row.metadata.event_time,'09:30');assert.equal(row.priority,'LOW');assert.equal(row.risk_level,'HIGH');assert.equal(row.template_id,res.body.repeating.template_id);}
+  await query("UPDATE compliance_items SET deleted_at=NOW() WHERE current_due_date='2040-02-29'");
   const result=await context.generate({req,templateId:res.body.repeating.template_id,siteIds:[1],startDate:'2040-01-01',throughDate:'2040-12-31',db});
   assert.equal(result.generated,0); assert.equal((await query('SELECT COUNT(*)::int AS count FROM compliance_items')).rows[0].count,4);
+  assert.equal((await query('SELECT COUNT(*)::int AS count FROM compliance_items WHERE deleted_at IS NULL')).rows[0].count,3,'applying a template never recreates a deleted occurrence');
   const schedulerSource=readFileSync(new URL('../src/services/complianceScheduler.service.js',import.meta.url),'utf8');
   vm.runInContext(schedulerSource.slice(schedulerSource.indexOf('export async function generateRecurringItems'),schedulerSource.indexOf('async function refreshOverdueAndRisk')).replace('export async ','async ')+ ';globalThis.scheduler=generateRecurringItems;',context);
   const pending=[]; await context.scheduler(db,pending); assert.equal(pending.length,0);
@@ -64,7 +66,9 @@ test('calendar creation and later scheduler runs preserve time and do not duplic
   rows=(await query("SELECT * FROM compliance_items WHERE current_due_date < '2030-01-01' ORDER BY current_due_date")).rows;
   assert.deepEqual(rows.map(row=>dateKey(row.current_due_date)),['2026-10-31','2026-11-30','2026-12-31']);
   assert.ok(rows.every(row=>row.metadata.event_time==='09:30' && row.title==='Monthly review'));
+  await query("UPDATE compliance_items SET deleted_at=NOW() WHERE current_due_date='2026-11-30'");
   await context.scheduler(db,[]); assert.equal((await query('SELECT COUNT(*)::int AS count FROM compliance_items')).rows[0].count,7);
+  assert.equal((await query("SELECT COUNT(*)::int AS count FROM compliance_items WHERE current_due_date='2026-11-30' AND deleted_at IS NULL")).rows[0].count,0,'scheduler keeps a deleted monthly date removed');
   await assert.rejects(()=>context.generate({req:{user:{organization_id:2}},templateId:res.body.repeating.template_id,siteIds:[2],startDate:'2040-01-01',throughDate:'2040-12-31',db}),error=>error.statusCode===404);
  } finally {await pg.close();}
 });

@@ -30,6 +30,10 @@ const requireAdmin = (actor) => {
   if (!isSeekAdmin(actor)) throw fail('Only admins can do this', 403);
 };
 
+const requireSeekActor = actor => {
+  if (!['admin', 'super_admin', 'sub_admin'].includes(actor?.role)) throw fail('Access denied', 403);
+};
+
 // Attachments: the browser optimizes photos and PDFs first (lib/evidenceFile.js);
 // the server writes them under one S3 prefix and only ever signs keys from that
 // prefix, so a stored link can never be pointed at another private document.
@@ -49,56 +53,89 @@ export const storeSeekFiles = files => Promise.all(files.map(async file => ({
 const signSeekFile = async url => (isOwnSeekAttachment(url) ? signMemberDocumentUrl(url) : null);
 
 const ROW_SQL = `SELECT sp.id, sp.site_id, s.name AS site_name, sp.requested_by, ru.name AS requested_by_name,
-    sp.asked_to, au.name AS asked_to_name, sp.title, sp.amount, sp.party_name, sp.reason, sp.attachments,
+    sp.asked_to, au.name AS asked_to_name, sp.title, sp.amount, sp.party_name, sp.reason, sp.attachments, sp.priority,
     sp.status, sp.decided_by, du.name AS decided_by_name, sp.decided_at, sp.decision_note,
-    sp.requester_seen_at, sp.created_at, sp.updated_at,
+    sp.requester_seen_at, sp.created_at, sp.updated_at, sp.comment_count, sp.last_comment_at,
+    COALESCE(cr.last_comment_id, 0) AS last_read_comment_id,
+    (sp.status = 'pending' AND ($4::boolean OR COALESCE(sp.asked_to = $2, false))) AS can_decide,
     CASE WHEN sp.status = 'cancelled' THEN sp.updated_at ELSE sp.decided_at END AS resolved_at
   FROM seek_permissions sp
   JOIN sites s ON s.id = sp.site_id
   JOIN users ru ON ru.id = sp.requested_by
   LEFT JOIN users au ON au.id = sp.asked_to
-  LEFT JOIN users du ON du.id = sp.decided_by`;
+  LEFT JOIN users du ON du.id = sp.decided_by
+  LEFT JOIN seek_permission_comment_reads cr ON cr.request_id = sp.id AND cr.user_id = $2`;
 
 // Stored S3 URLs never leave the server: clients get name/type/size and ask
 // GET /:id/attachments/:index for a fresh signed link when they open one.
-const publicRow = row => row && { ...row, attachments: (row.attachments || []).map(({ name, type, size }) => ({ name, type, size })) };
-
-const findRequest = async (id, db) => publicRow((await db.query(`${ROW_SQL} WHERE sp.id = $1`, [id])).rows[0]);
+const publicRow = row => {
+  if (!row) return row;
+  const { last_read_comment_id, ...rest } = row;
+  return { ...rest, comment_count: Number(row.comment_count || 0), unread_comments: Number(row.unread_comments || 0),
+    attachments: (row.attachments || []).map(({ name, type, size }) => ({ name, type, size })) };
+};
 
 // Shared WHERE pieces; every query using them binds $2 = viewer id, $4 = viewer is admin.
 const SITE_ACCESS = '($4::boolean OR EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id = $2 AND us.site_id = sp.site_id))';
+// Auth already reads current users. Keep service calls and socket recipients just
+// as strict, including when a role, site assignment or account has been revoked.
+const activeViewerSql = (userParam = '$2', orgParam = '$3', adminParam = '$4') =>
+  `EXISTS (SELECT 1 FROM users viewer WHERE viewer.id = ${userParam} AND viewer.is_active
+  AND viewer.organization_id = ${orgParam} AND viewer.role IN ('admin', 'super_admin', 'sub_admin')
+  AND (viewer.role IN ('admin', 'super_admin')) = ${adminParam}::boolean)`;
+const VIEWER_ACTIVE = activeViewerSql();
 const SCOPE = {
   // Page: own requests, requests asked of me, everything for admins, plus Studio grants.
   visible: `(sp.requested_by = $2 OR sp.asked_to = $2 OR $4::boolean OR a.scope = 'all'
     OR (a.scope = 'selected' AND sp.requested_by = ANY(a.visible_user_ids)))`,
-  sent: 'sp.requested_by = $2',
-  // Bell: open requests asked of me; any with nobody picked (before the picker) go to admins.
-  received: `sp.status = 'pending' AND (sp.asked_to = $2 OR (sp.asked_to IS NULL AND $4::boolean))`,
 };
 
-// One query per list: organisation, site assignment and visibility are all in the
-// WHERE clause, so nobody receives a row the rules do not allow.
-async function queryRequests(actor, siteId, scope, limit, db) {
-  const { rows } = await db.query(`${ROW_SQL}
+// Aggregate unread messages in SQL for the visible set. The indexed thread/id
+// range and per-user watermark avoid fetching message bodies or a query per row.
+const WITH_UNREAD = `, unread AS (
+    SELECT c.request_id, count(*)::int AS unread_comments
+      FROM seek_permission_comments c JOIN visible v ON v.id = c.request_id
+     WHERE c.id > v.last_read_comment_id AND c.author_id <> $2 GROUP BY c.request_id
+  ), entries AS (SELECT v.*, COALESCE(unread.unread_comments, 0) AS unread_comments
+      FROM visible v LEFT JOIN unread ON unread.request_id = v.id)`;
+const visibleSiteSql = `${ROW_SQL}
     LEFT JOIN seek_permission_access a ON a.site_id = sp.site_id AND a.user_id = $2
-    WHERE sp.site_id = $1 AND s.organization_id = $3 AND ${SITE_ACCESS} AND ${SCOPE[scope]}
-    ORDER BY sp.created_at DESC, sp.id DESC
-    LIMIT $5`, [siteId, actor.id, orgOf(actor), isSeekAdmin(actor), limit]);
+    WHERE sp.site_id = $1 AND s.organization_id = $3 AND ${VIEWER_ACTIVE} AND ${SITE_ACCESS} AND ${SCOPE.visible}`;
+
+async function queryRequests(actor, siteId, db) {
+  requireSeekActor(actor);
+  const { rows } = await db.query(`WITH visible AS (${visibleSiteSql}
+      ORDER BY COALESCE(sp.last_comment_at, sp.created_at) DESC, sp.id DESC LIMIT 500) ${WITH_UNREAD}
+    SELECT * FROM entries ORDER BY COALESCE(last_comment_at, created_at) DESC, id DESC LIMIT 500`,
+  [siteId, actor.id, orgOf(actor), isSeekAdmin(actor)]);
   return rows.map(publicRow);
 }
 
-// ponytail: newest 500 per site, client-side filters; add paging when a site outgrows it.
+// Most recently active 500 per site; only those threads need unread aggregation.
 export const listSeekPermissions = (actor, { site_id } = {}, db = pool) =>
-  queryRequests(actor, positiveId(site_id, 'site_id'), 'visible', 500, db);
+  queryRequests(actor, positiveId(site_id, 'site_id'), db);
 
-/** Header bell: open requests asked of me, plus a requester's own requests. */
+/** Header bell: every visible pending request and conversations with new replies. */
 export async function seekInbox(actor, { site_id } = {}, db = pool) {
+  requireSeekActor(actor);
   const siteId = positiveId(site_id, 'site_id');
-  const [received, sent] = await Promise.all([
-    queryRequests(actor, siteId, 'received', 200, db),
-    actor?.role === 'sub_admin' ? queryRequests(actor, siteId, 'sent', 50, db) : [],
-  ]);
-  return { received, sent };
+  const { rows: [inbox] } = await db.query(`WITH visible AS (${visibleSiteSql}) ${WITH_UNREAD},
+    received AS (SELECT * FROM entries WHERE requested_by <> $2 AND (status = 'pending' OR unread_comments > 0)),
+    sent AS (SELECT * FROM entries WHERE requested_by = $2)
+    SELECT COALESCE((SELECT json_agg(r) FROM (SELECT * FROM received
+        ORDER BY COALESCE(last_comment_at, created_at) DESC, id DESC LIMIT 200) r), '[]'::json) AS received,
+      COALESCE((SELECT json_agg(r) FROM (SELECT * FROM sent ORDER BY
+        (unread_comments > 0 OR (status IN ('approved', 'rejected') AND requester_seen_at IS NULL)) DESC,
+        COALESCE(last_comment_at, created_at) DESC, id DESC LIMIT 50) r), '[]'::json) AS sent,
+      (SELECT count(*)::int FROM received) AS received_count,
+      (SELECT count(*)::int FROM sent WHERE status = 'pending') AS sent_pending_count,
+      (SELECT count(*)::int FROM sent WHERE status IN ('approved', 'rejected') AND requester_seen_at IS NULL) AS sent_unseen_count,
+      (SELECT count(*)::int FROM sent WHERE unread_comments > 0) AS sent_unread_count,
+      (SELECT count(*)::int FROM sent WHERE status = 'pending' OR unread_comments > 0
+        OR (status IN ('approved', 'rejected') AND requester_seen_at IS NULL)) AS sent_attention_count,
+      (SELECT COALESCE(sum(unread_comments), 0)::int FROM entries) AS unread_comments_count`,
+  [siteId, actor.id, orgOf(actor), isSeekAdmin(actor)]);
+  return { ...inbox, received: inbox.received.map(publicRow), sent: inbox.sent.map(publicRow) };
 }
 
 // Who a requester may ask on a site: every active admin, plus active sub-admins
@@ -131,6 +168,9 @@ export async function createSeekPermission(actor, body = {}, db = pool, files = 
   }
   const partyName = cleanText(body.party_name, 120, 'Person');
   const reason = cleanText(body.reason, 2000, 'Reason');
+  const priority = body.priority == null || body.priority === '' ? 'normal'
+    : typeof body.priority === 'string' ? body.priority.trim().toLowerCase() : null;
+  if (!['critical','important','normal'].includes(priority)) throw fail('Choose Critical, Important or Normal priority');
 
   // Everything is checked before upload, so a refused request never reaches S3.
   const { rows: [check] } = await db.query(`SELECT ${REQUESTER_ON_SITE} AS can_ask,
@@ -139,19 +179,131 @@ export async function createSeekPermission(actor, body = {}, db = pool, files = 
   if (!check.target_ok) throw fail('Ask an admin, or a sub-admin of this site');
   const attachments = files.length ? await store(files) : [];
   const { rows: [created] } = await db.query(`INSERT INTO seek_permissions
-      (site_id, requested_by, asked_to, title, amount, party_name, reason, attachments)
-    SELECT $1, $2, $4, $5, $6, $7, $8, $9::jsonb WHERE ${REQUESTER_ON_SITE}
-    RETURNING id`, [...params, title, amount, partyName, reason, JSON.stringify(attachments)]);
+      (site_id, requested_by, asked_to, title, amount, party_name, reason, attachments, priority)
+    SELECT $1, $2, $4, $5, $6, $7, $8, $9::jsonb, $10 WHERE ${REQUESTER_ON_SITE}
+    RETURNING id`, [...params, title, amount, partyName, reason, JSON.stringify(attachments), priority]);
   if (!created) throw fail('Access denied to this site', 403);
-  return findRequest(created.id, db);
+  return getSeekPermission(actor, created.id, db);
 }
 
 // One request by id ($1), returned only if the viewer may see it.
 const visibleById = columns => `SELECT ${columns} FROM seek_permissions sp
   JOIN sites s ON s.id = sp.site_id
   LEFT JOIN seek_permission_access a ON a.site_id = sp.site_id AND a.user_id = $2
-  WHERE sp.id = $1 AND s.organization_id = $3 AND ${SITE_ACCESS} AND ${SCOPE.visible}`;
+  WHERE sp.id = $1 AND s.organization_id = $3 AND ${VIEWER_ACTIVE} AND ${SITE_ACCESS} AND ${SCOPE.visible}`;
 const viewerParams = (actor, id) => [id, actor.id, orgOf(actor), isSeekAdmin(actor)];
+const visibleDetailSql = `${ROW_SQL}
+  LEFT JOIN seek_permission_access a ON a.site_id = sp.site_id AND a.user_id = $2
+  WHERE sp.id = $1 AND s.organization_id = $3 AND ${VIEWER_ACTIVE} AND ${SITE_ACCESS} AND ${SCOPE.visible}`;
+
+export async function assertSeekVisible(actor, rawId, db = pool) {
+  requireSeekActor(actor);
+  const id = positiveId(rawId, 'request id');
+  const { rows: [request] } = await db.query(visibleById('sp.id, sp.site_id, sp.requested_by, sp.asked_to'), viewerParams(actor, id));
+  if (!request) throw fail('Permission request not found', 404);
+  return request;
+}
+
+export async function getSeekPermission(actor, rawId, db = pool) {
+  requireSeekActor(actor);
+  const id = positiveId(rawId, 'request id');
+  const { rows: [request] } = await db.query(`WITH visible AS (${visibleDetailSql})
+    ${WITH_UNREAD} SELECT * FROM entries`, viewerParams(actor, id));
+  if (!request) throw fail('Permission request not found', 404);
+  return publicRow(request);
+}
+
+const COMMENT_SQL = `SELECT c.id, c.request_id, c.author_id, u.name AS author_name,
+  u.role AS author_role, c.body, c.client_id, c.created_at
+  FROM seek_permission_comments c JOIN users u ON u.id = c.author_id`;
+const commentMetadata = request => ({ comment_count: request.comment_count,
+  unread_comments: request.unread_comments, last_comment_at: request.last_comment_at });
+
+export async function listSeekComments(actor, rawId, query = {}, db = pool) {
+  requireSeekActor(actor);
+  const id = positiveId(rawId, 'request id');
+  const hasBefore = query.before_id !== undefined && query.before_id !== '';
+  const hasAfter = query.after_id !== undefined && query.after_id !== '';
+  if (hasBefore && hasAfter) throw fail('Use before_id or after_id, not both');
+  const cursor = hasAfter && (query.after_id === 0 || query.after_id === '0') ? 0
+    : hasBefore || hasAfter ? positiveId(hasBefore ? query.before_id : query.after_id, 'comment cursor') : null;
+  const limit = query.limit === undefined ? 40 : positiveId(query.limit, 'limit');
+  if (limit > 100) throw fail('limit must be 100 or fewer');
+  const { rows: [result] } = await db.query(`WITH visible AS (${visibleDetailSql}) ${WITH_UNREAD},
+    page AS (${COMMENT_SQL} JOIN entries ON entries.id = c.request_id
+      WHERE ($5::int IS NULL OR c.id ${hasAfter ? '>' : '<'} $5)
+      ORDER BY c.id ${hasAfter ? 'ASC' : 'DESC'} LIMIT $6)
+    SELECT entries.comment_count, entries.unread_comments, entries.last_comment_at,
+      COALESCE((SELECT json_agg(page ORDER BY page.id ${hasAfter ? 'ASC' : 'DESC'}) FROM page), '[]'::json) AS comments
+    FROM entries`, [...viewerParams(actor, id), cursor, limit + 1]);
+  if (!result) throw fail('Permission request not found', 404);
+  const hasMore = result.comments.length > limit;
+  const comments = result.comments.slice(0, limit);
+  if (!hasAfter) comments.reverse();
+  return { comments, has_more: hasMore, next_before_id: comments[0]?.id ?? null,
+    last_comment_id: comments.at(-1)?.id ?? null, ...commentMetadata(result) };
+}
+
+const cleanComment = body => {
+  if (typeof body !== 'string') throw fail('Write a comment');
+  const text = body.replace(/\r\n?/g, '\n').trim();
+  if (!text) throw fail('Write a comment');
+  if (text.length > 4000) throw fail('Comment must be 4000 characters or fewer');
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) throw fail('Comment contains unsupported characters');
+  return text;
+};
+const cleanClientId = value => {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw fail('A valid client_id UUID is required');
+  }
+  return value.toLowerCase();
+};
+
+export async function createSeekComment(actor, rawId, body = {}, db = pool) {
+  requireSeekActor(actor);
+  const id = positiveId(rawId, 'request id');
+  const text = cleanComment(body.body);
+  const clientId = cleanClientId(body.client_id);
+  // Lock this request BEFORE the INSERT allocates its SERIAL id. Concurrent
+  // replies therefore commit in thread order: a delta/read cursor cannot skip
+  // an earlier id from an uncommitted reply. Replays never increment counters.
+  const { rows: [inserted] } = await db.query(`WITH allowed AS MATERIALIZED (
+      ${visibleById('sp.id')} FOR UPDATE OF sp
+    ) INSERT INTO seek_permission_comments (request_id, author_id, body, client_id)
+    SELECT allowed.id, $2, $5, $6::uuid FROM allowed
+    ON CONFLICT (request_id, author_id, client_id) DO NOTHING RETURNING id`,
+  [...viewerParams(actor, id), text, clientId]);
+  // Re-check visibility even for a retry; old client ids do not grant access.
+  const [request, { rows: [comment] }] = await Promise.all([
+    getSeekPermission(actor, id, db),
+    db.query(`WITH allowed AS (${visibleById('sp.id')}) ${COMMENT_SQL}
+      JOIN allowed ON allowed.id = c.request_id WHERE c.author_id = $2 AND c.client_id = $5::uuid`,
+    [...viewerParams(actor, id), clientId]),
+  ]);
+  if (!comment) throw fail('Unable to send comment. Please try again.', 503);
+  if (comment.body !== text) throw fail('This client_id was already used for another comment', 409);
+  return { comment, created: Boolean(inserted), request, ...commentMetadata(request) };
+}
+
+export async function markSeekCommentsSeen(actor, rawId, body = {}, db = pool) {
+  const request = await assertSeekVisible(actor, rawId, db);
+  const lastId = body.last_comment_id === 0 || body.last_comment_id === '0' ? 0 : positiveId(body.last_comment_id, 'last_comment_id');
+  // Only a real id from this thread is accepted. Never advance to a guessed
+  // future id, and never let a slower tab move an existing watermark backwards.
+  const { rows: [seen] } = await db.query(`WITH allowed AS (${visibleById('sp.id')})
+    INSERT INTO seek_permission_comment_reads (request_id, user_id, last_comment_id)
+    SELECT allowed.id, $2, $5 FROM allowed WHERE $5 = 0 OR EXISTS (
+      SELECT 1 FROM seek_permission_comments c WHERE c.request_id = allowed.id AND c.id = $5)
+    ON CONFLICT (request_id, user_id) DO UPDATE
+      SET last_comment_id = GREATEST(seek_permission_comment_reads.last_comment_id, EXCLUDED.last_comment_id), seen_at = now()
+    RETURNING last_comment_id`, [...viewerParams(actor, request.id), lastId]);
+  if (!seen) {
+    await assertSeekVisible(actor, request.id, db);
+    throw fail('last_comment_id must identify a comment in this request');
+  }
+  const updated = await getSeekPermission(actor, request.id, db);
+  return { last_comment_id: seen.last_comment_id, ...commentMetadata(updated) };
+}
 
 // Why a guarded UPDATE matched nothing: hidden → 404, decided → 409, not yours → 403.
 async function explainMiss(actor, id, db, action) {
@@ -166,6 +318,7 @@ async function explainMiss(actor, id, db, action) {
 // request. The status guard makes it race-safe: the first decision wins, later
 // ones get a 409.
 export async function decideSeekPermission(actor, rawId, decision, note, db = pool) {
+  requireSeekActor(actor);
   const status = { approve: 'approved', reject: 'rejected' }[decision];
   if (!status) throw fail('Unknown decision');
   const id = positiveId(rawId, 'request id');
@@ -173,19 +326,22 @@ export async function decideSeekPermission(actor, rawId, decision, note, db = po
       SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4, updated_at = now()
      FROM sites s
     WHERE sp.id = $1 AND sp.status = 'pending' AND s.id = sp.site_id AND s.organization_id = $5
+      AND ${activeViewerSql('$3', '$5', '$6')}
       AND ($6::boolean OR (sp.asked_to = $3
         AND EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id = $3 AND us.site_id = sp.site_id)))
     RETURNING sp.id`, [id, status, actor.id, cleanText(note, 1000, 'Note'), orgOf(actor), isSeekAdmin(actor)]);
   if (!rows[0]) await explainMiss(actor, id, db, 'decide');
-  return findRequest(id, db);
+  return getSeekPermission(actor, id, db);
 }
 
 export async function cancelSeekPermission(actor, rawId, db = pool) {
+  requireSeekActor(actor);
   const id = positiveId(rawId, 'request id');
   const { rows } = await db.query(`UPDATE seek_permissions SET status = 'cancelled', updated_at = now()
-    WHERE id = $1 AND requested_by = $2 AND status = 'pending' RETURNING id`, [id, actor.id]);
+    WHERE id = $1 AND requested_by = $2 AND status = 'pending'
+      AND EXISTS (${visibleById('sp.id')}) RETURNING id`, viewerParams(actor, id));
   if (!rows[0]) await explainMiss(actor, id, db, 'cancel');
-  return findRequest(id, db);
+  return getSeekPermission(actor, id, db);
 }
 
 /** A fresh signed link to one attachment, for anyone who can see the request. */
@@ -246,11 +402,13 @@ export async function setSeekAccess(actor, rawUserId, body = {}, db = pool) {
 
 /** Everyone whose bell or page shows this request: admins, requester, person asked, Studio viewers. */
 export async function seekRecipients(request, db = pool) {
-  const { rows } = await db.query(`SELECT u.id FROM users u JOIN sites s ON s.organization_id = u.organization_id
-     WHERE s.id = $1 AND u.is_active AND u.role IN ('admin', 'super_admin')
-    UNION SELECT id FROM unnest(ARRAY[$2::int, $3::int]) AS id WHERE id IS NOT NULL
-    UNION SELECT a.user_id FROM seek_permission_access a
-     WHERE a.site_id = $1 AND (a.scope = 'all' OR (a.scope = 'selected' AND $2::int = ANY(a.visible_user_ids)))`,
-  [request.site_id, request.requested_by, request.asked_to ?? null]);
+  const { rows } = await db.query(`SELECT u.id FROM seek_permissions sp JOIN sites s ON s.id = sp.site_id
+    JOIN users u ON u.organization_id = s.organization_id AND u.is_active
+      AND u.role IN ('admin', 'super_admin', 'sub_admin')
+    LEFT JOIN seek_permission_access a ON a.site_id = sp.site_id AND a.user_id = u.id
+    WHERE sp.id = $1 AND (u.role IN ('admin', 'super_admin') OR (
+      EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id = u.id AND us.site_id = sp.site_id)
+      AND (u.id = sp.requested_by OR u.id = sp.asked_to OR a.scope = 'all'
+        OR (a.scope = 'selected' AND sp.requested_by = ANY(a.visible_user_ids)))))`, [request.id]);
   return rows.map(row => row.id);
 }

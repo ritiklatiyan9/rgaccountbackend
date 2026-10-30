@@ -3,6 +3,8 @@ import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import { migrationSql } from '../src/migrations/222_seek_permissions.js';
 import { migrationSql as targetsSql } from '../src/migrations/223_seek_permission_targets.js';
+import { migrationSql as commentsSql } from '../src/migrations/230_seek_permission_comments.js';
+import { migrationSql as prioritySql, up as migratePriority } from '../src/migrations/231_seek_permission_priority.js';
 import {
   cancelSeekPermission, createSeekPermission, decideSeekPermission, isOwnSeekAttachment, listSeekAccess,
   listSeekPermissions, listSeekTargets, markSeekSeen, seekAttachmentUrl, seekInbox, seekRecipients, setSeekAccess,
@@ -30,7 +32,8 @@ test('Seek permission: ask a chosen person per site, they (or an admin) decide o
         (9, 'Other org', 'admin', 2, true);
       INSERT INTO user_sites VALUES (5, 1), (6, 1), (7, 2), (5, 2), (8, 1);
       ${migrationSql}
-      ${targetsSql}`);
+      ${targetsSql}
+      ${commentsSql} ${prioritySql}`);
 
     // Picker: admins plus active sub-admins of the site, never yourself.
     assert.deepEqual((await listSeekTargets(ravi, { site_id: 1 }, db)).map(p => [p.name, p.role]),
@@ -46,21 +49,25 @@ test('Seek permission: ask a chosen person per site, they (or an admin) decide o
     await rejects(ask(admin, {}, [pdf], countingStore), 403);
     await rejects(ask(ravi, { title: '   ' }, [pdf], countingStore), 400);
     await rejects(ask(ravi, { amount: -5 }, [pdf], countingStore), 400);
+    for (const priority of ['urgent','__proto__',{},['critical'],42]) await rejects(ask(ravi, { priority }, [pdf], countingStore), 400);
     assert.equal(uploads, 0, 'a refused request never reaches S3');
 
     const asked = await ask(ravi, { title: ' Payment to shuttering contractor ', amount: '500000', party_name: 'Rakesh', reason: 'Block C advance' }, [pdf], countingStore);
     assert.equal(uploads, 1);
     assert.equal(asked.status, 'pending');
+    assert.equal(asked.priority, 'normal', 'older clients default to Normal');
     assert.equal(asked.title, 'Payment to shuttering contractor');
     assert.equal(Number(asked.amount), 500000);
     assert.equal(asked.asked_to_name, 'Kuldeep Tomar');
     assert.deepEqual(asked.attachments, [{ name: 'quotation.pdf', type: 'application/pdf', size: 1234 }], 'stored S3 URLs never leave the server');
-    const toSunny = await ask(ravi, { asked_to: 6, title: 'Use the site JCB on Sunday' });
-    const otherSite = await ask(ravi, { site_id: 2, title: 'Cement purchase' });
+    const toSunny = await ask(ravi, { asked_to: 6, title: 'Use the site JCB on Sunday', priority: ' CRITICAL ' });
+    const otherSite = await ask(ravi, { site_id: 2, title: 'Cement purchase', priority: 'important' });
+    assert.equal(toSunny.priority, 'critical'); assert.equal(otherSite.priority, 'important');
 
-    // Bell: each person receives what was asked of them; requesters track their own. Site-scoped.
+    // Bell: visible pending requests match the page and socket audience. Site-scoped.
     const received = async (actor, siteId = 1) => (await seekInbox(actor, { site_id: siteId }, db)).received.map(r => r.id);
-    assert.deepEqual(await received(admin), [asked.id], 'admins are not pinged for requests asked of someone else');
+    assert.deepEqual(await received(admin), [toSunny.id, asked.id], 'admins can follow and decide any visible request');
+    assert.equal((await seekInbox(admin, { site_id: 1 }, db)).received.find(row => row.id === toSunny.id).priority, 'critical');
     assert.deepEqual(await received(sunny), [toSunny.id]);
     assert.deepEqual((await seekInbox(ravi, { site_id: 1 }, db)).sent.map(r => r.id), [toSunny.id, asked.id]);
     assert.deepEqual((await seekInbox(ravi, { site_id: 2 }, db)).sent.map(r => r.id), [otherSite.id]);
@@ -102,7 +109,8 @@ test('Seek permission: ask a chosen person per site, they (or an admin) decide o
     await rejects(decideSeekPermission(outsider, asked.id, 'approve', '', db), 404);
     await rejects(decideSeekPermission(foreignAdmin, asked.id, 'approve', '', db), 404);
     await rejects(decideSeekPermission(admin, asked.id, 'maybe', '', db), 400);
-    assert.equal((await decideSeekPermission(sunny, toSunny.id, 'approve', '', db)).decided_by_name, 'Sunny');
+    const criticalApproved = await decideSeekPermission(sunny, toSunny.id, 'approve', '', db);
+    assert.equal(criticalApproved.decided_by_name, 'Sunny'); assert.equal(criticalApproved.priority, 'critical');
     const approved = await decideSeekPermission(admin, asked.id, 'approve', 'Pay by cheque', db);
     assert.equal(approved.status, 'approved');
     assert.equal(approved.decided_by_name, 'Kuldeep Tomar');
@@ -121,5 +129,23 @@ test('Seek permission: ask a chosen person per site, they (or an admin) decide o
     await rejects(cancelSeekPermission(sunny, otherSite.id, db), 404);
     assert.equal((await cancelSeekPermission(ravi, otherSite.id, db)).status, 'cancelled');
     await rejects(decideSeekPermission(admin, otherSite.id, 'approve', '', db), 409);
+  } finally { await db.close(); }
+});
+
+test('priority migration preserves existing decisions and timestamps, defaults old requests to Normal and is replay-safe', async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
+      CREATE TABLE seek_permissions(id int PRIMARY KEY,status text,updated_at timestamptz);
+      INSERT INTO seek_permissions VALUES(1,'approved','2026-10-01T12:00:00Z');`);
+    const query = async (sql, values) => values?.length ? db.query(sql, values) : (await db.exec(sql)).at(-1);
+    const database = { connect: async () => ({ query, release() {} }) };
+    assert.equal(await migratePriority(database), true);
+    assert.equal(await migratePriority(database), false);
+    const row = (await db.query('SELECT * FROM seek_permissions WHERE id=1')).rows[0];
+    assert.equal(row.priority,'normal'); assert.equal(row.status,'approved');
+    assert.equal(new Date(row.updated_at).toISOString(),'2026-10-01T12:00:00.000Z');
+    await assert.rejects(db.query("UPDATE seek_permissions SET priority='urgent' WHERE id=1"), error => error.code === '23514');
+    await assert.rejects(db.query('UPDATE seek_permissions SET priority=NULL WHERE id=1'), error => error.code === '23502');
   } finally { await db.close(); }
 });

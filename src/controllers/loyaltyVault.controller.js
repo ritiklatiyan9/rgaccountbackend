@@ -5,7 +5,8 @@ import { vaultUser, isVaultAdmin, accessibleSite, holder, validateHolder, create
 import { walletError, positiveId, pagination, historyDate, uuid, WALLET_ROLES } from '../services/wallet.service.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../services/loyaltyVaultContext.service.js';
 import { vaultTransactionsCte, vaultTransactionScope, pendingVaultTotals, publicVaultTransaction } from '../services/loyaltyVaultTransactions.service.js';
-import { walletReadQuery } from '../services/walletRead.service.js';
+import { walletReadQuery, walletReadTransaction } from '../services/walletRead.service.js';
+import { getWalletAmountBreakdown } from '../services/walletAmountBreakdown.service.js';
 import { siteVaultAccountsCte } from '../services/loyaltyVaultSite.service.js';
 import { walletHistoryJoins as historyJoins, walletHistorySelect as historySelect, walletHistorySearch } from '../services/walletHistory.service.js';
 import { adminWalletCashStates, walletWithCashInHand } from '../services/adminWalletCash.service.js';
@@ -35,6 +36,15 @@ export const reportingOpenings = asyncHandler(async(req,res)=>{
   const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id);
   const openings=await readWalletReportingOpenings(actor.organization_id,siteId,pool);
   res.set('Cache-Control','no-store').json({site_id:siteId,openings:openings.filter(row=>canViewAllWallets(actor)||row.holder_id===Number(actor.id))});
+});
+
+export const amountBreakdown = asyncHandler(async(req,res)=>{
+  const actor = await walletReadActor(req);
+  const data = await walletReadTransaction(pool, db => getWalletAmountBreakdown(db, {
+    actor, siteId: req.query.site_id, userId: req.params.id, section: req.query.section,
+    page: req.query.page, limit: req.query.limit,
+  }), { repeatableRead: true });
+  res.set('Cache-Control','no-store').json(data);
 });
 
 export const siteBalance = asyncHandler(async (req, res) => {

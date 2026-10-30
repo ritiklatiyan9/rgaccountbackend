@@ -8,7 +8,7 @@ import * as seek from '../services/seekPermission.service.js';
 const broadcast = (request) => {
   const payload = {
     id: request.id, site_id: request.site_id, site_name: request.site_name, status: request.status,
-    title: request.title, amount: request.amount, requested_by: request.requested_by,
+    title: request.title, amount: request.amount, priority: request.priority, requested_by: request.requested_by,
     requested_by_name: request.requested_by_name, asked_to: request.asked_to,
     asked_to_name: request.asked_to_name, decided_by_name: request.decided_by_name,
   };
@@ -18,6 +18,33 @@ const broadcast = (request) => {
 };
 
 const noStore = res => res.set('Cache-Control', 'no-store');
+
+export const getSeekPermission = asyncHandler(async (req, res) => {
+  noStore(res).json({ request: await seek.getSeekPermission(req.user, req.params.id) });
+});
+
+export const getSeekComments = asyncHandler(async (req, res) => {
+  noStore(res).json(await seek.listSeekComments(req.user, req.params.id, req.query));
+});
+
+export const createSeekComment = asyncHandler(async (req, res) => {
+  const { comment, created, request, ...metadata } = await seek.createSeekComment(req.user, req.params.id, req.body);
+  if (created) {
+    // Socket rooms contain no request text: every recipient must fetch the delta
+    // through current access checks, even if a site's membership just changed.
+    seek.seekRecipients(request)
+      .then(ids => ids.forEach(id => emitToUser(id, 'seek_permission:comment', {
+        id: request.id, request_id: request.id, site_id: request.site_id, comment_id: comment.id, author_id: comment.author_id,
+        comment_count: metadata.comment_count, last_comment_at: metadata.last_comment_at, priority: request.priority,
+      })))
+      .catch(error => console.error('Seek permission comment push failed:', error.message));
+  }
+  noStore(res).status(created ? 201 : 200).json({ comment, ...metadata });
+});
+
+export const markSeekCommentsSeen = asyncHandler(async (req, res) => {
+  noStore(res).json(await seek.markSeekCommentsSeen(req.user, req.params.id, req.body));
+});
 
 export const listSeekPermissions = asyncHandler(async (req, res) => {
   noStore(res).json({ requests: await seek.listSeekPermissions(req.user, req.query) });

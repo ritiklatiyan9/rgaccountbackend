@@ -13,14 +13,19 @@ import {
   markSeekSeen,
   getSeekAccess,
   updateSeekAccess,
+  getSeekPermission,
+  getSeekComments,
+  createSeekComment,
+  markSeekCommentsSeen,
 } from '../controllers/seekPermission.controller.js';
 
+export function createSeekPermissionRouter({ authenticate = authMiddleware } = {}) {
 const router = express.Router();
 
 // Sub-admins ask; the person asked (or any admin) decides. The service re-checks
 // role, organisation, site assignment and visibility on every call, so nothing
 // here is cached.
-router.use(authMiddleware, requireRole('admin', 'sub_admin'));
+router.use(authenticate, requireRole('admin', 'sub_admin'));
 
 router.get('/', listSeekPermissions);
 router.get('/inbox', getSeekInbox);
@@ -30,9 +35,16 @@ router.post('/', receiveUpload(upload.array('attachments', 5)), createSeekPermis
 router.post('/seen', markSeekSeen);
 router.get('/access', requireRole('admin'), getSeekAccess);
 router.put('/access/:userId', requireRole('admin'), updateSeekAccess);
+router.get('/:id', getSeekPermission);
+router.get('/:id/comments', getSeekComments);
+router.post('/:id/comments', createSeekComment);
+router.post('/:id/comments/seen', markSeekCommentsSeen);
 router.get('/:id/attachments/:index', getSeekAttachment);
 router.put('/:id/approve', decideSeekPermission('approve'));
 router.put('/:id/reject', decideSeekPermission('reject'));
 router.put('/:id/cancel', cancelSeekPermission);
 
-export default router;
+return router;
+}
+
+export default createSeekPermissionRouter();
