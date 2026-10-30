@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 import multer from 'multer';
@@ -81,7 +82,7 @@ router.use(authMiddleware);
 router.get('/documents/plots', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), accessByQuerySite, listRegistryDocumentPlots);
 router.get('/documents/plot/:plotId', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'read'), accessByParamDocumentPlot, getRegistryDocuments);
 // Resolve site access before Multer buffers the file in memory.
-router.post('/documents/plot/:plotId', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'write'), accessByParamDocumentPlot, receiveRegistryDocument, bustRegistryCache, uploadRegistryDocument);
+router.post('/documents/plot/:plotId', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'write'), accessByParamDocumentPlot, receiveRegistryDocument, optimizeEvidenceImages, bustRegistryCache, uploadRegistryDocument);
 router.delete('/documents/:docId', requireRole('admin', 'sub_admin'), requirePermission('plot_registry', 'delete'), bustRegistryCache, deleteRegistryDocument);
 
 // ── Registry Payment endpoints (BEFORE /:id to avoid route conflict) ──

@@ -1,5 +1,6 @@
 import multer from 'multer';
 import { evidenceMime } from '../utils/evidenceFile.js';
+import optimizeEvidenceImages from './optimizeEvidenceImages.middleware.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -17,7 +18,7 @@ export default function receiveProof(req, res, next) {
   upload(req, res, error => {
     if (!error) {
       if (req.file && !req.file.size) return res.status(400).json({ message: 'The selected file is empty. Choose another file.' });
-      return next();
+      return optimizeEvidenceImages(req, res, next);
     }
     const tooLarge = error.code === 'LIMIT_FILE_SIZE';
     res.status(tooLarge ? 413 : 400).json({

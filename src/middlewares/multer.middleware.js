@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'node:crypto';
 import { evidenceMime } from '../utils/evidenceFile.js';
+import optimizeEvidenceImages from './optimizeEvidenceImages.middleware.js';
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -44,14 +45,14 @@ const upload = multer({
   fileFilter
 });
 
-export const receiveUpload = handler => (req, res, next) => handler(req, res, error => {
+export const receiveUpload = (handler, { shouldOptimize = () => true } = {}) => (req, res, next) => handler(req, res, error => {
   if (!error) {
     const files = req.files || (req.file ? [req.file] : []);
     if (files.some(file => !file.size)) {
       files.forEach(file => cleanupFile(file.path));
       return res.status(400).json({ message: 'The selected file is empty. Choose another file.' });
     }
-    return next();
+    return shouldOptimize(req) ? optimizeEvidenceImages(req, res, next) : next();
   }
   const tooLarge = error.code === 'LIMIT_FILE_SIZE';
   res.status(tooLarge ? 413 : 400).json({

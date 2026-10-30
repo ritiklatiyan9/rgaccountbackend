@@ -6,7 +6,7 @@ import upload, { receiveUpload } from '../middlewares/multer.middleware.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import { signExpenseDocumentUrl } from '../utils/expenseDocumentUrls.js';
 
-router.post('/single', authMiddleware, receiveUpload(upload.single('file')), async (req, res) => {
+router.post('/single', authMiddleware, receiveUpload(upload.single('file'), { shouldOptimize: req => !req.query.provider || req.query.provider === 's3' }), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
     const { provider = 's3' } = req.query;
@@ -20,7 +20,7 @@ router.post('/single', authMiddleware, receiveUpload(upload.single('file')), asy
   }
 });
 
-router.post('/many', authMiddleware, receiveUpload(upload.array('files')), async (req, res) => {
+router.post('/many', authMiddleware, receiveUpload(upload.array('files'), { shouldOptimize: req => !req.query.provider || req.query.provider === 's3' }), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) return res.status(400).json({ message: 'No files uploaded' });
     const { provider = 's3' } = req.query;

@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 const router = express.Router();
@@ -72,7 +73,7 @@ router.get('/members', farmerMembersCache, listFarmerMembers);
 
 // Farmer documents — scoped to the farmer, stored in the shared document bucket.
 router.get('/:farmerId/documents', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'read'), getFarmerDocuments);
-router.post('/:farmerId/documents', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), receiveFarmerDocument, bustFarmerCache, uploadFarmerDocument);
+router.post('/:farmerId/documents', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'write'), receiveFarmerDocument, optimizeEvidenceImages, bustFarmerCache, uploadFarmerDocument);
 router.delete('/documents/:docId', requireRole('admin', 'sub_admin'), requirePermission('farmers', 'delete'), bustFarmerCache, deleteFarmerDocument);
 
 // Farmer CRUD

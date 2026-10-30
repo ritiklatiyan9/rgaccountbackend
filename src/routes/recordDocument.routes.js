@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -53,7 +54,7 @@ const documentPermission = (action) => async (req, res, next) => {
 
 router.use(authMiddleware, requireRole('admin', 'sub_admin'));
 router.get('/:entityType/:entityId', documentPermission('read'), listRecordDocuments);
-router.post('/:entityType/:entityId', documentPermission('write'), receive, uploadRecordDocument);
+router.post('/:entityType/:entityId', documentPermission('write'), receive, optimizeEvidenceImages, uploadRecordDocument);
 router.delete('/:entityType/:entityId/:documentId', documentPermission('delete'), deleteRecordDocument);
 
 export default router;

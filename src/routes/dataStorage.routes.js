@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import express from 'express';
 import multer from 'multer';
 import { pipeline } from 'node:stream/promises';
@@ -31,7 +32,7 @@ export function createDataStorageRouter({ database = pool, files = dataStorageFi
   router.use(authenticate);
   router.get('/', permission('data_storage', 'read'), asyncHandler(async (req, res) => res.json(await service.list(req.user, req.query))));
   router.post('/folders', permission('data_storage', 'write'), asyncHandler(async (req, res) => res.status(201).json({ entry: await service.createFolder(req.user, req.body) })));
-  router.post('/files', permission('data_storage', 'write'), receiveFile, asyncHandler(async (req, res) => res.status(201).json({ entry: await service.upload(req.user, req.body, req.file) })));
+  router.post('/files', permission('data_storage', 'write'), receiveFile, optimizeEvidenceImages, asyncHandler(async (req, res) => res.status(201).json({ entry: await service.upload(req.user, req.body, req.file) })));
   const sendFile = (inline) => asyncHandler(async (req, res) => {
     const file = await service.download(req.user, req.query.site_id, req.params.id);
     res.attachment(file.name);

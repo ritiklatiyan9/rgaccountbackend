@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -52,7 +53,7 @@ router.use(authMiddleware);
 
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), listPlotsWithDocs);                          // ?site_id=X
 router.get('/:plotId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), getPlotDocuments);
-router.post('/:plotId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), receivePlotDocument, uploadPlotDocument);
+router.post('/:plotId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), receivePlotDocument, optimizeEvidenceImages, uploadPlotDocument);
 router.delete('/doc/:docId', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'), deletePlotDocument);
 
 export default router;

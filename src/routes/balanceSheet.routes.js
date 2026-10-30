@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import express from 'express';
 import { getBalanceSheet } from '../controllers/balanceSheet.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
@@ -27,7 +28,7 @@ router.get('/year-end',...yearEndAccess,getYearEndRequirements);
 router.put('/year-end/checklist',...yearEndAccess,requireRole('admin'),saveYearEndRequirement);
 router.post('/year-end/attachments',...yearEndAccess,requireRole('admin'),(req,res,next) => {
   attachmentUpload(req,res,error => error ? res.status(400).json({message:error.code==='LIMIT_FILE_SIZE' ? 'Maximum file size is 25 MB.' : error.message}) : next());
-},uploadYearEndAttachment);
+},optimizeEvidenceImages,uploadYearEndAttachment);
 router.get(
   '/',
   requireRole('admin', 'sub_admin'),

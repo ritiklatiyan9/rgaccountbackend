@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -71,7 +72,7 @@ router.patch(
   assignUnassignedDmsDocument
 );
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('document_search', 'read'), getDmsDocument);
-router.post('/', requireRole('admin', 'sub_admin'), requirePermission('document_search', 'write'), receiveDocument, uploadDmsDocument);
+router.post('/', requireRole('admin', 'sub_admin'), requirePermission('document_search', 'write'), receiveDocument, optimizeEvidenceImages, uploadDmsDocument);
 router.post('/:id/retry-ocr', requireRole('admin', 'sub_admin'), requirePermission('document_search', 'write'), retryOcr);
 router.patch('/:id', requireRole('admin', 'sub_admin'), requirePermission('document_search', 'update'), updateDmsDocument);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('document_search', 'delete'), deleteDmsDocument);

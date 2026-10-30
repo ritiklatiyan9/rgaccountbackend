@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -45,6 +46,6 @@ router.get('/file/:documentId/content', streamComplianceDocument);
 router.get('/file/:documentId', getComplianceDocument);
 router.delete('/file/:documentId', deleteComplianceDocument);
 router.get('/:entityType/:entityId', listComplianceDocuments);
-router.post('/:entityType/:entityId', uploadLimiter, receive, uploadComplianceDocument);
+router.post('/:entityType/:entityId', uploadLimiter, receive, optimizeEvidenceImages, uploadComplianceDocument);
 
 export default router;

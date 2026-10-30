@@ -1,3 +1,4 @@
+import optimizeEvidenceImages from '../middlewares/optimizeEvidenceImages.middleware.js';
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -112,7 +113,7 @@ router.get('/case/:id', requirePermission('clients', 'read'), getCase);
 router.patch('/case/:id/customer', requireKycMutationPermission('params'), bustMemberCache, updateCaseCustomer);
 // Multer must parse the multipart body before the ownership middleware can read
 // kyc_case_id. Authentication/role checks have already run at router level.
-router.post('/upload', acceptUpload, requireKycMutationPermission('body'), bustPendingKycCache, uploadDocument);
+router.post('/upload', acceptUpload, requireKycMutationPermission('body'), optimizeEvidenceImages, bustPendingKycCache, uploadDocument);
 router.get('/document/:id', requirePermission('clients', 'read'), getDocument);
 router.post('/document/:id/retry', requireKycMutationPermission('document'), bustPendingKycCache, retryDocument);
 router.post('/case/:id/extract-preview', requirePermission('clients', 'read'), extractPreview);
