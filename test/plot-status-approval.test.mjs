@@ -1,4 +1,5 @@
 import { attachModuleChequeDates } from '../src/services/chequeDates.service.js';
+import { signApprovalVoucherLinks } from '../src/services/approvalVoucherLinks.service.js';
 import test from 'node:test';
 import { chequeReadyForApproval, chequeReadySql } from '../src/utils/chequeWorkflow.js';
 import assert from 'node:assert/strict';
@@ -64,7 +65,7 @@ test('migration and shared single/bulk approvals preserve the plot lifecycle', {
     };
     const controller = read('../src/controllers/approval.controller.js').replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
     const accountWhatsAppHooks = createAccountWhatsAppHooks(async () => ({ queued: true }));
-    const ctx = { constructionCanViewAll:async()=>false,projectAccessPredicate:()=> 'true', attachModuleChequeDates, chequeReadyForApproval, chequeReadySql, accountWhatsAppHooks, pool: { query }, asyncHandler: fn => fn, console,
+    const ctx = { constructionCanViewAll:async()=>false,projectAccessPredicate:()=> 'true', attachModuleChequeDates, signApprovalVoucherLinks, chequeReadyForApproval, chequeReadySql, accountWhatsAppHooks, pool: { query }, asyncHandler: fn => fn, console,
       hasRelation: async name => (await db.query('SELECT to_regclass($1) IS NOT NULL AS present', [name])).rows[0].present };
     vm.createContext(ctx);
     vm.runInContext(`${controller}\nthis.handlers = { approveEntry, rejectEntry, bulkApprove, bulkReject, listAllPending, getPendingCounts };`, ctx);

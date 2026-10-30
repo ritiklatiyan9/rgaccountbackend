@@ -1,4 +1,5 @@
 import { attachModuleChequeDates } from '../src/services/chequeDates.service.js';
+import { signApprovalVoucherLinks } from '../src/services/approvalVoucherLinks.service.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -43,7 +44,7 @@ test('approval queries preserve recorded parties, ledger ownership and categorie
     `);
     const controller = readFileSync(new URL('../src/controllers/approval.controller.js', import.meta.url), 'utf8')
       .replace(/^import[\s\S]*?;\n/gm, '').replace(/export const /g, 'const ');
-    const context = { attachModuleChequeDates, asyncHandler: fn => fn, console, chequeReadySql, hasRelation: async name => name==='transaction_party_links',
+    const context = { attachModuleChequeDates, signApprovalVoucherLinks, asyncHandler: fn => fn, console, chequeReadySql, hasRelation: async name => name==='transaction_party_links',
       pool: { query: async (sql, params) => /FROM (expenses e|cash_flow_entries cfe|misc_income_entries mie|transaction_party_links l)\b/.test(sql)
         ? db.query(sql, params) : { rows: [] } } };
     vm.createContext(context);

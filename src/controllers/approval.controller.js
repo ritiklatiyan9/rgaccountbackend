@@ -14,6 +14,7 @@ import { decideTransferApproval } from './transactionTransfer.controller.js';
 import { assertConstructionSiteAccess, assertConstructionProjectAccess, constructionCanViewAll, projectAccessPredicate, recordConstructionActivity } from '../services/constructionWorkflow.service.js';
 import { translateVendorIntegrityError } from '../services/vendorPaymentIntegrity.service.js';
 import { enrichTransactionDocumentation } from '../services/transactionDocumentation.service.js';
+import { signApprovalVoucherLinks } from '../services/approvalVoucherLinks.service.js';
 
 /**
  * Unified approval controller for all financial modules.
@@ -856,7 +857,8 @@ export const listAllPending = asyncHandler(async (req, res) => {
     return dB - dA || b.id - a.id;
   });
 
-  res.json({ entries: results, total: results.length });
+  const entries = await signApprovalVoucherLinks(results, req.user, pool);
+  res.json({ entries, total: entries.length });
 });
 
 /**
