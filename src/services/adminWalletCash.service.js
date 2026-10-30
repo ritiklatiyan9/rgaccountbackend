@@ -1,3 +1,4 @@
+import { addWalletCashDeductions } from './walletCashDeductions.service.js';
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 import { walletReadTransaction } from './walletRead.service.js';
 
@@ -9,23 +10,23 @@ const inFlight = new WeakMap();
 // allocations. Financial site cash already includes receipts handed to Admin;
 // only cash still held in another wallet is outside Admin's custody. Staff
 // spending reduces both site cash and imprest, once each.
-export function adminWalletCashStates(organizationId, siteId, database, siteDetail) {
+export function adminWalletCashStates(organizationId, siteId, database, siteDetail, { includeDeductions = false } = {}) {
   // Imprest already has a locked site snapshot; reuse it on that connection.
-  if (siteDetail) return readStates(organizationId, siteId, database, siteDetail);
+  if (siteDetail) return readStates(organizationId, siteId, database, siteDetail, includeDeductions);
   let reads = inFlight.get(database);
   if (!reads) { reads = new Map(); inFlight.set(database, reads); }
-  const key = `${organizationId}:${siteId}`;
+  const key = `${organizationId}:${siteId}:${includeDeductions}`;
   if (!reads.has(key)) {
     const read = database.connect && !database.release
-      ? walletReadTransaction(database, client => readStates(organizationId, siteId, client), { repeatableRead: true })
-      : readStates(organizationId, siteId, database);
+      ? walletReadTransaction(database, client => readStates(organizationId, siteId, client, null, includeDeductions), { repeatableRead: true })
+      : readStates(organizationId, siteId, database, null, includeDeductions);
     const pending = read.finally(() => reads.delete(key));
     reads.set(key, pending);
   }
   return reads.get(key);
 }
 
-async function readStates(organizationId, siteId, database, siteDetail) {
+async function readStates(organizationId, siteId, database, siteDetail, includeDeductions = false) {
   const { rows } = await database.query(`WITH aligned AS (
     SELECT DISTINCT ON (e.holder_key) e.id,e.holder_key
     FROM loyalty_vault_entries e JOIN users u ON e.holder_type='user' AND u.id=e.holder_id
@@ -36,6 +37,9 @@ async function readStates(organizationId, siteId, database, siteDetail) {
     SELECT holder_key,sum(amount) AS balance FROM loyalty_vault_entries
     WHERE organization_id=$1 AND site_id=$2 GROUP BY holder_key
   ) SELECT a.holder_key,sum(e.amount)::text AS recorded_balance,
+    COALESCE(sum(e.amount) FILTER(WHERE e.kind IS DISTINCT FROM 'transfer_out' AND e.kind IS DISTINCT FROM 'adjustment'),0)::text AS total_received,
+    (-COALESCE(sum(e.amount) FILTER(WHERE e.kind='transfer_out'),0))::text AS total_handover,
+    COALESCE(sum(e.amount) FILTER(WHERE e.kind='adjustment'),0)::text AS total_adjustments,
     COALESCE(sum(e.amount) FILTER(WHERE e.id>a.id AND e.kind IN ('transfer_in','transfer_out')),0)::text AS transfer_net,
     (SELECT COALESCE(sum(GREATEST(w.balance,0)),0) FROM site_wallets w
       WHERE w.holder_key<>a.holder_key)::text AS other_wallet_cash
@@ -43,11 +47,13 @@ async function readStates(organizationId, siteId, database, siteDetail) {
     GROUP BY a.holder_key,a.id`, [organizationId, siteId]);
   if (!rows.length) return new Map();
   let site = siteDetail;
+  let endDate;
   if (!site) {
     const end = (await database.query("SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date")).rows[0].end_date;
+    endDate = end;
     site = await getSiteBalanceDetail(siteId, '1900-01-01', end, database);
   }
-  return new Map(rows.map(row => {
+  const states = new Map(rows.map(row => {
     const recorded = money(row.recorded_balance), transfers = money(row.transfer_net);
     const otherWalletCash = money(row.other_wallet_cash);
     const balance = money(Math.min(recorded, money(site.distributableBalance - otherWalletCash)));
@@ -58,8 +64,13 @@ async function readStates(organizationId, siteId, database, siteDetail) {
       site_cash_balance: site.cashBalance, imprest_held: site.imprestHeld,
       pending_imprest_reservations: site.pendingImprestReservations, wallet_transfer_net: transfers,
       wallet_cash_held_elsewhere: otherWalletCash,
+      ...(includeDeductions ? { total_received: row.total_received, total_handover: row.total_handover,
+        total_adjustments: row.total_adjustments } : {}),
     }];
   }));
+  if (!includeDeductions) return states;
+  if (!endDate) endDate = (await database.query("SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date")).rows[0].end_date;
+  return addWalletCashDeductions(database, { organizationId, siteId, states, totals: new Map(rows.map(row => [row.holder_key, row])), endDate });
 }
 
 export function walletWithCashInHand(row, states, holderKey = `${row.holder_type || 'user'}:${row.holder_id ?? row.id}`) {

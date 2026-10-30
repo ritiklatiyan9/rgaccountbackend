@@ -40,8 +40,8 @@ test('overall wallet reconciles exact user custody across authorized sites witho
       INSERT INTO users VALUES(1,'  KuLdEeP   Tomar  ','admin',1,true),(2,'Sunny','sub_admin',1,true),
         (3,'Retired collector','sub_admin',1,false),(4,'Site viewer','sub_admin',1,true),
         (5,'Kuldeep Tomar','admin',2,true),(6,'Unassigned viewer','sub_admin',1,true);
-      CREATE TABLE sites(id int PRIMARY KEY,name text,organization_id int);
-      INSERT INTO sites VALUES(10,'Defence Garden',1),(11,'DG Associates',1),(12,'New project',1),(20,'Private organization',2);
+      CREATE TABLE sites(id int PRIMARY KEY,name text,organization_id int,include_in_overall boolean NOT NULL DEFAULT true);
+      INSERT INTO sites(id,name,organization_id) VALUES(10,'Defence Garden',1),(11,'DG Associates',1),(12,'New project',1),(20,'Private organization',2);
       CREATE TABLE user_sites(user_id int,site_id int);
       INSERT INTO user_sites VALUES(2,10),(2,11),(4,10);
       CREATE TABLE user_permissions(user_id int,module text,can_read boolean,can_view_all boolean);
@@ -99,6 +99,56 @@ test('overall wallet reconciles exact user custody across authorized sites witho
       assert.deepEqual(empty.sites, []);
       assert.equal(empty.top_authority, null);
       assert.equal(empty.totals.balance, '0.00');
+    });
+
+    await t.test('switching a site off removes its custody from all totals and shared holders immediately, then switching on restores it', async () => {
+      // Prime an earlier all-sites read: a switch must apply on the next request,
+      // independently of a browser's selected project or previous totals.
+      assert.equal((await getOverallWalletOverview(admin, database)).totals.balance, '344.21');
+      await pg.exec("UPDATE sites SET include_in_overall=false WHERE id=11");
+      const result = await getOverallWalletOverview(admin, database);
+      assert.deepEqual(result.sites.map(site => site.site_id).sort(), [10,12]);
+      assert.equal(result.totals.balance, '140.04');
+      assert.equal(result.totals.available_balance, '140.04');
+      assert.equal(result.totals.reserved_balance, '0.00');
+      assert.equal(result.totals.site_count, 2);
+      assert.equal(result.top_authority.balance, '100.10');
+      assert.equal(result.holders.find(holder => holder.holder_id === 2).balance, '50.05');
+      assert.ok(result.holders.every(holder => holder.sites.every(site => site.site_id !== 11)));
+      // Hiding an overall report must not alter or hide an individual site's cash.
+      const individual = await pg.query(`SELECT COALESCE(sum(amount),0)::text AS balance
+        FROM loyalty_vault_entries WHERE organization_id=1 AND site_id=11 AND holder_type='user'`);
+      assert.equal(individual.rows[0].balance, '204.17');
+      await pg.exec("UPDATE sites SET include_in_overall=true WHERE id=11");
+      const restored = await getOverallWalletOverview(admin, database);
+      assert.equal(restored.totals.balance, '344.21');
+      assert.equal(restored.top_authority.balance, '300.30');
+      assert.equal(restored.holders.find(holder => holder.holder_id === 2).balance, '49.98');
+    });
+
+    await t.test('an off site is excluded before expensive aligned-cash corrections or granted-user totals', async () => {
+      await pg.exec("UPDATE sites SET include_in_overall=false WHERE id=10; UPDATE loyalty_vault_entries SET source_table='manual_wallet_site_cash_alignment' WHERE site_id=10 AND holder_id=1");
+      const start = statements.length;
+      const result = await getOverallWalletOverview(admin, database);
+      assert.deepEqual(result.sites.map(site => site.site_id).sort(), [11,12]);
+      assert.equal(result.totals.balance, '204.17');
+      assert.equal(statements.slice(start).some(sql => sql.includes('WITH aligned AS')), false,
+        'an excluded site cannot trigger its site cash projection');
+      const granted = await getOverallWalletOverview(viewer, database);
+      assert.deepEqual(granted.sites, []);
+      assert.deepEqual(granted.holders, []);
+      assert.equal(granted.top_authority, null);
+      assert.equal(granted.totals.balance, '0.00');
+      await pg.exec("UPDATE loyalty_vault_entries SET source_table=NULL WHERE site_id=10; UPDATE sites SET include_in_overall=false WHERE organization_id=1");
+      const empty = await getOverallWalletOverview(admin, database);
+      assert.deepEqual(empty.sites, []);
+      assert.deepEqual(empty.holders, []);
+      assert.equal(empty.totals.site_count, 0);
+      assert.equal(empty.totals.balance, '0.00');
+      assert.equal(empty.totals.available_balance, '0.00');
+      assert.equal(empty.top_authority, null);
+      assert.equal(empty.unallocated.balance, '99.99', 'legacy unallocated custody remains metadata outside project totals');
+      await pg.exec("UPDATE sites SET include_in_overall=true WHERE organization_id=1");
     });
 
     await t.test('the controller ignores selected-site narrowing, applies current read permission and disables caching', async () => {

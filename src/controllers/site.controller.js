@@ -2,6 +2,7 @@ import { validateProjectProfile, allowedUnitTypes } from '../services/projectPro
 import asyncHandler from '../utils/asyncHandler.js';
 import siteModel from '../models/Site.model.js';
 import pool from '../config/db.js';
+import { clearCacheByPrefixes } from '../config/cache.js';
 
 /**
  * POST /sites
@@ -114,6 +115,11 @@ export const updateSite = asyncHandler(async (req, res) => {
     if (rows.length) return res.status(409).json({ message: 'This site has existing units of another type. Choose Flats + Plots to retain all inventory.' });
   }
   const updated = await siteModel.update(parseInt(id), updateData, pool);
+  if (updateData.include_in_overall !== undefined) {
+    // Expire local snapshots, in-flight generations and shared profit snapshots
+    // before the successful switch response can trigger client reloads.
+    await clearCacheByPrefixes(['sites|', 'site-profit|', 'plot-commissions|', 'cashflow|', 'dashboard:', 'wallet|', 'overall-wallet|']);
+  }
   res.json({ site: updated });
 });
 

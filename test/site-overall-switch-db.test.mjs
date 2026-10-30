@@ -9,6 +9,9 @@ import { updateSite } from '../src/controllers/site.controller.js';
 import { listAllSitesCommissions } from '../src/controllers/plotCommissionV2.controller.js';
 import { listPersonalLedgerPortfolio } from '../src/controllers/cashflow.controller.js';
 import { cashFlowMonthModel } from '../src/models/CashFlow.model.js';
+import { requireOverallSiteScope } from '../src/middlewares/overallSiteScope.middleware.js';
+import { cacheResponse, buildCacheKey } from '../src/middlewares/cache.middleware.js';
+import { cacheGet, cacheSet } from '../src/config/cache.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const invoke = (handler, req) => new Promise((resolve, reject) => handler(req, {
@@ -17,6 +20,19 @@ const invoke = (handler, req) => new Promise((resolve, reject) => handler(req, {
 }, reject));
 const commissionSites = async () => (await invoke(listAllSitesCommissions, { query: {} })).body.commissions.map((row) => row.site_id);
 const switchSite = (id, include) => invoke(updateSite, { params: { id: String(id) }, body: { include_in_overall: include } });
+const cachedPortfolio = async (namespace, handler) => {
+  const req = { method: 'GET', path: '/portfolio', headers: {}, query: {}, user: { id: 1, role: 'admin' } };
+  await new Promise((resolve, reject) => requireOverallSiteScope(req, {}, error => error ? reject(error) : resolve()));
+  const key = buildCacheKey(req, namespace);
+  return new Promise((resolve, reject) => {
+    const headers = {};
+    const res = { statusCode: 200, setHeader(name, value) { headers[name] = value; },
+      status(code) { this.statusCode = code; return this; },
+      json(body) { resolve({ body, key, cache: headers['X-Cache'] }); } };
+    cacheResponse({ namespace, ttlSeconds: 60 })(req, res, () => handler(req, res, reject)).catch(reject);
+  });
+};
+
 
 test('a site switched off on the Sites page leaves the all-sites commission and personal-ledger portfolios', async () => {
   const pg = new PGlite();
@@ -55,11 +71,28 @@ test('a site switched off on the Sites page leaves the all-sites commission and 
     assert.equal(await up(pool), true);
     assert.equal(await up(pool), false, 'the migration is idempotent');
     assert.deepEqual(await commissionSites(), [1, 2], 'every existing site starts included');
+    const commissionBefore = await cachedPortfolio('plot-commissions', listAllSitesCommissions);
+    const personalBefore = await cachedPortfolio('cashflow', listPersonalLedgerPortfolio);
+    assert.equal((await cachedPortfolio('plot-commissions', listAllSitesCommissions)).cache, 'HIT');
+    assert.equal((await cachedPortfolio('cashflow', listPersonalLedgerPortfolio)).cache, 'HIT');
 
     assert.equal((await switchSite(2, 'false')).status, 400, 'only a real boolean is accepted');
     const off = await switchSite(2, false);
     assert.equal(off.status, 200);
     assert.equal(off.body.site.include_in_overall, false);
+    assert.equal(await cacheGet(commissionBefore.key), null, 'switch response waits for commission invalidation');
+    assert.equal(await cacheGet(personalBefore.key), null, 'switch response waits for personal-ledger invalidation');
+    // Recreate a stale entry as if another process still held the old portfolio.
+    // Live scope fingerprints must prevent it from being read after switching off.
+    await cacheSet(commissionBefore.key, { statusCode: 200, payload: commissionBefore.body });
+    await cacheSet(personalBefore.key, { statusCode: 200, payload: personalBefore.body });
+    const commissionAfter = await cachedPortfolio('plot-commissions', listAllSitesCommissions);
+    const personalAfter = await cachedPortfolio('cashflow', listPersonalLedgerPortfolio);
+    assert.notEqual(commissionAfter.key, commissionBefore.key);
+    assert.notEqual(personalAfter.key, personalBefore.key);
+    assert.deepEqual(commissionAfter.body.commissions.map(row => row.site_id), [1]);
+    assert.deepEqual(personalAfter.body.ledgers.map(row => row.site_id), [1]);
+    assert.equal((await cachedPortfolio('plot-commissions', listAllSitesCommissions)).cache, 'HIT');
 
     assert.deepEqual(await commissionSites(), [1]);
     const { body } = await invoke(listPersonalLedgerPortfolio, {});
@@ -70,6 +103,11 @@ test('a site switched off on the Sites page leaves the all-sites commission and 
 
     await switchSite(2, true);
     assert.deepEqual(await commissionSites(), [1, 2]);
+    assert.deepEqual((await cachedPortfolio('plot-commissions', listAllSitesCommissions)).body.commissions.map(row => row.site_id), [1, 2]);
+    assert.deepEqual((await cachedPortfolio('cashflow', listPersonalLedgerPortfolio)).body.ledgers.map(row => row.site_id).sort(), [1, 2]);
+    await switchSite(1, false); await switchSite(2, false);
+    assert.deepEqual((await cachedPortfolio('plot-commissions', listAllSitesCommissions)).body.commissions, []);
+    assert.deepEqual((await cachedPortfolio('cashflow', listPersonalLedgerPortfolio)).body.ledgers, []);
   } finally {
     pool.query = originalQuery; pool.connect = originalConnect;
     await pg.close();

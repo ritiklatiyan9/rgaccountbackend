@@ -10,6 +10,7 @@ import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
+import { requireOverallSiteScope } from '../middlewares/overallSiteScope.middleware.js';
 
 // All cashflow routes require auth
 router.use(authMiddleware);
@@ -22,7 +23,7 @@ const cashflowMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'cashflow-
 const bustCashflowCache = invalidateCacheOnSuccess(['cashflow|', '/daybook']);
 
 // Matches the organisation-wide commission page's admin-only scope.
-router.get('/portfolio', requireRole('admin'), requirePermission('cashflow', 'read'), cashflowReadCache, listPersonalLedgerPortfolio);
+router.get('/portfolio', requireRole('admin'), requirePermission('cashflow', 'read'), requireOverallSiteScope, cashflowReadCache, listPersonalLedgerPortfolio);
 
 // ── Month endpoints ──
 router.get('/months', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), cashflowReadCache, listMonths);                                // ?site_id=X

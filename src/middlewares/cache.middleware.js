@@ -23,7 +23,8 @@ export const buildCacheKey = (req, namespace = 'api') => {
   const scope = encodeURIComponent(JSON.stringify([req.user?.role, req.user?.organization_id,
     req.user?.version, req.sessionId, req.authenticatedUser?.token_version, permissions]));
   const queryPart = sortQueryEntries(req.query || {});
-  return `${namespace}|${userPart}|scope:${scope}|${req.path}|${queryPart}`;
+  const dataScope = req.cacheDataScope == null ? '' : `|data:${encodeURIComponent(req.cacheDataScope)}`;
+  return `${namespace}|${userPart}|scope:${scope}${dataScope}|${req.path}|${queryPart}`;
 };
 
 export const cacheResponse = ({ ttlSeconds, namespace = 'api', shouldCache, authorizeHit } = {}) => {

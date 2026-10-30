@@ -6,6 +6,7 @@ import { up as walletUp } from '../src/migrations/185_cash_wallets.js';
 import { up as vaultUp } from '../src/migrations/199_loyalty_vault.js';
 import { up as unifiedUp } from '../src/migrations/203_unified_cash_wallet.js';
 import { up } from '../src/migrations/208_cash_wallet_site_scope.js';
+import { up as siteOverallUp } from '../src/migrations/224_site_overall_switch.js';
 import { postingPolicySql } from '../src/migrations/171_cheque_clearance_before_approval.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../src/services/loyaltyVaultContext.service.js';
 import { createVaultTransfer,resolveVaultTransfer } from '../src/services/loyaltyVault.service.js';
@@ -33,6 +34,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
   const unallocatedTransfer=randomUUID();
   try {
     await query(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
+      CREATE TABLE application_settings(site_id integer,setting_key text,setting_value jsonb,updated_by integer,updated_at timestamptz,UNIQUE(site_id,setting_key));
       CREATE TABLE users(id integer PRIMARY KEY,name text,role text,organization_id integer,is_active boolean DEFAULT true);
       INSERT INTO users VALUES(1,'Sachin','sub_admin',1,true),(2,'Administrator','admin',1,true),(3,'Live site staff','sub_admin',1,true),(4,'Outside admin','admin',2,true),(5,'Test site staff','sub_admin',1,true);
       CREATE TABLE sites(id integer PRIMARY KEY,name text,organization_id integer);INSERT INTO sites VALUES(10,'Live project',1),(11,'Test site',1),(20,'Outside',2);
@@ -51,7 +53,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       cash_flow_entry_id integer,expense_id integer,farmer_payment_id integer,commission_id integer,firm_transaction_id integer,plot_payment_id integer,vendor_payment_id integer,imprest_allocation_id integer,
       entry_transfer_id uuid,money_transfer_id uuid,is_firm_to_firm_transfer boolean,transfer_group_id uuid,is_financial_projection boolean,source_vendor_payment_id integer,is_imprest_internal boolean)`);
     await query(walletHistoryParentsSql);
-    await walletUp(db);await vaultUp(db);await unifiedUp(db);await up(db);
+    await walletUp(db);await vaultUp(db);await unifiedUp(db);await up(db);await siteOverallUp(db);
     const testReceipt=await entry({site_id:11,credit:1504000});
     const liveReceipt=await entry({site_id:10,credit:30000});
     // Legacy handovers have no proven project. They remain immutable and
@@ -353,7 +355,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       await resolveVaultTransfer({id:7},request.transfer.id,'cancel',{site_id:10},db);
     });
     await t.test('site cash wallet uses actual custody after imprest and enforces it on request and acceptance',async()=>{
-      await query(`INSERT INTO sites VALUES(12,'Cash custody',1),(13,'Another project',1);
+      await query(`INSERT INTO sites(id,name,organization_id) VALUES(12,'Cash custody',1),(13,'Another project',1);
         INSERT INTO user_sites VALUES(1,12);
         CREATE TABLE ledger_entries(site_id integer,entry_date date DEFAULT CURRENT_DATE,bucket text,credit numeric DEFAULT 0,debit numeric DEFAULT 0);
         CREATE TABLE imprest_ledger(site_id integer,user_id integer,amount numeric,created_at timestamptz DEFAULT now());
@@ -386,6 +388,12 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       assert.equal(overallSite.holders.find(user=>user.holder_id===2).balance,holder.balance,'all-site balances reuse the current cash-in-hand correction');
       assert.equal(overallSite.balance,'4300000.00');
       assert.equal(overallWallet.sites.find(site=>site.site_id===13).holders.find(user=>user.holder_id===2).balance,'150.00');
+      await query('UPDATE sites SET include_in_overall=false WHERE id=13');
+      const withoutOtherSite=await invoke(controller.overall,{site:null});
+      assert.equal(withoutOtherSite.sites.some(site=>site.site_id===13),false,'off removes even aligned cash custody from the overall wallet');
+      assert.equal(Number((await invoke(controller.summary,{site:13})).vault.total_balance),150,'individual-site wallet remains accessible with its cash-in-hand correction');
+      await query('UPDATE sites SET include_in_overall=true WHERE id=13');
+      assert.equal((await invoke(controller.overall,{site:null})).sites.find(site=>site.site_id===13).balance,'150.00','on restores the same custody, without rewriting receipts');
       await assert.rejects(createVaultTransfer({id:2},transfer('4300000.01',12,1),db),status(409));
       const requested=await createVaultTransfer({id:2},transfer('4300000',12,1),db);
       await query('INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,100000)');
@@ -479,7 +487,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       assert.equal(await cash(),base-250,'positive client custody is deducted together with user custody');
     });
     await t.test('a reporting opening persists counters without changing wallet history and remains private',async()=>{
-      await query(`CREATE TABLE application_settings(site_id integer,setting_key text,setting_value jsonb,updated_by integer,updated_at timestamptz,UNIQUE(site_id,setting_key));
+      await query(`CREATE TABLE IF NOT EXISTS application_settings(site_id integer,setting_key text,setting_value jsonb,updated_by integer,updated_at timestamptz,UNIQUE(site_id,setting_key));
         INSERT INTO sites VALUES(15,'Report opening',1); INSERT INTO user_sites VALUES(1,15);
         INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(15,'cash',1000)`);
       await query("SELECT loyalty_vault_apply_delta('user:2',1,1000,'adjustment','Opening fixture','manual_wallet_site_cash_alignment',NULL,NULL,15,2)");

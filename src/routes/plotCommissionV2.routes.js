@@ -23,6 +23,7 @@ import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
+import { requireOverallSiteScope } from '../middlewares/overallSiteScope.middleware.js';
 
 const plotCommissionReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'plot-commissions' });
 // /plots is just the list of plots a commission can be assigned to — it
@@ -40,7 +41,7 @@ router.get('/plots', requireRole('admin', 'sub_admin'), requirePermission('commi
 router.post('/create', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustPlotCommissionCache, createPlotCommission);
 // Organisation-wide broker portfolio. Admin-only because it intentionally
 // crosses every site rather than following the selected/assigned site.
-router.get('/portfolio', requireRole('admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listAllSitesCommissions);
+router.get('/portfolio', requireRole('admin'), requirePermission('commissions', 'read'), requireOverallSiteScope, plotCommissionReadCache, listAllSitesCommissions);
 router.get('/list', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listPlotCommissions);
 // Land Commission (subject = land purchase / land sale) — same engine, same permission key.
 router.get('/land', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listLandCommissions);

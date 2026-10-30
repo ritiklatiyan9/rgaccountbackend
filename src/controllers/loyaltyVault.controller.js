@@ -90,7 +90,7 @@ export const summary = asyncHandler(async(req,res)=>{
   const {pending_incoming,pending_outgoing,...vault}=rows[0];
   const awaiting=await pendingVaultTotals(actor,pool,null,siteId);
   Object.assign(vault,{pending_credit:sumPending(awaiting,'pending_credit'),pending_debit:sumPending(awaiting,'pending_debit'),pending_assignment_count:awaiting.reduce((n,row)=>n+row.pending_count,0)});
-  const cashStates = canViewAllWallets(actor) ? await adminWalletCashStates(actor.organization_id, siteId, pool) : new Map();
+  const cashStates = canViewAllWallets(actor) ? await adminWalletCashStates(actor.organization_id, siteId, pool, null, { includeDeductions: true }) : new Map();
   const cashVault = walletWithCashInHand(vault, cashStates, `user:${actor.id}`);
   if (canViewAllWallets(actor)) cashVault.total_balance = (Number(vault.total_balance) + [...cashStates.values()].reduce((sum,state) => sum + Number(state.cash_in_hand_adjustment), 0)).toFixed(2);
   res.set('Cache-Control','no-store').json({site_id:siteId,vault:cashVault,pending_incoming,pending_outgoing,unallocated:await unallocatedCustody(actor)});
@@ -125,7 +125,7 @@ export const holders = asyncHandler(async(req,res)=>{
       WHERE ($4::boolean OR $6::boolean OR (h.holder_type='user' AND h.holder_id=$1))
       ORDER BY h.holder_type DESC,h.name,h.holder_id`,[actor.id,actor.organization_id,siteId,canViewAllWallets(actor),includeMembers,selection,isVaultAdmin(actor)]);
   const awaiting=new Map((await pendingVaultTotals(actor,pool,null,siteId)).map(row=>[`${row.holder_type}:${row.holder_id}`,row]));
-  const cashStates = canViewAllWallets(actor) ? await adminWalletCashStates(actor.organization_id, siteId, pool) : new Map();
+  const cashStates = canViewAllWallets(actor) ? await adminWalletCashStates(actor.organization_id, siteId, pool, null, { includeDeductions: !selection }) : new Map();
   res.set('Cache-Control','no-store').json({site_id:siteId,holders:rows.map(row=>({...walletWithCashInHand(row,cashStates),
     pending_credit:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_credit||'0.00',
     pending_debit:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_debit||'0.00',
@@ -146,7 +146,7 @@ export const userDetail = asyncHandler(async(req,res)=>{
     FROM users u CROSS JOIN pending LEFT JOIN site_accounts a ON a.holder_key='user:'||u.id::text
     WHERE u.id=$1 AND u.organization_id=$2 AND (u.role IN ('super_admin','admin') OR (u.role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3)) OR a.holder_key IS NOT NULL)`,[id,actor.organization_id,siteId]);
   if(!rows[0]) throw walletError('Cash Wallet user not found.',404);
-  const cashStates = rows[0].role === 'admin' ? await adminWalletCashStates(actor.organization_id, siteId, pool) : new Map();
+  const cashStates = rows[0].role === 'admin' ? await adminWalletCashStates(actor.organization_id, siteId, pool, null, { includeDeductions: true }) : new Map();
   res.set('Cache-Control','no-store').json({site_id:siteId,user:{...walletWithCashInHand(rows[0],cashStates,`user:${id}`),site_id:siteId,holder_type:'user',holder_id:id},unallocated:await unallocatedCustody(actor,holder('user',id))});
 });
 

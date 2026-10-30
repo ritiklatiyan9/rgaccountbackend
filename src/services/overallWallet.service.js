@@ -6,6 +6,10 @@ import { adminWalletCashStates, walletWithCashInHand } from './adminWalletCash.s
 
 const scopedSites = `scoped_sites AS (
   SELECT s.id,s.name FROM sites s WHERE s.organization_id=$1
+    -- The Sites switch changes consolidated reporting, never the underlying
+    -- custody records or access to an individual site's wallet. Scope before
+    -- aggregation so shared holders and cash-in-hand corrections exclude it too.
+    AND COALESCE(s.include_in_overall,true)
     AND ($2::boolean OR EXISTS(SELECT 1 FROM user_sites us WHERE us.user_id=$3 AND us.site_id=s.id))
 )`;
 
