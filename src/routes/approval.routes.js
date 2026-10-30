@@ -3,6 +3,7 @@ const router = express.Router();
 
 import {
   listAllPending,
+  getApprovalVoucher,
   getPendingCounts,
   approveEntry,
   rejectEntry,
@@ -29,6 +30,7 @@ router.use(requireRole('admin', 'sub_admin'));
 
 router.get('/pending', requireApprovalAccess, approvalReadCache, listAllPending);
 router.get('/counts', requireApprovalAccess, approvalReadCache, getPendingCounts);
+router.get('/:id/voucher', requireApprovalAccess, getApprovalVoucher);
 router.put('/:id/approve', requireApprovalAccess, bustApprovalCache, approveEntry);
 router.put('/:id/reject', requireApprovalAccess, bustApprovalCache, rejectEntry);
 router.post('/bulk-approve', requireApprovalAccess, bustApprovalCache, bulkApprove);

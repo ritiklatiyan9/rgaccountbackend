@@ -15,6 +15,7 @@ import { assertConstructionSiteAccess, assertConstructionProjectAccess, construc
 import { translateVendorIntegrityError } from '../services/vendorPaymentIntegrity.service.js';
 import { enrichTransactionDocumentation } from '../services/transactionDocumentation.service.js';
 import { signApprovalVoucherLinks } from '../services/approvalVoucherLinks.service.js';
+import { signExpenseDocumentUrl } from '../utils/expenseDocumentUrls.js';
 
 /**
  * Unified approval controller for all financial modules.
@@ -274,6 +275,42 @@ export const vendorApprovalVisibility = async req => moduleVisibility(req.user,a
  * List all pending entries across all modules.
  * Sub-admins only see modules they've been granted.
  */
+export const getApprovalVoucher = asyncHandler(async (req, res) => {
+  const source = req.query.source;
+  const id = Number(req.params.id), siteId = Number(req.query.site_id);
+  if (!Object.hasOwn(ALLOWED_TABLES, source) || !Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(siteId) || siteId <= 0) {
+    return res.status(400).json({ message: 'Invalid voucher reference.' });
+  }
+  const table = ALLOWED_TABLES[source];
+  const join = source === 'farmer_payment' ? 'JOIN farmers parent ON parent.id=t.farmer_id'
+    : source === 'plot_installment_payment' ? 'JOIN plots parent ON parent.id=t.plot_id' : '';
+  const site = join ? 'parent.site_id' : 't.site_id';
+  const { rows } = await pool.query(`SELECT to_jsonb(t) AS entry,s.organization_id FROM ${table} t ${join}
+    JOIN sites s ON s.id=${site} WHERE t.id=$1 AND s.id=$2`, [id, siteId]);
+  const row = rows[0];
+  if (!row || (req.user.role !== 'super_admin' && Number(row.organization_id) !== Number(req.user.organization_id || 1))) {
+    return res.status(404).json({ message: 'Voucher not found.' });
+  }
+  if (!hasGlobalApprovalOverride(req.user)) {
+    const access = await pool.query('SELECT 1 FROM user_sites WHERE user_id=$1 AND site_id=$2', [req.user.id, siteId]);
+    const allowed = await getAllowedModules(req.user, req.assignedApprovalsOnly);
+    if (!access.rows.length || (Number(row.entry.assigned_admin_id) !== Number(req.user.id) && !isModuleAllowed(allowed, source))) {
+      return res.status(403).json({ message: 'Access denied to this voucher.' });
+    }
+    if (['vendor_payment', 'vendor_inventory_payment'].includes(source) && Number(row.entry.assigned_admin_id) !== Number(req.user.id)) {
+      const params = [id, siteId];
+      const scope = await vendorApprovalScope('t', req, params, { inventory: source === 'vendor_inventory_payment' });
+      if (!(await pool.query(`SELECT 1 FROM ${table} t WHERE t.id=$1 AND t.site_id=$2 AND ${scope}`, params)).rows.length) {
+        return res.status(403).json({ message: 'Access denied to this voucher.' });
+      }
+    }
+  }
+  const voucher = row.entry.voucher_url || row.entry.voucher_urls?.[0];
+  if (!voucher) return res.status(404).json({ message: 'This transaction has no voucher.' });
+  res.set('Cache-Control', 'private, no-store');
+  res.json({ url: await signExpenseDocumentUrl(voucher) });
+});
+
 export const listAllPending = asyncHandler(async (req, res) => {
   const { site_id, date_from, date_to, module, assigned_admin_id } = req.query;
   const allowedModules = await getAllowedModules(req.user, req.assignedApprovalsOnly);
