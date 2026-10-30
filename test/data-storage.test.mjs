@@ -4,6 +4,8 @@ import { Readable } from 'node:stream';
 import express from 'express';
 import { PGlite } from '@electric-sql/pglite';
 import { up } from '../src/migrations/193_data_storage.js';
+import { up as enableSubAdminStorage } from '../src/migrations/227_data_storage_sub_admin_access.js';
+import permissionModel from '../src/models/Permission.model.js';
 import { createDataStorageService, MAX_STORAGE_FILE_BYTES } from '../src/services/dataStorage.service.js';
 import { createDataStorageRouter } from '../src/routes/dataStorage.routes.js';
 import requirePermission from '../src/middlewares/permission.middleware.js';
@@ -68,6 +70,9 @@ test('site and organisation isolation apply to every operation and breadcrumbs',
   await denied(service.list(subAdmin, { site_id: 2 }), 403);
   await denied(service.createFolder(subAdmin, { site_id: 2, name: 'Denied' }), 403);
   await denied(service.upload(subAdmin, { site_id: 2 }, sampleFile()), 403);
+  await denied(service.download(subAdmin, 2, uploaded.id), 403);
+  await denied(service.rename(subAdmin, 2, uploaded.id, { name: 'Changed' }), 403);
+  await denied(service.remove(subAdmin, 2, uploaded.id), 403);
   await denied(service.list(subAdmin, { site_id: 1, parent_id: folder.id }), 404);
   await denied(service.createFolder(admin, { site_id: 1, parent_id: folder.id, name: 'Cross-site' }), 404);
   await denied(service.upload(admin, { site_id: 1, parent_id: folder.id }, sampleFile()), 404);
@@ -79,6 +84,37 @@ test('site and organisation isolation apply to every operation and breadcrumbs',
   }
   assert.equal(stored.size, 1);
   await service.list({ ...admin, role: 'super_admin' }, { site_id: 3 });
+});
+
+test('sub-admin storage access is enabled once and later permission changes are respected', async (t) => {
+  const sql = new PGlite();
+  t.after(() => sql.close());
+  await sql.exec(`CREATE TABLE app_schema_migrations(version TEXT PRIMARY KEY);
+    CREATE TABLE users(id INTEGER PRIMARY KEY, role TEXT NOT NULL);
+    CREATE TABLE user_permissions(user_id INTEGER, module TEXT, can_read BOOLEAN NOT NULL,
+      can_write BOOLEAN NOT NULL, can_update BOOLEAN NOT NULL, can_delete BOOLEAN NOT NULL,
+      can_restore BOOLEAN NOT NULL DEFAULT false, can_view_all BOOLEAN NOT NULL DEFAULT false,
+      updated_at TIMESTAMPTZ DEFAULT now(), UNIQUE(user_id,module));
+    INSERT INTO users VALUES (1,'sub_admin'),(2,'sub_admin'),(3,'sub_admin'),(4,'admin');
+    INSERT INTO user_permissions(user_id,module,can_read,can_write,can_update,can_delete) VALUES
+      (1,'data_storage',false,false,false,false), (2,'data_storage',false,false,false,true),
+      (4,'data_storage',false,false,false,false);`);
+  const query = (text, values) => sql.query(text, values);
+  const database = { query, connect: async () => ({ query, release() {} }) };
+  assert.equal(await enableSubAdminStorage(database), true);
+  const grants = () => sql.query("SELECT user_id, can_read, can_write, can_update, can_delete FROM user_permissions WHERE module='data_storage' ORDER BY user_id");
+  assert.deepEqual((await grants()).rows, [
+    { user_id: 1, can_read: true, can_write: true, can_update: true, can_delete: false },
+    { user_id: 2, can_read: true, can_write: false, can_update: false, can_delete: true },
+    { user_id: 3, can_read: true, can_write: true, can_update: true, can_delete: false },
+    { user_id: 4, can_read: false, can_write: false, can_update: false, can_delete: false },
+  ]);
+  await sql.query("UPDATE user_permissions SET can_read=false WHERE user_id=1 AND module='data_storage'");
+  assert.equal(await enableSubAdminStorage(database), false);
+  assert.equal((await grants()).rows[0].can_read, false);
+  await sql.query("DELETE FROM user_permissions WHERE user_id=3 AND module='data_storage'");
+  const defaults = (await permissionModel.getPermissions(3, ['data_storage'], database)).get('data_storage');
+  assert.deepEqual([defaults.can_read, defaults.can_write, defaults.can_update, defaults.can_delete], [true, true, true, false]);
 });
 
 test('duplicate names are rejected and failed uploads clean up their stored bytes', async (t) => {

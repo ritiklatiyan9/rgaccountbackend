@@ -17,6 +17,7 @@ import { up as migrateGoogleDriveSiteAccess } from './migrations/189_google_driv
 import { up as migrateGoogleDriveJobs } from './migrations/190_google_drive_share_jobs.js';
 import { up as migrateTdsDeducteeMapping } from './migrations/191_tds_deductee_mapping.js';
 import { up as migrateDataStorage } from './migrations/193_data_storage.js';
+import { up as migrateDataStorageSubAdminAccess } from './migrations/227_data_storage_sub_admin_access.js';
 import { up as migrateExistingVoucherGaps } from './migrations/196_existing_voucher_gaps_filled.js';
 import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_financial_settlements.js';
 import { up as migratePlotFullPaymentDue } from './migrations/201_plot_full_payment_due.js';
@@ -61,6 +62,7 @@ connectDB().then(async () => {
     : `[startup] Cash Wallet schema current; installed migrations skipped${walletStartup.repaired.length ? '; runtime functions restored' : ''}`);
   await migratePlotFullPaymentDue(pool);
   await migrateDataStorage(pool);
+  await migrateDataStorageSubAdminAccess(pool);
   await migrateExistingVoucherGaps(pool);
   await migrateImprestApprovalIndexes(pool);
   await migrateTransactionDocumentation(pool);

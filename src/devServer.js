@@ -10,6 +10,7 @@ import { initCache } from './config/cache.js';
 import { backupMaintenanceEnabled } from './middlewares/backupMaintenance.middleware.js';
 import { up as migrateTdsDeducteeMapping } from './migrations/191_tds_deductee_mapping.js';
 import { up as migrateDataStorage } from './migrations/193_data_storage.js';
+import { up as migrateDataStorageSubAdminAccess } from './migrations/227_data_storage_sub_admin_access.js';
 import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
 import { up as migrateMemberIdentityLinking } from './migrations/192_member_identity_linking.js';
 import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_financial_settlements.js';
@@ -37,6 +38,7 @@ connectDB().then(async () => {
   await migrateTdsDeducteeMapping(pool);
   await migrateTdsFinancialSettlements(pool);
   await migrateDataStorage(pool);
+  await migrateDataStorageSubAdminAccess(pool);
   await migrateImprestCashGuard(pool);
   await migrateImprestApprovalIndexes(pool);
   await migrateExistingVoucherGaps(pool);
