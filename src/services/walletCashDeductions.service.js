@@ -18,6 +18,7 @@ export function walletCashDeductions({ opening, totals, state, spending, imprest
     received: money(received), handed_over: money(handed), current_cash: money(current),
     commission: money(commission), expenses: money(expenses), imprest: money(float),
     other_cash_payments: money(otherPayments),
+    ...(Array.isArray(spending.modules) ? { modules: spending.modules } : {}),
     // The remainder is explicit: custody changes, reservations, source edits and
     // alignments must never be silently relabelled as an expense or commission.
     other_adjustments: money(total - commission - expenses - float - otherPayments), total: money(total) };
@@ -45,11 +46,17 @@ export async function addWalletCashDeductions(database, { organizationId, siteId
       FROM ledger_entries l JOIN sites s ON s.id=l.site_id AND s.organization_id=$1
       WHERE l.site_id=$2 AND l.bucket='cash' AND l.entry_date<$4::date
         AND l.created_at>=(SELECT min(started_at) FROM scopes)
+    ), by_source AS (
+      SELECT r.holder_key,p.source_key,sum(p.amount) AS amount
+      FROM scopes r JOIN cash_payments p ON p.created_at>=r.started_at
+      WHERE p.source_key IS NOT NULL GROUP BY r.holder_key,p.source_key
     ) SELECT r.holder_key,
       COALESCE(sum(p.amount) FILTER(WHERE p.source_key IN ('plot_commission_payments','commission_payments')),0)::text AS commission,
       COALESCE(sum(p.amount) FILTER(WHERE p.source_key='expenses'),0)::text AS expenses,
-      COALESCE(sum(p.amount) FILTER(WHERE p.source_key NOT IN ('plot_commission_payments','commission_payments','expenses')),0)::text AS other_cash_payments
-    FROM scopes r LEFT JOIN cash_payments p ON p.created_at>=r.started_at GROUP BY r.holder_key`, [organizationId, siteId, scopes, endDate]);
+      COALESCE(sum(p.amount) FILTER(WHERE p.source_key NOT IN ('plot_commission_payments','commission_payments','expenses')),0)::text AS other_cash_payments,
+      COALESCE(jsonb_agg(jsonb_build_object('source',p.source_key,'amount',p.amount::text) ORDER BY p.source_key)
+        FILTER (WHERE p.source_key IS NOT NULL AND p.amount <> 0), '[]'::jsonb) AS modules
+    FROM scopes r LEFT JOIN by_source p ON p.holder_key=r.holder_key GROUP BY r.holder_key`, [organizationId, siteId, scopes, endDate]);
   const { rows: floats } = await database.query(`WITH scopes AS (
       SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(holder_key text,started_at timestamptz)
     ), accounts AS (

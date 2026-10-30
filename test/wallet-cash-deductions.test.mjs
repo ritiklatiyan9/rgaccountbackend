@@ -49,6 +49,8 @@ test('batched SQL classifies only posted cash in this organisation, site and ope
  await addWalletCashDeductions(db,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
  const changed=states.get('user:7').cash_deductions;
  assert.equal(changed.expenses,'25.10');assert.equal(changed.imprest,'30.15');assert.equal(changed.other_cash_payments,'10.25');assert.equal(changed.other_adjustments,'0.00');
+ assert.deepEqual(changed.modules,[{source:'expenses',amount:'25.10'},{source:'plot_commission_payments',amount:'20000'},{source:'plot_payments',amount:'10.25'}]);
+ assert.deepEqual(states.get('user:9').cash_deductions.modules,[{source:'expenses',amount:'25.10'},{source:'plot_payments',amount:'10.25'}]);
  const missing=new Map([['user:10',{balance:'50'}]]);
  await addWalletCashDeductions(db,{organizationId:1,siteId:2,states:missing,totals:new Map(),endDate:'2026-10-31'});
  assert.equal(missing.get('user:10').cash_deductions,undefined,'no opening never invents zero deductions');
