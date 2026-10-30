@@ -1,3 +1,4 @@
+import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
 import 'dotenv/config';
 import http from 'node:http';
 import app from './app.js';
@@ -31,6 +32,7 @@ const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();
 connectDB().then(async () => {
+  await migrateBookingAccountsLogin(pool);
   await migratePlotAreaChanges(pool);
   await migratePlotBankRounding(pool);
   await migrateMemberSiteSharing(pool);

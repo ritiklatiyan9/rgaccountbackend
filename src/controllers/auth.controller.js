@@ -9,6 +9,7 @@ import siteModel from '../models/Site.model.js';
 import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
 import { writeAuditLog } from '../services/auditLog.service.js';
+import { requestAppContext, assertAppLoginAccess } from '../services/appLoginAccess.js';
 
 /* ── Email OTP second factor — admin / sub_admin only, super_admin is exempt ── */
 const OTP_ROLES = new Set(['admin', 'sub_admin']);
@@ -28,19 +29,17 @@ const maskEmail = (email) => {
 /** OTP is opt-in so a broken mail transport cannot lock every admin out. */
 const needsOtp = (user) => LOGIN_OTP_ENABLED && mailerEnabled() && OTP_ROLES.has(user.role);
 
-// Per-app switch from User ID Management (migration 221). Gates sign-in only:
-// the Accountancy copy inside dgbooking.com reuses Booking sessions on purpose.
-const ACCOUNTS_LOGIN_DENIED = 'This ID is not allowed to sign in to Defence Garden Accounts. Contact your admin.';
-
 /**
  * Everything a successful sign-in returns (tokens + sites + permissions + session).
  * Shared by password login, Google login and the OTP verification step so all three
  * produce the exact same payload the frontend already consumes.
  */
 const buildLoginPayload = async (user, req) => {
+  const app = requestAppContext(req);
+  assertAppLoginAccess(user, app);
   const version = user.token_version;
-  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version });
-  const refreshToken = signRefreshToken({ id: user.id, version });
+  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version, app });
+  const refreshToken = signRefreshToken({ id: user.id, version, app });
   const hashedRefresh = await hashRefreshToken(refreshToken);
   await userModel.update(user.id, { refresh_token: hashedRefresh }, pool);
 
@@ -94,16 +93,17 @@ const buildLoginPayload = async (user, req) => {
  * `login_otps` table (created by the booking app's migration 012 — same database)
  * and email a 6-digit code. No JWTs leave the server until /auth/verify-otp.
  */
-const startOtpChallenge = async (user, res) => {
+const startOtpChallenge = async (user, req, res) => {
+  const app = requestAppContext(req);
   const otp = String(crypto.randomInt(100000, 1000000));
   const pendingToken = crypto.randomBytes(24).toString('hex');
   const otpHash = await hashPassword(otp);
 
-  await pool.query('DELETE FROM login_otps WHERE user_id = $1', [user.id]);
+  await pool.query('DELETE FROM login_otps WHERE user_id = $1 AND app_context = $2', [user.id, app]);
   await pool.query(
-    `INSERT INTO login_otps (user_id, pending_token, otp_hash, expires_at)
-     VALUES ($1, $2, $3, now() + ($4 || ' minutes')::interval)`,
-    [user.id, pendingToken, otpHash, OTP_TTL_MINUTES]
+    `INSERT INTO login_otps (user_id, pending_token, otp_hash, expires_at, app_context)
+     VALUES ($1, $2, $3, now() + ($4 || ' minutes')::interval, $5)`,
+    [user.id, pendingToken, otpHash, OTP_TTL_MINUTES, app]
   );
 
   try {
@@ -158,8 +158,9 @@ export const register = asyncHandler(async (req, res) => {
   };
 
   const user = await userModel.create(userData, pool);
-  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version: 1 });
-  const refreshToken = signRefreshToken({ id: user.id, version: 1 });
+  const app = requestAppContext(req);
+  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version: 1, app });
+  const refreshToken = signRefreshToken({ id: user.id, version: 1, app });
   const hashedRefresh = await hashRefreshToken(refreshToken);
   await userModel.update(user.id, { refresh_token: hashedRefresh }, pool);
 
@@ -183,13 +184,11 @@ export const login = asyncHandler(async (req, res) => {
   if (!user.is_active) {
     return res.status(403).json({ message: 'Account is deactivated. Contact your admin.' });
   }
-  if (user.can_login_accounts === false) {
-    return res.status(403).json({ message: ACCOUNTS_LOGIN_DENIED });
-  }
+  assertAppLoginAccess(user, requestAppContext(req));
 
   // Admin-class roles confirm a 6-digit code emailed to the account's address
   // before any tokens are issued (second authentication step).
-  if (needsOtp(user)) return startOtpChallenge(user, res);
+  if (needsOtp(user)) return startOtpChallenge(user, req, res);
 
   res.json(await buildLoginPayload(user, req));
 });
@@ -238,11 +237,9 @@ export const googleLogin = asyncHandler(async (req, res) => {
   if (!user.is_active) {
     return res.status(403).json({ message: 'Account is deactivated. Contact your admin.' });
   }
-  if (user.can_login_accounts === false) {
-    return res.status(403).json({ message: ACCOUNTS_LOGIN_DENIED });
-  }
+  assertAppLoginAccess(user, requestAppContext(req));
 
-  if (needsOtp(user)) return startOtpChallenge(user, res);
+  if (needsOtp(user)) return startOtpChallenge(user, req, res);
 
   res.json({ ...(await buildLoginPayload(user, req)), via: 'google' });
 });
@@ -259,6 +256,10 @@ export const verifyLoginOtp = asyncHandler(async (req, res) => {
 
   const { rows } = await pool.query('SELECT * FROM login_otps WHERE pending_token = $1 LIMIT 1', [String(pending_token)]);
   const challenge = rows[0];
+  const app = requestAppContext(req);
+  if (challenge && challenge.app_context !== app) {
+    return res.status(403).json({ code: 'APP_ACCESS_DENIED', message: 'This verification code belongs to another application. Please sign in again.' });
+  }
   if (!challenge || challenge.consumed_at) {
     return res.status(401).json({ message: 'This sign-in attempt is no longer valid. Please sign in again.' });
   }
@@ -288,10 +289,7 @@ export const verifyLoginOtp = asyncHandler(async (req, res) => {
     await pool.query('DELETE FROM login_otps WHERE id = $1', [challenge.id]);
     return res.status(403).json({ message: 'Account is deactivated. Contact your admin.' });
   }
-  if (user.can_login_accounts === false) {
-    await pool.query('DELETE FROM login_otps WHERE id = $1', [challenge.id]);
-    return res.status(403).json({ message: ACCOUNTS_LOGIN_DENIED });
-  }
+  assertAppLoginAccess(user, requestAppContext(req));
 
   await pool.query('UPDATE login_otps SET consumed_at = now() WHERE id = $1', [challenge.id]);
   res.json(await buildLoginPayload(user, req));
@@ -304,6 +302,10 @@ export const resendLoginOtp = asyncHandler(async (req, res) => {
 
   const { rows } = await pool.query('SELECT * FROM login_otps WHERE pending_token = $1 LIMIT 1', [String(pending_token)]);
   const challenge = rows[0];
+  const app = requestAppContext(req);
+  if (challenge && challenge.app_context !== app) {
+    return res.status(403).json({ code: 'APP_ACCESS_DENIED', message: 'This verification code belongs to another application. Please sign in again.' });
+  }
   if (!challenge || challenge.consumed_at || new Date(challenge.expires_at) < new Date()) {
     return res.status(401).json({ message: 'This sign-in attempt is no longer valid. Please sign in again.' });
   }
@@ -317,6 +319,7 @@ export const resendLoginOtp = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: 'Account is deactivated. Contact your admin.' });
   }
 
+  assertAppLoginAccess(user, app);
   const otp = String(crypto.randomInt(100000, 1000000));
   const otpHash = await hashPassword(otp);
   await pool.query(
@@ -363,9 +366,14 @@ export const refresh = asyncHandler(async (req, res) => {
     return res.status(401).json({ message: 'Invalid refresh token' });
   }
 
+  const context = requestAppContext(req);
+  assertAppLoginAccess(user, context, decoded);
+  // Legacy dgbooking sessions were unscoped and shared with Booking itself.
+  // Keep that parent session usable when its replica refreshes it first.
+  const app = decoded.app || (context === 'booking_accounts' ? 'booking' : context);
   const version = user.token_version;
-  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version });
-  const newRefreshToken = signRefreshToken({ id: user.id, version });
+  const accessToken = signAccessToken({ id: user.id, email: user.email, role: user.role, version, app });
+  const newRefreshToken = signRefreshToken({ id: user.id, version, app });
 
   res.json({ accessToken, refreshToken: newRefreshToken });
 });

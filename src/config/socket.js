@@ -1,6 +1,7 @@
 import { Server } from 'socket.io';
 import { verifyToken } from './jwt.js';
 import pool from './db.js';
+import { requestAppContext, assertAppLoginAccess } from '../services/appLoginAccess.js';
 
 let io;
 
@@ -74,12 +75,23 @@ export const initSocket = (server) => {
         }
     });
 
-    io.use((socket, next) => {
+    io.use(async (socket, next) => {
         const token = socket.handshake.auth.token;
         if (!token) return next(new Error('Authentication error'));
-
         try {
-            socket.user = verifyToken(token);
+            const decoded = verifyToken(token);
+            const app = requestAppContext({ headers: {
+                ...socket.handshake.headers,
+                'x-app-context': socket.handshake.auth.appContext,
+            } });
+            const { rows } = await pool.query(
+                'SELECT id, role, is_active, token_version, can_login_accounts, can_login_booking_accounts FROM users WHERE id=$1', [decoded.id]
+            );
+            const user = rows[0];
+            if (!user?.is_active || user.token_version !== decoded.version) throw new Error('Invalid session');
+            assertAppLoginAccess(user, app, decoded);
+            socket.user = { ...decoded, role: user.role };
+            socket.appContext = app;
             next();
         } catch {
             next(new Error('Authentication error'));
@@ -211,3 +223,11 @@ export const emitToUser = (userId, event, payload) => {
     const id = positiveId(userId);
     if (io && id) io.to(userRoom(id)).emit(event, payload);
 };
+
+// Immediately stop events for a revoked app without disconnecting a user's
+// independently permitted session in the other Accounts frontend.
+export function disconnectUserAppSockets(userId, app) {
+    for (const socket of io?.sockets?.sockets?.values() || []) {
+        if (String(socket.user?.id) === String(userId) && (!app || socket.appContext === app)) socket.disconnect(true);
+    }
+}

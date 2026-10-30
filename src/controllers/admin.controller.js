@@ -4,6 +4,7 @@ import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
 import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
+import { disconnectUserAppSockets } from '../config/socket.js';
 
 const SUPPORTED_MANAGED_ROLES = ['admin', 'sub_admin'];
 
@@ -109,7 +110,7 @@ export const createSubAdmin = asyncHandler(async (req, res) => {
 export const listSubAdmins = asyncHandler(async (req, res) => {
   // Show all non-super_admin users
   const result = await pool.query(
-    `SELECT id, name, email, phone, photo, role, is_active, can_login_accounts, can_login_booking, created_at, updated_at
+    `SELECT id, name, email, phone, photo, role, is_active, can_login_accounts, can_login_booking, can_login_booking_accounts, created_at, updated_at
      FROM users
      WHERE role IN ('admin', 'sub_admin')
      ORDER BY created_at DESC`
@@ -202,11 +203,10 @@ export const deleteSubAdmin = asyncHandler(async (req, res) => {
 
 /**
  * PATCH /admin/sub-admins/:id/access
- * Body: any of { is_active, can_login_accounts, can_login_booking } (booleans).
- * is_active blocks the ID everywhere; the other two gate sign-in per frontend:
- * Accounts = dgdefence.com (this backend), Booking = dgbooking.com (sales-backend).
+ * Body: any of { is_active, can_login_accounts, can_login_booking, can_login_booking_accounts }.
+ * App grants are independent; is_active blocks the ID everywhere.
  */
-const ACCESS_FIELDS = ['is_active', 'can_login_accounts', 'can_login_booking'];
+const ACCESS_FIELDS = ['is_active', 'can_login_accounts', 'can_login_booking', 'can_login_booking_accounts'];
 
 export const updateManagedUserAccess = asyncHandler(async (req, res) => {
   const targetUserId = parseInt(req.params.id, 10);
@@ -238,13 +238,19 @@ export const updateManagedUserAccess = asyncHandler(async (req, res) => {
 
   const updated = await userModel.update(targetUserId, updates, pool);
 
-  // Blocking, or closing Accounts sign-in, ends open dgdefence.com sessions now.
-  // Booking sessions end on their next request (sales-backend checks can_login_booking).
-  if (updates.is_active === false || updates.can_login_accounts === false) {
+  // Per-app revocation is checked on every request. Do not end another app
+  // session: both Accounts frontends can use the shared session table.
+  if (updates.is_active === false) {
     await pool.query(
       'UPDATE user_sessions SET logout_time = CURRENT_TIMESTAMP WHERE user_id = $1 AND logout_time IS NULL',
       [targetUserId]
     );
+  }
+
+  if (updates.is_active === false) disconnectUserAppSockets(targetUserId);
+  else {
+    if (updates.can_login_accounts === false) disconnectUserAppSockets(targetUserId, 'accounts');
+    if (updates.can_login_booking_accounts === false) disconnectUserAppSockets(targetUserId, 'booking_accounts');
   }
 
   const message = updates.is_active === undefined

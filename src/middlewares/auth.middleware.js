@@ -1,5 +1,6 @@
 import { verifyToken } from '../config/jwt.js';
 import pool from '../config/db.js';
+import { requestAppContext, assertAppLoginAccess } from '../services/appLoginAccess.js';
 
 // A screen commonly starts several authenticated requests at the same time.
 // When the database is remote, independently validating the same user/session
@@ -18,7 +19,7 @@ export const createAuthStateLoader = (db) => {
     const pending = (async () => {
       try {
         const result = await db.query(
-        `SELECT u.id, u.name, u.role, u.token_version, u.is_active, u.organization_id,
+        `SELECT u.id, u.name, u.role, u.token_version, u.is_active, u.organization_id, u.can_login_accounts, u.can_login_booking_accounts,
                 s.id AS session_id, s.logout_time AS session_logout_time
            FROM users u
            LEFT JOIN user_sessions s
@@ -66,6 +67,10 @@ export const createAuthMiddleware = ({ verify = verifyToken, loadState = loadAut
       return res.status(401).json({ message: 'Session expired. Please login again.' });
     }
 
+    const app = requestAppContext(req);
+    assertAppLoginAccess(dbUser, app, decoded);
+    req.appContext = app;
+
     if (decoded.version !== dbUser.token_version) {
       return res.status(401).json({ message: 'Session expired. Please login again.' });
     }
@@ -81,6 +86,7 @@ export const createAuthMiddleware = ({ verify = verifyToken, loadState = loadAut
     // decoded contains: id, email, role, version
     req.user = {
       ...decoded,
+      role: dbUser.role,
       organization_id: dbUser.organization_id || 1,
       // Request-scoped only. Downstream permission and visibility checks can
       // reuse a permission row already loaded by route middleware.

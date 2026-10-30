@@ -1,3 +1,4 @@
+import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
 import { ensureWalletStartup } from './services/walletStartup.service.js';
 import { ensureConstructionStartup } from './services/constructionStartup.service.js';
 import 'dotenv/config';
@@ -42,6 +43,7 @@ if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();
 
 connectDB().then(async () => {
+  await migrateBookingAccountsLogin(pool);
   await migratePlotAreaChanges(pool);
   await migratePlotBankRounding(pool);
   await migratePlotFixedDiscount(pool);
