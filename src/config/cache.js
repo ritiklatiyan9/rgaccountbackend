@@ -6,6 +6,11 @@ const stdTTL = parseInt(process.env.CACHE_STD_TTL_SECONDS || '45', 10);
 // ponytail: single-process cache; if the API ever runs multiple instances, swap back to a shared store
 const cache = new NodeCache({ stdTTL, checkperiod: 60, useClones: false });
 let cacheGeneration = 0;
+const invalidationListeners = new Set();
+export const onCacheInvalidation = listener => {
+  invalidationListeners.add(listener);
+  return () => invalidationListeners.delete(listener);
+};
 
 export const initCache = () => {
   console.log(`[Cache] node-cache ready (ttl ${stdTTL}s)`);
@@ -23,6 +28,7 @@ export const getCacheGeneration = () => cacheGeneration;
  * @returns {Promise<object|null>}
  */
 export const cacheGet = async (key) => cache.get(key) ?? null;
+export const cacheDelete = async (key) => cache.del(key);
 
 /** Sliding-window counter for the per-user rate limiter (shared node-cache,
  * TTL handles expiry). Returns the running count and seconds until reset. */
@@ -59,7 +65,9 @@ export const clearCacheByPrefixes = async (prefixes = []) => {
     p.replace(/^\/+/, '').replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
   ));
   const keys = cache.keys().filter((k) => regexes.some((r) => r.test(k)));
-  return cache.del(keys);
+  const deleted = cache.del(keys);
+  await Promise.allSettled([...invalidationListeners].map(listener => Promise.resolve().then(() => listener(prefixes))));
+  return deleted;
 };
 
 /**

@@ -1,3 +1,4 @@
+import { managementVisibleUserIds } from '../middlewares/imprestManagementAccess.middleware.js';
 import { runLoyaltyVaultSourceMaker } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -316,7 +317,7 @@ export const listAllocations = asyncHandler(async (req, res) => {
   const callerIsAdmin = ADMIN_ROLES.has(req.user.role) || hasImprestManagementScope(req);
 
   if (callerIsAdmin) {
-    const allocations = await imprestAllocationModel.findAllWithDetails(parsedSiteId, pool);
+    const allocations = await imprestAllocationModel.findAllWithDetails(parsedSiteId, pool, managementVisibleUserIds(req));
     return res.json({ allocations: await withProofUrls(allocations) });
   }
 
@@ -667,6 +668,10 @@ export const confirmReceipt = asyncHandler(async (req, res) => {
  */
 export const getBalance = asyncHandler(async (req, res) => {
   const userId = req.query.user_id ? parseInt(req.query.user_id) : req.user.id;
+  if (!Number.isSafeInteger(userId) || userId <= 0) return res.status(400).json({ message: 'A valid user_id is required' });
+  if (hasImprestManagementScope(req) && !ADMIN_ROLES.has(req.user.role) && !managementVisibleUserIds(req).includes(userId)) {
+    return res.status(403).json({ message: 'You do not have access to this person’s imprest' });
+  }
 
   // Admin can check any user's balance; sub-admin only their own
   if (!ADMIN_ROLES.has(req.user.role) && !hasImprestManagementScope(req) && userId !== req.user.id) {
@@ -701,6 +706,10 @@ export const getBalance = asyncHandler(async (req, res) => {
  */
 export const getLedger = asyncHandler(async (req, res) => {
   const userId = req.query.user_id ? parseInt(req.query.user_id) : req.user.id;
+  if (!Number.isSafeInteger(userId) || userId <= 0) return res.status(400).json({ message: 'A valid user_id is required' });
+  if (hasImprestManagementScope(req) && !ADMIN_ROLES.has(req.user.role) && !managementVisibleUserIds(req).includes(userId)) {
+    return res.status(403).json({ message: 'You do not have access to this person’s imprest' });
+  }
   const { date_from, date_to, page = 1, limit = 20, site_id } = req.query;
   const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
 
@@ -780,7 +789,8 @@ export const listTransferPeers = asyncHandler(async (req, res) => {
                u.email ASC`,
     [req.user.id, siteId]
   );
-  res.json({ peers: rows });
+  res.json({ peers: hasImprestManagementScope(req) && !ADMIN_ROLES.has(req.user.role)
+    ? rows.filter(row => managementVisibleUserIds(req).includes(Number(row.id))) : rows });
 });
 
 /**
@@ -943,6 +953,10 @@ export const listTransfers = asyncHandler(async (req, res) => {
 
   const callerIsAdmin = ADMIN_ROLES.has(req.user.role) || hasImprestManagementScope(req);
   const requestedUserId = parseInt(req.query.user_id, 10);
+  if (hasImprestManagementScope(req) && !ADMIN_ROLES.has(req.user.role) && req.query.user_id != null
+    && !managementVisibleUserIds(req).includes(requestedUserId)) {
+    return res.status(403).json({ message: 'You do not have access to this person’s imprest' });
+  }
   const userId = callerIsAdmin
     ? (Number.isInteger(requestedUserId) && requestedUserId > 0 ? requestedUserId : null)
     : req.user.id;
@@ -951,8 +965,8 @@ export const listTransfers = asyncHandler(async (req, res) => {
   const offset = (page - 1) * limit;
 
   const [transfers, totalItems] = await Promise.all([
-    imprestTransferModel.findWithDetails({ siteId, userId, limit, offset }, pool),
-    imprestTransferModel.count({ siteId, userId }, pool),
+    imprestTransferModel.findWithDetails({ siteId, userId, limit, offset, visibleUserIds: hasImprestManagementScope(req) ? managementVisibleUserIds(req) : null }, pool),
+    imprestTransferModel.count({ siteId, userId, visibleUserIds: hasImprestManagementScope(req) ? managementVisibleUserIds(req) : null }, pool),
   ]);
 
   res.json({
@@ -973,7 +987,7 @@ export const listTransfers = asyncHandler(async (req, res) => {
 export const getAllBalances = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   const parsedSiteId = req.imprestSiteId || (site_id ? parseInt(site_id) : null);
-  const balances = await imprestLedgerModel.getAllBalances(parsedSiteId, pool);
+  const balances = await imprestLedgerModel.getAllBalances(parsedSiteId, pool, managementVisibleUserIds(req));
   res.json({ balances });
 });
 
@@ -1177,9 +1191,9 @@ export const listExpenseRequests = asyncHandler(async (req, res) => {
   let requests;
   if (ADMIN_ROLES.has(req.user.role) || hasImprestManagementScope(req)) {
     if (status === 'PENDING') {
-      requests = await imprestExpenseRequestModel.findPending(parsedSiteId, pool);
+      requests = await imprestExpenseRequestModel.findPending(parsedSiteId, pool, managementVisibleUserIds(req));
     } else {
-      requests = await imprestExpenseRequestModel.findAllWithDetails(parsedSiteId, pool);
+      requests = await imprestExpenseRequestModel.findAllWithDetails(parsedSiteId, pool, managementVisibleUserIds(req));
     }
   } else if (scope === 'assigned') {
     requests = await imprestExpenseRequestModel.findAssignedToReviewer(req.user.id, parsedSiteId, pool);
@@ -1659,7 +1673,7 @@ export const listReturns = asyncHandler(async (req, res) => {
 
   let returns;
   if (ADMIN_ROLES.has(req.user.role) || hasImprestManagementScope(req)) {
-    returns = await imprestReturnModel.findAllWithDetails(parsedSiteId, pool);
+    returns = await imprestReturnModel.findAllWithDetails(parsedSiteId, pool, managementVisibleUserIds(req));
   } else {
     returns = await imprestReturnModel.findBySubAdminId(req.user.id, parsedSiteId, pool);
   }
@@ -1674,6 +1688,7 @@ export const getApprovalActivity = asyncHandler(async (req, res) => {
     isAdmin: ADMIN_ROLES.has(req.user.role),
     canReadPersonal: req.canReadPersonalImprest === true,
     canManage: req.canManageImprest === true,
+    visibleUserIds: managementVisibleUserIds(req),
   });
   res.json({ ...activity, received: await withProofUrls(activity.received) });
 });

@@ -1,7 +1,7 @@
 // One site-scoped snapshot for both approval surfaces. Only sent history is
 // capped; pending counts and amounts include every outstanding record.
 export async function loadImprestApprovalActivity(db, {
-  siteId, userId, isAdmin, canReadPersonal, canManage,
+  siteId, userId, isAdmin, canReadPersonal, canManage, visibleUserIds = isAdmin ? null : [],
 }) {
   const { rows } = await db.query(`
     WITH received AS (
@@ -11,12 +11,12 @@ export async function loadImprestApprovalActivity(db, {
              ($3 OR ($4 AND r.assigned_admin_id = $2 AND r.sub_admin_id <> $2)) AS can_decide
         FROM imprest_expense_requests r
        WHERE r.site_id = $1 AND r.status = 'PENDING'
-         AND ($5 OR ($4 AND r.assigned_admin_id = $2 AND r.sub_admin_id <> $2))
+         AND (($5 AND ($6::integer[] IS NULL OR r.sub_admin_id=ANY($6::integer[]))) OR ($4 AND r.assigned_admin_id = $2 AND r.sub_admin_id <> $2))
       UNION ALL
       SELECT 'imprest_return', to_jsonb(r), r.created_at, r.sub_admin_id,
              r.assigned_admin_id, 0::numeric, r.amount, $3
         FROM imprest_returns r
-       WHERE r.site_id = $1 AND r.status = 'PENDING' AND $5
+       WHERE r.site_id = $1 AND r.status = 'PENDING' AND $5 AND ($6::integer[] IS NULL OR r.sub_admin_id=ANY($6::integer[]))
       UNION ALL
       SELECT 'allocation', to_jsonb(a), a.created_at, a.admin_id,
              a.assigned_admin_id, 0::numeric, a.amount, true
@@ -76,7 +76,7 @@ export async function loadImprestApprovalActivity(db, {
       ((SELECT count(*) FROM imprest_expense_requests WHERE site_id=$1 AND sub_admin_id=$2 AND status='PENDING' AND $4)
        + (SELECT count(*) FROM imprest_returns WHERE site_id=$1 AND sub_admin_id=$2 AND status='PENDING' AND $4)
        + (SELECT count(*) FROM imprest_allocations WHERE site_id=$1 AND admin_id=$2 AND status='PENDING_RECEIPT' AND ($4 OR $3)))::integer AS sent_pending
-  `, [siteId, userId, isAdmin, canReadPersonal, canManage]);
+  `, [siteId, userId, isAdmin, canReadPersonal, canManage, visibleUserIds]);
   const row = rows[0];
   return {
     received: row.received,

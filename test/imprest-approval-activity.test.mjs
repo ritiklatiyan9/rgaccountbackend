@@ -55,14 +55,21 @@ test('Imprest approval activity isolates sites and permissions and reflects deci
       assert.equal(activity.counts.sent_pending,1);
     });
     await t.test('Management grants site visibility without granting financial decisions', async () => {
-      const activity = await snapshot({userId:4,canReadPersonal:false,canManage:true});
+      const activity = await snapshot({userId:4,canReadPersonal:false,canManage:true,visibleUserIds:[2,3]});
       assert.equal(activity.counts.received,4);
       assert.ok(activity.received.every(r => r.can_decide === false));
       assert.deepEqual(activity.sent,[]);
-      const assignedObserver = await snapshot({canManage:true});
+      const assignedObserver = await snapshot({canManage:true,visibleUserIds:[2,3]});
       assert.ok(assignedObserver.received.find(r => r._type==='imprest' && r.id===2).can_decide);
       assert.equal(assignedObserver.received.find(r => r._type==='imprest' && r.id===3).can_decide,false);
       assert.equal(assignedObserver.received.find(r => r._type==='imprest_return').can_decide,false);
+    });
+    await t.test('Management counts and totals include only selected people', async () => {
+      const selected = await snapshot({userId:4,canReadPersonal:false,canManage:true,visibleUserIds:[3]});
+      assert.deepEqual(selected.received.map(row=>[row._type,row.id]),[['imprest',2]]);
+      assert.deepEqual(selected.totals,{debit:200,credit:0});
+      const empty = await snapshot({userId:4,canReadPersonal:false,canManage:true,visibleUserIds:[]});
+      assert.equal(empty.counts.received,0);
     });
     await t.test('revocation removes both the inbox and history immediately', async () => {
       const activity = await snapshot({canReadPersonal:false,canManage:false});

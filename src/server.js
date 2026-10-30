@@ -1,3 +1,4 @@
+import { up as migrateImprestVisibility } from './migrations/229_imprest_management_visibility.js';
 import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
 import { ensureWalletStartup } from './services/walletStartup.service.js';
 import { ensureConstructionStartup } from './services/constructionStartup.service.js';
@@ -44,6 +45,7 @@ initCache();
 
 connectDB().then(async () => {
   await migrateBookingAccountsLogin(pool);
+  await migrateImprestVisibility(pool);
   await migratePlotAreaChanges(pool);
   await migratePlotBankRounding(pool);
   await migratePlotFixedDiscount(pool);

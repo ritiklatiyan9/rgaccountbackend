@@ -20,6 +20,8 @@ import { getFinanceForecast } from './services/forecast.service.js';
 import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes } from '../config/cache.js';
 import pool from '../config/db.js';
 import { inventoryModel } from '../models/Inventory.model.js';
+import { buildProfitPortfolio } from '../services/profitPortfolio.service.js';
+import { getProfitPortfolioSnapshot } from '../services/profitPortfolioSnapshot.service.js';
 
 const PRIVILEGED_ROLES = new Set(['admin', 'super_admin']);
 
@@ -940,9 +942,125 @@ const FinanceForecastType = new GraphQLObjectType({
   },
 });
 
+const ProfitPortfolioShareType = new GraphQLObjectType({
+  name: 'ProfitPortfolioShare',
+  fields: {
+    id: { type: GraphQLID }, member_id: { type: GraphQLID }, farmer_id: { type: GraphQLID },
+    share_pct: { type: GraphQLFloat }, notes: { type: GraphQLString }, full_name: { type: GraphQLString },
+    member_type: { type: GraphQLString }, phone: { type: GraphQLString }, photo: { type: GraphQLString },
+  },
+});
+const ProfitPortfolioSideType = new GraphQLObjectType({
+  name: 'ProfitPortfolioSide',
+  fields: { expectedProfit: { type: GraphQLFloat }, currentProfit: { type: GraphQLFloat } },
+});
+const ProfitPortfolioProfitType = new GraphQLObjectType({
+  name: 'ProfitPortfolioProfit',
+  fields: {
+    expectedProfit: { type: GraphQLFloat }, currentProfit: { type: GraphQLFloat }, runningExpense: { type: GraphQLFloat },
+    siteBalance: { type: GraphQLFloat }, siteBalanceDetail: { type: SiteBalanceDetailType },
+    plotIncoming: { type: PlotIncomingType }, landProfitDetail: { type: LandProfitDetailType },
+    plot: { type: ProfitPortfolioSideType }, land: { type: ProfitPortfolioSideType },
+  },
+});
+const ProfitPortfolioLandType = new GraphQLObjectType({
+  name: 'ProfitPortfolioLand',
+  fields: {
+    farmer_id: { type: GraphQLID }, name: { type: GraphQLString }, saleValue: { type: GraphQLFloat },
+    soldCost: { type: GraphQLFloat }, otherCost: { type: GraphQLFloat }, bookProfit: { type: GraphQLFloat },
+    received: { type: GraphQLFloat }, paid: { type: GraphQLFloat }, expectedProfit: { type: GraphQLFloat },
+    currentProfit: { type: GraphQLFloat }, shares: { type: new GraphQLList(ProfitPortfolioShareType) },
+  },
+});
+const ProfitPortfolioPaidType = new GraphQLObjectType({
+  name: 'ProfitPortfolioPaid',
+  fields: {
+    member_id: { type: GraphQLID }, full_name: { type: GraphQLString }, phone: { type: GraphQLString }, photo: { type: GraphQLString },
+    paid: { type: GraphQLFloat }, payment_count: { type: GraphQLInt },
+  },
+});
+const ProfitPortfolioLedgerType = new GraphQLObjectType({
+  name: 'ProfitPortfolioLedger',
+  fields: {
+    id: { type: GraphQLID }, site_id: { type: GraphQLID }, ledger_type: { type: GraphQLString }, ledger_name: { type: GraphQLString },
+    linked_member_id: { type: GraphQLID }, is_locked: { type: GraphQLBoolean }, opening_balance: { type: GraphQLFloat }, total_debit: { type: GraphQLFloat },
+    total_credit: { type: GraphQLFloat }, entry_count: { type: GraphQLInt }, month: { type: GraphQLInt }, year: { type: GraphQLInt },
+    profit_given_debit: { type: GraphQLFloat }, profit_return_credit: { type: GraphQLFloat },
+  },
+});
+const ProfitPortfolioPaymentType = new GraphQLObjectType({
+  name: 'ProfitPortfolioPayment',
+  fields: {
+    id: { type: GraphQLID }, site_id: { type: GraphQLID }, member_id: { type: GraphQLID },
+    full_name: { type: GraphQLString }, phone: { type: GraphQLString }, photo: { type: GraphQLString },
+    date: { type: GraphQLString }, transaction_time: { type: GraphQLString }, amount: { type: GraphQLFloat },
+    posted_amount: { type: GraphQLFloat }, tds_amount: { type: GraphQLFloat }, status: { type: GraphQLString },
+    entry_transfer_id: { type: GraphQLID }, payment_mode: { type: GraphQLString }, bank_name: { type: GraphQLString },
+    bank_reference: { type: GraphQLString }, remarks: { type: GraphQLString }, bank_account_id: { type: GraphQLID },
+    created_by_name: { type: GraphQLString }, voucher_url: { type: GraphQLString }, tds_rate: { type: GraphQLFloat },
+    tds_mode: { type: GraphQLString }, tds_section: { type: GraphQLString }, tds_module: { type: GraphQLString },
+    tds_member_id: { type: GraphQLID }, tds_deductee_name: { type: GraphQLString }, tds_pan: { type: GraphQLString },
+    tds_aadhaar: { type: GraphQLString },
+  },
+});
+const ProfitPortfolioSiteType = new GraphQLObjectType({
+  name: 'ProfitPortfolioSite',
+  fields: {
+    siteId: { type: new GraphQLNonNull(GraphQLID) }, siteName: { type: new GraphQLNonNull(GraphQLString) },
+    profit: { type: ProfitPortfolioProfitType }, shares: { type: new GraphQLList(ProfitPortfolioShareType) },
+    lands: { type: new GraphQLList(ProfitPortfolioLandType) }, payments: { type: new GraphQLList(ProfitPortfolioPaidType) },
+    personalLedgers: { type: new GraphQLList(ProfitPortfolioLedgerType) }, profitPayments: { type: new GraphQLList(ProfitPortfolioPaymentType) },
+    personalLedgersUnavailable: { type: GraphQLBoolean }, profitPaymentsUnavailable: { type: GraphQLBoolean },
+  },
+});
+const ProfitPortfolioFailureType = new GraphQLObjectType({
+  name: 'ProfitPortfolioFailure',
+  fields: { id: { type: GraphQLID }, name: { type: GraphQLString }, message: { type: GraphQLString }, scopeChanged: { type: GraphQLBoolean } },
+});
+const ProfitPortfolioType = new GraphQLObjectType({
+  name: 'ProfitPortfolio',
+  fields: {
+    data: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(ProfitPortfolioSiteType))) },
+    failures: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(ProfitPortfolioFailureType))) },
+    completed: { type: new GraphQLNonNull(GraphQLInt) }, total: { type: new GraphQLNonNull(GraphQLInt) },
+    generatedAt: { type: GraphQLString }, refreshing: { type: GraphQLBoolean }, cacheStatus: { type: GraphQLString },
+  },
+});
+
 const QueryType = new GraphQLObjectType({
   name: 'Query',
   fields: {
+    profitPortfolio: {
+      type: ProfitPortfolioType,
+      args: {
+        siteIds: { type: new GraphQLNonNull(new GraphQLList(new GraphQLNonNull(GraphQLID))) },
+        excludeOldPlots: { type: GraphQLBoolean }, refresh: { type: GraphQLBoolean }, overall: { type: GraphQLBoolean },
+      },
+      async resolve(_, { siteIds, excludeOldPlots = false, refresh = false, overall = false }, ctx) {
+        if (!ctx?.user) throw new GraphQLError('Authentication required', { extensions: { code: 'UNAUTHENTICATED' } });
+        if (!PRIVILEGED_ROLES.has(ctx.user.role)) throw new GraphQLError('Administrator access is required for the profit portfolio', { extensions: { code: 'FORBIDDEN' } });
+        const ids = [...new Set(siteIds.map(id => requirePositiveId(id, 'siteId')))].sort((a, b) => a - b);
+        if (ids.length > 1000) throw new GraphQLError('Too many sites requested', { extensions: { code: 'BAD_USER_INPUT' } });
+        // Authoritative metadata is deliberately read before any snapshot. A
+        // switched-off overall site must not survive an old cached portfolio.
+        const { rows: sites } = ids.length ? await pool.query('SELECT id, name, include_in_overall FROM sites WHERE id = ANY($1::int[])', [ids]) : { rows: [] };
+        const names = new Map(sites.map(site => [Number(site.id), site.name]));
+        const allowedIds = sites.filter(site => !overall || site.include_in_overall !== false).map(site => Number(site.id)).sort((a, b) => a - b);
+        const allowed = new Set(allowedIds);
+        const scopeFailures = ids.filter(id => !allowed.has(id)).map(id => ({ id, name: names.get(id) || `Site ${id}`, scopeChanged: true,
+          message: names.has(id) ? 'This site is excluded from overall reports.' : 'This site is no longer available.' }));
+        const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+        const date = new Date(`${today}T00:00:00Z`); date.setUTCDate(date.getUTCDate() + 1);
+        const end = date.toISOString().slice(0, 10);
+        const snapshot = await getProfitPortfolioSnapshot({ userId: ctx.user.id, siteIds: allowedIds, end, excludeOldPlots, refresh },
+          () => buildProfitPortfolio(allowedIds, end, excludeOldPlots));
+        return { ...snapshot.value,
+          data: snapshot.value.data.map(site => ({ ...site, siteName: names.get(Number(site.siteId)) || site.siteName })),
+          failures: [...scopeFailures, ...snapshot.value.failures.map(site => ({ ...site, name: names.get(Number(site.id)) || site.name }))],
+          completed: ids.length, total: ids.length, generatedAt: snapshot.generatedAt,
+          refreshing: snapshot.refreshing, cacheStatus: snapshot.cacheStatus };
+      },
+    },
     financeForecast: {
       type: FinanceForecastType,
       args: {

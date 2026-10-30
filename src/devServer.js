@@ -1,3 +1,4 @@
+import { up as migrateImprestVisibility } from './migrations/229_imprest_management_visibility.js';
 import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
 import 'dotenv/config';
 import http from 'node:http';
@@ -33,6 +34,7 @@ if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();
 connectDB().then(async () => {
   await migrateBookingAccountsLogin(pool);
+  await migrateImprestVisibility(pool);
   await migratePlotAreaChanges(pool);
   await migratePlotBankRounding(pool);
   await migrateMemberSiteSharing(pool);

@@ -71,7 +71,7 @@ class ImprestAllocationModel extends MasterModel {
   /**
    * All allocations (admin view - all sub-admins)
    */
-  async findAllWithDetails(siteId, pool) {
+  async findAllWithDetails(siteId, pool, visibleUserIds = null) {
     let query = `
       SELECT ia.*,
              sa.name as sub_admin_name, sa.email as sub_admin_email,
@@ -88,6 +88,10 @@ class ImprestAllocationModel extends MasterModel {
     if (siteId) {
       query += ` WHERE ia.site_id = $1`;
       params.push(siteId);
+    }
+    if (visibleUserIds !== null) {
+      params.push(visibleUserIds);
+      query += ` ${siteId ? 'AND' : 'WHERE'} (ia.sub_admin_id = ANY($${params.length}::integer[]) OR ia.admin_id = ANY($${params.length}::integer[]))`;
     }
     query += ` ORDER BY ia.created_at DESC`;
     const result = await pool.query(query, params);
@@ -378,7 +382,7 @@ class ImprestLedgerModel extends MasterModel {
   /**
    * Get all sub-admin balances (admin overview)
    */
-  async getAllBalances(siteId, pool) {
+  async getAllBalances(siteId, pool, visibleUserIds = null) {
     const ledgerFilter = siteId ? 'WHERE site_id = $1' : '';
     const reservationFilter = siteId ? 'WHERE site_id = $1' : '';
     const query = `
@@ -416,6 +420,7 @@ class ImprestLedgerModel extends MasterModel {
       LEFT JOIN reservation_totals rt ON rt.user_id = u.id
       WHERE u.role = 'sub_admin'
         AND u.is_active = true
+        ${visibleUserIds !== null ? `AND u.id = ANY($${siteId ? 2 : 1}::integer[])` : ''}
         ${siteId ? `AND (
           EXISTS (
             SELECT 1 FROM user_sites us
@@ -425,6 +430,7 @@ class ImprestLedgerModel extends MasterModel {
       ORDER BY u.name ASC
     `;
     const params = siteId ? [siteId] : [];
+    if (visibleUserIds !== null) params.push(visibleUserIds);
     const result = await pool.query(query, params);
     return result.rows;
   }
@@ -436,7 +442,7 @@ class ImprestTransferModel extends MasterModel {
     super('imprest_transfers');
   }
 
-  async findWithDetails({ siteId, userId = null, limit = 100, offset = 0 }, pool) {
+  async findWithDetails({ siteId, userId = null, limit = 100, offset = 0, visibleUserIds = null }, pool) {
     const params = [siteId];
     let query = `
       SELECT it.*,
@@ -457,18 +463,26 @@ class ImprestTransferModel extends MasterModel {
       params.push(userId);
       query += ` AND (it.from_user_id = $2 OR it.to_user_id = $2)`;
     }
+    if (visibleUserIds !== null) {
+      params.push(visibleUserIds);
+      query += ` AND (it.from_user_id = ANY($${params.length}::integer[]) OR it.to_user_id = ANY($${params.length}::integer[]))`;
+    }
     params.push(limit, offset);
     query += ` ORDER BY it.created_at DESC, it.id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`;
     const result = await pool.query(query, params);
     return result.rows;
   }
 
-  async count({ siteId, userId = null }, pool) {
+  async count({ siteId, userId = null, visibleUserIds = null }, pool) {
     const params = [siteId];
     let query = `SELECT COUNT(*)::int AS total FROM imprest_transfers WHERE site_id = $1`;
     if (userId) {
       params.push(userId);
       query += ` AND (from_user_id = $2 OR to_user_id = $2)`;
+    }
+    if (visibleUserIds !== null) {
+      params.push(visibleUserIds);
+      query += ` AND (from_user_id = ANY($${params.length}::integer[]) OR to_user_id = ANY($${params.length}::integer[]))`;
     }
     const result = await pool.query(query, params);
     return result.rows[0].total;
@@ -484,7 +498,7 @@ class ImprestExpenseRequestModel extends MasterModel {
   /**
    * Find pending requests (admin view)
    */
-  async findPending(siteId, pool) {
+  async findPending(siteId, pool, visibleUserIds = null) {
     let query = `
       SELECT ier.*, u.name as sub_admin_name, u.email as sub_admin_email,
              s.name as site_name, asa.name as assigned_admin_name
@@ -499,6 +513,10 @@ class ImprestExpenseRequestModel extends MasterModel {
       query += ` AND ier.site_id = $1`;
       params.push(siteId);
     }
+    if (visibleUserIds !== null) {
+      params.push(visibleUserIds);
+      query += ` AND ier.sub_admin_id = ANY($${params.length}::integer[])`;
+    }
     query += ` ORDER BY ier.created_at DESC`;
     const result = await pool.query(query, params);
     return result.rows;
@@ -507,7 +525,7 @@ class ImprestExpenseRequestModel extends MasterModel {
   /**
    * Find all requests with details
    */
-  async findAllWithDetails(siteId, pool) {
+  async findAllWithDetails(siteId, pool, visibleUserIds = null) {
     let query = `
       SELECT ier.*, u.name as sub_admin_name, u.email as sub_admin_email,
              s.name as site_name, r.name as reviewer_name,
@@ -522,6 +540,10 @@ class ImprestExpenseRequestModel extends MasterModel {
     if (siteId) {
       query += ` WHERE ier.site_id = $1`;
       params.push(siteId);
+    }
+    if (visibleUserIds !== null) {
+      params.push(visibleUserIds);
+      query += ` ${siteId ? 'AND' : 'WHERE'} ier.sub_admin_id = ANY($${params.length}::integer[])`;
     }
     query += ` ORDER BY ier.created_at DESC`;
     const result = await pool.query(query, params);
@@ -628,7 +650,7 @@ class ImprestReturnModel extends MasterModel {
   /**
    * Find all pending returns (admin view)
    */
-  async findPending(siteId, pool) {
+  async findPending(siteId, pool, visibleUserIds = null) {
     let query = `
       SELECT ir.*, u.name as sub_admin_name, u.email as sub_admin_email,
              s.name as site_name, asa.name as assigned_admin_name
@@ -643,12 +665,16 @@ class ImprestReturnModel extends MasterModel {
       query += ` AND ir.site_id = $1`;
       params.push(siteId);
     }
+    if (visibleUserIds !== null) {
+      params.push(visibleUserIds);
+      query += ` AND ir.sub_admin_id = ANY($${params.length}::integer[])`;
+    }
     query += ` ORDER BY ir.created_at DESC`;
     const result = await pool.query(query, params);
     return result.rows;
   }
 
-  async findAllWithDetails(siteId, pool) {
+  async findAllWithDetails(siteId, pool, visibleUserIds = null) {
     let query = `
       SELECT ir.*, u.name as sub_admin_name, u.email as sub_admin_email,
              s.name as site_name, r.name as reviewer_name,
@@ -663,6 +689,10 @@ class ImprestReturnModel extends MasterModel {
     if (siteId) {
       query += ` WHERE ir.site_id = $1`;
       params.push(siteId);
+    }
+    if (visibleUserIds !== null) {
+      params.push(visibleUserIds);
+      query += ` ${siteId ? 'AND' : 'WHERE'} ir.sub_admin_id = ANY($${params.length}::integer[])`;
     }
     query += ` ORDER BY ir.created_at DESC`;
     const result = await pool.query(query, params);
