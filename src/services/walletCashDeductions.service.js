@@ -39,7 +39,7 @@ export async function addWalletCashDeductions(database, { organizationId, siteId
     && ['opening_cash','received_at_start','handovers_at_start','adjustments_at_start','recorded_balance_at_start']
       .every(key => /^-?\d+(?:\.\d{1,2})?$/.test(String(row[key] ?? ''))));
   if (!openings.length) return states;
-  const scopes = JSON.stringify(openings.map(row => ({ holder_key: `user:${row.holder_id}`, started_at: row.started_at })));
+  const scopes = JSON.stringify(openings.map(row => ({ holder_key: `user:${row.holder_id}`, holder_id: row.holder_id, started_at: row.started_at })));
   const { rows: spending } = await database.query(`WITH scopes AS (
       SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(holder_key text,started_at timestamptz)
     ), cash_payments AS MATERIALIZED (
@@ -59,17 +59,31 @@ export async function addWalletCashDeductions(database, { organizationId, siteId
         FILTER (WHERE p.source_key IS NOT NULL AND p.amount <> 0), '[]'::jsonb) AS modules
     FROM scopes r LEFT JOIN by_source p ON p.holder_key=r.holder_key GROUP BY r.holder_key`, [organizationId, siteId, scopes, endDate]);
   const { rows: floats } = await database.query(`WITH scopes AS (
-      SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(holder_key text,started_at timestamptz)
+      SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(holder_key text,holder_id integer,started_at timestamptz)
     ), accounts AS (
       SELECT r.holder_key,il.user_id,COALESCE(sum(il.amount),0) AS current_float,
-        COALESCE(sum(il.amount) FILTER(WHERE il.created_at<r.started_at),0) AS opening_float,
-        COALESCE(sum(il.amount) FILTER(WHERE il.type = 'ALLOCATION' AND il.amount > 0),0) AS given
+        COALESCE(sum(il.amount) FILTER(WHERE il.created_at<r.started_at),0) AS opening_float
       FROM scopes r JOIN imprest_ledger il ON il.site_id=$2 AND il.created_at<$4::date
       JOIN sites s ON s.id=il.site_id AND s.organization_id=$1
       JOIN users u ON u.id=il.user_id AND LOWER(COALESCE(u.role,'')) NOT IN ('admin','super_admin')
       GROUP BY r.holder_key,il.user_id
-    ) SELECT holder_key,sum(GREATEST(current_float,0)-GREATEST(opening_float,0))::text AS imprest,
-      sum(given)::text AS imprest_given FROM accounts GROUP BY holder_key`, [organizationId, siteId, scopes, endDate]);
+    ), float_totals AS (
+      SELECT holder_key,sum(GREATEST(current_float,0)-GREATEST(opening_float,0)) AS imprest
+      FROM accounts GROUP BY holder_key
+    ), given_totals AS (
+      -- Gross cash given belongs to its giver, rather than every Admin wallet.
+      -- Received allocations are authoritative for both handovers and approved
+      -- refill requests; ledger expenses, returns and peer transfers are unrelated.
+      SELECT r.holder_key,sum(a.amount) AS imprest_given
+      FROM scopes r JOIN imprest_allocations a ON a.admin_id=r.holder_id AND a.site_id=$2
+      JOIN sites s ON s.id=a.site_id AND s.organization_id=$1
+      WHERE a.status='RECEIVED' AND a.from_own_float IS NOT TRUE AND a.amount>0
+        AND COALESCE(a.confirmed_at,a.created_at)<($4::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+      GROUP BY r.holder_key
+    ) SELECT r.holder_key,COALESCE(f.imprest,0)::text AS imprest,
+      COALESCE(g.imprest_given,0)::text AS imprest_given
+      FROM scopes r LEFT JOIN float_totals f USING(holder_key)
+      LEFT JOIN given_totals g USING(holder_key)`, [organizationId, siteId, scopes, endDate]);
   const spendByHolder = new Map(spending.map(row => [row.holder_key, row]));
   const floatByHolder = new Map(floats.map(row => [row.holder_key, row]));
   for (const opening of openings) {
