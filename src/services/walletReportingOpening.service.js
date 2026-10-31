@@ -27,7 +27,7 @@ export async function planWalletReportingOpening(database,{organizationId,siteId
   const prior=(await readWalletReportingOpenings(organizationId,siteId,database)).find(row=>row.holder_id===holderId);
   if(prior) return {prior,user,replayed:true};
   const {rows}=await database.query(`WITH ${siteVaultAccountsCte('$1','$2')}
-    SELECT total_received::text,total_handover::text,total_adjustments::text,balance::text
+    SELECT total_received::text,total_handover::text,total_adjustments::text,total_imprest_out::text,balance::text
     FROM site_accounts WHERE holder_key=$3`,[organizationId,siteId,`user:${holderId}`]);
   const totals=rows[0]||{total_received:'0.00',total_handover:'0.00',total_adjustments:'0.00',balance:'0.00'};
   // Match the existing wallet read: aligned wallets use current custody;
@@ -39,7 +39,7 @@ export async function planWalletReportingOpening(database,{organizationId,siteId
     FROM loyalty_vault_entries e WHERE organization_id=$1 AND site_id=$2`,[organizationId,siteId])).rows[0];
   const opening={version:1,organization_id:organizationId,site_id:siteId,holder_type:'user',holder_id:holderId,
     opening_cash:cash.balance,received_at_start:totals.total_received,handovers_at_start:totals.total_handover,
-    adjustments_at_start:totals.total_adjustments,recorded_balance_at_start:totals.balance,
+    adjustments_at_start:totals.total_adjustments,imprest_out_at_start:totals.total_imprest_out||'0.00',recorded_balance_at_start:totals.balance,
     started_at:new Date(clock.started_at).toISOString(),operation_key:operationKey,
     basis:'Wallet report opening from current accounted cash; historical postings unchanged'};
   if(!validWalletReportingOpening(opening)) throw new Error('The opening snapshot is invalid.');

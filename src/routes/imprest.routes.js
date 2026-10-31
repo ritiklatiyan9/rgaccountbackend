@@ -39,6 +39,7 @@ import { requireImprestReadAccess, requireImprestBalanceAccess } from '../middle
 import requireImprestSiteAccess, { requireImprestParticipant } from '../middlewares/imprestSiteAccess.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import uploadProofPhoto from '../middlewares/proofUpload.middleware.js';
+import walletImprestTransferRoutes from './walletImprestTransfer.routes.js';
 
 const cachedImprestRead = cacheResponse({ ttlSeconds: 30, namespace: 'imprest' });
 const imprestReadCache = (req, res, next) => req.user.role === 'sub_admin' ? next() : cachedImprestRead(req, res, next);
@@ -62,6 +63,7 @@ const requireAssignedReviewer = requireImprestParticipant({
 
 // All imprest routes require auth
 router.use(authMiddleware);
+router.use('/wallet-transfers',walletImprestTransferRoutes);
 
 router.get('/management-settings', requireRole('admin'), getManagementSettings);
 router.put('/management-settings/:userId', requireRole('admin'), bustImprestCache, saveManagementSettings);

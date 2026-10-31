@@ -14,6 +14,7 @@ import { canViewAllWallets, withWalletVisibility } from '../services/walletVisib
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 import { getOverallWalletOverview } from '../services/overallWallet.service.js';
 import { readWalletReportingOpenings } from '../services/walletReportingOpening.service.js';
+import { walletActivityScope, addWalletAmountFilters, addWalletActorFilter, addWalletModuleFilter, addWalletPartyFilters } from '../services/walletActivityFilters.service.js';
 
 async function walletReadActor(req) {
   const user = req.authenticatedUser && Number(req.authenticatedUser.id) === Number(req.user?.id)
@@ -88,7 +89,7 @@ export const summary = asyncHandler(async(req,res)=>{
     (COALESCE(w.balance,0)-COALESCE(w.reserved_balance,0))::text AS available_balance,'INR' AS currency,s.tracking_started_at,
     (SELECT COALESCE(sum(balance),0)::text FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS total_balance,
     CASE WHEN $3::boolean THEN (SELECT COALESCE(sum(amount),0)::text FROM loyalty_vault_entries
-      WHERE organization_id=$2 AND site_id=$4 AND kind NOT IN ('transfer_in','transfer_out')) ELSE NULL END AS site_cash_incoming,
+      WHERE organization_id=$2 AND site_id=$4 AND kind NOT IN ('transfer_in','transfer_out','imprest_out')) ELSE NULL END AS site_cash_incoming,
     (SELECT COALESCE(sum(reserved_balance),0)::text FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS total_reserved_balance,
     (SELECT count(*)::int FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS holder_count,
     (SELECT COALESCE(sum(entry_count),0)::int FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS entry_count,
@@ -126,6 +127,7 @@ export const holders = asyncHandler(async(req,res)=>{
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_received,0)::text ELSE NULL END AS total_received,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_adjustments,0)::text ELSE NULL END AS total_adjustments,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_handover,0)::text ELSE NULL END AS total_handover,
+      CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.total_imprest_out,0)::text ELSE NULL END AS total_imprest_out,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.reserved_balance,0)::text ELSE NULL END AS reserved_balance,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text ELSE NULL END AS available_balance,
       ($7::boolean OR (h.holder_type='user' AND h.holder_id=$1)) AS can_transfer_from,
@@ -151,7 +153,7 @@ export const userDetail = asyncHandler(async(req,res)=>{
   ) SELECT u.id,u.name,to_jsonb(u)->>'email' AS email,u.role,u.is_active,to_jsonb(u)->>'phone' AS phone,
     COALESCE(a.balance,0)::text AS balance,COALESCE(a.reserved_balance,0)::text AS reserved_balance,
     COALESCE(a.total_in,0)::text AS total_in,COALESCE(a.total_handover,0)::text AS total_handover,
-    COALESCE(a.total_received,0)::text AS total_received,COALESCE(a.total_adjustments,0)::text AS total_adjustments,
+    COALESCE(a.total_received,0)::text AS total_received,COALESCE(a.total_adjustments,0)::text AS total_adjustments,COALESCE(a.total_imprest_out,0)::text AS total_imprest_out,
     (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text AS available_balance,a.updated_at,pending.*
     FROM users u CROSS JOIN pending LEFT JOIN site_accounts a ON a.holder_key='user:'||u.id::text
     WHERE u.id=$1 AND u.organization_id=$2 AND (u.role IN ('super_admin','admin') OR (u.role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3)) OR a.holder_key IS NOT NULL)`,[id,actor.organization_id,siteId]);
@@ -161,11 +163,17 @@ export const userDetail = asyncHandler(async(req,res)=>{
 });
 
 export const assignedTransactions = asyncHandler(async(req,res)=>{
-  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id),{page,limit,offset}=pagination(req.query);
+  const actor=await walletReadActor(req);
+  const data=await walletReadTransaction(pool,async db=>{
+  const activity=await walletActivityScope(actor,req.query,req.path?.includes('/overall/'),db),{page,limit,offset}=pagination(req.query);
+  const {siteId,siteIds}=activity;
   const scope=vaultTransactionScope(actor),params=[...scope.params],clauses=[scope.clause];
   if(req.query.holder_type||req.query.holder_id){const selected=holder(req.query.holder_type,req.query.holder_id);
-    await validateHolder(actor,selected,pool,siteId,true);params.push(selected.type,selected.id);clauses.push(`holder_type=$${params.length-1} AND holder_id=$${params.length}`);}
-  if(siteId){params.push(siteId);clauses.push(`site_id=$${params.length}`);}
+    await validateHolder(actor,selected,db,siteId,true);params.push(selected.type,selected.id);clauses.push(`holder_type=$${params.length-1} AND holder_id=$${params.length}`);}
+  params.push(siteIds);clauses.push(`site_id=ANY($${params.length}::int[])`);
+  addWalletAmountFilters(req.query,params,clauses,'(credit+debit)');
+  addWalletActorFilter(req.query,params,clauses,"NULLIF(COALESCE(source->>'created_by',cash->>'created_by'),'')::integer");
+  addWalletModuleFilter(req.query,params,clauses,{source:'source_table',transfer:null});
   if(req.query.source_table||req.query.source_id){
     const table=String(req.query.source_table||'');
     if(!LOYALTY_VAULT_SOURCE_TABLES.has(table)) throw walletError('Unknown transaction source.');
@@ -180,16 +188,18 @@ export const assignedTransactions = asyncHandler(async(req,res)=>{
   const q=String(req.query.q||'').trim();if(q.length>200)throw walletError('Keep search within 200 characters.');
   if(q){params.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);clauses.push(`concat_ws(' ',holder_name,site_name,plot_no,buyer_name,source_table,source_id::text,cash->>'particular',source->>'remarks',source->>'cheque_no') ILIKE $${params.length} ESCAPE '\\'`);}
   const where=clauses.join(' AND ');
-  const {rows}=await walletReadQuery(pool, `${vaultTransactionsCte} SELECT *,count(*) OVER()::int AS total,
+  const {rows}=await db.query( `${vaultTransactionsCte} SELECT *,count(*) OVER()::int AS total,
     COALESCE(sum(credit) OVER(),0)::text AS total_credit,COALESCE(sum(debit) OVER(),0)::text AS total_debit,
     COALESCE(sum(posted_amount) OVER(),0)::text AS total_posted_amount FROM assigned_transactions WHERE ${where}
     ORDER BY cash_flow_entry_id DESC LIMIT $${params.length+1} OFFSET $${params.length+2}`,[...params,limit,offset]);
-  const aggregate=rows[0] || (offset ? (await walletReadQuery(pool, `${vaultTransactionsCte} SELECT count(*)::int AS total,
+  const aggregate=rows[0] || (offset ? (await db.query( `${vaultTransactionsCte} SELECT count(*)::int AS total,
     COALESCE(sum(credit),0)::text AS total_credit,COALESCE(sum(debit),0)::text AS total_debit,
     COALESCE(sum(posted_amount),0)::text AS total_posted_amount FROM assigned_transactions WHERE ${where}`,params)).rows[0]
     : {total:0,total_credit:'0',total_debit:'0',total_posted_amount:'0'});
-  res.set('Cache-Control','no-store').json({site_id:siteId,transactions:rows.map(publicVaultTransaction),total:Number(aggregate.total),page,limit,
-    totals:{credit:aggregate.total_credit,debit:aggregate.total_debit,posted_amount:aggregate.total_posted_amount}});
+  return {...activity.response,transactions:rows.map(publicVaultTransaction),total:Number(aggregate.total),page,limit,
+    totals:{credit:aggregate.total_credit,debit:aggregate.total_debit,posted_amount:aggregate.total_posted_amount}};
+  },{repeatableRead:true});
+  res.set('Cache-Control','no-store').json(data);
 });
 // Apply the site before the running sum and before pagination/search, so an
 // individual receipt never exposes another project's balance_after snapshot.
@@ -197,17 +207,25 @@ const siteHistoryCte=`WITH site_history AS (SELECT e.*,sum(amount) OVER(PARTITIO
   FROM loyalty_vault_entries e WHERE organization_id=$1 AND site_id=$2)`;
 const publicHistory = ({site_balance_after,...entry}) => ({...entry,balance_after:site_balance_after});
 export const history = asyncHandler(async(req,res)=>{
-  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id),{page,limit,offset}=pagination(req.query);
+  const actor=await walletReadActor(req);
+  const data=await walletReadTransaction(pool,async db=>{
+  const activity=await walletActivityScope(actor,req.query,req.path?.includes('/overall/'),db),{page,limit,offset}=pagination(req.query);
+  const {siteId,siteIds}=activity;
+  const activityHistoryCte=siteHistoryCte.replace('PARTITION BY holder_key','PARTITION BY site_id,holder_key').replace('site_id=$2','site_id=ANY($2::int[])');
   const order=req.query.order||'desc';
   if(!['asc','desc'].includes(order)) throw walletError('Unknown wallet history order.');
   const direction=order==='asc'?'ASC':'DESC';
   // Pre-consolidation noncash movements and their compensating reversals stay
   // visible in the immutable audit. Current transactions remain CASH-only.
-  const params=[actor.organization_id,siteId],clauses=['e.organization_id=$1','e.site_id=$2'];
+  const params=[actor.organization_id,siteIds],clauses=['e.organization_id=$1','e.site_id=ANY($2::int[])'];
+  addWalletAmountFilters(req.query,params,clauses,'abs(e.amount)');
+  addWalletActorFilter(req.query,params,clauses,'e.actor_id');
+  addWalletModuleFilter(req.query,params,clauses);
+  addWalletPartyFilters(req.query,params,clauses,{history:true});
   if(!canViewAllWallets(actor)){params.push(`user:${actor.id}`);clauses.push(`e.holder_key=$${params.length}`);}
-  if(req.query.holder_type||req.query.holder_id){const selected=holder(req.query.holder_type,req.query.holder_id);await validateHolder(actor,selected,pool,siteId,true);params.push(selected.key);clauses.push(`e.holder_key=$${params.length}`);}
+  if(req.query.holder_type||req.query.holder_id){const selected=holder(req.query.holder_type,req.query.holder_id);await validateHolder(actor,selected,db,siteId,true);params.push(selected.key);clauses.push(`e.holder_key=$${params.length}`);}
   if(req.query.type&&req.query.type!=='all'){
-    if(!['credit','debit','adjustment','reversal','transfer_in','transfer_out'].includes(req.query.type)) throw walletError('Unknown vault history type.');
+    if(!['credit','debit','adjustment','reversal','transfer_in','transfer_out','imprest_out'].includes(req.query.type)) throw walletError('Unknown vault history type.');
     params.push(req.query.type);clauses.push(`e.kind=$${params.length}`);
   }
   addDateFilters(req.query,params,clauses,'e.created_at',true);
@@ -215,7 +233,7 @@ export const history = asyncHandler(async(req,res)=>{
   if(q){params.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);clauses.push(`${walletHistorySearch} ILIKE $${params.length} ESCAPE '\\'`);}
   const where=clauses.join(' AND ');
   const countFrom=q ? historyJoins : 'FROM loyalty_vault_entries e';
-  const aggregate=(await walletReadQuery(pool,`${q?siteHistoryCte:''} SELECT count(*)::int AS total,
+  const aggregate=(await db.query(`${q?activityHistoryCte:''} SELECT count(*)::int AS total,
     COALESCE(sum(e.amount) FILTER(WHERE e.amount>0),0)::text AS credit,
     (-COALESCE(sum(e.amount) FILTER(WHERE e.amount<0),0))::text AS debit,
     COALESCE(sum(e.amount),0)::text AS net ${countFrom} WHERE ${where}`,params)).rows[0];
@@ -223,13 +241,15 @@ export const history = asyncHandler(async(req,res)=>{
   // With no source search, paginate custody first: hydrate at most one page
   // of source records instead of looking up every historical module row.
   const pageSql=q
-    ? `${siteHistoryCte} SELECT ${historySelect} ${historyJoins} WHERE ${where} ORDER BY e.id ${direction} LIMIT $${params.length+1} OFFSET $${params.length+2}`
-    : `${siteHistoryCte}, selected_history AS MATERIALIZED (SELECT e.* FROM site_history e WHERE ${where}
+    ? `${activityHistoryCte} SELECT ${historySelect} ${historyJoins} WHERE ${where} ORDER BY e.id ${direction} LIMIT $${params.length+1} OFFSET $${params.length+2}`
+    : `${activityHistoryCte}, selected_history AS MATERIALIZED (SELECT e.* FROM site_history e WHERE ${where}
         ORDER BY e.id ${direction} LIMIT $${params.length+1} OFFSET $${params.length+2})
        SELECT ${historySelect} ${historyJoins.replace('FROM site_history e','FROM selected_history e')} ORDER BY e.id ${direction}`;
-  const {rows}=await walletReadQuery(pool,pageSql,[...params,limit,offset]);
-  res.set('Cache-Control','no-store').json({site_id:siteId,entries:rows.map(publicHistory),total,page,limit,order,
-    totals:{credit:aggregate.credit,debit:aggregate.debit,net:aggregate.net}});
+  const {rows}=await db.query(pageSql,[...params,limit,offset]);
+  return {...activity.response,entries:rows.map(publicHistory),total,page,limit,order,
+    totals:{credit:aggregate.credit,debit:aggregate.debit,net:aggregate.net}};
+  },{repeatableRead:true});
+  res.set('Cache-Control','no-store').json(data);
 });
 export const historyDetail = asyncHandler(async(req,res)=>{
   const actor=await walletReadActor(req),id=positiveId(req.params.id),siteId=await accessibleSite(actor,req.query.site_id);
@@ -262,31 +282,47 @@ export const assignment = asyncHandler(async(req,res)=>{
     site_id:Number(source.site_id),created_by:source.created_by?Number(source.created_by):null,created_by_name:creator,name}});
 });
 export const transfers = asyncHandler(async(req,res)=>{
-  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id),{page,limit,offset}=pagination(req.query);
+  const actor=await walletReadActor(req);
+  const data=await walletReadTransaction(pool,async db=>{
+  const activity=await walletActivityScope(actor,req.query,req.path?.includes('/overall/'),db),{page,limit,offset}=pagination(req.query);
+  const {siteId,siteIds}=activity;
   const params=[actor.organization_id,actor.id],clauses=['t.organization_id=$1','$2::int>0'];
   const direction=req.query.direction||'all';if(!['all','incoming','outgoing'].includes(direction)) throw walletError('Unknown transfer direction.');
   if(!canViewAllWallets(actor)) clauses.push("(t.sender_id=$2 OR t.recipient_id=$2 OR (t.from_holder_type='user' AND t.from_holder_id=$2))");
   if(req.query.holder_type||req.query.holder_id){
     const selected=holder(req.query.holder_type||'user',req.query.holder_id);
     if(!canViewAllWallets(actor)&&(selected.type!=='user'||selected.id!==actor.id)) throw walletError('You can view only your own Cash Wallet transfers.',403);
-    await validateHolder(actor,selected,pool,siteId,true);
+    await validateHolder(actor,selected,db,siteId,true);
     params.push(selected.type,selected.id);
     const from=`(t.from_holder_type=$${params.length-1} AND t.from_holder_id=$${params.length})`;
     const to=`($${params.length-1}='user' AND t.to_holder_id=$${params.length})`;
     clauses.push(direction==='incoming'?to:direction==='outgoing'?from:`(${from} OR ${to})`);
   } else if(direction==='incoming') clauses.push('t.recipient_id=$2');
   else if(direction==='outgoing') clauses.push("(t.sender_id=$2 OR (t.from_holder_type='user' AND t.from_holder_id=$2))");
-  params.push(siteId);clauses.push(`t.site_id=$${params.length}`);
+  params.push(siteIds);clauses.push(`t.site_id=ANY($${params.length}::int[])`);
+  addWalletAmountFilters(req.query,params,clauses,'t.amount');
+  addWalletActorFilter(req.query,params,clauses,'t.sender_id');
+  addWalletPartyFilters(req.query,params,clauses);
   if(req.query.status&&req.query.status!=='all'){if(!['pending','accepted','rejected','cancelled'].includes(req.query.status)) throw walletError('Unknown transfer status.');params.push(req.query.status);clauses.push(`t.status=$${params.length}`);}
   addDateFilters(req.query,params,clauses,'t.created_at',true);
-  const where=clauses.join(' AND '),total=Number((await pool.query(`SELECT count(*)::int AS total FROM loyalty_vault_transfers t WHERE ${where}`,params)).rows[0].total);
-  const {rows}=await pool.query(`SELECT t.*,COALESCE(owner.name,m.full_name) AS from_name,recipient.name AS to_name,sender.name AS sender_name,resolver.name AS resolved_by_name,s.name AS site_name,
-    (t.recipient_id=$2 AND t.status='pending') AS can_accept,(t.sender_id=$2 AND t.status='pending') AS can_cancel
-    FROM loyalty_vault_transfers t LEFT JOIN users owner ON t.from_holder_type='user' AND owner.id=t.from_holder_id
+  const joins=`FROM loyalty_vault_transfers t LEFT JOIN users owner ON t.from_holder_type='user' AND owner.id=t.from_holder_id
     LEFT JOIN members m ON t.from_holder_type='member' AND m.id=t.from_holder_id JOIN users recipient ON recipient.id=t.recipient_id
-    JOIN users sender ON sender.id=t.sender_id LEFT JOIN users resolver ON resolver.id=t.resolved_by LEFT JOIN sites s ON s.id=t.site_id
-    WHERE ${where} ORDER BY t.created_at DESC,t.id DESC LIMIT $${params.length+1} OFFSET $${params.length+2}`,[...params,limit,offset]);
-  res.set('Cache-Control','no-store').json({site_id:siteId,transfers:rows,total,page,limit});
+    JOIN users sender ON sender.id=t.sender_id LEFT JOIN users resolver ON resolver.id=t.resolved_by LEFT JOIN sites s ON s.id=t.site_id`;
+  const q=String(req.query.q||'').trim();if(q.length>200)throw walletError('Keep search within 200 characters.');
+  if(q){params.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);clauses.push(`concat_ws(' ',owner.name,m.full_name,recipient.name,sender.name,t.note,t.resolution_note,t.id::text,s.name) ILIKE $${params.length} ESCAPE '\\'`);}
+  const where=clauses.join(' AND ');
+  const aggregate=(await db.query(`SELECT count(*)::int AS total,COALESCE(sum(t.amount) FILTER(WHERE t.status='accepted'),0)::text AS accepted_amount,
+    COALESCE(sum(t.amount) FILTER(WHERE t.status='pending'),0)::text AS pending_amount ${joins} WHERE ${where}`,params)).rows[0];
+  const {rows}=await db.query(`SELECT t.*,COALESCE(owner.name,m.full_name) AS from_name,recipient.name AS to_name,sender.name AS sender_name,resolver.name AS resolved_by_name,s.name AS site_name,
+    (t.recipient_id=$2 AND t.status='pending') AS can_accept,(t.sender_id=$2 AND t.status='pending') AS can_cancel
+    ${joins} WHERE ${where} ORDER BY t.created_at DESC,t.id DESC LIMIT $${params.length+1} OFFSET $${params.length+2}`,[...params,limit,offset]);
+  const {rows:recipients}=await db.query(`SELECT t.to_holder_id AS holder_id,recipient.name,
+    sum(t.amount)::text AS amount,count(*)::int AS count ${joins} WHERE ${where} AND t.status='accepted'
+    GROUP BY t.to_holder_id,recipient.name ORDER BY sum(t.amount) DESC,t.to_holder_id LIMIT 50`,params);
+  return {...activity.response,transfers:rows,total:Number(aggregate.total),page,limit,
+    totals:{accepted_amount:aggregate.accepted_amount,pending_amount:aggregate.pending_amount},recipient_totals:recipients};
+  },{repeatableRead:true});
+  res.set('Cache-Control','no-store').json(data);
 });
 export const createTransfer=asyncHandler(async(req,res)=>{await walletReadActor(req);const result=await createVaultTransfer(req.user,req.body);res.status(result.replayed?200:201).json(result);});
 export const resolveTransfer=action=>asyncHandler(async(req,res)=>{await walletReadActor(req);res.json(await resolveVaultTransfer(req.user,req.params.id,action,req.body));});

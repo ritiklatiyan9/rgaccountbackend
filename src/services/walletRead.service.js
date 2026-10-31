@@ -47,18 +47,27 @@ export async function walletReadTransaction(database, run, { repeatableRead = fa
   const releaseSlot = await limiterFor(database).acquire();
   let client;
   let discard;
+  let connectionFailure;
+  const onConnectionError = error => { connectionFailure = error; };
   try {
     client = await database.connect();
+    // Checked-out pg clients emit socket errors directly. Keep the reader
+    // alive, reject this snapshot, and discard its connection on release.
+    client.on?.('error', onConnectionError);
     await client.query(repeatableRead ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN READ ONLY');
     await client.query("SELECT set_config('statement_timeout',$1,true)", [`${timeout}ms`]);
     const result = await run(client);
+    if (connectionFailure) throw connectionFailure;
     await client.query('COMMIT');
     return result;
   } catch (error) {
     if (client) { try { await client.query('ROLLBACK'); } catch (cleanupError) { discard = cleanupError; } }
     throw error;
   } finally {
-    try { client?.release(discard); } finally { releaseSlot(); }
+    try { client?.release(discard || connectionFailure); } finally {
+      client?.removeListener?.('error', onConnectionError);
+      releaseSlot();
+    }
   }
 }
 

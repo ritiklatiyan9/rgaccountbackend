@@ -22,6 +22,7 @@ import pool from '../config/db.js';
 import { inventoryModel } from '../models/Inventory.model.js';
 import { buildProfitPortfolio } from '../services/profitPortfolio.service.js';
 import { getProfitPortfolioSnapshot } from '../services/profitPortfolioSnapshot.service.js';
+import { walletImprestQueryFields } from './walletImprestTransfers.js';
 
 const PRIVILEGED_ROLES = new Set(['admin', 'super_admin']);
 
@@ -1030,6 +1031,7 @@ const ProfitPortfolioType = new GraphQLObjectType({
 const QueryType = new GraphQLObjectType({
   name: 'Query',
   fields: {
+    ...walletImprestQueryFields,
     profitPortfolio: {
       type: ProfitPortfolioType,
       args: {

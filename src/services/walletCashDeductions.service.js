@@ -81,10 +81,20 @@ export async function addWalletCashDeductions(database, { organizationId, siteId
         AND COALESCE(a.confirmed_at,a.created_at)>=r.started_at
         AND COALESCE(a.confirmed_at,a.created_at)<($4::date::timestamp AT TIME ZONE 'Asia/Kolkata')
       GROUP BY r.holder_key
-    ) SELECT r.holder_key,COALESCE(f.imprest,0)::text AS imprest,
-      COALESCE(g.imprest_given,0)::text AS imprest_given
+    ), wallet_funding AS (
+      -- Cash issued from another holder's wallet reduces that holder's cash
+      -- at the same instant staff float rises. It never reduces Admin cash
+      -- again, so remove that funding from the Admin's site-wide float effect.
+      SELECT r.holder_key,
+        -COALESCE(sum(e.amount) FILTER(WHERE e.holder_key<>r.holder_key),0) AS other_funding,
+        -COALESCE(sum(e.amount) FILTER(WHERE e.holder_key=r.holder_key),0) AS own_funding
+      FROM scopes r LEFT JOIN loyalty_vault_entries e ON e.organization_id=$1 AND e.site_id=$2
+        AND e.kind='imprest_out' AND e.created_at>=r.started_at AND e.created_at<($4::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+      GROUP BY r.holder_key
+    ) SELECT r.holder_key,(COALESCE(f.imprest,0)-COALESCE(w.other_funding,0))::text AS imprest,
+      (COALESCE(g.imprest_given,0)+COALESCE(w.own_funding,0))::text AS imprest_given
       FROM scopes r LEFT JOIN float_totals f USING(holder_key)
-      LEFT JOIN given_totals g USING(holder_key)`, [organizationId, siteId, scopes, endDate]);
+      LEFT JOIN given_totals g USING(holder_key) LEFT JOIN wallet_funding w USING(holder_key)`, [organizationId, siteId, scopes, endDate]);
   const spendByHolder = new Map(spending.map(row => [row.holder_key, row]));
   const floatByHolder = new Map(floats.map(row => [row.holder_key, row]));
   for (const opening of openings) {

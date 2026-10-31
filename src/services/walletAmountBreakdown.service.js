@@ -26,7 +26,7 @@ async function receiptEntries(db, { organizationId, siteId, userId, section, ope
   const params = [organizationId, siteId, `user:${userId}`, opening?.started_at || null];
   const where = `e.organization_id=$1 AND e.site_id=$2 AND e.holder_key=$3
     AND ($4::timestamptz IS NULL OR e.created_at >= $4::timestamptz)
-    AND ${section === 'received' ? "e.kind IS DISTINCT FROM 'transfer_out' AND e.kind IS DISTINCT FROM 'adjustment'" : "e.kind='transfer_out'"}`;
+    AND ${section === 'received' ? "e.kind NOT IN ('transfer_out','imprest_out','adjustment')" : "e.kind='transfer_out'"}`;
   const sign = section === 'received' ? '' : '-';
   const { rows: [aggregate] } = await db.query(`SELECT count(*)::int AS total,
     COALESCE(sum(${sign}e.amount),0)::text AS net FROM loyalty_vault_entries e WHERE ${where}`, params);
@@ -74,6 +74,17 @@ export const walletDeductionEntriesCte = `WITH cash_payments AS (
     i.amount AS original_amount,GREATEST(i.running-i.amount,0) AS float_before,GREATEST(i.running,0) AS float_after
   FROM imprest_running i LEFT JOIN users actor ON actor.id=NULLIF(to_jsonb(i)->>'created_by','')::integer AND actor.organization_id=$1
   WHERE i.created_at>=$4::timestamptz AND GREATEST(i.running,0)-GREATEST(i.running-i.amount,0)<>0
+), wallet_funding_offsets AS (
+  SELECT 'wallet-imprest-funding:'||e.id::text AS id,'imprest'::text AS category,'wallet-imprest-funding'::text AS entry_type,
+    e.created_at,(e.created_at AT TIME ZONE 'Asia/Kolkata')::date::text AS transaction_date,e.amount AS amount,
+    'Imprest funded from another cash holder wallet'::text AS description,
+    'This funding reduces the source wallet, so it does not also reduce this Admin wallet.'::text AS note,
+    'wallet_imprest_transfers'::text AS source_table,NULL::integer AS source_id,
+    owner.name AS person_name,actor.name AS actor_name,NULL::numeric AS original_amount,NULL::numeric AS float_before,NULL::numeric AS float_after
+  FROM loyalty_vault_entries e LEFT JOIN users owner ON owner.id=e.holder_id AND e.holder_type='user'
+    LEFT JOIN users actor ON actor.id=e.actor_id AND actor.organization_id=$1
+  WHERE e.organization_id=$1 AND e.site_id=$2 AND e.holder_key<>$3 AND e.kind='imprest_out'
+    AND e.created_at>=$4::timestamptz AND e.created_at<($5::date::timestamp AT TIME ZONE 'Asia/Kolkata')
 ), adjustments AS (
   SELECT 'adjustment:'||e.id::text AS id,'other_adjustments'::text AS category,'adjustment'::text AS entry_type,
     e.created_at,(e.created_at AT TIME ZONE 'Asia/Kolkata')::date::text AS transaction_date,-e.amount AS amount,
@@ -82,7 +93,7 @@ export const walletDeductionEntriesCte = `WITH cash_payments AS (
   FROM loyalty_vault_entries e LEFT JOIN users actor ON actor.id=e.actor_id AND actor.organization_id=$1
   WHERE e.organization_id=$1 AND e.site_id=$2 AND e.holder_key=$3 AND e.kind='adjustment' AND e.created_at>=$4::timestamptz
 ), items AS (
-  SELECT * FROM cash_payments UNION ALL SELECT * FROM imprest_movements UNION ALL SELECT * FROM adjustments
+  SELECT * FROM cash_payments UNION ALL SELECT * FROM imprest_movements UNION ALL SELECT * FROM wallet_funding_offsets UNION ALL SELECT * FROM adjustments
 ), reconciliation AS (
   SELECT $6::numeric-COALESCE(sum(amount) FILTER(WHERE category='other_adjustments'),0) AS amount FROM items
 ), all_items AS (

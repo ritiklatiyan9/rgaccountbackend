@@ -37,6 +37,7 @@ import { startEventReminderScheduler, stopEventReminderScheduler } from './servi
 import { backupMaintenanceEnabled } from './middlewares/backupMaintenance.middleware.js';
 import { startDriveShareRunner, stopDriveShareRunner } from './services/driveShareJobs.service.js';
 import { startAccountWhatsAppWorker, stopAccountWhatsAppWorker } from './services/accountWhatsApp.service.js';
+import { startWalletImprestNotificationRunner, stopWalletImprestNotificationRunner } from './services/walletImprestNotifications.service.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -91,6 +92,7 @@ connectDB().then(async () => {
     startEventReminderScheduler();
     startDriveShareRunner();
     startAccountWhatsAppWorker();
+    startWalletImprestNotificationRunner();
   } else console.log('Backup maintenance mode: business APIs, sockets and reminder schedulers are paused.');
 }).catch(err => {
   console.error('Backend startup failed', err);
@@ -103,6 +105,7 @@ const shutdown = (signal) => {
   stopEventReminderScheduler();
   stopDriveShareRunner();
   stopAccountWhatsAppWorker();
+  void stopWalletImprestNotificationRunner();
   server.close(() => process.exit(0));
   // Fallback if open sockets keep the server from closing promptly.
   setTimeout(() => process.exit(0), 5000).unref();

@@ -2,7 +2,7 @@ import { walletHistoryParentsSql } from './helpers/walletHistoryParents.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pool from '../src/config/db.js';
-import { history, historyDetail } from '../src/controllers/loyaltyVault.controller.js';
+import { history, historyDetail, transfers } from '../src/controllers/loyaltyVault.controller.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../src/services/loyaltyVaultContext.service.js';
 
 test('wallet history preserves module descriptions, transfer parties and site-only custody', { skip: !process.env.PGLITE_MODULE }, async () => {
@@ -168,5 +168,41 @@ test('wallet history preserves module descriptions, transfer parties and site-on
     const movedVendor=(await invoke()).entries.find(row=>row.source_table==='vendor_payments'&&row.source_id===100);
     assert.equal(movedVendor.source_details.party_name,undefined,'parents from another site are excluded');
     assert.equal((await invoke(history,{q:'Private vendor'})).total,0);
+
+    await pg.exec(`ALTER TABLE sites ADD COLUMN include_in_overall boolean DEFAULT true;
+      UPDATE sites SET include_in_overall=false WHERE id=11;
+      INSERT INTO users VALUES(3,'Dev','sub_admin',1,true);
+      INSERT INTO user_sites VALUES(3,10);
+      ALTER TABLE loyalty_vault_transfers ADD COLUMN organization_id int DEFAULT 1,ADD COLUMN site_id int DEFAULT 10,
+        ADD COLUMN sender_id int DEFAULT 1,ADD COLUMN recipient_id int,ADD COLUMN amount numeric DEFAULT 10000;
+      UPDATE loyalty_vault_transfers SET recipient_id=to_holder_id;
+      INSERT INTO loyalty_vault_transfers(id,from_holder_type,from_holder_id,to_holder_id,recipient_id,status,note,amount,site_id,created_at) VALUES
+        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','user',1,3,3,'accepted','100% office cash',25.10,10,now()),
+        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc','user',1,3,3,'pending','Awaiting receipt',70,10,now()),
+        ('dddddddd-dddd-4ddd-8ddd-dddddddddddd','user',1,3,3,'accepted','Off-site cash',999,11,now());`);
+    const invokeOverall=(handler,query={},id=1)=>new Promise((resolve,reject)=>handler({
+      path:'/overall/history',user:{id},authenticatedUser:{id,role:id===1?'admin':'sub_admin',organization_id:1,is_active:true},query,params:{}
+    },{set(){return this;},json:resolve},reject));
+    const handovers=await invokeOverall(transfers,{from_id:'1',limit:1});
+    assert.equal(handovers.total,3);
+    assert.equal(handovers.transfers.length,1);
+    assert.equal(Number(handovers.totals.accepted_amount),10025.10,'accepted amounts span all matching pages');
+    assert.equal(Number(handovers.totals.pending_amount),70);
+    assert.deepEqual(handovers.included_site_ids,[10]);
+    assert.deepEqual(handovers.recipient_totals.map(row=>[row.name,Number(row.amount)]),[['Kuldeep',10000],['Dev',25.10]]);
+    const dev=await invokeOverall(transfers,{from_id:1,to_id:3,status:'accepted',amount_min:'25',amount_max:'26',q:'100%'});
+    assert.equal(dev.total,1);assert.equal(Number(dev.totals.accepted_amount),25.10);
+    assert.equal((await invokeOverall(transfers,{q:'100_'})).total,0);
+    await assert.rejects(invokeOverall(transfers,{site_id:11}),error=>error.statusCode===403);
+    await assert.rejects(invokeOverall(transfers,{},2),error=>error.statusCode===403);
+    await assert.rejects(invoke(transfers,{amount_min:'50',amount_max:'20'}),error=>error.statusCode===400);
+    const fromRavi=await invokeOverall(history,{from_id:1,to_id:2,amount_min:10000,amount_max:10000});
+    assert.equal(fromRavi.total,2,'both posted sides remain separate wallet movements');
+    assert.equal(Number(fromRavi.totals.net),0);
+    assert.ok(fromRavi.entries.every(row=>row.site_id===10));
+    assert.equal((await invoke(history,{module:'expenses',amount_min:'15000',amount_max:'15000'})).total,1);
+    assert.equal((await invoke(history,{from_id:1,to_id:2,actor_id:1})).total,0);
+    const ownTransfers=await invoke(transfers,{from_id:1}, {},2);
+    assert.equal(ownTransfers.total,1,'own-wallet-only account cannot see other recipients through sender filters');
   } finally { pool.query = originalQuery; pool.connect = originalConnect; await pg.close(); }
 });

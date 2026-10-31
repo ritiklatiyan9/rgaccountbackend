@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
 import { walletReadQuery, createWalletReadLimiter } from '../src/services/walletRead.service.js';
 import { pendingVaultTotals } from '../src/services/loyaltyVaultTransactions.service.js';
 
@@ -88,4 +89,14 @@ test('failed connection checkout releases the wallet admission slot', async () =
   } };
   await assert.rejects(walletReadQuery(db, 'SELECT 1'), /connection failed/);
   assert.deepEqual((await walletReadQuery(db, 'SELECT 1')).rows, [1]);
+});
+
+test('an active socket error rejects the read and discards its client without stopping the reader', async()=>{
+ const failure=new Error('Connection terminated unexpectedly');let released;
+ const client=Object.assign(new EventEmitter(),{query:async sql=>{if(sql==='SELECT disconnected'){client.emit('error',failure);throw failure;}return {rows:[]};},release:error=>{released=error;}});
+ const db={connect:async()=>client};
+ await assert.rejects(walletReadQuery(db,'SELECT disconnected'),error=>error===failure);
+ assert.equal(released,failure);assert.equal(client.listenerCount('error'),0);
+ const recovered={connect:async()=>({query:async()=>({rows:[1]}),release(){}})};
+ assert.deepEqual((await walletReadQuery(recovered,'SELECT 1')).rows,[1]);
 });

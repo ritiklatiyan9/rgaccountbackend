@@ -9,6 +9,7 @@ import { up as balances, walletBalanceGuardsSql } from '../migrations/210_wallet
 import { up as collector } from '../migrations/211_locked_cash_collector.js';
 import { up as permanent } from '../migrations/212_wallet_permanent_balance_guard.js';
 import { up as adminCustody, adminCashCustodySql } from '../migrations/217_admin_cash_custody_guard.js';
+import { up as walletImprest } from '../migrations/232_wallet_imprest_transfers.js';
 
 export const walletStartupMigrations = Object.freeze([
   ['199_loyalty_vault', vault],
@@ -21,6 +22,7 @@ export const walletStartupMigrations = Object.freeze([
   ['211_locked_cash_collector', collector],
   ['212_wallet_permanent_balance_guard', permanent],
   ['217_admin_cash_custody_guard', adminCustody],
+  ['232_wallet_imprest_transfers', walletImprest],
 ]);
 
 export const walletRuntimeFunctions = [

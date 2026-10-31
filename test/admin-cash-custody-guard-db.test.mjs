@@ -15,6 +15,8 @@ import { LOYALTY_VAULT_SOURCE_TABLES } from '../src/services/loyaltyVaultContext
 import { createVaultTransfer, resolveVaultTransfer } from '../src/services/loyaltyVault.service.js';
 import { adminWalletCashStates } from '../src/services/adminWalletCash.service.js';
 import { ensureWalletStartup, walletStartupMigrations } from '../src/services/walletStartup.service.js';
+import { up as walletImprestUp } from '../src/migrations/232_wallet_imprest_transfers.js';
+import { createWalletImprestTransfer,resolveWalletImprestTransfer } from '../src/services/walletImprestTransfer.service.js';
 
 test('Admin native cash expenses and Imprest enforce current cash custody', { skip: !process.env.PGLITE_MODULE }, async t => {
   const { PGlite } = await import(process.env.PGLITE_MODULE);
@@ -223,6 +225,24 @@ test('Admin native cash expenses and Imprest enforce current cash custody', { sk
       assert.ok(recovered.repaired.includes('reconcile_imprest_debit'),'restore the site cash caller after interrupted migration 125');
       await assert.rejects(expense(50,0.01),noFunds);
       assert.deepEqual(await snapshot(),beforeRepair);
+    });
+    await t.test('wallet-funded imprest keeps aligned Admin custody unchanged for staff funding and debits own funding once',async()=>{
+      await query('CREATE TABLE user_permissions(user_id integer,module text,can_read boolean,can_view_all boolean)');
+      await walletImprestUp(db);
+      const walletCash=async()=>Number((await adminWalletCashStates(1,14,db)).get('user:2').available_balance);
+      const before=await walletCash();
+      await receipt(14,10000.15,1);
+      assert.equal(await walletCash(),before,'staff cash collection remains outside Admin custody');
+      const request=await createWalletImprestTransfer({id:3},{site_id:14,from_user_id:1,to_user_id:3,amount:'10000.15',note:'Staff wallet allocation',idempotency_key:randomUUID()},db);
+      await resolveWalletImprestTransfer({id:1},request.transfer.id,'accept',{site_id:14},db);
+      assert.equal(await walletCash(),before,'one acceptance never changes either cash balance');
+      await resolveWalletImprestTransfer({id:3},request.transfer.id,'accept',{site_id:14},db);
+      assert.equal(await walletCash(),before,'staff wallet debit offsets the same rise in staff float');
+      const own=await createWalletImprestTransfer({id:1},{site_id:14,from_user_id:2,to_user_id:3,amount:'20000.25',note:'Admin wallet allocation',idempotency_key:randomUUID()},db);
+      await resolveWalletImprestTransfer({id:3},own.transfer.id,'accept',{site_id:14},db);
+      await resolveWalletImprestTransfer({id:2},own.transfer.id,'accept',{site_id:14},db);
+      assert.equal(await walletCash(),Math.round((before-20000.25)*100)/100,'Admin source is reduced once, including when Admin accepts last');
+      assert.equal(await scalar('SELECT count(*) FROM imprest_ledger WHERE wallet_imprest_transfer_id=$1',[own.transfer.id]),1);
     });
   } finally { await pg.close(); }
 });

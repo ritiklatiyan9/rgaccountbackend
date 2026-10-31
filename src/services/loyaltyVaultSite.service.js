@@ -9,10 +9,11 @@
 export function siteVaultAccountsCte(organization = '$2', site = '$4') {
   return `site_postings AS (
     SELECT holder_key,holder_type,holder_id,sum(amount) AS balance,
-      COALESCE(sum(amount) FILTER (WHERE kind IS DISTINCT FROM 'transfer_out'),0) AS total_in,
-      COALESCE(sum(amount) FILTER (WHERE kind IS DISTINCT FROM 'transfer_out' AND kind IS DISTINCT FROM 'adjustment'),0) AS total_received,
+      COALESCE(sum(amount) FILTER (WHERE kind NOT IN ('transfer_out','imprest_out')),0) AS total_in,
+      COALESCE(sum(amount) FILTER (WHERE kind NOT IN ('transfer_out','imprest_out') AND kind IS DISTINCT FROM 'adjustment'),0) AS total_received,
       COALESCE(sum(amount) FILTER (WHERE kind='adjustment'),0) AS total_adjustments,
       -COALESCE(sum(amount) FILTER (WHERE kind='transfer_out'),0) AS total_handover,
+      -COALESCE(sum(amount) FILTER (WHERE kind='imprest_out'),0) AS total_imprest_out,
       max(created_at) AS updated_at,count(*)::int AS entry_count
     FROM loyalty_vault_entries WHERE organization_id=${organization} AND site_id=${site}
     GROUP BY holder_key,holder_type,holder_id

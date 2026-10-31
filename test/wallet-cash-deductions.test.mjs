@@ -21,6 +21,7 @@ test('batched SQL classifies only posted cash in this organisation, site and ope
  await db.exec(`CREATE TABLE sites(id int PRIMARY KEY,organization_id int);INSERT INTO sites VALUES(2,1),(5,1),(20,2);
   CREATE TABLE users(id int PRIMARY KEY,role text);INSERT INTO users VALUES(7,'admin'),(8,'sub_admin'),(9,'admin');
   CREATE TABLE application_settings(site_id int,setting_key text,setting_value jsonb);
+  CREATE TABLE loyalty_vault_entries(organization_id int,site_id int,holder_key text,kind text,amount numeric,created_at timestamptz);
   CREATE TABLE ledger_entries(site_id int,bucket text,entry_date date,created_at timestamptz,source_key text,debit numeric,credit numeric);
   INSERT INTO ledger_entries VALUES
    (2,'cash','2026-10-26','2026-10-26T10:00:00Z','plot_commission_payments',20000,0),
@@ -68,6 +69,20 @@ test('batched SQL classifies only posted cash in this organisation, site and ope
  assert.equal(changed.imprest_given,'40.20');assert.equal(changed.expenses,'25.10');assert.equal(changed.imprest,'30.15');assert.equal(changed.other_cash_payments,'10.25');assert.equal(changed.other_adjustments,'0.00');
  assert.deepEqual(changed.modules,[{source:'expenses',amount:'25.10'},{source:'plot_commission_payments',amount:'20000'},{source:'plot_payments',amount:'10.25'}]);
  assert.deepEqual(states.get('user:9').cash_deductions.modules,[{source:'expenses',amount:'25.10'},{source:'plot_payments',amount:'10.25'}]);
+ await db.exec(`BEGIN;SAVEPOINT wallet_funding;
+   INSERT INTO loyalty_vault_entries VALUES(1,2,'user:8','imprest_out',-100,'2026-10-27T12:00:00Z');
+   INSERT INTO imprest_ledger VALUES(2,8,'2026-10-27T12:00:00Z',100,'TRANSFER_IN');`);
+ await addWalletCashDeductions(db,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
+ assert.equal(states.get('user:7').cash_deductions.imprest,'30.15','another wallet funds its own float transfer, leaving Admin cash unchanged');
+ assert.equal(states.get('user:7').cash_deductions.other_adjustments,'0.00','a staff wallet transfer never invents an Admin custody correction');
+ await db.exec(`INSERT INTO loyalty_vault_entries VALUES(1,2,'user:7','imprest_out',-20,'2026-10-27T13:00:00Z');
+   INSERT INTO imprest_ledger VALUES(2,8,'2026-10-27T13:00:00Z',20,'TRANSFER_IN');`);
+ states.get('user:7').balance='4944993.76';
+ await addWalletCashDeductions(db,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
+ assert.equal(states.get('user:7').cash_deductions.imprest,'50.15','own Admin cash funds the float exactly once');
+ assert.equal(states.get('user:7').cash_deductions.imprest_given,'60.20');
+ assert.equal(states.get('user:7').cash_deductions.other_adjustments,'0.00');
+ await db.exec('ROLLBACK TO SAVEPOINT wallet_funding;COMMIT');states.get('user:7').balance='4945013.76';
  await db.exec(`INSERT INTO imprest_ledger VALUES (2,8,'2026-10-28T10:00:00Z',-50,'EXPENSE'),(2,8,'2026-10-28T11:00:00Z',50,'TRANSFER_IN'),(2,8,'2026-10-28T12:00:00Z',-10,'RETURN');`);
  await addWalletCashDeductions(db,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
  assert.equal(states.get('user:7').cash_deductions.imprest_given,'40.20','expenses, returns and staff transfers do not change the total given');

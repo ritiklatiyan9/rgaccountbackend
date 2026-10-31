@@ -2,6 +2,7 @@ import { Router } from 'express';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
+import walletImprestTransferRoutes from './walletImprestTransfer.routes.js';
 import { summary,overall,siteBalance,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer,userDetail,assignedTransactions,reportingOpenings,amountBreakdown } from '../controllers/loyaltyVault.controller.js';
 const router=Router();
 let ready = false;
@@ -17,12 +18,16 @@ function walletReady() {
   return readiness;
 }
 router.use(authMiddleware);
+router.use('/imprest-transfers',walletImprestTransferRoutes);
 router.use(asyncHandler(async(req,res,next)=>{
   if(!await walletReady()) return res.status(503).json({message:'Cash Wallet setup is pending. Apply the wallet migrations through migrate:locked-cash-collector and restart the backend.',code:'WALLET_NOT_READY'});
   next();
 }));
 router.get('/',summary);
 router.get('/overall',overall);
+router.get('/overall/history',history);
+router.get('/overall/transfers',transfers);
+router.get('/overall/transactions',assignedTransactions);
 router.get('/site-balance',siteBalance);
 router.get('/reporting-openings',reportingOpenings);
 router.get('/holders',holders);

@@ -37,8 +37,9 @@ async function readStates(organizationId, siteId, database, siteDetail, includeD
     SELECT holder_key,sum(amount) AS balance FROM loyalty_vault_entries
     WHERE organization_id=$1 AND site_id=$2 GROUP BY holder_key
   ) SELECT a.holder_key,sum(e.amount)::text AS recorded_balance,
-    COALESCE(sum(e.amount) FILTER(WHERE e.kind IS DISTINCT FROM 'transfer_out' AND e.kind IS DISTINCT FROM 'adjustment'),0)::text AS total_received,
+    COALESCE(sum(e.amount) FILTER(WHERE e.kind NOT IN ('transfer_out','imprest_out','adjustment')),0)::text AS total_received,
     (-COALESCE(sum(e.amount) FILTER(WHERE e.kind='transfer_out'),0))::text AS total_handover,
+    (-COALESCE(sum(e.amount) FILTER(WHERE e.kind='imprest_out'),0))::text AS total_imprest_out,
     COALESCE(sum(e.amount) FILTER(WHERE e.kind='adjustment'),0)::text AS total_adjustments,
     COALESCE(sum(e.amount) FILTER(WHERE e.id>a.id AND e.kind IN ('transfer_in','transfer_out')),0)::text AS transfer_net,
     (SELECT COALESCE(sum(GREATEST(w.balance,0)),0) FROM site_wallets w
@@ -65,7 +66,7 @@ async function readStates(organizationId, siteId, database, siteDetail, includeD
       pending_imprest_reservations: site.pendingImprestReservations, wallet_transfer_net: transfers,
       wallet_cash_held_elsewhere: otherWalletCash,
       ...(includeDeductions ? { total_received: row.total_received, total_handover: row.total_handover,
-        total_adjustments: row.total_adjustments } : {}),
+        total_adjustments: row.total_adjustments, total_imprest_out: row.total_imprest_out } : {}),
     }];
   }));
   if (!includeDeductions) return states;

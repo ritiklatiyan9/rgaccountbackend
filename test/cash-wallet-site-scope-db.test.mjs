@@ -557,5 +557,14 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
         await assert.rejects(invokeAs(controller.holders),status(403));
       } finally {await query("DELETE FROM user_permissions WHERE user_id=1 AND module='wallet'");}
     });
+    await t.test('overall original cash transactions apply source, account and amount filters before pagination and exclude off sites',async()=>{
+      await query('ALTER TABLE sites ADD COLUMN IF NOT EXISTS include_in_overall boolean DEFAULT true');
+      await query('UPDATE sites SET include_in_overall=false WHERE id=11');
+      const live=await entry({created_by:2,credit:12.34,loyalty_vault_holder_type:'user',loyalty_vault_holder_id:2,loyalty_vault_assigned_by:2});
+      await entry({site_id:11,created_by:2,credit:12.34,loyalty_vault_holder_type:'user',loyalty_vault_holder_id:2,loyalty_vault_assigned_by:2});
+      const result=await new Promise((resolve,reject)=>controller.assignedTransactions({path:'/overall/transactions',user:{id:2},query:{holder_type:'user',holder_id:2,module:'cash_flow_entries',actor_id:2,amount_min:'12.34',amount_max:'12.34',limit:1}},{set(){return this;},json:resolve},reject));
+      assert.equal(result.scope,'overall_wallet_activity');assert.ok(result.included_site_ids.includes(10));assert.ok(!result.included_site_ids.includes(11));assert.ok(!result.included_site_ids.includes(20));
+      assert.equal(result.total,1);assert.deepEqual(result.transactions.map(row=>row.id),[live]);assert.equal(Number(result.totals.credit),12.34);
+    });
   } finally {pool.query=originalQuery;pool.connect=originalConnect;await pg.close();}
 });
