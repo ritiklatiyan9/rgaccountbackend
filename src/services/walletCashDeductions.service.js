@@ -5,7 +5,7 @@ const paise = value => {
 };
 const money = value => `${value < 0n ? '-' : ''}${(value < 0n ? -value : value) / 100n}.${String((value < 0n ? -value : value) % 100n).padStart(2, '0')}`;
 
-export function walletCashDeductions({ opening, totals, state, spending, imprest, siteId, holderId }) {
+export function walletCashDeductions({ opening, totals, state, spending, imprest, imprestGiven = null, siteId, holderId }) {
   const received = paise(opening.opening_cash) + paise(totals.total_received) - paise(opening.received_at_start);
   const handed = paise(totals.total_handover) - paise(opening.handovers_at_start);
   const current = paise(state.balance);
@@ -17,6 +17,7 @@ export function walletCashDeductions({ opening, totals, state, spending, imprest
   return { version: 1, site_id: Number(siteId), holder_id: Number(holderId), started_at: opening.started_at,
     received: money(received), handed_over: money(handed), current_cash: money(current),
     commission: money(commission), expenses: money(expenses), imprest: money(float),
+    ...(imprestGiven == null ? {} : { imprest_given: money(paise(imprestGiven)) }),
     other_cash_payments: money(otherPayments),
     ...(Array.isArray(spending.modules) ? { modules: spending.modules } : {}),
     // The remainder is explicit: custody changes, reservations, source edits and
@@ -61,20 +62,21 @@ export async function addWalletCashDeductions(database, { organizationId, siteId
       SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(holder_key text,started_at timestamptz)
     ), accounts AS (
       SELECT r.holder_key,il.user_id,COALESCE(sum(il.amount),0) AS current_float,
-        COALESCE(sum(il.amount) FILTER(WHERE il.created_at<r.started_at),0) AS opening_float
+        COALESCE(sum(il.amount) FILTER(WHERE il.created_at<r.started_at),0) AS opening_float,
+        COALESCE(sum(il.amount) FILTER(WHERE il.type = 'ALLOCATION' AND il.amount > 0),0) AS given
       FROM scopes r JOIN imprest_ledger il ON il.site_id=$2 AND il.created_at<$4::date
       JOIN sites s ON s.id=il.site_id AND s.organization_id=$1
       JOIN users u ON u.id=il.user_id AND LOWER(COALESCE(u.role,'')) NOT IN ('admin','super_admin')
       GROUP BY r.holder_key,il.user_id
-    ) SELECT holder_key,sum(GREATEST(current_float,0)-GREATEST(opening_float,0))::text AS imprest
-      FROM accounts GROUP BY holder_key`, [organizationId, siteId, scopes, endDate]);
+    ) SELECT holder_key,sum(GREATEST(current_float,0)-GREATEST(opening_float,0))::text AS imprest,
+      sum(given)::text AS imprest_given FROM accounts GROUP BY holder_key`, [organizationId, siteId, scopes, endDate]);
   const spendByHolder = new Map(spending.map(row => [row.holder_key, row]));
-  const floatByHolder = new Map(floats.map(row => [row.holder_key, row.imprest]));
+  const floatByHolder = new Map(floats.map(row => [row.holder_key, row]));
   for (const opening of openings) {
     const key = `user:${opening.holder_id}`;
     const state = states.get(key);
     state.cash_deductions = walletCashDeductions({ opening, totals: totals.get(key), state,
-      spending: spendByHolder.get(key), imprest: floatByHolder.get(key) || '0', siteId, holderId: opening.holder_id });
+      spending: spendByHolder.get(key), imprest: floatByHolder.get(key)?.imprest || '0', imprestGiven: floatByHolder.get(key)?.imprest_given || '0', siteId, holderId: opening.holder_id });
   }
   return states;
 }
