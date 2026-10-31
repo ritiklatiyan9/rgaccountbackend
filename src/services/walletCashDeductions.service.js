@@ -78,6 +78,7 @@ export async function addWalletCashDeductions(database, { organizationId, siteId
       FROM scopes r JOIN imprest_allocations a ON a.admin_id=r.holder_id AND a.site_id=$2
       JOIN sites s ON s.id=a.site_id AND s.organization_id=$1
       WHERE a.status='RECEIVED' AND a.from_own_float IS NOT TRUE AND a.amount>0
+        AND COALESCE(a.confirmed_at,a.created_at)>=r.started_at
         AND COALESCE(a.confirmed_at,a.created_at)<($4::date::timestamp AT TIME ZONE 'Asia/Kolkata')
       GROUP BY r.holder_key
     ) SELECT r.holder_key,COALESCE(f.imprest,0)::text AS imprest,

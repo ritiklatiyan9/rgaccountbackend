@@ -36,6 +36,10 @@ test('batched SQL classifies only posted cash in this organisation, site and ope
   INSERT INTO imprest_allocations VALUES
    (2,7,100,'RECEIVED',false,'2026-10-24T09:00:00Z','2026-10-24T10:00:00Z'),
    (2,9,5.20,'RECEIVED',false,'2026-10-24T09:00:00Z',NULL),
+   (2,7,10.05,'RECEIVED',false,'2026-10-24T09:00:00Z','2026-10-25T11:12:42.570Z'),
+   (2,7,8888,'RECEIVED',false,'2026-10-24T09:00:00Z','2026-10-25T11:12:42.569Z'),
+   (2,9,5.20,'RECEIVED',false,'2026-10-27T10:00:00Z',NULL),
+   (2,9,7777,'RECEIVED',false,'2026-10-27T09:59:59.999Z',NULL),
    (2,7,1000,'PENDING_RECEIPT',false,'2026-10-26T10:00:00Z',NULL),
    (2,7,2000,'CANCELLED',false,'2026-10-26T10:00:00Z',NULL),
    (2,7,3000,'DECLINED',false,'2026-10-26T10:00:00Z',NULL),
@@ -52,27 +56,27 @@ test('batched SQL classifies only posted cash in this organisation, site and ope
  await addWalletCashDeductions(database,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
  assert.equal(queries,3,'one opening query and two aggregate queries for every wallet');
  const first=states.get('user:7').cash_deductions;
- assert.equal(first.imprest_given,'100.00');assert.equal(first.commission,'20000.00');assert.equal(first.expenses,'0.00');assert.equal(first.imprest,'0.00');assert.equal(first.other_adjustments,'0.00');
+ assert.equal(first.imprest_given,'10.05','the opening timestamp is inclusive and older confirmed allocations are excluded');assert.equal(first.commission,'20000.00');assert.equal(first.expenses,'0.00');assert.equal(first.imprest,'0.00');assert.equal(first.other_adjustments,'0.00');
  assert.equal(states.get('user:9').cash_deductions.commission,'0.00','a later opening excludes earlier payments');
- assert.equal(states.get('user:9').cash_deductions.imprest_given,'5.20','each giver has a distinct all-time total, independent of wallet opening');
+ assert.equal(states.get('user:9').cash_deductions.imprest_given,'5.20','each giver uses their own opening; legacy rows fall back to creation time');
  await db.exec(`INSERT INTO ledger_entries VALUES(2,'cash','2026-10-27','2026-10-27T10:00:00Z','expenses',25.10,0),(2,'cash','2026-10-27','2026-10-27T10:00:00Z','plot_payments',0,-10.25);
    INSERT INTO imprest_ledger VALUES(2,8,'2026-10-27T10:00:00Z',30.15,'ALLOCATION');
    INSERT INTO imprest_allocations VALUES(2,7,30.15,'RECEIVED',false,'2026-10-27T09:00:00Z','2026-10-27T10:00:00Z');`);
  states.get('user:7').balance='4945013.76';
  await addWalletCashDeductions(db,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
  const changed=states.get('user:7').cash_deductions;
- assert.equal(changed.imprest_given,'130.15');assert.equal(changed.expenses,'25.10');assert.equal(changed.imprest,'30.15');assert.equal(changed.other_cash_payments,'10.25');assert.equal(changed.other_adjustments,'0.00');
+ assert.equal(changed.imprest_given,'40.20');assert.equal(changed.expenses,'25.10');assert.equal(changed.imprest,'30.15');assert.equal(changed.other_cash_payments,'10.25');assert.equal(changed.other_adjustments,'0.00');
  assert.deepEqual(changed.modules,[{source:'expenses',amount:'25.10'},{source:'plot_commission_payments',amount:'20000'},{source:'plot_payments',amount:'10.25'}]);
  assert.deepEqual(states.get('user:9').cash_deductions.modules,[{source:'expenses',amount:'25.10'},{source:'plot_payments',amount:'10.25'}]);
  await db.exec(`INSERT INTO imprest_ledger VALUES (2,8,'2026-10-28T10:00:00Z',-50,'EXPENSE'),(2,8,'2026-10-28T11:00:00Z',50,'TRANSFER_IN'),(2,8,'2026-10-28T12:00:00Z',-10,'RETURN');`);
  await addWalletCashDeductions(db,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
- assert.equal(states.get('user:7').cash_deductions.imprest_given,'130.15','expenses, returns and staff transfers do not change the total given');
+ assert.equal(states.get('user:7').cash_deductions.imprest_given,'40.20','expenses, returns and staff transfers do not change the total given');
  assert.equal(states.get('user:9').cash_deductions.imprest_given,'5.20','another giver is unaffected by these allocations');
  await db.exec(`INSERT INTO imprest_allocations VALUES
   (2,7,0.10,'RECEIVED',false,'2026-10-26T10:00:00Z','2026-10-30T18:29:59Z'),
   (2,7,9999,'RECEIVED',false,'2026-10-26T10:00:00Z','2026-10-30T18:30:00Z');`);
  await addWalletCashDeductions(db,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
- assert.equal(states.get('user:7').cash_deductions.imprest_given,'130.25','confirmation cutoff uses midnight India time and preserves exact paise');
+ assert.equal(states.get('user:7').cash_deductions.imprest_given,'40.30','confirmation cutoff uses midnight India time and preserves exact paise');
  const missing=new Map([['user:10',{balance:'50'}]]);
  await addWalletCashDeductions(db,{organizationId:1,siteId:2,states:missing,totals:new Map(),endDate:'2026-10-31'});
  assert.equal(missing.get('user:10').cash_deductions,undefined,'no opening never invents zero deductions');
