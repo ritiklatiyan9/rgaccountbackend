@@ -27,7 +27,9 @@ const pool = new BoundedPool({
   // it with DB_POOL_MAX (hard-capped at 20).
   max: poolMax,
   maxWaiting: boundedInteger(process.env.DB_POOL_MAX_WAITING, 64, 1024),
-  idleTimeoutMillis: 30000,
+  idleTimeoutMillis: boundedInteger(process.env.DB_POOL_IDLE_TIMEOUT_MS, 30000, 300000),
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
   connectionTimeoutMillis: boundedInteger(process.env.DB_CONNECTION_TIMEOUT_MS, 10000, 30000),
 });
 

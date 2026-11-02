@@ -70,7 +70,7 @@ const scopeCtes=scope=>{
 const transactionsCte = (pendingOnly = false,scope=null) => `WITH wallet_mode AS (SELECT NULLIF(to_jsonb(s)->>'consolidated_at','')::timestamptz AS consolidated_at FROM loyalty_vault_settings s LIMIT 1), ${scopeCtes(scope)} ${candidateCte(pendingOnly,!!scope)}, assigned_sources AS MATERIALIZED (${sourceSql(pendingOnly)}), eligible_sources AS MATERIALIZED (
   SELECT a.*,s.organization_id,s.name AS site_name,
     COALESCE(u.name,m.full_name,'Former holder') AS holder_name,
-    creator.name AS created_by_name,assigner.name AS assigned_by_name,
+    creator.name AS created_by_name,assigner.name AS assigned_by_name,approver.name AS approved_by_name,
     vault_plot.id AS plot_id,to_jsonb(vault_plot)->>'plot_no' AS plot_no,
     to_jsonb(vault_plot)->>'block' AS plot_block,
     COALESCE(NULLIF(BTRIM(to_jsonb(vault_plot)->>'buyer_name'),''),NULLIF(BTRIM(source->>'buyer_name'),'')) AS buyer_name,
@@ -88,6 +88,7 @@ const transactionsCte = (pendingOnly = false,scope=null) => `WITH wallet_mode AS
     LEFT JOIN members m ON a.holder_type='member' AND m.id=a.holder_id
     LEFT JOIN users creator ON creator.id=NULLIF(COALESCE(source->>'created_by',cash->>'created_by'),'')::integer
     LEFT JOIN users assigner ON assigner.id=NULLIF(source->>'loyalty_vault_assigned_by','')::integer
+    LEFT JOIN users approver ON approver.id=NULLIF(source->>'approved_by','')::integer AND approver.organization_id=s.organization_id
     LEFT JOIN plot_installments vault_installment ON a.source_table='plot_installment_payments' AND vault_installment.id=NULLIF(source->>'installment_id','')::integer
     LEFT JOIN plots vault_plot ON a.source_table IN ('plot_payments','plot_installment_payments')
       AND vault_plot.id=COALESCE(NULLIF(source->>'plot_id','')::integer,vault_installment.plot_id) AND vault_plot.site_id=a.site_id
@@ -173,23 +174,36 @@ async function loadPendingVaultTotals(actor, database, selected, siteId) {
 
 export function publicVaultTransaction(row) {
   const s=row.source,c=row.cash;
+  // Keep the same display context used by Day Book without exposing the raw
+  // source record (which can contain private bank and identity fields).
+  const displayFields = ['party_name','category','sub_category','entry_type','from_entity','to_entity',
+    'entity_name','ledger_name','ledger_type','firm_name','farmer_name','vendor_name','agent_name',
+    'work_title','item_name','deal_no','firm_purpose','linked_detail','linked_client_name'];
+  const particulars = Object.fromEntries(displayFields.flatMap(field => {
+    const value = [s[field],c[field]].find(candidate => typeof candidate === 'string' && candidate.trim());
+    return value == null ? [] : [[field,value]];
+  }));
+  const reference = s.cheque_no || s.reference_no || s.bank_reference || s.transaction_id
+    || s.voucher_no || s.receipt_no || c.reference_no || '';
+  const notes = s.remarks || s.remark || s.note || c.remarks || '';
   return {
     id: row.cash_flow_entry_id, source_table: row.source_table, source_id: row.source_id,
     holder_type: row.holder_type, holder_id: row.holder_id, holder_name: row.holder_name,
     plot_no: row.plot_no,buyer_name: row.buyer_name,plot_block: row.plot_block,
     site_id: row.site_id, site_name: row.site_name, status: row.status, source_status: row.source_status,
-    source_reviewed_at: s.approved_at || null,
+    source_reviewed_at: s.approved_at || null,source_reviewed_by: s.approved_by || null,
     cheque_status: row.cheque_status, payment_mode: row.payment_mode==='SPLIT'?'CASH':row.payment_mode, source_payment_mode: row.payment_mode,
     credit: String(row.credit), debit: String(row.debit), posted_amount: String(row.posted_amount),
     pending_credit: ['pending_clearance','pending_approval'].includes(row.status) ? String(row.unposted_credit) : '0',
     pending_debit: ['pending_clearance','pending_approval'].includes(row.status) ? String(row.unposted_debit) : '0',
     transaction_date: c.date, transaction_time: s.transaction_time || c.transaction_time,
     created_at: s.created_at || c.created_at, created_by: s.created_by || c.created_by,
-    created_by_name: row.created_by_name,assigned_by: s.loyalty_vault_assigned_by,assigned_by_name: row.assigned_by_name,
+    created_by_name: row.created_by_name,approved_by_name: row.approved_by_name,
+    assigned_by: s.loyalty_vault_assigned_by,assigned_by_name: row.assigned_by_name,
     description: c.particular || s.particular || s.description || s.narration || 'Assigned transaction',
-    remarks: s.remarks || s.remark || s.note || c.remarks || '',
-    reference: s.cheque_no || s.reference_no || s.bank_reference || s.transaction_id || '',
-    source_details: { plot_id: row.plot_id || s.plot_id,plot_no: row.plot_no,buyer_name: row.buyer_name,plot_block: row.plot_block,
+    remarks: notes, reference,
+    source_details: { ...particulars,source_description: s.description || s.particular || s.narration || c.particular || '',notes,reference,
+      plot_id: row.plot_id || s.plot_id,plot_no: row.plot_no,buyer_name: row.buyer_name,plot_block: row.plot_block,
       parent_id: s.farmer_id || s.land_deal_id || s.firm_id || s.cash_flow_month_id || s.commitment_id || s.order_id,
       site_id: row.site_id, source_available: true },
   };

@@ -73,9 +73,9 @@ export const holderCashPaymentsCte = `holder_cash_payments AS MATERIALIZED (
     )
 )`;
 
-async function readActivity(database,{organizationId,siteId,scopes,endDate,net=false,netScopes}) {
-  const params=[organizationId,siteId,JSON.stringify(scopes),endDate,JSON.stringify(net?(netScopes||scopes):[])];
-  const {rows:activity}=await database.query(`WITH scopes AS (
+// The combined workspace embeds this exact query; standalone reads retain
+// the same parameterized statement and financial rules.
+export const walletHolderActivitySql=`WITH scopes AS (
     SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(holder_key text,holder_id integer,started_at timestamptz)
   ), ${holderCashPaymentsCte}, by_source AS (
     SELECT holder_key,source_key,sum(payment_amount) AS amount FROM holder_cash_payments GROUP BY holder_key,source_key
@@ -138,7 +138,16 @@ async function readActivity(database,{organizationId,siteId,scopes,endDate,net=f
   ) SELECT p.*,COALESCE(g.amount,0)::text AS imprest_given,COALESCE(c.amount,0)::text AS pending_cash_commitments,
     (COALESCE(f.imprest,0)-COALESCE(w.amount,0))::text AS imprest
     FROM spending p LEFT JOIN giving g USING(holder_key) LEFT JOIN commitments c USING(holder_key)
-      LEFT JOIN floats f USING(holder_key) LEFT JOIN other_funding w USING(holder_key)`,params);
+      LEFT JOIN floats f USING(holder_key) LEFT JOIN other_funding w USING(holder_key)`;
+
+async function readActivity(database,{organizationId,siteId,scopes,endDate,net=false,netScopes}) {
+  const params=[organizationId,siteId,JSON.stringify(scopes),endDate,JSON.stringify(net?(netScopes||scopes):[])];
+  const {rows:activity}=await database.query(walletHolderActivitySql,params);
+  return walletHolderActivityFromRows(activity);
+}
+
+export function walletHolderActivityFromRows(activity) {
+
   return {spending:new Map(activity.map(row=>[row.holder_key,row])),given:new Map(activity.map(row=>[row.holder_key,row.imprest_given])),
     commitments:new Map(activity.map(row=>[row.holder_key,row.pending_cash_commitments])),
     net:new Map(activity.map(row=>[row.holder_key,row.imprest]))};
@@ -151,6 +160,10 @@ async function activityContextFor(database,{organizationId,siteId,endDate}) {
     (SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date) clock
     LEFT JOIN application_settings a ON a.site_id=$2 AND a.setting_key LIKE 'wallet_reporting_opening:user:%'
       AND EXISTS(SELECT 1 FROM sites s WHERE s.id=a.site_id AND s.organization_id=$1)`,[organizationId,siteId]);
+  return walletActivityContextFromRows(rows,{organizationId,siteId,endDate});
+}
+
+export function walletActivityContextFromRows(rows,{organizationId,siteId,endDate}) {
   const openings=rows.map(row=>row.setting_value).filter(row=>row?.version===1&&row.holder_type==='user'
     &&row.organization_id===Number(organizationId)&&row.site_id===Number(siteId)&&Number.isSafeInteger(row.holder_id)
     &&Number.isFinite(Date.parse(row.started_at))&&typeof row.operation_key==='string'&&!!row.operation_key
@@ -178,19 +191,24 @@ export async function addWalletCashDeductions(database,{organizationId,siteId,st
 // Batch ordinary visible wallets without changing balances or source postings.
 // No opening means all recorded history and a null started_at. Private rows
 // never gain money through this enrichment.
-export async function addHolderWalletActivity(database,{organizationId,siteId,holders,endDate,includeAlignedNet=false}) {
+export async function addHolderWalletActivity(database,{organizationId,siteId,holders,endDate,includeAlignedNet=false,preloadedActivity}) {
   const rows=holders.filter(row=>(row.holder_type??'user')==='user'&&row.balance!=null
     &&Number.isSafeInteger(Number(row.holder_id??row.id))&&Number(row.holder_id??row.id)>0
     &&!(row.cash_deductions?.version===2&&row.cash_deductions.scope==='holder'
       &&Number(row.cash_deductions.site_id)===Number(siteId)&&Number(row.cash_deductions.holder_id)===Number(row.holder_id??row.id)
       &&row.cash_deductions.current_cash===money(paise(row.balance))));
   if(!rows.length) return holders;
-  const context=await activityContextFor(database,{organizationId,siteId,endDate});
+  const context=preloadedActivity?.context??await activityContextFor(database,{organizationId,siteId,endDate});
   const saved=new Map(context.openings.map(row=>[row.holder_id,row]));
   const scopes=rows.map(row=>({holder_key:`user:${row.holder_id??row.id}`,holder_id:Number(row.holder_id??row.id),started_at:saved.get(Number(row.holder_id??row.id))?.started_at??null}));
   const aligned=new Set(rows.filter(row=>row.cash_in_hand_basis==='SITE_CASH_AFTER_IMPREST').map(row=>Number(row.holder_id??row.id)));
   const netScopes=includeAlignedNet?scopes.filter(scope=>aligned.has(scope.holder_id)&&saved.has(scope.holder_id)):[];
-  const activity=await readActivity(database,{organizationId,siteId,scopes,endDate:context.endDate,net:netScopes.length>0,netScopes});
+  // Metadata with unusual legacy dates remains supported: use embedded results
+  // only when its SQL-derived scopes exactly match the established JS rules.
+  const signature=list=>JSON.stringify((list||[]).map(row=>[row.holder_key,row.holder_id??null,row.started_at??null]).sort((a,b)=>a[0].localeCompare(b[0])));
+  const compatible=preloadedActivity&&signature(preloadedActivity.scopes)===signature(scopes)
+    &&signature(preloadedActivity.netScopes)===signature(netScopes);
+  const activity=compatible?walletHolderActivityFromRows(preloadedActivity.rows):await readActivity(database,{organizationId,siteId,scopes,endDate:context.endDate,net:netScopes.length>0,netScopes});
   for(const row of rows) {
     const holderId=Number(row.holder_id??row.id),key=`user:${holderId}`;
     const opening=saved.get(holderId)||{opening_cash:'0',received_at_start:'0',handovers_at_start:'0',started_at:null};

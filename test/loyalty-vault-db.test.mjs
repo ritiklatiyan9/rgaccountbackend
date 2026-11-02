@@ -260,7 +260,11 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
       try {
         await query("INSERT INTO users VALUES(7,'Pending cheque holder','admin',1,true)");
         await query("INSERT INTO plots VALUES(3,10,'A3','ALICE BUYER','A'),(4,10,'A3','OTHER BUYER','A')");
+        await query(`ALTER TABLE plot_payments ADD COLUMN category text, ADD COLUMN sub_category text,
+          ADD COLUMN party_name text, ADD COLUMN reference_no text, ADD COLUMN approved_by integer,
+          ADD COLUMN approved_at timestamptz, ADD COLUMN account_no text`);
         await query("INSERT INTO plot_payments(id,plot_id,site_id,created_by,payment_mode,cheque_status,loyalty_vault_holder_type,loyalty_vault_holder_id,loyalty_vault_assigned_by) VALUES(5001,3,10,2,'CHEQUE','PENDING','user',7,2)");
+        await query("UPDATE plot_payments SET category='Booking recovery',sub_category='Second instalment',party_name='Buyer receipt desk',reference_no='REF-SOURCE-5001',account_no='PRIVATE-ACCOUNT' WHERE id=5001");
         const cashId=await entry({source_module:'plot_payments',source_id:5001,date:'2024-02-29',credit:150000,cash_type:'CHEQUE',cheque_status:'PENDING',loyalty_vault_holder_type:null,loyalty_vault_holder_id:null});
         const scope={holder_type:'user',holder_id:'7'};
         const profile=await invoke(controller.userDetail,{params:{id:'7'}});
@@ -272,6 +276,12 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         assert.equal(pending.transactions[0].posted_amount,'0');assert.equal(pending.transactions[0].pending_credit,'150000');
         assert.equal(pending.transactions[0].plot_no,'A3');assert.equal(pending.transactions[0].buyer_name,'ALICE BUYER');assert.equal(pending.transactions[0].source_details.plot_id,3);
         assert.equal(pending.transactions[0].created_by_name,'Administrator');assert.equal(await entries(),before);
+        assert.equal(pending.transactions[0].source_details.category,'Booking recovery');
+        assert.equal(pending.transactions[0].source_details.sub_category,'Second instalment');
+        assert.equal(pending.transactions[0].source_details.party_name,'Buyer receipt desk');
+        assert.equal(pending.transactions[0].reference,'REF-SOURCE-5001');
+        assert.equal(pending.transactions[0].source_details.reference,'REF-SOURCE-5001');
+        assert.ok(!JSON.stringify(pending.transactions[0]).includes('PRIVATE-ACCOUNT'));
         const beyond=await invoke(controller.assignedTransactions,{query:{...scope,page:'99'}});assert.equal(beyond.total,1);assert.equal(beyond.transactions.length,0);
         for(const dates of [{from:'2024-02-29',to:'2024-02-29'},{from:'2024-02-01',to:'2024-02-29'},{from:'2024-01-01',to:'2024-12-31'},{to:'2024-02-29'},{from:'2024-02-29'}]){
           const dated=await invoke(controller.assignedTransactions,{query:{...scope,...dates,status:'pending',q:'ALICE BUYER',site_id:'10'}});
@@ -292,8 +302,16 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,q:'A3'}})).total,1);
         assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,q:'OTHER BUYER'}})).total,0);
         assert.equal((await invoke(controller.assignedTransactions,{query:{...scope,q:'%'}})).total,0);
-        await query("UPDATE plot_payments SET cheque_status='CLEARED',status='approved' WHERE id=5001");
+        for (const q of ['Booking recovery','Second instalment','Buyer receipt desk','REF-SOURCE-5001']) {
+          const matching=await invoke(controller.assignedTransactions,{query:{...scope,q}});
+          assert.equal(matching.total,1,q);assert.equal(matching.transactions[0].source_id,5001,q);
+          assert.equal(matching.totals.credit,'150000',q);
+        }
+        await query("UPDATE plot_payments SET cheque_status='CLEARED',status='approved',approved_by=2,approved_at='2024-02-29T12:00:00Z' WHERE id=5001");
         await query("UPDATE cash_flow_entries SET cheque_status='CLEARED',status='approved' WHERE id=$1",[cashId]);
+        const approved=(await invoke(controller.assignedTransactions,{query:scope})).transactions[0];
+        assert.equal(approved.approved_by_name,'Administrator');assert.equal(approved.source_reviewed_by,2);
+        assert.equal(approved.source_reviewed_at,'2024-02-29T12:00:00+00:00');
         assert.equal((await amount('user:7')).balance,'150000.00');assert.equal(await entries(),before+1);
         const movement=(await invoke(controller.history,{query:scope})).entries[0];
         assert.equal(movement.plot_no,'A3');assert.equal(movement.buyer_name,'ALICE BUYER');assert.equal(movement.source_details.plot_id,3);

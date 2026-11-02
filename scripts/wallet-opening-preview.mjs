@@ -3,15 +3,27 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import pool from '../src/config/db.js';
+import pool,{getDatabasePoolStats} from '../src/config/db.js';
 import {createWalletOpeningPreviewAuth} from '../src/middlewares/walletOpeningPreviewAuth.middleware.js';
+import {requestPerformance} from '../src/utils/requestPerformance.js';
+import errorMiddleware from '../src/middlewares/error.middleware.js';
 import {summary,workspace,holders,userDetail,reportingOpenings,amountBreakdown,history,transfers,assignedTransactions} from '../src/controllers/loyaltyVault.controller.js';
 const app=express();
-const auth=process.env.WALLET_OPENING_AUTH_MODE==='upstream'
-  ? createWalletOpeningPreviewAuth({database:pool})
-  : (_req,res)=>res.status(503).json({message:'Wallet opening is saved; existing-session verification needs approval before activation.'});
-app.use((req,res,next)=>{const started=performance.now();const json=res.json.bind(res);res.json=body=>{if(res.statusCode===401)console.log('Wallet opening authentication:',body.message);return json(body);};res.once('finish',()=>console.log(`Wallet opening reader ${req.method} ${req.path}: ${res.statusCode} (${Math.round(performance.now()-started)} ms)`));next();});
-app.use(cors({origin:['http://127.0.0.1:5174','http://localhost:5174'],credentials:true}));
+const mode=process.env.WALLET_OPENING_AUTH_MODE;
+const verifySession=['upstream','local'].includes(mode)
+  ? createWalletOpeningPreviewAuth({database:pool,mode})
+  : (_req,res)=>res.status(503).json({message:'Wallet reader authentication is not configured.'});
+const auth=(req,res,next)=>{
+  const started=performance.now();
+  return verifySession(req,res,error=>{
+    const elapsed=performance.now()-started;
+    res.setHeader('Server-Timing',`auth;dur=${elapsed.toFixed(1)}`);
+    if(process.env.API_PERFORMANCE_LOG==='true')console.log(JSON.stringify({type:'wallet-auth-timing',route:req.route.path,mode,duration_ms:Math.round(elapsed)}));
+    next(error);
+  });
+};
+app.use(requestPerformance({poolStats:getDatabasePoolStats}));
+app.use(cors({origin:['http://127.0.0.1:5174','http://localhost:5174'],credentials:true,exposedHeaders:['Server-Timing']}));
 app.get('/health',(_req,res)=>res.json({service:'wallet-opening-reader',read_only:true}));
 app.get('/wallet',auth,summary);
 app.get('/wallet/workspace',auth,workspace);
@@ -24,7 +36,10 @@ for(const prefix of ['/wallet','/wallet/overall']){
   app.get(`${prefix}/transfers`,auth,transfers);
   app.get(`${prefix}/transactions`,auth,assignedTransactions);
 }
-app.use((error,_req,res,_next)=>{console.error('Wallet opening read failed:',error.code||error.name,error.message);res.status(error.statusCode||500).json({message:error.statusCode?error.message:'Wallet reporting opening unavailable.'});});
+app.use(errorMiddleware);
 const port=Number(process.env.WALLET_OPENING_PREVIEW_PORT||8003);
+// Establish the two bounded read connections before advertising readiness.
+// This warms transport only; every wallet balance is still read from the DB.
+await Promise.all([pool.query('SELECT 1'),pool.query('SELECT 1')]);
 const server=app.listen(port,'127.0.0.1',()=>console.log(`Wallet opening reader ready on http://127.0.0.1:${port}`));
 for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>server.close(()=>pool.end().finally(()=>process.exit(0))));

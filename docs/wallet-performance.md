@@ -37,12 +37,26 @@ A separate integration fixture measured initial summary plus directory at 21 dat
 
 One bounded live workspace measurement on the same selected site improved from 5,855 ms and 17 calls to 2,739 ms and 7 calls (the call counts include the measurement's separate actor lookup). The final timed workspace itself issued six calls: selected-site authorization, transaction setup, base packet, report-opening context, all-holder activity, and commit. Each remote call cost approximately 363–591 ms in the final sample, so network latency remains material. These are individual observations, **not production p95 or a sub-second API claim**. Financial output was unchanged in the selected-site check.
 
+The subsequent latency pass combines authorization, openings and all-holder activity into the same financial statement. The established JavaScript opening validation still verifies the server-derived scope; unusual legacy metadata uses the existing activity query as a safe fallback. The normal workspace now needs three timed database calls (read-only BEGIN, one SELECT, COMMIT), or four including the measurement's separate actor lookup. An individual live sample took 2,217 ms, versus the preceding 2,739 ms. A bounded server plan spent 57.964 ms planning and 258.868 ms executing, with no disk reads and no JIT compilation. Explicit transaction bounds remain; remote transport and authentication still determine the complete page experience.
+
+### Authenticated local reader verification
+
+The running local reader now prewarms two bounded connections, keeps its idle connections for 120 seconds, and shares only overlapping authentication checks for the same credential/session pair. Completed authentication results are never retained. The hosted session check and local active-user/role/organization check remain mandatory. Local JWT mode is available only as an explicit configuration option; it was **not enabled** because the existing browser session failed local verification. The default reader continues using the existing hosted session.
+
+The first measured HTTP workspace request took 4,587.53 ms; seven subsequent interactive observations ranged from 1,706.81 to 3,811.43 ms, with a median of 2,807.52 ms. Each returned the same 16,582-byte payload size. These include session verification and remote database transport. They are not controlled production p95 or browser LCP measurements. Query count was four normally, or three when an overlapping request had already started the shared identity check. Authentication timing includes that local lookup and therefore overlaps the DB timing.
+
+The browser verification confirmed the OM ASSOCIATES wallet displayed its holder rows and balances, kept those values visible during refresh, and settled back to the normal table. The frontend now prioritizes the workspace before hidden notification history and stops unchanged 15-second imprest polls from refreshing all financial views. The local changes are running at `localhost:5174`; hosted application code has not been deployed by this verification.
+
+Start the bounded, read-only reader with `npm run dev:wallet-reader`. Set `API_PERFORMANCE_LOG=true` for opt-in timing, query-count and pool telemetry; the reader exposes authentication duration in `Server-Timing`. It does not log credentials, financial rows or query parameters. The final wallet regression suite covered 221 backend tests without outstanding failures/skips (the sandbox-blocked Redis fixture passed against an owned temporary loopback instance), and the frontend covered 286 tests plus its production build.
+
 Raw measurements and plans:
 
 - [120k benchmark results](benchmarks/wallet-cash-latest.json)
 - [Initial before-change baseline](benchmarks/wallet-cash-baseline.json)
 - [Bounded live selected-site query-local inlining comparison](benchmarks/wallet-cash-selective-live-inlining.json)
 - [Single live workspace before/after observations](benchmarks/wallet-workspace-live.json)
+- [Single-statement workspace observations and server plan](benchmarks/wallet-workspace-single-statement.json)
+- [Authenticated local-reader HTTP observations](benchmarks/wallet-reader-http-latest.json)
 
 The live comparison was read-only: it substituted the optimized view definition inside one query and did not execute DDL. It verified identical returned columns and values. Its planning times were 11.576 ms before and 27.752 ms after; execution times were 301.066 ms and 78.248 ms, with 2,072 and 1,913 buffer hits and no buffer reads. These are single bounded plan measurements, **not production p95 API latency**.
 

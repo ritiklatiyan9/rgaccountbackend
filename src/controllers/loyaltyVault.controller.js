@@ -15,7 +15,7 @@ import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 import { getOverallWalletOverview } from '../services/overallWallet.service.js';
 import { readWalletReportingOpenings } from '../services/walletReportingOpening.service.js';
 import { walletActivityScope, addWalletAmountFilters, addWalletActorFilter, addWalletModuleFilter, addWalletPartyFilters } from '../services/walletActivityFilters.service.js';
-import { addHolderWalletActivity } from '../services/walletCashDeductions.service.js';
+import { addHolderWalletActivity, walletHolderActivitySql, walletActivityContextFromRows } from '../services/walletCashDeductions.service.js';
 import { sumWalletMoney } from '../services/walletMoney.service.js';
 
 async function walletReadActor(req) {
@@ -124,11 +124,11 @@ export const summary = asyncHandler(async(req,res)=>{
   res.set('Cache-Control','no-store').json(data);
 });
 const walletHolderSql=`WITH ${siteVaultAccountsCte('$2','$3')}, holders AS(
-    SELECT 'user'::text AS holder_type,u.id AS holder_id,u.name,u.role,NULL::text AS phone,$3::int AS site_id,
+    SELECT 'user'::text AS holder_type,u.id AS holder_id,u.name,u.role,NULL::text AS phone,$3::int AS site_id,to_jsonb(u)->>'photo' AS photo,
       (u.is_active AND (u.role IN ('admin','super_admin') OR (u.role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3)))) AS can_receive_transfer,u.is_active AS is_active FROM users u
       WHERE organization_id=$2 AND ((is_active=true AND (role IN ('admin','super_admin') OR (role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3))))
         OR ($4::boolean AND EXISTS(SELECT 1 FROM site_accounts a WHERE a.holder_key='user:'||u.id::text)))
-    UNION ALL SELECT 'member',m.id,m.full_name,NULL,m.phone,m.site_id,false,NULL::boolean FROM members m JOIN sites s ON s.id=m.site_id
+    UNION ALL SELECT 'member',m.id,m.full_name,NULL,m.phone,m.site_id,NULL::text,false,NULL::boolean FROM members m JOIN sites s ON s.id=m.site_id
       WHERE $5::boolean AND s.organization_id=$2 AND ($3::int IS NULL OR m.site_id=$3) AND ($4::boolean OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=$1 AND site_id=m.site_id))
     ) SELECT h.*,(h.holder_type='member' OR h.can_receive_transfer) AS can_assign_custody,COALESCE(s.name,'') AS site_name,
       CASE WHEN $4::boolean OR (h.holder_type='user' AND h.holder_id=$1) THEN COALESCE(a.balance,0)::text ELSE NULL END AS balance,
@@ -154,7 +154,7 @@ async function walletHolderData(db,actor,siteId,{selection=false,includeMembers=
     pending_credit:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_credit||'0.00',
     pending_debit:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_debit||'0.00',
     pending_count:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_count||0}));
-  if(!selection) await addHolderWalletActivity(db,{organizationId:actor.organization_id,siteId,holders:visible,endDate:shared.endDate,includeAlignedNet:shared.includeAlignedNet===true});
+  if(!selection) await addHolderWalletActivity(db,{organizationId:actor.organization_id,siteId,holders:visible,endDate:shared.endDate,includeAlignedNet:shared.includeAlignedNet===true,preloadedActivity:shared.preloadedActivity});
   return {site_id:siteId,holders:visible};
 }
 
@@ -171,8 +171,13 @@ export const holders = asyncHandler(async(req,res)=>{
 });
 
 export const workspace = asyncHandler(async(req,res)=>{
-  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id);
-  if(req.query.include_members!=null&&!['true','false'].includes(String(req.query.include_members))) throw walletError('Invalid holder list option.');
+  const actor=await walletReadActor(req);
+  // Same selected-site validation as accessibleSite; its authorization query
+  // is evaluated inside the workspace snapshot instead of a separate RTT.
+  if(req.query.site_id==null||req.query.site_id==='')throw walletError('Choose a site from the sidebar to use Cash Wallet.');
+  const siteId=positiveId(req.query.site_id);
+  if(siteId>2147483647)throw walletError('Choose a valid site from the sidebar.');
+  const invalidMembers=req.query.include_members!=null&&!['true','false'].includes(String(req.query.include_members));
   const includeMembers=String(req.query.include_members)==='true';
   const data=await walletReadTransaction(pool,async db=>{
     // Existing queries share one parameterized round trip and one snapshot.
@@ -183,14 +188,52 @@ export const workspace = asyncHandler(async(req,res)=>{
     const holderSql=bind(walletHolderSql,typed);
     const cashSql=bind(adminWalletCashRowsSql,{1:typed[2],2:'ARRAY[$3::integer]'});
     const unallocatedSql=bind(unallocatedCustodySql,{1:typed[2],2:typed[7],3:typed[1],4:'NULL::text'});
-    const {rows:[packet]}=await db.query(`SELECT
+    const activitySql=bind(walletHolderActivitySql,{1:typed[2],2:typed[3],
+      3:'(SELECT scopes FROM wallet_workspace_scopes)',4:'(SELECT end_date FROM wallet_workspace_base)',
+      5:'(SELECT net_scopes FROM wallet_workspace_scopes)'});
+    const {rows:[packet]}=await db.query(`WITH wallet_workspace_access AS MATERIALIZED (
+      SELECT s.id FROM sites s WHERE s.id=$3::integer AND s.organization_id=$2::integer
+        AND ($7::boolean OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=$1::integer AND site_id=s.id))
+    ),wallet_workspace_base AS MATERIALIZED (SELECT
       (SELECT to_jsonb(summary_row) FROM (${summarySql}) summary_row) AS summary,
       (SELECT COALESCE(jsonb_agg(to_jsonb(holder_row)),'[]'::jsonb) FROM (${holderSql}) holder_row) AS holders,
       CASE WHEN $4::boolean THEN (SELECT COALESCE(jsonb_agg(to_jsonb(cash_row)),'[]'::jsonb) FROM (${cashSql}) cash_row)
         ELSE '[]'::jsonb END AS cash_rows,
       (SELECT to_jsonb(unallocated_row) FROM (${unallocatedSql}) unallocated_row) AS unallocated,
-      ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date`,
+      ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date FROM wallet_workspace_access
+    ),wallet_workspace_openings AS MATERIALIZED (
+      SELECT COALESCE(jsonb_agg(a.setting_value),'[]'::jsonb) AS openings FROM application_settings a
+      JOIN wallet_workspace_base b ON a.site_id=$3::integer
+      WHERE a.setting_key LIKE 'wallet_reporting_opening:user:%'
+    ),wallet_workspace_scope_rows AS MATERIALIZED (
+      SELECT jsonb_build_object('holder_key','user:'||(h.value->>'holder_id'),
+        'holder_id',(h.value->>'holder_id')::integer,'started_at',saved.opening->'started_at') AS scope,
+        saved.opening IS NOT NULL AND EXISTS(SELECT 1 FROM jsonb_array_elements(b.cash_rows) aligned
+          WHERE aligned->>'holder_key'='user:'||(h.value->>'holder_id')) AS aligned
+      FROM wallet_workspace_base b CROSS JOIN wallet_workspace_openings context
+      CROSS JOIN LATERAL jsonb_array_elements(b.holders) h(value)
+      LEFT JOIN LATERAL (
+        SELECT candidate.value AS opening FROM jsonb_array_elements(context.openings) WITH ORDINALITY candidate(value,ordinal)
+        WHERE candidate.value->'version'='1'::jsonb AND candidate.value->>'holder_type'='user'
+          AND candidate.value->'organization_id'=to_jsonb($2::integer) AND candidate.value->'site_id'=to_jsonb($3::integer)
+          AND candidate.value->'holder_id'=h.value->'holder_id'
+          AND jsonb_typeof(candidate.value->'operation_key')='string' AND candidate.value->>'operation_key'<>''
+          AND pg_input_is_valid(candidate.value->>'started_at','timestamp with time zone')
+          AND NOT EXISTS(SELECT 1 FROM unnest(ARRAY['opening_cash','received_at_start','handovers_at_start',
+            'adjustments_at_start','recorded_balance_at_start']) field
+            WHERE COALESCE(candidate.value->>field,'')!~'^-?[0-9]+([.][0-9]{1,2})?$')
+        ORDER BY candidate.ordinal DESC LIMIT 1
+      ) saved ON true
+      WHERE h.value->>'holder_type'='user' AND h.value->>'balance' IS NOT NULL
+    ),wallet_workspace_scopes AS MATERIALIZED (
+      SELECT COALESCE(jsonb_agg(scope),'[]'::jsonb) AS scopes,
+        COALESCE(jsonb_agg(scope) FILTER(WHERE aligned),'[]'::jsonb) AS net_scopes FROM wallet_workspace_scope_rows
+    ) SELECT b.*,context.openings,scopes.scopes AS activity_scopes,scopes.net_scopes,
+      (SELECT COALESCE(jsonb_agg(to_jsonb(activity_row)),'[]'::jsonb) FROM (${activitySql}) activity_row) AS activity
+      FROM wallet_workspace_base b CROSS JOIN wallet_workspace_openings context CROSS JOIN wallet_workspace_scopes scopes`,
       [actor.id,actor.organization_id,siteId,canViewAllWallets(actor),includeMembers,false,isVaultAdmin(actor)]);
+    if(!packet)throw walletError('Choose a site you can access.',403);
+    if(invalidMembers)throw walletError('Invalid holder list option.');
     // Match node-postgres timestamp serialization used by the older routes.
     for(const field of ['tracking_started_at','refreshed_at'])if(packet.summary?.[field])packet.summary[field]=new Date(packet.summary[field]);
     for(const row of packet.holders)if(row.updated_at)row.updated_at=new Date(row.updated_at);
@@ -198,6 +241,9 @@ export const workspace = asyncHandler(async(req,res)=>{
     const states=adminWalletCashStatesFromRows(packet.cash_rows,siteId);
     const shared={deferActivity:true,includeAlignedNet:true,endDate:packet.end_date,
       summaryRows:packet.summary?[packet.summary]:[],holderRows:packet.holders,unallocated:packet.unallocated,
+      preloadedActivity:{context:walletActivityContextFromRows(packet.openings.map(setting_value=>({setting_value})),
+          {organizationId:actor.organization_id,siteId,endDate:packet.end_date}),
+        scopes:packet.activity_scopes,netScopes:packet.net_scopes,rows:packet.activity},
       pendingTotals:()=>pending??=packet.summary?.consolidation_active?Promise.resolve([]):pendingVaultTotals(actor,db,null,siteId),
       cashStates:()=>states};
     const overview=await walletSummaryData(db,actor,siteId,shared);
@@ -257,7 +303,12 @@ export const assignedTransactions = asyncHandler(async(req,res)=>{
   if(status==='pending')clauses.push("status IN ('pending_clearance','pending_approval')");
   else if(status!=='all'){params.push(status);clauses.push(`status=$${params.length}`);}
   const q=String(req.query.q||'').trim();if(q.length>200)throw walletError('Keep search within 200 characters.');
-  if(q){params.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);clauses.push(`concat_ws(' ',holder_name,site_name,plot_no,buyer_name,source_table,source_id::text,cash->>'particular',source->>'remarks',source->>'cheque_no') ILIKE $${params.length} ESCAPE '\\'`);}
+  if(q){params.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);clauses.push(`concat_ws(' ',holder_name,site_name,plot_no,buyer_name,source_table,source_id::text,
+    created_by_name,approved_by_name,cash->>'particular',cash->>'remarks',cash->>'reference_no',
+    source->>'description',source->>'particular',source->>'narration',source->>'remarks',source->>'remark',source->>'note',
+    source->>'party_name',source->>'category',source->>'sub_category',source->>'from_entity',source->>'to_entity',
+    cash->>'party_name',cash->>'category',cash->>'sub_category',cash->>'from_entity',cash->>'to_entity',
+    source->>'cheque_no',source->>'reference_no',source->>'bank_reference',source->>'transaction_id',source->>'voucher_no',source->>'receipt_no') ILIKE $${params.length} ESCAPE '\\'`);}
   const where=clauses.join(' AND '),transactionCte=scopedVaultTransactionsCte({organization:'$1',sites:sitesParameter});
   const {rows}=await db.query( `${transactionCte} SELECT *,count(*) OVER()::int AS total,
     COALESCE(sum(credit) OVER(),0)::text AS total_credit,COALESCE(sum(debit) OVER(),0)::text AS total_debit,

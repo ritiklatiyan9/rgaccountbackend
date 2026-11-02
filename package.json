@@ -230,6 +230,7 @@
     "test:construction-startup": "node --test test/construction-startup-db.test.mjs",
     "dev:studio-api": "node --watch scripts/studio-api.mjs",
     "dev:seek-permission": "node scripts/seek-permission-preview.mjs",
+    "dev:wallet-reader": "WALLET_OPENING_AUTH_MODE=upstream DB_POOL_MAX=4 DB_POOL_IDLE_TIMEOUT_MS=120000 node scripts/wallet-opening-preview.mjs",
     "test:seek-preview": "node --test test/seek-permission-preview.test.mjs test/seek-permission-preview-auth.test.mjs",
     "migrate:account-whatsapp": "node src/migrations/225_account_whatsapp_studio.js && node src/migrations/226_account_whatsapp_documents.js",
     "test:account-whatsapp": "node --test test/account-whatsapp-*.test.mjs",

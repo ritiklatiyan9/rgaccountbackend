@@ -602,15 +602,36 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       assert.deepEqual(JSON.parse(JSON.stringify(combined.holders)),JSON.parse(JSON.stringify(separateHolders.holders)));
       assert.equal(combined.site_cash_balance,'1000.00');
       assert.ok(combinedCount<separateCount-4,`workspace ${combinedCount} statements must remove duplicate work from ${separateCount}`);
+      assert.equal(combinedCount,4,'actor lookup plus BEGIN, one authorized financial packet and COMMIT');
       t.diagnostic(`workspace statements: separate=${separateCount}, combined=${combinedCount}`);
       const staff=await invoke(controller.workspace,{user:3});
       assert.ok(staff.holders.every(row=>row.holder_type==='user'&&row.holder_id===3));
       assert.equal(staff.site_cash_balance,null,'private staff reads never gain the site cash stock');
       await assert.rejects(invoke(controller.workspace,{site:20}),status(403));
+      await assert.rejects(invoke(controller.workspace,{site:20,extraQuery:{include_members:'invalid'}}),status(403),'site authorization retains precedence over invalid display options');
+      await assert.rejects(invoke(controller.workspace,{site:11,user:3}),status(403),'a staff user cannot select another site in the packet');
+      for(const site of [null,'bad',0,2147483648])await assert.rejects(invoke(controller.workspace,{site}),status(400));
       await assert.rejects(invoke(controller.workspace,{extraQuery:{include_members:'invalid'}}),status(400));
       await query("INSERT INTO user_permissions VALUES(3,'wallet',false,true)");
       try {await assert.rejects(invoke(controller.workspace,{user:3}),status(403));}
       finally {await query("DELETE FROM user_permissions WHERE user_id=3 AND module='wallet'");}
+    });
+    await t.test('embedded opening scopes preserve invalid metadata handling and fall back for PostgreSQL-only timestamps',async()=>{
+      const original=(await query("SELECT setting_value FROM application_settings WHERE site_id=15 AND setting_key='wallet_reporting_opening:user:2'")).rows[0].setting_value;
+      try {
+        for(const started_at of ['not-a-timestamp','infinity']){
+          await query("UPDATE application_settings SET setting_value=$1::jsonb WHERE site_id=15 AND setting_key='wallet_reporting_opening:user:2'",[JSON.stringify({...original,started_at})]);
+          const separate=await invoke(controller.holders,{site:15,extraQuery:{include_members:false}});
+          statementCount=0;
+          const combined=await invoke(controller.workspace,{site:15});
+          const count=statementCount;
+          assert.deepEqual(JSON.parse(JSON.stringify(combined.holders)),JSON.parse(JSON.stringify(separate.holders)));
+          assert.equal(combined.holders.find(row=>row.holder_id===2).cash_deductions.started_at,null);
+          assert.equal(count,started_at==='infinity'?5:4,'unusual metadata may cost one safe activity fallback, never change its accounting scope');
+        }
+      } finally {
+        await query("UPDATE application_settings SET setting_value=$1::jsonb WHERE site_id=15 AND setting_key='wallet_reporting_opening:user:2'",[JSON.stringify(original)]);
+      }
     });
   } finally {pool.query=originalQuery;pool.connect=originalConnect;await pg.close();}
 });

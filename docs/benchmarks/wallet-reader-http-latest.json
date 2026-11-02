@@ -1,0 +1,68 @@
+{
+  "observed_on": "2026-11-02",
+  "scope": "Authenticated read-only localhost wallet reader against the existing remote Accounts session service and configured remote PostgreSQL. Interactive observations, not controlled production p95 or browser LCP.",
+  "first_request": {
+    "duration_ms": 4587.53,
+    "payload_bytes": 16582,
+    "query_count": 4,
+    "query_total_ms": 2566.53,
+    "query_slowest_ms": 1288.86
+  },
+  "subsequent_requests": [
+    {
+      "duration_ms": 3009.93,
+      "payload_bytes": 16582,
+      "query_count": 4,
+      "query_total_ms": 1974.28,
+      "query_slowest_ms": 937.47
+    },
+    {
+      "duration_ms": 2807.52,
+      "payload_bytes": 16582,
+      "query_count": 4,
+      "query_total_ms": 1891.89,
+      "query_slowest_ms": 917.39
+    },
+    {
+      "duration_ms": 2658.33,
+      "payload_bytes": 16582,
+      "query_count": 3,
+      "query_total_ms": 1596.39,
+      "query_slowest_ms": 927.47
+    },
+    {
+      "duration_ms": 2801.83,
+      "payload_bytes": 16582,
+      "query_count": 4,
+      "query_total_ms": 1928.99,
+      "query_slowest_ms": 939.81
+    },
+    {
+      "duration_ms": 3178.72,
+      "payload_bytes": 16582,
+      "query_count": 4,
+      "query_total_ms": 2292.46,
+      "query_slowest_ms": 1070.85
+    },
+    {
+      "duration_ms": 1706.81,
+      "payload_bytes": 16582,
+      "query_count": 3,
+      "query_total_ms": 1563.74,
+      "query_slowest_ms": 919.89
+    },
+    {
+      "duration_ms": 3811.43,
+      "payload_bytes": 16582,
+      "query_count": 4,
+      "query_total_ms": 1640.93,
+      "query_slowest_ms": 646.37
+    }
+  ],
+  "subsequent_median_ms": 2807.52,
+  "notes": [
+    "Normal workspace uses one financial SELECT inside BEGIN/COMMIT; the separate local identity lookup adds a fourth query. An overlapping verified identity request may share that lookup, resulting in three queries attributed to this request.",
+    "Authentication time contains the local identity DB lookup, so auth time and query_total_ms overlap and must not be summed.",
+    "No financial data, user identifiers, credentials or SQL parameters are included."
+  ]
+}
