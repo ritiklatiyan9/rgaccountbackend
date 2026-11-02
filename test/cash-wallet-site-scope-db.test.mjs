@@ -44,6 +44,20 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       CREATE TABLE cash_flow_entries(id integer PRIMARY KEY,site_id integer,created_by integer,credit numeric DEFAULT 0,debit numeric DEFAULT 0,
         cash_type text,status text,cheque_status text,particular text,source_module text,source_id integer,date date DEFAULT CURRENT_DATE,
         created_at timestamptz DEFAULT now(),entry_transfer_id uuid,is_imprest_internal boolean,is_firm_transaction boolean,to_firm_id integer);
+      -- Wallet activity now reads the canonical financial surface for every
+      -- visible holder. Keep it available from the first controller call;
+      -- the custody scenarios below explicitly populate its posted legs.
+      CREATE SEQUENCE fixture_ledger_entry_ids START 1000000;
+      CREATE TABLE ledger_entries(id text PRIMARY KEY DEFAULT nextval('fixture_ledger_entry_ids')::text,
+        site_id integer,entry_date date DEFAULT CURRENT_DATE,bucket text,credit numeric DEFAULT 0,debit numeric DEFAULT 0,
+        source_key text DEFAULT 'personal_ledger',source_id integer,notes text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_ledger(id serial PRIMARY KEY,site_id integer,user_id integer,amount numeric,
+        type text,reference_id integer,source_module text,remarks text,created_by integer,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_allocations(id serial PRIMARY KEY,admin_id integer,sub_admin_id integer,site_id integer,
+        amount numeric,status text,from_own_float boolean DEFAULT false,confirmed_at timestamptz,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_transfers(id serial PRIMARY KEY,from_user_id integer,to_user_id integer,site_id integer,
+        amount numeric,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric);
       CREATE TABLE cash_flow_months(id integer PRIMARY KEY,site_id integer);
       CREATE TABLE farmers(id integer PRIMARY KEY,site_id integer);
       CREATE TABLE plots(id integer PRIMARY KEY,site_id integer,plot_no text,buyer_name text,block text);CREATE TABLE plot_installments(id integer PRIMARY KEY,plot_id integer);
@@ -73,6 +87,9 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       assert.equal(Number((await invoke(controller.summary,{site:11})).vault.site_cash_incoming),1504000);
       const holders=await invoke(controller.holders);const sachin=holders.holders.find(h=>h.holder_id===1&&h.holder_type==='user');
       assert.equal(Number(sachin.available_balance),30000);assert.ok(!holders.holders.some(h=>h.holder_type==='member'&&h.holder_id===2));
+      assert.equal(sachin.cash_deductions.version,2);assert.equal(sachin.cash_deductions.scope,'holder');
+      assert.equal(sachin.cash_deductions.site_id,10);assert.equal(sachin.cash_deductions.holder_id,1);
+      assert.equal(Number(sachin.cash_deductions.current_cash),30000);assert.equal(Number(sachin.cash_deductions.received),30000);
       assert.ok(!holders.holders.some(h=>h.holder_type==='user'&&h.holder_id===5));
       const user=await invoke(controller.userDetail,{params:{id:1}});assert.equal(Number(user.user.balance),30000);assert.equal(user.user.site_id,10);assert.equal(Number(user.unallocated.balance),77);
       await assert.rejects(invoke(controller.summary,{site:11,user:3}),status(403));
@@ -245,15 +262,20 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
         const summary=await invoke(controller.summary,{user});
         assert.equal(Number(summary.vault.total_balance),Number(summary.vault.balance));
         assert.equal(summary.vault.site_cash_incoming,null);
+        assert.equal(own.holders[0].cash_deductions.version,2);assert.equal(own.holders[0].cash_deductions.scope,'holder');
+        assert.equal(own.holders[0].cash_deductions.holder_id,user);assert.equal(own.holders[0].cash_deductions.site_id,10);
+        assert.equal(own.holders[0].cash_deductions.current_cash,Number(own.holders[0].balance).toFixed(2));
+        assert.equal(summary.vault.cash_deductions.holder_id,user);assert.equal(summary.vault.cash_deductions.site_id,10);
         assert.ok((await invoke(controller.history,{user})).entries.every(e=>e.holder_key===`user:${user}`));
         assert.ok((await invoke(controller.assignedTransactions,{user})).transactions.every(e=>e.holder_type==='user'&&e.holder_id===user));
       }
       const directory=await invoke(controller.holders,{user:1,extraQuery:{purpose:'selection'}});
       assert.ok(directory.holders.some(h=>h.holder_id===3&&h.holder_type==='user'),'other recipients remain selectable');
       for(const other of directory.holders.filter(h=>h.holder_type!=='user'||h.holder_id!==1)) {
-        for(const field of ['balance','total_in','total_received','total_adjustments','total_handover','available_balance','reserved_balance','pending_credit','pending_debit','pending_count','updated_at']) {
+        for(const field of ['balance','total_in','total_received','total_adjustments','total_handover','total_imprest_out','available_balance','reserved_balance','pending_credit','pending_debit','pending_count','updated_at']) {
           assert.equal(other[field],null,`recipient directory must hide ${field}`);
         }
+        assert.equal(other.cash_deductions,undefined,'private recipient picker rows never acquire a money breakdown');
         assert.equal(other.can_transfer_from,false);
       }
       await assert.rejects(invoke(controller.userDetail,{user:1,params:{id:3}}),status(403));
@@ -357,10 +379,6 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
     await t.test('site cash wallet uses actual custody after imprest and enforces it on request and acceptance',async()=>{
       await query(`INSERT INTO sites(id,name,organization_id) VALUES(12,'Cash custody',1),(13,'Another project',1);
         INSERT INTO user_sites VALUES(1,12);
-        CREATE TABLE ledger_entries(site_id integer,entry_date date DEFAULT CURRENT_DATE,bucket text,credit numeric DEFAULT 0,debit numeric DEFAULT 0);
-        CREATE TABLE imprest_ledger(site_id integer,user_id integer,amount numeric,created_at timestamptz DEFAULT now());
-        CREATE TABLE imprest_allocations(site_id integer,amount numeric,status text,from_own_float boolean DEFAULT false,created_at timestamptz DEFAULT now());
-        CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric);
         INSERT INTO ledger_entries(site_id,bucket,credit) VALUES(12,'cash',4500000),(12,'bank',900000),(13,'cash',200);
         INSERT INTO imprest_ledger(site_id,user_id,amount) VALUES(12,1,200000),(12,2,999999),(12,3,-500),(13,1,50)`);
       const delta=(amount,kind='adjustment',source=null,site=12,key='user:2')=>query('SELECT loyalty_vault_apply_delta($1,1,$2,$3,$4,$5,NULL,NULL,$6,2)',[key,amount,kind,'Custody test',source,site]);

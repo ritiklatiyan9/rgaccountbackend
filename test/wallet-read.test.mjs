@@ -60,6 +60,15 @@ test('summary and holder requests share only in-flight totals with the same tena
   await pendingVaultTotals(actor, db);
   assert.equal(queries, 3, 'completed totals must be reread after transactions or approvals');
 });
+test('pending totals reuse the caller read snapshot without another pool checkout or transaction', async () => {
+  const queries = [];
+  const client = { release() { throw new Error('The outer snapshot owns release'); },
+    async query(sql, params) { queries.push({ sql, params }); return { rows: [{ holder_id: 7, pending_credit: '10.15' }] }; } };
+  const result = await pendingVaultTotals({ id: 7, organization_id: 1, role: 'sub_admin' }, client, null, 5);
+  assert.equal(result[0].pending_credit, '10.15'); assert.equal(queries.length, 1);
+  assert.ok(queries[0].sql.startsWith('WITH wallet_mode'));
+  assert.deepEqual(queries[0].params, [1, false, 7, 5]);
+});
 
 test('wallet readers reserve capacity for login and reject overload instead of building an unbounded queue', async () => {
   const limiter = createWalletReadLimiter({ limit: 2, maxPending: 1 });

@@ -135,11 +135,17 @@ async function loadPendingVaultTotals(actor, database, selected, siteId) {
     scope.params.push(siteId);
     scope.clause += ` AND site_id=$${scope.params.length}`;
   }
-  const { rows } = await walletReadQuery(database, `${vaultPendingTransactionsCte}
+  const sql = `${vaultPendingTransactionsCte}
     SELECT holder_type,holder_id,sum(credit-posted_credit)::text AS pending_credit,
       sum(debit-posted_debit)::text AS pending_debit,count(*)::int AS pending_count
     FROM assigned_transactions WHERE ${scope.clause} AND status IN ('pending_clearance','pending_approval')
-    GROUP BY holder_type,holder_id`,scope.params);
+    GROUP BY holder_type,holder_id`;
+  // A caller already holding a read snapshot must use that connection. A
+  // second pool checkout would split the financial snapshot and can deadlock
+  // the wallet admission limit when summary and holder reads run together.
+  const { rows } = database.release
+    ? await database.query(sql,scope.params)
+    : await walletReadQuery(database,sql,scope.params);
   return rows;
 }
 

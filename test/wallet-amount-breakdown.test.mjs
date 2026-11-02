@@ -17,7 +17,7 @@ const deductions = walletCashDeductions({ opening, totals:{ total_received:'1140
 
 test('opening, handovers and net corrections preserve every paise', () => {
   assert.deepEqual(walletAmountSummary({total_received:'11400.15',total_handover:'1200.00',balance:'5000.00',cash_deductions:deductions},opening),
-    {received:'6400.15',handed_over:'200.00',current_cash:'5000.00',deductions:'1200.15',categories:deductions});
+    {received:'6400.15',handed_over:'200.00',current_cash:'5000.00',deductions:'300.15',categories:deductions});
   assert.equal(walletAmountSummary({total_received:'-12.15',total_handover:'0',balance:'-12.15'},null).received,'-12.15');
 });
 
@@ -65,7 +65,7 @@ test('amount pages reconcile all entries, paginate and enforce current wallet/si
         (5,2,'bank','2026-10-26','2026-10-26T10:00:00Z','expenses',5,99000,0,'BANK NOT CASH',null,null,null),
         (6,2,'cash','2026-10-24','2026-10-24T10:00:00Z','expenses',6,99000,0,'BEFORE OPENING',null,null,null),
         (7,2,'cash','2099-10-26','2026-10-26T10:00:00Z','expenses',7,99000,0,'FUTURE PAYMENT',null,null,null);
-      CREATE TABLE imprest_ledger(id serial PRIMARY KEY,site_id int,user_id int,created_at timestamptz,amount numeric,description text,source_module text,reference_id int,created_by int);
+      CREATE TABLE imprest_ledger(id serial PRIMARY KEY,site_id int,user_id int,created_at timestamptz,amount numeric,description text,source_module text,reference_id int,created_by int,type text DEFAULT 'ALLOCATION');
       INSERT INTO imprest_ledger(site_id,user_id,created_at,amount,description,source_module,created_by) VALUES
         (2,8,'2026-10-24T10:00:00Z',100,'Earlier imprest','manual',7),
         (2,8,'2026-10-26T10:00:00Z',400,'Cash advanced','manual',7),
@@ -76,6 +76,17 @@ test('amount pages reconcile all entries, paginate and enforce current wallet/si
       description text,particular text,narration text,remark text,remarks text,note text,reference_no text,
       plot_id int,installment_id int,date date,payment_date date,site_id int DEFAULT 2,status text,approved_at timestamptz,approved_by int,created_by int)`);
     await db.exec(walletHistoryParentsSql);
+    await db.exec(`ALTER TABLE cash_flow_entries ADD COLUMN source_module text,ADD COLUMN source_id integer;
+      INSERT INTO cash_flow_entries(id,site_id,created_by,source_module,source_id)
+        SELECT id,site_id,7,source_key,source_id FROM ledger_entries;
+      INSERT INTO cash_flow_entries(id,site_id,created_by,approved_by,source_module,source_id) VALUES(8,2,8,7,'expenses',8),(9,2,7,7,'expenses',9);
+      INSERT INTO ledger_entries VALUES
+        (8,2,'cash','2026-10-26','2026-10-26T12:00:00Z','expenses',8,200,0,'STAFF PAYMENT APPROVED BY ADMIN',null,null,'Staff'),
+        (9,2,'cash','2026-10-26','2026-10-26T12:00:00Z','expenses',9,300,0,'OWN FLOAT PAYMENT',null,null,'Admin');
+      INSERT INTO imprest_ledger(site_id,user_id,created_at,amount,source_module,reference_id,created_by,type) VALUES
+        (2,8,'2026-10-26T12:00:00Z',-200,'expense',8,8,'EXPENSE'),(2,7,'2026-10-26T12:00:00Z',-300,'expense',9,7,'EXPENSE');
+      CREATE TABLE imprest_allocations(site_id integer,admin_id integer,amount numeric,status text,from_own_float boolean,created_at timestamptz,confirmed_at timestamptz);
+      CREATE TABLE imprest_transfers(site_id integer,from_user_id integer,to_user_id integer,amount numeric,created_at timestamptz);`);
     await db.query('INSERT INTO application_settings VALUES(2,$1,$2)', ['wallet_reporting_opening:user:7', JSON.stringify(opening)]);
     const options = { cashStateReader:async()=>new Map([['user:7',{balance:'5000.00',cash_deductions:deductions}]]) };
     const read = (section, query = {}, actor = admin) => getWalletAmountBreakdown(db, {actor,siteId:2,userId:7,section,...query}, options);
@@ -89,30 +100,27 @@ test('amount pages reconcile all entries, paginate and enforce current wallet/si
     assert.equal(handed.entries[0].to_holder_name,'Staff'); assert.equal(handed.entries[0].transfer_status,'accepted');
     assert.equal(handed.entries[0].transfer_note,'Office cash');
     const deduction = await read('deductions');
-    assert.equal(deduction.entries_total,'1200.15'); assert.equal(deduction.summary.deductions,'1200.15');
-    assert.equal(deduction.reconciliation_difference,'0.00'); assert.equal(deduction.total,6);
-    assert.equal(deduction.entries.find(row=>row.entry_type==='reconciliation').amount,'600.00');
-    assert.equal(deduction.entries.find(row=>row.entry_type==='adjustment').amount,'50');
+    assert.equal(deduction.entries_total,'300.15'); assert.equal(deduction.summary.deductions,'300.15');
+    assert.equal(deduction.reconciliation_difference,'0.00'); assert.equal(deduction.total,2);
+    assert.ok(deduction.entries.every(row=>row.entry_type==='payment'&&row.maker_id===7&&row.created_by===7));
+    assert.ok(!deduction.entries.some(row=>row.entry_type==='reconciliation'||row.entry_type==='adjustment'||row.entry_type==='imprest'));
     assert.equal(deduction.entries.find(row=>row.category==='commission').description,'Commission instalment');
     assert.ok(!JSON.stringify(deduction).match(/PRIVATE|BEFORE OPENING|FUTURE PAYMENT|BANK NOT CASH|Admin is excluded/));
-    const allPaged = await read('deductions',{limit:2,page:3});
-    assert.equal(allPaged.entries_total,'1200.15'); assert.equal(allPaged.entries.length,2);
+    const allPaged = await read('deductions',{limit:1,page:2});
+    assert.equal(allPaged.entries_total,'300.15'); assert.equal(allPaged.entries.length,1);
     await assert.rejects(read('received',{},sub), error=>error.statusCode===403);
     await assert.rejects(read('received',{siteId:20}), error=>error.statusCode===403);
     await assert.rejects(read('received',{userId:77}), error=>error.statusCode===403);
     await assert.rejects(read('received',{}, {...sub,wallet_can_read:false}), error=>error.statusCode===403);
     assert.equal((await read('received',{}, {...sub,wallet_view_all:true})).summary.received,'6400.15');
     const ordinary=await getWalletAmountBreakdown(db,{actor:sub,siteId:2,userId:8,section:'deductions'},options);
-    assert.equal(ordinary.deductions_available,false); assert.equal(ordinary.summary.deductions,null); assert.deepEqual(ordinary.entries,[]);
+    assert.equal(ordinary.deductions_available,true); assert.equal(ordinary.summary.deductions,'0.00'); assert.deepEqual(ordinary.entries,[]);
+    assert.equal(ordinary.opening,null); assert.equal(ordinary.summary.categories.started_at,null);
     for (const query of [{section:'unknown'},{page:0},{limit:101},{siteId:0},{userId:'7;DROP TABLE users'}]) await assert.rejects(read('received',query), error=>error.statusCode===400);
-    // A negative staff balance is not money held. Only the portion crossing
-    // back above zero contributes, matching the canonical deduction aggregate.
-    await db.exec(`INSERT INTO imprest_ledger(site_id,user_id,created_at,amount,description) VALUES
-      (2,9,'2026-10-24T10:00:00Z',-200,'Before'),(2,9,'2026-10-26T10:00:00Z',50,'Still below zero'),
-      (2,9,'2026-10-26T11:00:00Z',200,'Now holding 50');`);
-    const floor = await readWalletDeductionEntries(db,{organizationId:1,siteId:2,userId:7,opening,deductions,
+    const exact = await readWalletDeductionEntries(db,{organizationId:1,siteId:2,userId:7,opening,deductions,
       endDate:'2026-10-31',page:1,limit:25,offset:0});
-    const crossings = floor.entries.filter(row=>row.person_name==='Other staff');
-    assert.equal(crossings.length,1); assert.equal(crossings[0].amount,'50'); assert.equal(crossings[0].original_amount,'200');
+    assert.equal(exact.entries_total,'300.15');assert.equal(exact.entries.length,2);
+    assert.ok(exact.entries.every(row=>row.entry_type==='payment'&&row.maker_id===7));
+    assert.ok(!JSON.stringify(exact).match(/STAFF PAYMENT|OWN FLOAT|Staff expense|Cash advanced/));
   } finally { await db.close(); }
 });
