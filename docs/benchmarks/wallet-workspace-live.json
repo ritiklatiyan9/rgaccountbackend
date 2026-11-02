@@ -1,0 +1,52 @@
+{
+  "measured_on": "2026-11-02",
+  "method": "One authorized selected-site read-only workspace invocation per version; existing real data, same scope, no hosted load test. External actor lookup is not part of elapsed_ms. Amounts and actor/site identifiers omitted.",
+  "before": {
+    "success": true,
+    "elapsed_ms": 5855,
+    "sql_calls_with_external_actor_lookup": 17,
+    "sql_calls_in_timed_workspace": 16,
+    "query_durations_ms": [
+      343,
+      335,
+      354,
+      340,
+      330,
+      468,
+      392,
+      472,
+      332,
+      334,
+      328,
+      333,
+      330,
+      326,
+      504,
+      333,
+      336
+    ],
+    "holders": 12
+  },
+  "after": {
+    "success": true,
+    "elapsed_ms": 2739,
+    "sql_calls_with_external_actor_lookup": 7,
+    "sql_calls_in_timed_workspace": 6,
+    "query_durations_ms": [
+      627,
+      370,
+      393,
+      591,
+      449,
+      558,
+      363
+    ],
+    "holders": 12
+  },
+  "financial_output_equal": true,
+  "limits": [
+    "Individual observations only, not production p95 or sustained throughput.",
+    "Remote network and connection variation are included.",
+    "Before sample already included the consolidated pending fast path; it is an intermediate workspace baseline."
+  ]
+}

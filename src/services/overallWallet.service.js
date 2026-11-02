@@ -2,7 +2,7 @@ import pool from '../config/db.js';
 import { walletError, WALLET_ROLES } from './wallet.service.js';
 import { canViewAllWallets, isWalletAdmin } from './walletVisibility.service.js';
 import { walletReadTransaction } from './walletRead.service.js';
-import { adminWalletCashStates, walletWithCashInHand } from './adminWalletCash.service.js';
+import { adminWalletCashStatesForSites, walletWithCashInHand } from './adminWalletCash.service.js';
 
 const scopedSites = `scoped_sites AS (
   SELECT s.id,s.name FROM sites s WHERE s.organization_id=$1
@@ -91,10 +91,9 @@ export async function getOverallWalletOverview(actor, database = pool) {
     // zero balances; retired or reassigned users retain their posted custody.
     // Member custody is deliberately outside this user-wallet overview.
     const { rows } = await client.query(`WITH ${scopedSites}, postings AS (
-      SELECT e.site_id,e.holder_id,sum(e.amount) AS balance,max(e.created_at) AS updated_at,
-        bool_or(e.source_table='manual_wallet_site_cash_alignment') AS cash_aligned
-      FROM loyalty_vault_entries e JOIN scoped_sites s ON s.id=e.site_id
-      WHERE e.organization_id=$1 AND e.holder_type='user' GROUP BY e.site_id,e.holder_id
+      SELECT e.site_id,e.holder_id,e.balance,e.updated_at,(e.aligned_id IS NOT NULL) AS cash_aligned
+      FROM loyalty_vault_site_accounts e JOIN scoped_sites s ON s.id=e.site_id
+      WHERE e.organization_id=$1 AND e.holder_type='user'
     ), holder_sites AS (
       SELECT s.id AS site_id,u.id AS holder_id FROM scoped_sites s CROSS JOIN users u
       WHERE u.organization_id=$1 AND u.is_active=true AND u.role IN ('admin','super_admin','sub_admin')
@@ -111,10 +110,8 @@ export async function getOverallWalletOverview(actor, database = pool) {
       AND lower(regexp_replace(trim(name),'[[:space:]]+',' ','g'))='kuldeep tomar' ORDER BY id`, [actor.organization_id]);
     // Reuse the same live cash-in-hand correction as the existing wallet page.
     // Only aligned sites need that read; never issue a query for each person.
-    const cashBySite = new Map();
-    for (const siteId of new Set(rows.filter(row => row.cash_aligned).map(row => Number(row.site_id)))) {
-      cashBySite.set(siteId, await adminWalletCashStates(actor.organization_id, siteId, client));
-    }
+    const cashBySite = await adminWalletCashStatesForSites(actor.organization_id,
+      [...new Set(rows.filter(row=>row.cash_aligned).map(row=>Number(row.site_id)))],client);
     const adjusted = rows.map(row => walletWithCashInHand(row, cashBySite.get(Number(row.site_id)) || new Map(), `user:${row.holder_id}`));
     let unallocated = null;
     if (isWalletAdmin(actor)) {

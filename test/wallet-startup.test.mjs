@@ -12,7 +12,7 @@ test('an installed wallet starts with reads only and never locks or rebuilds liv
     return { rows: sql.includes('pg_proc') ? runtimeRows() : plan.map(([version]) => ({ version })) };
   }, connect() { throw new Error('No migration transaction should be opened'); } };
   assert.deepEqual(await ensureWalletStartup(db, plan), { applied: [], current: true, repaired: [] });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.ok(calls.every(call => /^SELECT /.test(call.sql)));
   assert.deepEqual(calls[0].params, [['base','consolidation','guard']]);
 });

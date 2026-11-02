@@ -3,7 +3,7 @@ import authMiddleware from '../middlewares/auth.middleware.js';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import walletImprestTransferRoutes from './walletImprestTransfer.routes.js';
-import { summary,overall,siteBalance,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer,userDetail,assignedTransactions,reportingOpenings,amountBreakdown } from '../controllers/loyaltyVault.controller.js';
+import { summary,workspace,overall,siteBalance,holders,history,historyDetail,assignment,transfers,createTransfer,resolveTransfer,userDetail,assignedTransactions,reportingOpenings,amountBreakdown } from '../controllers/loyaltyVault.controller.js';
 const router=Router();
 let ready = false;
 let readiness = null;
@@ -11,19 +11,21 @@ function walletReady() {
   if (ready) return Promise.resolve(true);
   if (!readiness) readiness = pool.query(`SELECT to_jsonb(s)->>'consolidated_at' AS consolidated_at,
       EXISTS(SELECT 1 FROM app_schema_migrations WHERE version='210_wallet_balance_guards') AS balance_guards_ready,
-      EXISTS(SELECT 1 FROM app_schema_migrations WHERE version='211_locked_cash_collector') AS collector_lock_ready
+      EXISTS(SELECT 1 FROM app_schema_migrations WHERE version='211_locked_cash_collector') AS collector_lock_ready,
+      EXISTS(SELECT 1 FROM app_schema_migrations WHERE version='234_wallet_site_projection') AS site_projection_ready
       FROM loyalty_vault_settings s LIMIT 1`)
-    .then(({ rows }) => { ready = !!rows[0]?.consolidated_at && rows[0]?.balance_guards_ready === true && rows[0]?.collector_lock_ready === true; return ready; })
+    .then(({ rows }) => { ready = !!rows[0]?.consolidated_at && rows[0]?.balance_guards_ready === true && rows[0]?.collector_lock_ready === true && rows[0]?.site_projection_ready === true; return ready; })
     .finally(() => { readiness = null; });
   return readiness;
 }
 router.use(authMiddleware);
 router.use('/imprest-transfers',walletImprestTransferRoutes);
 router.use(asyncHandler(async(req,res,next)=>{
-  if(!await walletReady()) return res.status(503).json({message:'Cash Wallet setup is pending. Apply the wallet migrations through migrate:locked-cash-collector and restart the backend.',code:'WALLET_NOT_READY'});
+  if(!await walletReady()) return res.status(503).json({message:'Cash Wallet setup is pending. Apply the wallet migrations through migrate:wallet-site-projection and restart the backend.',code:'WALLET_NOT_READY'});
   next();
 }));
 router.get('/',summary);
+router.get('/workspace',workspace);
 router.get('/overall',overall);
 router.get('/overall/history',history);
 router.get('/overall/transfers',transfers);
@@ -43,7 +45,7 @@ router.post('/transfers/:id/accept',resolveTransfer('accept'));
 router.post('/transfers/:id/reject',resolveTransfer('reject'));
 router.post('/transfers/:id/cancel',resolveTransfer('cancel'));
 router.use((error,req,res,next)=>{
-  if(['42P01','42883','42703'].includes(error.code)) return res.status(503).json({message:'Cash Wallet setup is pending. Apply the wallet migrations through migrate:locked-cash-collector and restart the backend.',code:'WALLET_NOT_READY'});
+  if(['42P01','42883','42703'].includes(error.code)) return res.status(503).json({message:'Cash Wallet setup is pending. Apply the wallet migrations through migrate:wallet-site-projection and restart the backend.',code:'WALLET_NOT_READY'});
   next(error);
 });
 export default router;

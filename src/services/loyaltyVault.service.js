@@ -4,6 +4,8 @@ import { walletUser, walletError, walletAmount, positiveId, uuid } from './walle
 import { siteVaultAccountsCte } from './loyaltyVaultSite.service.js';
 import { adminWalletCashStates } from './adminWalletCash.service.js';
 import { canViewAllWallets } from './walletVisibility.service.js';
+import { acquireWalletWriteSlot } from './walletWriteAdmission.service.js';
+import { clearCacheByPrefixes } from '../config/cache.js';
 export { walletUser as vaultUser };
 export const isVaultAdmin = actor => ['admin','super_admin'].includes(actor.role);
 export const holderKey = (type, id) => `${type}:${id}`;
@@ -40,11 +42,40 @@ function note(value) {
   if (result.length>1000) throw walletError('Keep the note within 1,000 characters.');
   return result;
 }
+export async function invalidateWalletFinancialCaches() {
+  // Clear the local generation before any response can acknowledge a committed
+  // custody change. Optional cache/Redis listeners cannot undo committed money.
+  await clearCacheByPrefixes(['wallet|','wallet-workspace|','wallet-imprest|','imprest|','balance-sheet|',
+    'site-profit|','dashboard:','management-analytics|','reports|']).catch(()=>{});
+}
 async function transaction(database, run) {
-  const db=await database.connect();
-  try { await db.query('BEGIN'); const result=await run(db); await db.query('COMMIT'); return result; }
-  catch(error) { await db.query('ROLLBACK'); throw error; }
-  finally { db.release(); }
+  const releaseSlot=await acquireWalletWriteSlot(database);
+  let db;
+  let connectionFailure,discard;
+  let result;
+  const onConnectionError=error=>{connectionFailure=error;};
+  try {
+    db=await database.connect();
+    db.on?.('error',onConnectionError);
+    await db.query('BEGIN');
+    await db.query("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='20s'");
+    result=await run(db);
+    if(connectionFailure) throw connectionFailure;
+    await db.query('COMMIT');
+  } catch(error) {
+    // Keep the original financial failure while ensuring a failed rollback
+    // cannot return an open/broken transaction to the shared connection pool.
+    if(db) {try { await db.query('ROLLBACK'); } catch(rollbackError) { discard=rollbackError; }}
+    throw error;
+  } finally {
+    try { db?.release(discard||connectionFailure); }
+    finally { db?.removeListener?.('error',onConnectionError);releaseSlot(); }
+  }
+  // This work is deliberately outside the financial catch/ROLLBACK path and
+  // after releasing its pg client/admission permit. It also runs for service
+  // callers whose browser disconnects before a response emits 'finish'.
+  if(!result.replayed) await invalidateWalletFinancialCaches();
+  return result;
 }
 async function lockAccounts(db, actor, holders) {
   for(const selected of [...new Map(holders.map(h=>[h.key,h])).values()].sort((a,b)=>a.key.localeCompare(b.key))) {
@@ -61,7 +92,14 @@ async function hasFunds(db, actor, from, amount, siteId) {
     [from.key,amount,actor.organization_id,siteId]);
   if (!rows.length) return false;
   const state = (await adminWalletCashStates(actor.organization_id, siteId, db)).get(from.key);
-  return !state || Number(state.available_balance) >= Number(amount);
+  // Compare decimal minor units, just as the database balance checks do.
+  // Do not introduce binary floating point into the final custody guard.
+  const cents=value=>{
+    const match=/^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(String(value??''));
+    if(!match) throw walletError('Invalid available cash balance.',409);
+    return (BigInt(match[2])*100n+BigInt((match[3]||'').padEnd(2,'0')))*(match[1]?-1n:1n);
+  };
+  return !state || cents(state.available_balance) >= cents(amount);
 }
 export async function createVaultTransfer(user,data,database=pool) {
   const from=holder(data.from_holder_type??'user',data.from_holder_id??user?.id);

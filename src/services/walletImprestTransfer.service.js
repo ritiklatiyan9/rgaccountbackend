@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import pool from '../config/db.js';
 import { walletUser, walletAmount, walletError, positiveId, uuid, pagination } from './wallet.service.js';
-import { accessibleSite } from './loyaltyVault.service.js';
+import { accessibleSite, invalidateWalletFinancialCaches } from './loyaltyVault.service.js';
 import { withWalletVisibility, canViewAllWallets } from './walletVisibility.service.js';
 import { adminWalletCashStates } from './adminWalletCash.service.js';
 import { siteVaultAccountsCte } from './loyaltyVaultSite.service.js';
 import { enqueueWalletImprestNotification, notifyWalletImprestOutbox } from './walletImprestNotifications.service.js';
+import { acquireWalletWriteSlot } from './walletWriteAdmission.service.js';
 
 const cents=value=>{
   const match=/^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(String(value??''));
@@ -19,25 +20,31 @@ function note(value) {
   return result;
 }
 async function transaction(database,run) {
-  const db=await database.connect();
+  const releaseSlot=await acquireWalletWriteSlot(database);
+  let db;
   let connectionFailure,discard;
+  let result;
   const onConnectionError=error=>{connectionFailure=error;};
-  db.on?.('error',onConnectionError);
   try {
+    db=await database.connect();
+    db.on?.('error',onConnectionError);
     await db.query('BEGIN');
     await db.query("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='20s'");
-    const result=await run(db);
+    result=await run(db);
     if(connectionFailure) throw connectionFailure;
     await db.query('COMMIT');
-    if(!result.replayed) notifyWalletImprestOutbox();
-    return result;
   } catch(error) {
-    try { await db.query('ROLLBACK'); } catch(rollbackError) { discard=rollbackError; }
+    if(db) {try { await db.query('ROLLBACK'); } catch(rollbackError) { discard=rollbackError; }}
     throw error;
   } finally {
-    try { db.release(discard||connectionFailure); }
-    finally { db.removeListener?.('error',onConnectionError); }
+    try { db?.release(discard||connectionFailure); }
+    finally { db?.removeListener?.('error',onConnectionError);releaseSlot(); }
   }
+  if(!result.replayed) {
+    await invalidateWalletFinancialCaches();
+    notifyWalletImprestOutbox();
+  }
+  return result;
 }
 export async function walletImprestAccess(user,value,database=pool) {
   const actor=await withWalletVisibility(await walletUser(user,database),database);

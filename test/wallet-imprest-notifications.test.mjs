@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
@@ -83,6 +84,9 @@ test('delivery failure persists bounded retry and recovery does not mutate any t
   const f = await fixture();
   let fail = true;
   const messages = [];
+  const releases = [];
+  const connect = f.database.connect;
+  f.database.connect = async () => { const client = await connect(); return { ...client, release(error) { releases.push(error); client.release(error); } }; };
   try {
     const id = await enqueueWalletImprestNotification(f.database, { transfer: f.transfer, event: 'accepted' });
     const before = (await f.query('SELECT * FROM wallet_imprest_transfers')).rows;
@@ -91,6 +95,7 @@ test('delivery failure persists bounded retry and recovery does not mutate any t
       messages.push(args);
     } });
     await assert.rejects(dispatcher.drain(), /temporary socket/);
+    assert.equal(releases[0], undefined, 'an application delivery failure must not churn a healthy database connection');
     const row = (await f.query('SELECT * FROM wallet_imprest_notification_outbox WHERE id=$1', [id])).rows[0];
     assert.equal(row.delivered_at, null);
     assert.equal(row.attempts, 1);
@@ -103,6 +108,30 @@ test('delivery failure persists bounded retry and recovery does not mutate any t
     assert.equal(messages.length, 2);
     assert.deepEqual((await f.query('SELECT * FROM wallet_imprest_transfers')).rows, before);
     assert.equal((await f.query('SELECT attempts FROM wallet_imprest_notification_outbox WHERE id=$1', [id])).rows[0].attempts, 2);
+  } finally { await f.close(); }
+});
+
+test('outbox worker contains active socket errors, rolls back the claim and discards only broken clients', async () => {
+  const f = await fixture();
+  const failure = new Error('Notification DB socket disconnected');
+  const connect = f.database.connect;
+  let activeClient;
+  let released;
+  f.database.connect = async () => {
+    const client = await connect();
+    activeClient = new EventEmitter();
+    activeClient.query = client.query;
+    activeClient.release = error => { released = error; client.release(error); };
+    return activeClient;
+  };
+  try {
+    const id = await enqueueWalletImprestNotification(f.database, { transfer: f.transfer, event: 'requested' });
+    const dispatcher = createWalletImprestNotificationDispatcher({ database: f.database, emit: () => { activeClient.emit('error', failure); } });
+    await assert.rejects(dispatcher.drain(), error => error === failure);
+    assert.equal(released, failure);
+    assert.equal(activeClient.listenerCount('error'), 0);
+    const row = (await f.query('SELECT delivered_at,attempts FROM wallet_imprest_notification_outbox WHERE id=$1', [id])).rows[0];
+    assert.equal(row.delivered_at, null); assert.equal(row.attempts, 1);
   } finally { await f.close(); }
 });
 

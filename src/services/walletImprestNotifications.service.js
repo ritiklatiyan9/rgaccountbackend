@@ -25,8 +25,9 @@ export function createWalletImprestNotificationDispatcher({ database, emit, batc
   const deliverOne = async (id = null) => {
     const client = await database.connect();
     let row;
-    let failure;
-    const connectionError = error => { failure = error; };
+    let connectionFailure;
+    let discard;
+    const connectionError = error => { connectionFailure = error; };
     client.on?.('error', connectionError);
     try {
       await client.query('BEGIN');
@@ -53,14 +54,13 @@ export function createWalletImprestNotificationDispatcher({ database, emit, batc
         ORDER BY u.id`, [[Number(row.from_user_id), Number(row.to_user_id)], row.organization_id, row.site_id]);
       const payload = { transfer_id: row.transfer_id, site_id: Number(row.site_id), event };
       for (const recipient of recipients.rows) await emit(Number(recipient.id), 'wallet_imprest_changed', payload);
-      if (failure) throw failure;
+      if (connectionFailure) throw connectionFailure;
       await client.query(`UPDATE wallet_imprest_notification_outbox
         SET delivered_at=now(),attempts=attempts+1,last_error=NULL WHERE id=$1`, [row.id]);
       await client.query('COMMIT');
       return true;
     } catch (error) {
-      failure ||= error;
-      try { await client.query('ROLLBACK'); } catch { /* failed clients are discarded below */ }
+      try { await client.query('ROLLBACK'); } catch (rollbackError) { discard = rollbackError; }
       if (row?.id) {
         // Record the retry outside the rolled-back delivery transaction. The
         // bounded backoff survives API/Redis restarts; rows are never dropped.
@@ -73,7 +73,9 @@ export function createWalletImprestNotificationDispatcher({ database, emit, batc
       }
       throw error;
     } finally {
-      try { client.release(failure); }
+      // A delivery/application failure with a successful rollback leaves a
+      // healthy pg client reusable. Discard only broken connections/cleanup.
+      try { client.release(discard || connectionFailure); }
       finally { client.removeListener?.('error', connectionError); }
     }
   };

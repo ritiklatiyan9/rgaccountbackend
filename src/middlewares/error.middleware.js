@@ -1,6 +1,26 @@
 import { isDatabaseUnavailable } from '../utils/databaseError.js';
 
 const errorMiddleware = (err, req, res, next) => {
+  const requestPath=String(req.originalUrl||`${req.baseUrl||''}${req.path||''}`).split('?')[0];
+  if (/^\/(?:wallet|loyalty-vault)(?:\/|$)/.test(requestPath) && ['57014','55P03'].includes(err.code)) {
+    const mutation=['POST','PUT','PATCH','DELETE'].includes(String(req.method||'').toUpperCase());
+    // The transfer service preserves the original SQLSTATE and rolls back
+    // before forwarding it. Only its HTTP presentation is retryable here;
+    // never expose the cancelled SQL/lock details or imply money was posted.
+    res.set('Retry-After', '2');
+    return res.status(503).json({
+      message: mutation
+        ? 'Cash Wallet is temporarily busy. Retry this request with the same request key in a few seconds.'
+        : 'Cash Wallet is temporarily busy. Please retry in a few seconds.',
+      code: 'WALLET_DATABASE_BUSY', database_code: err.code, retry_after_seconds: 2,
+    });
+  }
+  // Admission rejection is an expected, retryable overload response. It ran
+  // before pool checkout, so keep it actionable without logging stack storms.
+  if (['WALLET_WRITE_BUSY','WALLET_READ_BUSY'].includes(err.code)) {
+    res.set('Retry-After', '2');
+    return res.status(503).json({ message: err.message, code: err.code, retry_after_seconds: 2 });
+  }
   console.error(err.stack);
   if (isDatabaseUnavailable(err)) {
     res.set('Retry-After', '5');

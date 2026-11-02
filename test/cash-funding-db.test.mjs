@@ -1,3 +1,4 @@
+import {up as projectionUp} from '../src/migrations/234_wallet_site_projection.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -95,7 +96,7 @@ test('business cash debits consume imprest and leave receipt/transfer wallets se
     await query("SELECT loyalty_vault_apply_delta('user:2',1,-20,'debit','Old expense deduction','expenses',90,$1,10)", [legacy]);
     await query("INSERT INTO loyalty_vault_sources(cash_flow_entry_id,holder_key,posted_amount,organization_id,source_table,source_id,site_id) VALUES($1,'user:2',-20,1,'expenses',90,10)", [legacy]);
     const originalHistory = JSON.stringify((await query('SELECT * FROM loyalty_vault_entries ORDER BY id')).rows);
-    await up(db); await up(db);
+    await up(db); await up(db); await projectionUp(db);
     assert.equal(await wallet(2), 0, 'prior erroneous wallet spend gets a compensating reversal once');
     assert.equal(JSON.stringify((await query('SELECT * FROM loyalty_vault_entries ORDER BY id LIMIT 2')).rows), originalHistory);
     assert.equal(await wallet(1), 500);

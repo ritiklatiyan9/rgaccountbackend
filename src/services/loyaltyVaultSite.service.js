@@ -6,7 +6,7 @@
 // balance adjustments; total_received excludes them so an alignment can never
 // be presented as cash received. These totals reconcile to the recorded ledger,
 // before the separate Admin cash-in-hand projection.
-export function siteVaultAccountsCte(organization = '$2', site = '$4') {
+export function canonicalSiteVaultAccountsCte(organization = '$2', site = '$4') {
   return `site_postings AS (
     SELECT holder_key,holder_type,holder_id,sum(amount) AS balance,
       COALESCE(sum(amount) FILTER (WHERE kind NOT IN ('transfer_out','imprest_out')),0) AS total_in,
@@ -20,4 +20,15 @@ export function siteVaultAccountsCte(organization = '$2', site = '$4') {
   ), site_accounts AS (
     SELECT p.*,0::numeric AS reserved_balance FROM site_postings p
   )`;
+}
+
+// Projection maintenance is part of the posting transaction (migration 234).
+// Audits explicitly choose projection:false to compare against immutable facts.
+export function siteVaultAccountsCte(organization='$2',site='$4',{projection=true}={}) {
+  if(!projection)return canonicalSiteVaultAccountsCte(organization,site);
+  return `site_postings AS (
+    SELECT holder_key,holder_type,holder_id,balance,total_in,total_received,total_adjustments,
+      total_handover,total_imprest_out,updated_at,entry_count::integer AS entry_count
+    FROM loyalty_vault_site_accounts WHERE organization_id=${organization} AND site_id=${site}
+  ),site_accounts AS (SELECT p.*,0::numeric AS reserved_balance FROM site_postings p)`;
 }

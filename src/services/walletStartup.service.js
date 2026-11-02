@@ -10,6 +10,8 @@ import { up as collector } from '../migrations/211_locked_cash_collector.js';
 import { up as permanent } from '../migrations/212_wallet_permanent_balance_guard.js';
 import { up as adminCustody, adminCashCustodySql } from '../migrations/217_admin_cash_custody_guard.js';
 import { up as walletImprest } from '../migrations/232_wallet_imprest_transfers.js';
+import {up as ledgerInlining,ensureWalletLedgerInlining} from '../migrations/233_wallet_ledger_inlining.js';
+import {up as siteProjection} from '../migrations/234_wallet_site_projection.js';
 
 export const walletStartupMigrations = Object.freeze([
   ['199_loyalty_vault', vault],
@@ -23,6 +25,8 @@ export const walletStartupMigrations = Object.freeze([
   ['212_wallet_permanent_balance_guard', permanent],
   ['217_admin_cash_custody_guard', adminCustody],
   ['232_wallet_imprest_transfers', walletImprest],
+  ['233_wallet_ledger_inlining', ledgerInlining],
+  ['234_wallet_site_projection',siteProjection],
 ]);
 
 export const walletRuntimeFunctions = [
@@ -74,6 +78,7 @@ export async function ensureWalletStartup(database = pool, migrations = walletSt
   const firstMissing = migrations.findIndex(([version]) => !installed.has(version));
   if (firstMissing === -1) {
     const repaired = await ensureRuntimeFunctions(database);
+    if((await ensureWalletLedgerInlining(database)).changed)repaired.push('ledger_entries');
     return { applied: [], current: true, repaired };
   }
 

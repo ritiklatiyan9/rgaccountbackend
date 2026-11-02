@@ -412,7 +412,7 @@ export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
   );
 
   const row = rows[0];
-  return {
+  const detail = {
     totalMoneyIn:               roundMoney(row.total_money_in),
     totalMoneyOut:              roundMoney(row.total_money_out),
     cashBalance:                roundMoney(row.cash_balance),
@@ -427,6 +427,14 @@ export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
     periodMoneyOut:             roundMoney(row.period_money_out),
     periodNet:                  roundMoney(row.period_net),
   };
+  // Internal exact snapshot for financial decisions. Keep the established KPI
+  // JSON response unchanged while wallet custody avoids Number conversion.
+  Object.defineProperty(detail, 'exact', { value: Object.freeze({
+    cashBalance: String(row.cash_balance), imprestHeld: String(row.imprest_held),
+    pendingImprestReservations: String(row.pending_imprest_reservations),
+    distributableBalance: String(row.distributable_balance),
+  }) });
+  return detail;
 }
 
 /**

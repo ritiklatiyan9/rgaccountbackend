@@ -6,6 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { up } from '../src/migrations/199_loyalty_vault.js';
+import { up as projectionUp } from '../src/migrations/234_wallet_site_projection.js';
 import { up as cashWalletUp } from '../src/migrations/185_cash_wallets.js';
 import { postingPolicySql } from '../src/migrations/171_cheque_clearance_before_approval.js';
 import { createVaultTransfer,resolveVaultTransfer } from '../src/services/loyaltyVault.service.js';
@@ -17,7 +18,10 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
     const result=args?.length?await pg.query(sql,args):(await pg.exec(sql)).at(-1);
     return {...result,rows:result?.rows||[],rowCount:result?.affectedRows??result?.rows?.length??0};
   };
-  const db={query,connect:async()=>({query,release(){}})};
+  // The embedded fixture owns one connection. Concurrent controller snapshots
+  // must queue complete transactions, rather than nesting BEGIN on that one.
+  let connection=Promise.resolve();
+  const db={query,connect:async()=>{const before=connection;let release;connection=new Promise(resolve=>{release=resolve;});await before;return {query,release};}};
   const amount=async(key)=>(await query('SELECT balance::text,reserved_balance::text FROM loyalty_vault_accounts WHERE holder_key=$1',[key])).rows[0]||{balance:'0.00',reserved_balance:'0.00'};
   const entries=async()=>Number((await query('SELECT count(*)::int AS n FROM loyalty_vault_entries')).rows[0].n);
   const errorStatus=status=>error=>error.statusCode===status;
@@ -29,6 +33,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
   const req=(amount='10',from={type:'user',id:1},to=2)=>({from_holder_type:from.type,from_holder_id:from.id,to_holder_type:'user',to_holder_id:to,amount,note:'Handed over',site_id:10,idempotency_key:randomUUID()});
   try{
     await query(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
+      CREATE TABLE application_settings(site_id integer,setting_key text,setting_value jsonb,updated_by integer,updated_at timestamptz,UNIQUE(site_id,setting_key));
       CREATE TABLE users(id integer PRIMARY KEY,name text,role text,organization_id integer,is_active boolean DEFAULT true);
       INSERT INTO users VALUES(1,'Accountant','sub_admin',1,true),(2,'Administrator','admin',1,true),(3,'Owner','super_admin',1,true),(4,'Outside admin','admin',2,true),(5,'Inactive','admin',1,false),(6,'Viewer','viewer',1,true);
       CREATE TABLE sites(id integer PRIMARY KEY,name text,organization_id integer);INSERT INTO sites VALUES(10,'A',1),(11,'B',1),(20,'Outside',2);
@@ -39,6 +44,15 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         cash_type text,status text,cheque_status text,particular text,source_module text,source_id integer,date date DEFAULT CURRENT_DATE,
         created_at timestamptz DEFAULT now(),entry_transfer_id uuid,is_imprest_internal boolean,is_firm_transaction boolean,to_firm_id integer);
       CREATE TABLE cash_flow_months(id integer PRIMARY KEY,site_id integer);
+      CREATE TABLE ledger_entries(id text,site_id integer,entry_date date DEFAULT CURRENT_DATE,bucket text,
+        credit numeric DEFAULT 0,debit numeric DEFAULT 0,source_key text,source_id integer,notes text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_ledger(id serial PRIMARY KEY,site_id integer,user_id integer,amount numeric,type text,
+        reference_id integer,source_module text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_allocations(id serial PRIMARY KEY,site_id integer,admin_id integer,sub_admin_id integer,
+        amount numeric,status text,from_own_float boolean DEFAULT false,created_at timestamptz DEFAULT now(),confirmed_at timestamptz);
+      CREATE TABLE imprest_transfers(id serial PRIMARY KEY,site_id integer,from_user_id integer,to_user_id integer,
+        amount numeric,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric,created_at timestamptz DEFAULT now());
       CREATE TABLE farmers(id integer PRIMARY KEY,site_id integer);INSERT INTO farmers VALUES(1,10);
       CREATE TABLE plots(id integer PRIMARY KEY,site_id integer,plot_no text,buyer_name text,block text);CREATE TABLE plot_installments(id integer PRIMARY KEY,plot_id integer);
       CREATE TABLE firms(id integer PRIMARY KEY,site_id integer);INSERT INTO firms VALUES(1,10);
@@ -50,6 +64,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
     await query("INSERT INTO cash_flow_entries(id,site_id,created_by,credit,cash_type,status,created_at) VALUES(1,10,1,500,'CASH','approved','2020-01-01')");
     await query(walletHistoryParentsSql);
     await cashWalletUp(db);await up(db);await up(db);
+    await projectionUp(db);
     await t.test('migration is idempotent and historical unassigned finances are unchanged',async()=>{
       assert.equal((await query('SELECT credit::text FROM cash_flow_entries WHERE id=1')).rows[0].credit,'500');
       assert.equal(await entries(),0);assert.equal((await amount('user:1')).balance,'0.00');
@@ -185,7 +200,9 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
         const pending=await createVaultTransfer(admin,req('5',{type:'user',id:2},3),db);
         const notices=(await invoke(controller.transfers,{user:{id:3},query:{direction:'incoming',status:'pending',limit:'1'}})).body;
         assert.equal(notices.total,1);assert.equal(notices.transfers[0].id,pending.transfer.id);assert.equal(notices.transfers[0].can_accept,true);
-        await query('BEGIN');
+        // Controllers now own repeatable-read snapshots. Temporary fixture
+        // setup must not leave an outer transaction on the same embedded
+        // connection; clean up only the rows added by this read-only scenario.
         try {
           await query(`INSERT INTO users VALUES(7,'Review admin','admin',1,true),(8,'Review owner','super_admin',1,true),(9,'Unrelated staff','sub_admin',1,true);
             INSERT INTO user_sites VALUES(9,10);`);
@@ -203,12 +220,12 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
           assert.equal(staff.total,0,'staff cannot broaden their own transfer visibility');
           const outside=(await invoke(controller.transfers,{user:{id:4},query:{site_id:20,status:'pending'}})).body;
           assert.equal(outside.total,0,'requests remain organization-scoped');
-        } finally { await query('ROLLBACK'); }
+        } finally { await query('DELETE FROM user_sites WHERE user_id=ANY($1::int[])',[[7,8,9]]);await query('DELETE FROM users WHERE id=ANY($1::int[])',[[7,8,9]]); }
         await resolveVaultTransfer({id:3},pending.transfer.id,'reject',{site_id:10},db);
         await query("INSERT INTO loyalty_vault_entries(organization_id,holder_key,holder_type,holder_id,amount,balance_after,kind,site_id,created_at) VALUES(1,'user:1','user',1,1,0,'adjustment',10,'2026-09-30T18:29:59Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-09-30T18:30:00Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-10-01T18:29:59Z'),(1,'user:1','user',1,1,0,'adjustment',10,'2026-10-01T18:30:00Z')");
         const filtered=(await invoke(controller.history,{query:{type:'adjustment',from:'2026-10-01',to:'2026-10-01',limit:'1',page:'2'}})).body;assert.equal(filtered.total,2);assert.equal(new Date(filtered.entries[0].created_at).toISOString(),'2026-09-30T18:30:00.000Z');
         await assert.rejects(invoke(controller.history,{query:{from:'2026-10-02',to:'2026-10-01'}}),errorStatus(400));
-        await query('BEGIN');
+        const transferDates=(await query('SELECT id,created_at FROM loyalty_vault_transfers')).rows;
         try {
           const ids=listing.transfers.slice(0,4).map(row=>row.id);assert.equal(ids.length,4);
           await query("UPDATE loyalty_vault_transfers SET created_at='2040-01-01T00:00:00Z'");
@@ -221,7 +238,7 @@ test('Loyalty Vault attributes existing finances and transfers custody exactly o
           assert.equal(outside.total,2);assert.equal(outside.transfers.length,0);
           await assert.rejects(invoke(controller.transfers,{user:admin,query:{from:'2040-05-02',to:'2040-05-01'}}),errorStatus(400));
           await assert.rejects(invoke(controller.transfers,{user:admin,query:{to:'2040-02-30'}}),errorStatus(400));
-        } finally {await query('ROLLBACK');}
+        } finally {for(const row of transferDates)await query('UPDATE loyalty_vault_transfers SET created_at=$2 WHERE id=$1',[row.id,row.created_at]);}
       } finally {pool.query=originalQuery;pool.connect=originalConnect;}
     });
     await t.test('an approved edit preserves historical custody and never stamps the reviewer as collector',async()=>{

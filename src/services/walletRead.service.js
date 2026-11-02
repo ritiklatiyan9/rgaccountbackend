@@ -54,8 +54,10 @@ export async function walletReadTransaction(database, run, { repeatableRead = fa
     // Checked-out pg clients emit socket errors directly. Keep the reader
     // alive, reject this snapshot, and discard its connection on release.
     client.on?.('error', onConnectionError);
-    await client.query(repeatableRead ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN READ ONLY');
-    await client.query("SELECT set_config('statement_timeout',$1,true)", [`${timeout}ms`]);
+    const begin=repeatableRead?'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY':'BEGIN READ ONLY';
+    // timeout is a bounded integer, never request text. Send transaction setup
+    // together so every remote snapshot saves one sequential network round trip.
+    await client.query(`${begin}; SET LOCAL statement_timeout = '${timeout}ms'`);
     const result = await run(client);
     if (connectionFailure) throw connectionFailure;
     await client.query('COMMIT');

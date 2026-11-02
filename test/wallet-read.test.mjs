@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { walletReadQuery, createWalletReadLimiter } from '../src/services/walletRead.service.js';
+import { walletReadQuery, walletReadTransaction, createWalletReadLimiter } from '../src/services/walletRead.service.js';
 import { pendingVaultTotals } from '../src/services/loyaltyVaultTransactions.service.js';
 
 test('a timed-out wallet read rolls back and releases its connection for login and other requests', async () => {
@@ -9,8 +9,7 @@ test('a timed-out wallet read rolls back and releases its connection for login a
   let readOnly = false, configured = false, rolledBack = false, released = false;
   const db = { connect: async () => ({
     async query(sql, params) {
-      if (sql === 'BEGIN READ ONLY') readOnly = true;
-      else if (sql.includes('set_config')) configured = /ms$/.test(params[0]);
+      if (sql.startsWith('BEGIN READ ONLY;')) {readOnly=true;configured=/SET LOCAL statement_timeout = '\d+ms'$/.test(sql);}
       else if (sql === 'ROLLBACK') rolledBack = true;
       else if (sql === 'SELECT expensive_wallet_read') throw timeout;
       return { rows: [] };
@@ -19,6 +18,19 @@ test('a timed-out wallet read rolls back and releases its connection for login a
   }) };
   await assert.rejects(walletReadQuery(db, 'SELECT expensive_wallet_read'), error => error === timeout);
   assert.ok(readOnly && configured && rolledBack && released);
+});
+
+test('snapshot setup sends one bounded trusted command and preserves repeatable-read isolation',async t=>{
+ const previous=process.env.WALLET_READ_TIMEOUT_MS;
+ t.after(()=>{if(previous===undefined)delete process.env.WALLET_READ_TIMEOUT_MS;else process.env.WALLET_READ_TIMEOUT_MS=previous;});
+ process.env.WALLET_READ_TIMEOUT_MS="1'; SELECT pg_sleep(99);--";
+ const calls=[];
+ const db={connect:async()=>({query:async sql=>{calls.push(sql);return{rows:[1]};},release(){}})};
+ await walletReadTransaction(db,client=>client.query('SELECT 1'),{repeatableRead:true});
+ assert.deepEqual(calls,["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = '8000ms'",'SELECT 1','COMMIT']);
+ process.env.WALLET_READ_TIMEOUT_MS='50000';calls.length=0;
+ await walletReadQuery(db,'SELECT 1');
+ assert.equal(calls[0],"BEGIN READ ONLY; SET LOCAL statement_timeout = '30000ms'");
 });
 
 test('a failed rollback discards the connection instead of returning an open transaction to the pool', async () => {
@@ -65,9 +77,17 @@ test('pending totals reuse the caller read snapshot without another pool checkou
   const client = { release() { throw new Error('The outer snapshot owns release'); },
     async query(sql, params) { queries.push({ sql, params }); return { rows: [{ holder_id: 7, pending_credit: '10.15' }] }; } };
   const result = await pendingVaultTotals({ id: 7, organization_id: 1, role: 'sub_admin' }, client, null, 5);
-  assert.equal(result[0].pending_credit, '10.15'); assert.equal(queries.length, 1);
-  assert.ok(queries[0].sql.startsWith('WITH wallet_mode'));
-  assert.deepEqual(queries[0].params, [1, false, 7, 5]);
+  assert.equal(result[0].pending_credit, '10.15'); assert.equal(queries.length, 2);
+  assert.ok(queries[0].sql.includes('AS consolidated'));
+  assert.ok(queries[1].sql.startsWith('WITH wallet_mode'));
+  assert.deepEqual(queries[1].params, [1, false, 7, 5]);
+});
+
+test('consolidated pending totals stop before planning native JSON sources',async()=>{
+ let queries=0;
+ const client={release(){},query:async(sql)=>{queries++;assert.ok(sql.includes('AS consolidated'));return{rows:[{consolidated:true}]};}};
+ assert.deepEqual(await pendingVaultTotals({id:7,organization_id:1,role:'admin'},client,null,5),[]);
+ assert.equal(queries,1,'the consolidated policy cannot produce pending custody; do not build its fourteen legacy branches');
 });
 
 test('wallet readers reserve capacity for login and reject overload instead of building an unbounded queue', async () => {

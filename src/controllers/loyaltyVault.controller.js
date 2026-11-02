@@ -4,18 +4,19 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { vaultUser, isVaultAdmin, accessibleSite, holder, validateHolder, createVaultTransfer, resolveVaultTransfer } from '../services/loyaltyVault.service.js';
 import { walletError, positiveId, pagination, historyDate, uuid, WALLET_ROLES } from '../services/wallet.service.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../services/loyaltyVaultContext.service.js';
-import { vaultTransactionsCte, vaultTransactionScope, pendingVaultTotals, publicVaultTransaction } from '../services/loyaltyVaultTransactions.service.js';
+import { vaultTransactionsCte, scopedVaultTransactionsCte, vaultTransactionScope, pendingVaultTotals, publicVaultTransaction } from '../services/loyaltyVaultTransactions.service.js';
 import { walletReadQuery, walletReadTransaction } from '../services/walletRead.service.js';
 import { getWalletAmountBreakdown } from '../services/walletAmountBreakdown.service.js';
 import { siteVaultAccountsCte } from '../services/loyaltyVaultSite.service.js';
 import { walletHistoryJoins as historyJoins, walletHistorySelect as historySelect, walletHistorySearch } from '../services/walletHistory.service.js';
-import { adminWalletCashStates, walletWithCashInHand } from '../services/adminWalletCash.service.js';
+import { adminWalletCashStates, adminWalletCashRowsSql, adminWalletCashStatesFromRows, walletWithCashInHand } from '../services/adminWalletCash.service.js';
 import { canViewAllWallets, withWalletVisibility } from '../services/walletVisibility.service.js';
 import { getSiteBalanceDetail } from '../graphql/services/kpi.service.js';
 import { getOverallWalletOverview } from '../services/overallWallet.service.js';
 import { readWalletReportingOpenings } from '../services/walletReportingOpening.service.js';
 import { walletActivityScope, addWalletAmountFilters, addWalletActorFilter, addWalletModuleFilter, addWalletPartyFilters } from '../services/walletActivityFilters.service.js';
 import { addHolderWalletActivity } from '../services/walletCashDeductions.service.js';
+import { sumWalletMoney } from '../services/walletMoney.service.js';
 
 async function walletReadActor(req) {
   const user = req.authenticatedUser && Number(req.authenticatedUser.id) === Number(req.user?.id)
@@ -55,7 +56,7 @@ export const siteBalance = asyncHandler(async (req, res) => {
   if (!canViewAllWallets(actor)) throw walletError('All-user wallet visibility is required.', 403);
   const { rows } = await pool.query("SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date");
   const detail = await getSiteBalanceDetail(siteId, '1900-01-01', rows[0].end_date);
-  res.set('Cache-Control', 'no-store').json({ site_id: siteId, cash_balance: detail.cashBalance });
+  res.set('Cache-Control', 'no-store').json({ site_id: siteId, cash_balance: detail.exact?.cashBalance ?? detail.cashBalance });
 });
 
 const sumPending = (rows,field) => {
@@ -74,56 +75,55 @@ const addDateFilters = (query,params,clauses,column,timestamp=false) => {
     : `${column}<=$${params.length}::date`);}
 };
 
-async function unallocatedCustody(actor, selected = null, database = pool) {
-  const {rows}=await database.query(`WITH unallocated_holders AS (SELECT e.holder_key,count(*)::int AS entry_count,sum(e.amount) AS balance
+const unallocatedCustodySql=`WITH unallocated_holders AS (SELECT e.holder_key,count(*)::int AS entry_count,sum(e.amount) AS balance
     FROM loyalty_vault_entries e WHERE e.organization_id=$1 AND e.site_id IS NULL
       AND ($2::boolean OR e.holder_key='user:'||$3::text) AND ($4::text IS NULL OR e.holder_key=$4)
     GROUP BY e.holder_key HAVING sum(e.amount)<>0)
-    SELECT COALESCE(sum(entry_count),0)::int AS entry_count,COALESCE(sum(balance),0)::text AS balance FROM unallocated_holders`,
+    SELECT COALESCE(sum(entry_count),0)::int AS entry_count,COALESCE(sum(balance),0)::text AS balance FROM unallocated_holders`;
+
+async function unallocatedCustody(actor, selected = null, database = pool) {
+  const {rows}=await database.query(unallocatedCustodySql,
   [actor.organization_id,isVaultAdmin(actor),actor.id,selected?.key||null]);
   return rows[0];
 }
 
-export const summary = asyncHandler(async(req,res)=>{
-  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id);
-  const data=await walletReadTransaction(pool,async db=>{
-  const {rows}=await db.query(`WITH ${siteVaultAccountsCte()} SELECT $4::int AS site_id,COALESCE(w.balance,0)::text AS balance,COALESCE(w.reserved_balance,0)::text AS reserved_balance,
+const walletSummarySql=`WITH ${siteVaultAccountsCte()} SELECT $4::int AS site_id,COALESCE(w.balance,0)::text AS balance,COALESCE(w.reserved_balance,0)::text AS reserved_balance,
     (COALESCE(w.balance,0)-COALESCE(w.reserved_balance,0))::text AS available_balance,'INR' AS currency,s.tracking_started_at,
     COALESCE(w.total_received,0)::text AS total_received,COALESCE(w.total_handover,0)::text AS total_handover,
     COALESCE(w.total_adjustments,0)::text AS total_adjustments,COALESCE(w.total_imprest_out,0)::text AS total_imprest_out,
     (SELECT COALESCE(sum(balance),0)::text FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS total_balance,
-    CASE WHEN $3::boolean THEN (SELECT COALESCE(sum(amount),0)::text FROM loyalty_vault_entries
-      WHERE organization_id=$2 AND site_id=$4 AND kind NOT IN ('transfer_in','transfer_out','imprest_out')) ELSE NULL END AS site_cash_incoming,
+    CASE WHEN $3::boolean THEN (SELECT COALESCE(sum(total_in-total_transfer_in),0)::text FROM loyalty_vault_site_accounts
+      WHERE organization_id=$2 AND site_id=$4) ELSE NULL END AS site_cash_incoming,
     (SELECT COALESCE(sum(reserved_balance),0)::text FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS total_reserved_balance,
     (SELECT count(*)::int FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS holder_count,
     (SELECT COALESCE(sum(entry_count),0)::int FROM site_accounts WHERE ($3::boolean OR holder_key='user:'||$1::text)) AS entry_count,
     (SELECT count(*)::int FROM loyalty_vault_transfers WHERE recipient_id=$1::int AND organization_id=$2 AND site_id=$4 AND status='pending') AS pending_incoming,
     (SELECT count(*)::int FROM loyalty_vault_transfers WHERE (sender_id=$1::int OR (from_holder_type='user' AND from_holder_id=$1::int)) AND organization_id=$2 AND site_id=$4 AND status='pending') AS pending_outgoing,
     (SELECT COALESCE(sum(amount),0)::text FROM loyalty_vault_transfers WHERE recipient_id=$1::int AND organization_id=$2 AND site_id=$4 AND status='pending') AS pending_incoming_amount,
-    now() AS refreshed_at FROM loyalty_vault_settings s LEFT JOIN site_accounts w ON w.holder_key='user:'||$1::text LIMIT 1`,[actor.id,actor.organization_id,canViewAllWallets(actor),siteId]);
+    NULLIF(to_jsonb(s)->>'consolidated_at','') IS NOT NULL AS consolidation_active,now() AS refreshed_at FROM loyalty_vault_settings s LEFT JOIN site_accounts w ON w.holder_key='user:'||$1::text LIMIT 1`;
+
+async function walletSummaryData(db,actor,siteId,shared={}) {
+  const {rows}=shared.summaryRows?{rows:shared.summaryRows}:await db.query(walletSummarySql,[actor.id,actor.organization_id,canViewAllWallets(actor),siteId]);
   if(!rows[0]) throw walletError('Cash Wallet setup is pending.',503);
-  const {pending_incoming,pending_outgoing,...vault}=rows[0];
-  const awaiting=await pendingVaultTotals(actor,db,null,siteId);
+  const {pending_incoming,pending_outgoing,consolidation_active,...vault}=rows[0];
+  const awaiting=await (shared.pendingTotals?shared.pendingTotals():pendingVaultTotals(actor,db,null,siteId));
   Object.assign(vault,{pending_credit:sumPending(awaiting,'pending_credit'),pending_debit:sumPending(awaiting,'pending_debit'),pending_assignment_count:awaiting.reduce((n,row)=>n+row.pending_count,0)});
-  const cashStates = canViewAllWallets(actor) ? await adminWalletCashStates(actor.organization_id, siteId, db, null, { includeDeductions: true }) : new Map();
+  const cashStates = canViewAllWallets(actor) ? await (shared.cashStates?shared.cashStates():adminWalletCashStates(actor.organization_id, siteId, db, null, { includeDeductions: true })) : new Map();
   const cashVault = walletWithCashInHand(vault, cashStates, `user:${actor.id}`);
-  if (canViewAllWallets(actor)) cashVault.total_balance = (Number(vault.total_balance) + [...cashStates.values()].reduce((sum,state) => sum + Number(state.cash_in_hand_adjustment), 0)).toFixed(2);
+  if (canViewAllWallets(actor)) cashVault.total_balance = sumWalletMoney([vault.total_balance,...[...cashStates.values()].map(state=>state.cash_in_hand_adjustment)]);
+  if(!shared.deferActivity){
   const [activity]=await addHolderWalletActivity(db,{organizationId:actor.organization_id,siteId,holders:[{...cashVault,holder_type:'user',holder_id:actor.id}]});
   if(activity.cash_deductions) cashVault.cash_deductions=activity.cash_deductions;
-  return {site_id:siteId,vault:cashVault,pending_incoming,pending_outgoing,unallocated:await unallocatedCustody(actor,null,db)};
-  },{repeatableRead:true});
+  }
+  return {site_id:siteId,vault:cashVault,pending_incoming,pending_outgoing,unallocated:shared.unallocated??await unallocatedCustody(actor,null,db)};
+}
+
+export const summary = asyncHandler(async(req,res)=>{
+  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id);
+  const data=await walletReadTransaction(pool,db=>walletSummaryData(db,actor,siteId),{repeatableRead:true});
   res.set('Cache-Control','no-store').json(data);
 });
-export const holders = asyncHandler(async(req,res)=>{
-  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id);
-  if (req.query.include_members != null && !['true','false'].includes(String(req.query.include_members))) throw walletError('Invalid holder list option.');
-  if (req.query.purpose != null && req.query.purpose !== 'selection') throw walletError('Invalid holder list purpose.');
-  // A payment/transfer picker needs recipient names, never their wallet data.
-  // The default wallet list respects the per-user all-wallet viewing grant.
-  const selection = req.query.purpose === 'selection';
-  const includeMembers = String(req.query.include_members) !== 'false';
-  const data=await walletReadTransaction(pool,async db=>{
-  const {rows}=await db.query(`WITH ${siteVaultAccountsCte('$2','$3')}, holders AS(
+const walletHolderSql=`WITH ${siteVaultAccountsCte('$2','$3')}, holders AS(
     SELECT 'user'::text AS holder_type,u.id AS holder_id,u.name,u.role,NULL::text AS phone,$3::int AS site_id,
       (u.is_active AND (u.role IN ('admin','super_admin') OR (u.role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3)))) AS can_receive_transfer,u.is_active AS is_active FROM users u
       WHERE organization_id=$2 AND ((is_active=true AND (role IN ('admin','super_admin') OR (role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3))))
@@ -144,15 +144,67 @@ export const holders = asyncHandler(async(req,res)=>{
       FROM holders h LEFT JOIN site_accounts a ON a.holder_key=h.holder_type||':'||h.holder_id::text
       LEFT JOIN sites s ON s.id=h.site_id
       WHERE ($4::boolean OR $6::boolean OR (h.holder_type='user' AND h.holder_id=$1))
-      ORDER BY h.holder_type DESC,h.name,h.holder_id`,[actor.id,actor.organization_id,siteId,canViewAllWallets(actor),includeMembers,selection,isVaultAdmin(actor)]);
-  const awaiting=new Map((await pendingVaultTotals(actor,db,null,siteId)).map(row=>[`${row.holder_type}:${row.holder_id}`,row]));
-  const cashStates = canViewAllWallets(actor) ? await adminWalletCashStates(actor.organization_id, siteId, db, null, { includeDeductions: !selection }) : new Map();
+      ORDER BY h.holder_type DESC,h.name,h.holder_id`;
+
+async function walletHolderData(db,actor,siteId,{selection=false,includeMembers=true}={},shared={}) {
+  const {rows}=shared.holderRows?{rows:shared.holderRows}:await db.query(walletHolderSql,[actor.id,actor.organization_id,siteId,canViewAllWallets(actor),includeMembers,selection,isVaultAdmin(actor)]);
+  const awaiting=new Map((await (shared.pendingTotals?shared.pendingTotals():pendingVaultTotals(actor,db,null,siteId))).map(row=>[`${row.holder_type}:${row.holder_id}`,row]));
+  const cashStates = canViewAllWallets(actor) ? await (shared.cashStates?shared.cashStates():adminWalletCashStates(actor.organization_id, siteId, db, null, { includeDeductions: !selection })) : new Map();
   const visible=rows.map(row=>({...walletWithCashInHand(row,cashStates),
     pending_credit:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_credit||'0.00',
     pending_debit:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_debit||'0.00',
     pending_count:row.balance==null?null:awaiting.get(`${row.holder_type}:${row.holder_id}`)?.pending_count||0}));
-  if(!selection) await addHolderWalletActivity(db,{organizationId:actor.organization_id,siteId,holders:visible});
+  if(!selection) await addHolderWalletActivity(db,{organizationId:actor.organization_id,siteId,holders:visible,endDate:shared.endDate,includeAlignedNet:shared.includeAlignedNet===true});
   return {site_id:siteId,holders:visible};
+}
+
+export const holders = asyncHandler(async(req,res)=>{
+  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id);
+  if (req.query.include_members != null && !['true','false'].includes(String(req.query.include_members))) throw walletError('Invalid holder list option.');
+  if (req.query.purpose != null && req.query.purpose !== 'selection') throw walletError('Invalid holder list purpose.');
+  // A payment/transfer picker needs recipient names, never their wallet data.
+  // The default wallet list respects the per-user all-wallet viewing grant.
+  const selection = req.query.purpose === 'selection';
+  const includeMembers = String(req.query.include_members) !== 'false';
+  const data=await walletReadTransaction(pool,db=>walletHolderData(db,actor,siteId,{selection,includeMembers}),{repeatableRead:true});
+  res.set('Cache-Control','no-store').json(data);
+});
+
+export const workspace = asyncHandler(async(req,res)=>{
+  const actor=await walletReadActor(req),siteId=await accessibleSite(actor,req.query.site_id);
+  if(req.query.include_members!=null&&!['true','false'].includes(String(req.query.include_members))) throw walletError('Invalid holder list option.');
+  const includeMembers=String(req.query.include_members)==='true';
+  const data=await walletReadTransaction(pool,async db=>{
+    // Existing queries share one parameterized round trip and one snapshot.
+    // Rebinding is one pass over developer-owned placeholders, never user SQL.
+    const bind=(sql,bindings)=>sql.replace(/\$(\d+)/g,(token,index)=>bindings[Number(index)]??token);
+    const typed={1:'($1::integer)',2:'($2::integer)',3:'($3::integer)',4:'($4::boolean)',5:'($5::boolean)',6:'($6::boolean)',7:'($7::boolean)'};
+    const summarySql=bind(walletSummarySql,{1:typed[1],2:typed[2],3:typed[4],4:typed[3]});
+    const holderSql=bind(walletHolderSql,typed);
+    const cashSql=bind(adminWalletCashRowsSql,{1:typed[2],2:'ARRAY[$3::integer]'});
+    const unallocatedSql=bind(unallocatedCustodySql,{1:typed[2],2:typed[7],3:typed[1],4:'NULL::text'});
+    const {rows:[packet]}=await db.query(`SELECT
+      (SELECT to_jsonb(summary_row) FROM (${summarySql}) summary_row) AS summary,
+      (SELECT COALESCE(jsonb_agg(to_jsonb(holder_row)),'[]'::jsonb) FROM (${holderSql}) holder_row) AS holders,
+      CASE WHEN $4::boolean THEN (SELECT COALESCE(jsonb_agg(to_jsonb(cash_row)),'[]'::jsonb) FROM (${cashSql}) cash_row)
+        ELSE '[]'::jsonb END AS cash_rows,
+      (SELECT to_jsonb(unallocated_row) FROM (${unallocatedSql}) unallocated_row) AS unallocated,
+      ((now() AT TIME ZONE 'Asia/Kolkata')::date+1)::text AS end_date`,
+      [actor.id,actor.organization_id,siteId,canViewAllWallets(actor),includeMembers,false,isVaultAdmin(actor)]);
+    // Match node-postgres timestamp serialization used by the older routes.
+    for(const field of ['tracking_started_at','refreshed_at'])if(packet.summary?.[field])packet.summary[field]=new Date(packet.summary[field]);
+    for(const row of packet.holders)if(row.updated_at)row.updated_at=new Date(row.updated_at);
+    let pending;
+    const states=adminWalletCashStatesFromRows(packet.cash_rows,siteId);
+    const shared={deferActivity:true,includeAlignedNet:true,endDate:packet.end_date,
+      summaryRows:packet.summary?[packet.summary]:[],holderRows:packet.holders,unallocated:packet.unallocated,
+      pendingTotals:()=>pending??=packet.summary?.consolidation_active?Promise.resolve([]):pendingVaultTotals(actor,db,null,siteId),
+      cashStates:()=>states};
+    const overview=await walletSummaryData(db,actor,siteId,shared);
+    const directory=await walletHolderData(db,actor,siteId,{includeMembers},shared);
+    const own=directory.holders.find(row=>row.holder_type==='user'&&Number(row.holder_id)===Number(actor.id));
+    if(own?.cash_deductions)overview.vault.cash_deductions=own.cash_deductions;
+    return {...overview,holders:directory.holders,site_cash_balance:states.values().next().value?.site_cash_balance??null};
   },{repeatableRead:true});
   res.set('Cache-Control','no-store').json(data);
 });
@@ -161,19 +213,20 @@ export const userDetail = asyncHandler(async(req,res)=>{
   const actor=await walletReadActor(req),id=positiveId(req.params.id),siteId=await accessibleSite(actor,req.query.site_id);
   if(!canViewAllWallets(actor)&&id!==actor.id) throw walletError('You can view only your own Cash Wallet details.',403);
   const data=await walletReadTransaction(pool,async db=>{
-  const {rows}=await db.query( `${vaultTransactionsCte}, ${siteVaultAccountsCte('$2','$3')}, pending AS (
-    SELECT COALESCE(sum(unposted_credit),0)::text AS pending_credit,COALESCE(sum(unposted_debit),0)::text AS pending_debit,count(*)::int AS pending_count
-    FROM assigned_transactions WHERE organization_id=$2 AND site_id=$3 AND holder_type='user' AND holder_id=$1 AND status IN ('pending_clearance','pending_approval')
-  ) SELECT u.id,u.name,to_jsonb(u)->>'email' AS email,u.role,u.is_active,to_jsonb(u)->>'phone' AS phone,
+  const awaiting=await pendingVaultTotals(actor,db,holder('user',id),siteId);
+  const pending=awaiting.find(row=>row.holder_type==='user'&&Number(row.holder_id)===id)
+    ||{pending_credit:'0',pending_debit:'0',pending_count:0};
+  const {rows}=await db.query( `WITH ${siteVaultAccountsCte('$2','$3')}
+  SELECT u.id,u.name,to_jsonb(u)->>'email' AS email,u.role,u.is_active,to_jsonb(u)->>'phone' AS phone,
     COALESCE(a.balance,0)::text AS balance,COALESCE(a.reserved_balance,0)::text AS reserved_balance,
     COALESCE(a.total_in,0)::text AS total_in,COALESCE(a.total_handover,0)::text AS total_handover,
     COALESCE(a.total_received,0)::text AS total_received,COALESCE(a.total_adjustments,0)::text AS total_adjustments,COALESCE(a.total_imprest_out,0)::text AS total_imprest_out,
-    (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text AS available_balance,a.updated_at,pending.*
-    FROM users u CROSS JOIN pending LEFT JOIN site_accounts a ON a.holder_key='user:'||u.id::text
+    (COALESCE(a.balance,0)-COALESCE(a.reserved_balance,0))::text AS available_balance,a.updated_at
+    FROM users u LEFT JOIN site_accounts a ON a.holder_key='user:'||u.id::text
     WHERE u.id=$1 AND u.organization_id=$2 AND (u.role IN ('super_admin','admin') OR (u.role='sub_admin' AND EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=$3)) OR a.holder_key IS NOT NULL)`,[id,actor.organization_id,siteId]);
   if(!rows[0]) throw walletError('Cash Wallet user not found.',404);
   const cashStates = rows[0].role === 'admin' ? await adminWalletCashStates(actor.organization_id, siteId, db, null, { includeDeductions: true }) : new Map();
-  const visible=[{...walletWithCashInHand(rows[0],cashStates,`user:${id}`),site_id:siteId,holder_type:'user',holder_id:id}];
+  const visible=[{...walletWithCashInHand({...rows[0],...pending},cashStates,`user:${id}`),site_id:siteId,holder_type:'user',holder_id:id}];
   await addHolderWalletActivity(db,{organizationId:actor.organization_id,siteId,holders:visible});
   return {site_id:siteId,user:visible[0],unallocated:await unallocatedCustody(actor,holder('user',id),db)};
   },{repeatableRead:true});
@@ -188,7 +241,7 @@ export const assignedTransactions = asyncHandler(async(req,res)=>{
   const scope=vaultTransactionScope(actor),params=[...scope.params],clauses=[scope.clause];
   if(req.query.holder_type||req.query.holder_id){const selected=holder(req.query.holder_type,req.query.holder_id);
     await validateHolder(actor,selected,db,siteId,true);params.push(selected.type,selected.id);clauses.push(`holder_type=$${params.length-1} AND holder_id=$${params.length}`);}
-  params.push(siteIds);clauses.push(`site_id=ANY($${params.length}::int[])`);
+  params.push(siteIds);const sitesParameter=`$${params.length}`;clauses.push(`site_id=ANY(${sitesParameter}::int[])`);
   addWalletAmountFilters(req.query,params,clauses,'(credit+debit)');
   addWalletActorFilter(req.query,params,clauses,"NULLIF(COALESCE(source->>'created_by',cash->>'created_by'),'')::integer");
   addWalletModuleFilter(req.query,params,clauses,{source:'source_table',transfer:null});
@@ -205,12 +258,12 @@ export const assignedTransactions = asyncHandler(async(req,res)=>{
   else if(status!=='all'){params.push(status);clauses.push(`status=$${params.length}`);}
   const q=String(req.query.q||'').trim();if(q.length>200)throw walletError('Keep search within 200 characters.');
   if(q){params.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);clauses.push(`concat_ws(' ',holder_name,site_name,plot_no,buyer_name,source_table,source_id::text,cash->>'particular',source->>'remarks',source->>'cheque_no') ILIKE $${params.length} ESCAPE '\\'`);}
-  const where=clauses.join(' AND ');
-  const {rows}=await db.query( `${vaultTransactionsCte} SELECT *,count(*) OVER()::int AS total,
+  const where=clauses.join(' AND '),transactionCte=scopedVaultTransactionsCte({organization:'$1',sites:sitesParameter});
+  const {rows}=await db.query( `${transactionCte} SELECT *,count(*) OVER()::int AS total,
     COALESCE(sum(credit) OVER(),0)::text AS total_credit,COALESCE(sum(debit) OVER(),0)::text AS total_debit,
     COALESCE(sum(posted_amount) OVER(),0)::text AS total_posted_amount FROM assigned_transactions WHERE ${where}
     ORDER BY cash_flow_entry_id DESC LIMIT $${params.length+1} OFFSET $${params.length+2}`,[...params,limit,offset]);
-  const aggregate=rows[0] || (offset ? (await db.query( `${vaultTransactionsCte} SELECT count(*)::int AS total,
+  const aggregate=rows[0] || (offset ? (await db.query( `${transactionCte} SELECT count(*)::int AS total,
     COALESCE(sum(credit),0)::text AS total_credit,COALESCE(sum(debit),0)::text AS total_debit,
     COALESCE(sum(posted_amount),0)::text AS total_posted_amount FROM assigned_transactions WHERE ${where}`,params)).rows[0]
     : {total:0,total_credit:'0',total_debit:'0',total_posted_amount:'0'});

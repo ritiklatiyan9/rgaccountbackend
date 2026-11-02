@@ -1,6 +1,6 @@
 import { LOYALTY_VAULT_SOURCE_TABLES } from './loyaltyVaultContext.service.js';
 import { canViewAllWallets } from './walletVisibility.service.js';
-import { walletReadQuery } from './walletRead.service.js';
+import { walletReadTransaction } from './walletRead.service.js';
 
 // Read canonical cash transactions, including pending approval. The legacy
 // migration-only mode is retained for archived migration verification.
@@ -31,28 +31,43 @@ const sourceSql = (pendingOnly = false) => [...LOYALTY_VAULT_SOURCE_TABLES].map(
 // Only these cash-flow IDs can belong to a wallet: tracked receipts, explicit
 // source assignments, or new entries after consolidation. Discover IDs using
 // indexed native columns before converting/joining any financial record.
-const assignedCandidateIds = [...LOYALTY_VAULT_SOURCE_TABLES].filter(table => table !== 'cash_flow_entries').map(table => `
-  SELECT c.id FROM ${table} t JOIN cash_flow_entries c ON c.source_module='${table}' AND c.source_id=t.id
+const assignedCandidateIds = (cashTable='cash_flow_entries') => [...LOYALTY_VAULT_SOURCE_TABLES].filter(table => table !== 'cash_flow_entries').map(table => `
+  SELECT c.id FROM ${table} t JOIN ${cashTable} c ON c.source_module='${table}' AND c.source_id=t.id
   WHERE t.loyalty_vault_holder_type IS NOT NULL AND t.loyalty_vault_holder_id IS NOT NULL
-  UNION SELECT c.id FROM ${table} t JOIN cash_flow_entries c ON c.source_module='${table}' AND c.source_id=t.id
+  UNION SELECT c.id FROM ${table} t JOIN ${cashTable} c ON c.source_module='${table}' AND c.source_id=t.id
   WHERE t.created_at >= (SELECT consolidated_at FROM wallet_mode)`).join('\nUNION\n');
-const candidateCte = (pendingOnly = false) => `wallet_candidates AS MATERIALIZED (
-  SELECT cash_flow_entry_id AS id FROM wallet_sources
-  UNION SELECT cash_flow_entry_id FROM loyalty_vault_sources
-  UNION SELECT id FROM cash_flow_entries WHERE loyalty_vault_holder_type IS NOT NULL AND loyalty_vault_holder_id IS NOT NULL
-  UNION SELECT id FROM cash_flow_entries WHERE created_at >= (SELECT consolidated_at FROM wallet_mode)
-  UNION ${assignedCandidateIds}
+const candidateCte = (pendingOnly = false,scoped=false) => {
+  const cashTable=scoped?'wallet_scoped_cash':'cash_flow_entries';
+  return `wallet_candidates AS MATERIALIZED (
+  SELECT link.cash_flow_entry_id AS id FROM wallet_sources link ${scoped?'JOIN wallet_scoped_cash filter_cash ON filter_cash.id=link.cash_flow_entry_id':''}
+  UNION SELECT link.cash_flow_entry_id FROM loyalty_vault_sources link ${scoped?'JOIN wallet_scoped_cash filter_cash ON filter_cash.id=link.cash_flow_entry_id':''}
+  UNION SELECT id FROM ${cashTable} WHERE loyalty_vault_holder_type IS NOT NULL AND loyalty_vault_holder_id IS NOT NULL
+  UNION SELECT id FROM ${cashTable} WHERE created_at >= (SELECT consolidated_at FROM wallet_mode)
+  UNION ${assignedCandidateIds(cashTable)}
 ), wallet_cash_rows AS MATERIALIZED (
   SELECT c.* FROM wallet_candidates candidate JOIN LATERAL (
     SELECT cash.* FROM cash_flow_entries cash WHERE cash.id=candidate.id OFFSET 0
   ) c ON true
   ${pendingOnly ? 'WHERE (SELECT consolidated_at FROM wallet_mode) IS NULL' : ''}
 )`;
+};
+const scopeCtes=scope=>{
+  if(!scope)return '';
+  for(const value of Object.values(scope))if(value!=null&&!/^\$[1-9]\d*$/.test(value))throw new TypeError('Wallet query scopes must be bound SQL parameters');
+  if(!scope.organization)throw new TypeError('A wallet query organization parameter is required');
+  const sites=scope.sites?`${scope.sites}::integer[]`:scope.site?`ARRAY[${scope.site}::integer]`:null;
+  return `wallet_allowed_sites AS MATERIALIZED (
+    SELECT id FROM sites WHERE organization_id=${scope.organization}${sites?` AND id=ANY(${sites})`:''}
+  ),wallet_scoped_cash AS MATERIALIZED (
+    SELECT cash.* FROM cash_flow_entries cash WHERE cash.site_id IS NULL OR EXISTS(
+      SELECT 1 FROM wallet_allowed_sites access WHERE access.id=cash.site_id)
+  ),`;
+};
 
 // Materialize each stage once. Inlining the union expands JSON conversion,
 // creator fallback and posting rules repeatedly into every pending/status
 // predicate, tying up the shared pool on real production transaction volumes.
-const transactionsCte = (pendingOnly = false) => `WITH wallet_mode AS (SELECT NULLIF(to_jsonb(s)->>'consolidated_at','')::timestamptz AS consolidated_at FROM loyalty_vault_settings s LIMIT 1), ${candidateCte(pendingOnly)}, assigned_sources AS MATERIALIZED (${sourceSql(pendingOnly)}), eligible_sources AS MATERIALIZED (
+const transactionsCte = (pendingOnly = false,scope=null) => `WITH wallet_mode AS (SELECT NULLIF(to_jsonb(s)->>'consolidated_at','')::timestamptz AS consolidated_at FROM loyalty_vault_settings s LIMIT 1), ${scopeCtes(scope)} ${candidateCte(pendingOnly,!!scope)}, assigned_sources AS MATERIALIZED (${sourceSql(pendingOnly)}), eligible_sources AS MATERIALIZED (
   SELECT a.*,s.organization_id,s.name AS site_name,
     COALESCE(u.name,m.full_name,'Former holder') AS holder_name,
     creator.name AS created_by_name,assigner.name AS assigned_by_name,
@@ -68,7 +83,7 @@ const transactionsCte = (pendingOnly = false) => `WITH wallet_mode AS (SELECT NU
       ELSE GREATEST(COALESCE((cash->>'credit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'debit')::numeric,0),0) END AS credit,
     CASE WHEN (SELECT consolidated_at FROM wallet_mode) IS NOT NULL THEN 0::numeric
       ELSE GREATEST(COALESCE((cash->>'debit')::numeric,0),0)+GREATEST(-COALESCE((cash->>'credit')::numeric,0),0) END AS debit
-  FROM assigned_sources a JOIN sites s ON s.id=a.site_id
+  FROM assigned_sources a JOIN sites s ON s.id=a.site_id ${scope?'JOIN wallet_allowed_sites allowed ON allowed.id=s.id':''}
     LEFT JOIN users u ON a.holder_type='user' AND u.id=a.holder_id
     LEFT JOIN members m ON a.holder_type='member' AND m.id=a.holder_id
     LEFT JOIN users creator ON creator.id=NULLIF(COALESCE(source->>'created_by',cash->>'created_by'),'')::integer
@@ -108,6 +123,7 @@ const transactionsCte = (pendingOnly = false) => `WITH wallet_mode AS (SELECT NU
 
 export const vaultTransactionsCte = transactionsCte();
 export const vaultPendingTransactionsCte = transactionsCte(true);
+export const scopedVaultTransactionsCte=(scope,{pendingOnly=false}={})=>transactionsCte(pendingOnly,scope);
 
 export const vaultTransactionScope = actor => ({
   clause: 'organization_id=$1 AND ($2::boolean OR (holder_type=\'user\' AND holder_id=$3))',
@@ -126,7 +142,14 @@ export function pendingVaultTotals(actor, database, selected = null, siteId = nu
 }
 
 async function loadPendingVaultTotals(actor, database, selected, siteId) {
+  if(!database.release)return walletReadTransaction(database,client=>loadPendingVaultTotals(actor,client,selected,siteId),{repeatableRead:true});
+  // In consolidated mode physical incoming cash is already posted and this
+  // legacy pending-only query is provably empty. Do not plan/materialize its
+  // fourteen native JSON branches just to discover that one-time guard.
+  const mode=(await database.query("SELECT NULLIF(to_jsonb(s)->>'consolidated_at','') IS NOT NULL AS consolidated FROM loyalty_vault_settings s LIMIT 1")).rows[0];
+  if(mode?.consolidated===true)return [];
   const scope = vaultTransactionScope(actor);
+  let siteParameter=null;
   if (selected) {
     scope.clause += ' AND holder_type=$4 AND holder_id=$5';
     scope.params.push(selected.type,selected.id);
@@ -134,8 +157,9 @@ async function loadPendingVaultTotals(actor, database, selected, siteId) {
   if (siteId != null) {
     scope.params.push(siteId);
     scope.clause += ` AND site_id=$${scope.params.length}`;
+    siteParameter=`$${scope.params.length}`;
   }
-  const sql = `${vaultPendingTransactionsCte}
+  const sql = `${scopedVaultTransactionsCte({organization:'$1',site:siteParameter},{pendingOnly:true})}
     SELECT holder_type,holder_id,sum(credit-posted_credit)::text AS pending_credit,
       sum(debit-posted_debit)::text AS pending_debit,count(*)::int AS pending_count
     FROM assigned_transactions WHERE ${scope.clause} AND status IN ('pending_clearance','pending_approval')
@@ -143,9 +167,7 @@ async function loadPendingVaultTotals(actor, database, selected, siteId) {
   // A caller already holding a read snapshot must use that connection. A
   // second pool checkout would split the financial snapshot and can deadlock
   // the wallet admission limit when summary and holder reads run together.
-  const { rows } = database.release
-    ? await database.query(sql,scope.params)
-    : await walletReadQuery(database,sql,scope.params);
+  const {rows}=await database.query(sql,scope.params);
   return rows;
 }
 

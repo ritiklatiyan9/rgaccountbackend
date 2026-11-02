@@ -9,6 +9,7 @@ import { up as detailsUp } from '../src/migrations/209_cash_wallet_receipt_detai
 import { up as balanceUp } from '../src/migrations/210_wallet_balance_guards.js';
 import { up as collectorUp } from '../src/migrations/211_locked_cash_collector.js';
 import { up as permanentUp } from '../src/migrations/212_wallet_permanent_balance_guard.js';
+import { up as projectionUp,verifyWalletSiteProjection } from '../src/migrations/234_wallet_site_projection.js';
 import { repairSunnyWallet,SUNNY_WALLET_REPAIR as target } from '../src/services/sunnyWalletRepair.service.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../src/services/loyaltyVaultContext.service.js';
 import { postingPolicySql } from '../src/migrations/171_cheque_clearance_before_approval.js';
@@ -27,7 +28,9 @@ test('Sunny exact debit repair is recoverable, repeatable and protected against 
     source:(await query('SELECT * FROM loyalty_vault_sources ORDER BY cash_flow_entry_id')).rows,
     cash:(await query('SELECT * FROM cash_flow_entries ORDER BY id')).rows,
     payments:(await query('SELECT * FROM plot_payments ORDER BY id')).rows,
-    transfers:(await query('SELECT * FROM loyalty_vault_transfers ORDER BY id')).rows});
+    transfers:(await query('SELECT * FROM loyalty_vault_transfers ORDER BY id')).rows,
+    projection:(await query("SELECT to_regclass('loyalty_vault_site_accounts') AS name")).rows[0].name
+      ?(await query('SELECT * FROM loyalty_vault_site_accounts ORDER BY organization_id,site_id,holder_key')).rows:null});
   const balance=async()=>(await scalar("SELECT balance::text FROM loyalty_vault_accounts WHERE holder_key='user:2'")).balance;
   const noFunds=e=>e.constraint==='loyalty_vault_holder_funds';
   try {
@@ -44,6 +47,13 @@ test('Sunny exact debit repair is recoverable, repeatable and protected against 
       CREATE TABLE cash_flow_entries(id int PRIMARY KEY,site_id int,created_by int,credit numeric DEFAULT 0,debit numeric DEFAULT 0,
         cash_type text,status text,cheque_status text,particular text,source_module text,source_id int,date date DEFAULT CURRENT_DATE,
         created_at timestamptz DEFAULT now(),entry_transfer_id uuid,is_imprest_internal boolean,is_firm_transaction boolean,to_firm_id int);
+      CREATE TABLE ledger_entries(id text,site_id integer,entry_date date DEFAULT CURRENT_DATE,bucket text,
+        credit numeric DEFAULT 0,debit numeric DEFAULT 0,source_key text,source_id integer,notes text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_ledger(id serial PRIMARY KEY,site_id integer,user_id integer,amount numeric,type text,
+        reference_id integer,source_module text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_allocations(id serial PRIMARY KEY,site_id integer,admin_id integer,sub_admin_id integer,
+        amount numeric,status text,from_own_float boolean DEFAULT false,created_at timestamptz DEFAULT now(),confirmed_at timestamptz);
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric,created_at timestamptz DEFAULT now());
       ${postingPolicySql}`);
     for(const table of [...LOYALTY_VAULT_SOURCE_TABLES].filter(table=>table!=='cash_flow_entries'))await query(`CREATE TABLE ${table}(
       id int PRIMARY KEY,site_id int,created_by int,status text,payment_mode text,payment_type text,cheque_status text,
@@ -65,6 +75,11 @@ test('Sunny exact debit repair is recoverable, repeatable and protected against 
     await query("UPDATE cash_flow_entries SET status='rejected' WHERE id=74989");
     await detailsUp(db);await balanceUp(db);await collectorUp(db);
     assert.equal(await balance(),'-100000.00');
+    const beforeProjection=await live();
+    assert.equal((await repairSunnyWallet(db)).applied,false,'the original preview remains compatible before migration 234');
+    assert.equal(await live(),beforeProjection);
+    await projectionUp(db);
+    assert.equal((await scalar("SELECT balance::text FROM loyalty_vault_site_accounts WHERE organization_id=1 AND site_id=2 AND holder_key='user:2'")).balance,'-100000.00');
     let snapshot;
 
     await t.test('preview rolls back every financial and schema change and requires a durable snapshot for apply',async()=>{
@@ -72,6 +87,7 @@ test('Sunny exact debit repair is recoverable, repeatable and protected against 
       const report=await repairSunnyWallet(db,{writeSnapshot:async value=>{snapshot=value;}});
       assert.equal(report.applied,false);assert.equal(report.balance,'0.00');assert.equal(await live(),before);
       assert.equal(snapshot.before.entries.find(e=>String(e.id)==='141').kind,'reversal');
+      assert.equal(snapshot.before.projection.find(row=>row.holder_key==='user:2').balance,'-100000.00');
       assert.equal((await scalar("SELECT to_regclass('cash_wallet_voided_receipt_entries') AS table_name")).table_name,null);
       await assert.rejects(repairSunnyWallet(db,{apply:true}),/snapshot writer/);
       await assert.rejects(repairSunnyWallet(db,{apply:true,writeSnapshot:async()=>{throw new Error('Snapshot unavailable');}}),/Snapshot unavailable/);
@@ -85,9 +101,23 @@ test('Sunny exact debit repair is recoverable, repeatable and protected against 
       await query("UPDATE users SET name='Sunny Latiyan' WHERE id=2");
     });
 
+    await t.test('a failed projection refresh rolls back the authorized deletion, archive and financial cache together',async()=>{
+      await query(`CREATE FUNCTION reject_repair_projection_refresh() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Projection refresh failed'; END $$;
+        CREATE TRIGGER reject_repair_projection_refresh BEFORE DELETE ON loyalty_vault_site_accounts FOR EACH ROW EXECUTE FUNCTION reject_repair_projection_refresh();`);
+      const before=await live();let saved=0;
+      try {await assert.rejects(repairSunnyWallet(db,{apply:true,writeSnapshot:async()=>{saved+=1;}}),/Projection refresh failed/);}
+      finally {await query('DROP TRIGGER reject_repair_projection_refresh ON loyalty_vault_site_accounts');}
+      assert.equal(saved,1,'the required snapshot precedes every mutation');
+      assert.equal(await live(),before);assert.equal(await balance(),'-100000.00');
+      assert.equal((await verifyWalletSiteProjection(db)).mismatches,0);
+      assert.equal((await scalar("SELECT to_regclass('cash_wallet_voided_receipt_entries') AS table_name")).table_name,null);
+    });
+
     await t.test('apply removes only 141, archives the complete debit and leaves receipt, handover and other holders intact',async()=>{
       const result=await repairSunnyWallet(db,{apply:true,writeSnapshot:async value=>{snapshot=value;}});
       assert.equal(result.applied,true);assert.equal(result.negative_debits_blocked,true);assert.equal(await balance(),'0.00');
+      assert.equal((await scalar("SELECT balance::text FROM loyalty_vault_site_accounts WHERE organization_id=1 AND site_id=2 AND holder_key='user:2'")).balance,'0.00');
+      assert.equal((await verifyWalletSiteProjection(db)).mismatches,0);
       assert.equal((await query('SELECT id FROM loyalty_vault_entries WHERE id=141')).rows.length,0);
       const archive=await scalar('SELECT * FROM cash_wallet_voided_receipt_entries WHERE original_entry_id=141');
       assert.equal(Number(archive.original_entry.amount),-100000);assert.equal(Number(archive.retained_amount),100000);

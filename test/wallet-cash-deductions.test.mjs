@@ -26,7 +26,8 @@ test('holder totals exclude staff approvals and float spending while gross givin
   CREATE TABLE ledger_entries(id text,site_id int,bucket text,entry_date date,created_at timestamptz,source_key text,source_id int,debit numeric,credit numeric);
   CREATE TABLE imprest_ledger(site_id int,user_id int,created_at timestamptz,amount numeric,type text,source_module text,reference_id int);
   CREATE TABLE imprest_allocations(site_id int,admin_id int,amount numeric,status text,from_own_float boolean,created_at timestamptz,confirmed_at timestamptz);
-  CREATE TABLE imprest_transfers(site_id int,from_user_id int,to_user_id int,amount numeric,created_at timestamptz);`);
+  CREATE TABLE imprest_transfers(site_id int,from_user_id int,to_user_id int,amount numeric,created_at timestamptz);
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric,created_at timestamptz DEFAULT now());`);
  const entries=[
   [1,7,'plot_commission_payments','cash',20000,0],
   [2,8,'expenses','cash',337875,0],
@@ -87,6 +88,7 @@ test('holder totals exclude staff approvals and float spending while gross givin
  await addWalletCashDeductions(db,{organizationId:1,siteId:2,states,totals,endDate:'2026-10-31'});
  const data=states.get('user:7').cash_deductions;
  assert.equal(data.version,2);assert.equal(data.scope,'holder');assert.equal(data.started_at,opening.started_at);
+ assert.equal(data.opening_metadata_version,1);assert.deepEqual(data.reporting_opening,ownOpening,'opening and activity share the same database snapshot');
  assert.equal(data.commission,'20000.00');assert.equal(data.expenses,'100.25');assert.equal(data.other_cash_payments,'15061.15');
  assert.equal(data.payment_total,'35161.40');assert.equal(data.imprest_given,'140.01','confirmed allocations, legacy successful transfers and owned bridges each count once');
  assert.ok(!data.modules.some(row=>row.source==='land_deal_payments'||row.source==='partner_profit_payments'),'own float-funded land and partner payments are excluded');
@@ -105,16 +107,41 @@ test('holder totals exclude staff approvals and float spending while gross givin
  assert.equal(await addHolderWalletActivity(db,{organizationId:1,siteId:2,holders,endDate:'2026-10-31'}),holders);
  assert.equal(holders[0].cash_deductions,data,'already valid aligned snapshots keep their cash basis');
  assert.equal(holders[1].cash_deductions.started_at,null);assert.equal(holders[1].cash_deductions.payment_total,'0.00','staff spending funded by float is not a second wallet deduction');
+ assert.equal(holders[1].cash_deductions.opening_metadata_version,1);assert.equal(holders[1].cash_deductions.reporting_opening,null,'an explicit all-history marker avoids a second metadata read');
  assert.equal(holders[1].cash_deductions.imprest_given,'70.00','staff gross giving includes peer float distributions and its own accepted bridge once');
  assert.equal(holders[1].cash_deductions.cash_adjustment,'40.00','peer float giving is explicit reconciliation outside the cash payments column');
  assert.equal(holders[2].cash_deductions.payment_total,'0.00');assert.equal(holders[2].cash_deductions.cash_adjustment,'0.00');
  assert.equal(holders[3].cash_deductions,undefined,'private balances never gain totals');
+ // The workspace defers its aligned enrichment, then reads all visible holders
+ // in one batch. Its financial snapshot must match the standalone path.
+ const deferred=[{...holders[0],cash_in_hand_basis:'SITE_CASH_AFTER_IMPREST',cash_deductions:undefined},
+  {...holders[1],cash_deductions:undefined}, {...holders[3]}];
+ let calls=0;
+ const counted={query(...args){calls+=1;return db.query(...args);}};
+ await addHolderWalletActivity(counted,{organizationId:1,siteId:2,holders:deferred,endDate:'2026-10-31',includeAlignedNet:true});
+ assert.deepEqual(deferred[0].cash_deductions,states.get('user:7').cash_deductions,'deferred aligned balances retain the standalone snapshot, including net float');
+ assert.deepEqual(deferred[1].cash_deductions,holders[1].cash_deductions,'ordinary custody keeps its separate module history');
+ assert.equal(deferred[2].cash_deductions,undefined,'batching cannot reveal a private wallet');
+ assert.equal(calls,2,'one opening/cutoff read and one module/giving/net-float read');
  }finally{await db.close();}
 });
 
 test('the OM example uses own payments and gross giving with its one rupee reconciliation outside deductions',()=>{
- const result=walletCashDeductions({opening:{...opening,opening_cash:'8996582.00'},totals:{total_received:'0',total_handover:'1584302'},
+ const result=walletCashDeductions({opening:{...opening,opening_cash:'8996582.00'},totals:{total_received:'0',total_handover:'1584302',total_adjustments:'-1'},
   state:{balance:'4506621'},spending:{commission:'2239074',expenses:'0',other_cash_payments:'15000'},imprest:'-1000',imprestGiven:'651584',siteId:5,holderId:7});
  assert.equal(result.payment_total,'2254074.00');assert.equal(result.imprest_given,'651584.00');assert.equal(result.cash_adjustment,'-1.00');
+ assert.deepEqual(result.reconciliation,{wallet_corrections:'-1.00',pending_cash_commitments:'0.00',other_cash_changes:'0.00'});
  assert.throws(()=>walletCashDeductions({opening,totals:{total_received:'0',total_handover:'0'},state:{balance:'0'},spending,imprestGiven:'-0.01',siteId:2,holderId:7}),/cannot be negative/);
+});
+test('new pending cash commitments explain a cash reduction without becoming a posted expense or imprest giving',()=>{
+ const result=walletCashDeductions({opening:{...opening,opening_cash:'1000000.00'},totals:{total_received:'0',total_handover:'0',total_adjustments:'0'},
+  state:{balance:'700000.00'},spending:{commission:'0',expenses:'0',other_cash_payments:'0'},pendingCashCommitments:'300000',siteId:2,holderId:7});
+ assert.equal(result.payment_total,'0.00');assert.equal(result.imprest_given,'0.00');
+ assert.deepEqual(result.reconciliation,{wallet_corrections:'0.00',pending_cash_commitments:'-300000.00',other_cash_changes:'0.00'});
+});
+test('recorded custody identifies module and float history that never debited that wallet',()=>{
+ const result=walletCashDeductions({opening:{...opening,opening_cash:'1000'},totals:{total_received:'0',total_handover:'100',total_adjustments:'-1',total_imprest_out:'20'},
+  state:{balance:'879'},spending:{commission:'0',expenses:'100',other_cash_payments:'0'},imprestGiven:'50',siteId:2,holderId:8});
+ assert.equal(result.cash_adjustment,'129.00');assert.equal(result.payment_total,'100.00');
+ assert.deepEqual(result.reconciliation,{wallet_corrections:'-1.00',pending_cash_commitments:'0.00',module_activity_outside_wallet:'100.00',imprest_activity_outside_wallet:'30.00',other_cash_changes:'0.00'});
 });

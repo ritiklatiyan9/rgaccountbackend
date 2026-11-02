@@ -5,15 +5,16 @@ import express from 'express';
 import cors from 'cors';
 import pool from '../src/config/db.js';
 import {createWalletOpeningPreviewAuth} from '../src/middlewares/walletOpeningPreviewAuth.middleware.js';
-import {summary,holders,userDetail,reportingOpenings,amountBreakdown,history,transfers,assignedTransactions} from '../src/controllers/loyaltyVault.controller.js';
+import {summary,workspace,holders,userDetail,reportingOpenings,amountBreakdown,history,transfers,assignedTransactions} from '../src/controllers/loyaltyVault.controller.js';
 const app=express();
 const auth=process.env.WALLET_OPENING_AUTH_MODE==='upstream'
   ? createWalletOpeningPreviewAuth({database:pool})
   : (_req,res)=>res.status(503).json({message:'Wallet opening is saved; existing-session verification needs approval before activation.'});
-app.use((req,res,next)=>{const json=res.json.bind(res);res.json=body=>{if(res.statusCode===401)console.log('Wallet opening authentication:',body.message);return json(body);};res.once('finish',()=>console.log(`Wallet opening reader ${req.method} ${req.path}: ${res.statusCode}`));next();});
+app.use((req,res,next)=>{const started=performance.now();const json=res.json.bind(res);res.json=body=>{if(res.statusCode===401)console.log('Wallet opening authentication:',body.message);return json(body);};res.once('finish',()=>console.log(`Wallet opening reader ${req.method} ${req.path}: ${res.statusCode} (${Math.round(performance.now()-started)} ms)`));next();});
 app.use(cors({origin:['http://127.0.0.1:5174','http://localhost:5174'],credentials:true}));
 app.get('/health',(_req,res)=>res.json({service:'wallet-opening-reader',read_only:true}));
 app.get('/wallet',auth,summary);
+app.get('/wallet/workspace',auth,workspace);
 app.get('/wallet/holders',auth,holders);
 app.get('/wallet/users/:id',auth,userDetail);
 app.get('/wallet/reporting-openings',auth,reportingOpenings);

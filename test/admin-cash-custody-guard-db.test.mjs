@@ -1,3 +1,4 @@
+import {up as projectionUp} from '../src/migrations/234_wallet_site_projection.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -79,10 +80,10 @@ test('Admin native cash expenses and Imprest enforce current cash custody', { sk
         plot_payment_id integer,vendor_payment_id integer,imprest_allocation_id integer,entry_transfer_id uuid,money_transfer_id uuid,
         is_firm_to_firm_transfer boolean,transfer_group_id uuid,is_financial_projection boolean,source_vendor_payment_id integer,is_imprest_internal boolean)`);
     }
-    await query(`CREATE VIEW ledger_entries AS SELECT id::text AS id,source_module AS source_key,source_id,site_id,date AS entry_date,'cash'::text AS bucket,
+    await query(`CREATE VIEW ledger_entries AS WITH raw_base AS (SELECT id::text AS id,source_module AS source_key,source_id,site_id,date AS entry_date,'cash'::text AS bucket,
       CASE WHEN financial_transaction_posts(CASE WHEN debit<0 THEN 'credit' ELSE 'debit' END,status,cash_type,cheque_status) THEN debit ELSE 0 END AS debit,
       CASE WHEN financial_transaction_posts(CASE WHEN credit<0 THEN 'debit' ELSE 'credit' END,status,cash_type,cheque_status) THEN credit ELSE 0 END AS credit
-      FROM cash_flow_entries WHERE UPPER(cash_type)='CASH'`);
+      FROM cash_flow_entries WHERE UPPER(cash_type)='CASH'),base AS (SELECT * FROM raw_base),posted AS (SELECT * FROM base) SELECT * FROM posted`);
     const universal = await readFile(new URL('../src/migrations/125_universal_imprest_enforcement.js', import.meta.url), 'utf8');
     for (const name of ['refresh_imprest_balance_snapshots','imprest_debit_is_active','reconcile_imprest_debit','reconcile_direct_cashflow_imprest','sync_universal_imprest_from_source']) {
       const start = universal.indexOf(`CREATE OR REPLACE FUNCTION ${name}(`);
@@ -107,7 +108,7 @@ test('Admin native cash expenses and Imprest enforce current cash custody', { sk
           ON CONFLICT(source_module,source_id) DO UPDATE SET debit=EXCLUDED.debit,status=EXCLUDED.status;
         RETURN NEW; END $$;
       CREATE TRIGGER trg_farmer_projection AFTER INSERT OR UPDATE OR DELETE ON farmer_payments FOR EACH ROW EXECUTE FUNCTION test_farmer_projection();`);
-    await walletUp(db); await vaultUp(db); await unifiedUp(db); await imprestGuardUp(db); await fundingUp(db); await scopeUp(db); await balanceUp(db);
+    await walletUp(db); await vaultUp(db); await unifiedUp(db); await imprestGuardUp(db); await fundingUp(db); await scopeUp(db); await balanceUp(db);await projectionUp(db);
     await receipt(10,100); await align(10,100);
     await receipt(11,100,1);
     await receipt(12,1000); await align(12,100);

@@ -1,3 +1,4 @@
+import {up as projectionUp} from '../src/migrations/234_wallet_site_projection.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -68,7 +69,11 @@ test('cash receipts in every native module belong to the collector and can be ha
     await walletUp(db); await vaultUp(db); await unifiedUp(db); await siteUp(db); await up(db); await balanceUp(db);
     // Pre-existing assignments are deliberately retained when 211 is installed.
     await insert('expenses', {id:1,site_id:10,created_by:1,payment_mode:'CASH',status:'approved',remark:'Historical member custody',loyalty_vault_holder_type:'member',loyalty_vault_holder_id:1,loyalty_vault_assigned_by:2});
-    await collectorUp(db);
+    await collectorUp(db); await projectionUp(db);
+    await query(`CREATE TABLE ledger_entries(site_id integer,entry_date date,bucket text,debit numeric,credit numeric);
+      CREATE TABLE imprest_ledger(site_id integer,user_id integer,amount numeric,created_at timestamptz);
+      CREATE TABLE imprest_allocations(site_id integer,amount numeric,status text,from_own_float boolean,created_at timestamptz);
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric);`);
 
     await t.test('a 20,000 expense followed by 15,000 cash received creates transferable collector cash', async () => {
       const paid = await receipt('expenses', { amount: 20000, remark: 'Advertising paid', category: 'ADVERTISING', status: 'approved' }, { debit: 20000, credit: 0, status: 'approved' });

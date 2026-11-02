@@ -1,3 +1,4 @@
+import {up as projectionUp} from '../src/migrations/234_wallet_site_projection.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
@@ -24,7 +25,7 @@ test('opening, handovers and net corrections preserve every paise', () => {
 test('amount pages reconcile all entries, paginate and enforce current wallet/site visibility', async () => {
   const db = new PGlite();
   try {
-    await db.exec(`CREATE TABLE sites(id int PRIMARY KEY,name text,organization_id int);
+    await db.exec(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);CREATE TABLE sites(id int PRIMARY KEY,name text,organization_id int);
       INSERT INTO sites VALUES(2,'Selected site',1),(3,'Other site',1),(20,'Other org',2);
       CREATE TABLE users(id int PRIMARY KEY,name text,role text,organization_id int,is_active boolean);
       INSERT INTO users VALUES(7,'Admin','admin',1,true),(8,'Staff','sub_admin',1,true),(9,'Other staff','sub_admin',1,true),(77,'Outsider','admin',2,true);
@@ -86,7 +87,9 @@ test('amount pages reconcile all entries, paginate and enforce current wallet/si
       INSERT INTO imprest_ledger(site_id,user_id,created_at,amount,source_module,reference_id,created_by,type) VALUES
         (2,8,'2026-10-26T12:00:00Z',-200,'expense',8,8,'EXPENSE'),(2,7,'2026-10-26T12:00:00Z',-300,'expense',9,7,'EXPENSE');
       CREATE TABLE imprest_allocations(site_id integer,admin_id integer,amount numeric,status text,from_own_float boolean,created_at timestamptz,confirmed_at timestamptz);
-      CREATE TABLE imprest_transfers(site_id integer,from_user_id integer,to_user_id integer,amount numeric,created_at timestamptz);`);
+      CREATE TABLE imprest_transfers(site_id integer,from_user_id integer,to_user_id integer,amount numeric,created_at timestamptz);
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric,created_at timestamptz DEFAULT now());`);
+    await projectionUp({query:async(sql,args)=>args?.length?db.query(sql,args):(await db.exec(sql)).at(-1),connect:async()=>({query:async(sql,args)=>args?.length?db.query(sql,args):(await db.exec(sql)).at(-1),release(){}})});
     await db.query('INSERT INTO application_settings VALUES(2,$1,$2)', ['wallet_reporting_opening:user:7', JSON.stringify(opening)]);
     const options = { cashStateReader:async()=>new Map([['user:7',{balance:'5000.00',cash_deductions:deductions}]]) };
     const read = (section, query = {}, actor = admin) => getWalletAmountBreakdown(db, {actor,siteId:2,userId:7,section,...query}, options);

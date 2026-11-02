@@ -6,10 +6,13 @@ import { up as vaultUp } from '../src/migrations/199_loyalty_vault.js';
 import { up as unifiedUp } from '../src/migrations/203_unified_cash_wallet.js';
 import { up as siteUp } from '../src/migrations/208_cash_wallet_site_scope.js';
 import { up } from '../src/migrations/210_wallet_balance_guards.js';
+import { up as projectionUp } from '../src/migrations/234_wallet_site_projection.js';
 import { postingPolicySql } from '../src/migrations/171_cheque_clearance_before_approval.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../src/services/loyaltyVaultContext.service.js';
 import { createVaultTransfer,resolveVaultTransfer } from '../src/services/loyaltyVault.service.js';
 import { siteVaultAccountsCte } from '../src/services/loyaltyVaultSite.service.js';
+import { cacheGet,cacheSet,getCacheGeneration } from '../src/config/cache.js';
+import { buildCacheKey,cacheResponse } from '../src/middlewares/cache.middleware.js';
 
 test('Cash Wallet requests never reserve cash and every debit must remain funded', {skip:!process.env.PGLITE_MODULE},async t=>{
   const {PGlite}=await import(process.env.PGLITE_MODULE),pg=new PGlite();
@@ -49,6 +52,13 @@ test('Cash Wallet requests never reserve cash and every debit must remain funded
       CREATE TABLE cash_flow_entries(id integer PRIMARY KEY,site_id integer,created_by integer,credit numeric DEFAULT 0,debit numeric DEFAULT 0,
         cash_type text,status text,cheque_status text,particular text,source_module text,source_id integer,date date DEFAULT CURRENT_DATE,
         created_at timestamptz DEFAULT now(),entry_transfer_id uuid,is_imprest_internal boolean,is_firm_transaction boolean,to_firm_id integer);
+      CREATE TABLE ledger_entries(id text,site_id integer,entry_date date DEFAULT CURRENT_DATE,bucket text,
+        credit numeric DEFAULT 0,debit numeric DEFAULT 0,source_key text,source_id integer,notes text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_ledger(id serial PRIMARY KEY,site_id integer,user_id integer,amount numeric,type text,
+        reference_id integer,source_module text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_allocations(id serial PRIMARY KEY,site_id integer,admin_id integer,sub_admin_id integer,
+        amount numeric,status text,from_own_float boolean DEFAULT false,created_at timestamptz DEFAULT now(),confirmed_at timestamptz);
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric,created_at timestamptz DEFAULT now());
       CREATE TABLE cash_flow_months(id integer PRIMARY KEY,site_id integer);
       CREATE TABLE farmers(id integer PRIMARY KEY,site_id integer);
       CREATE TABLE plots(id integer PRIMARY KEY,site_id integer,plot_no text,buyer_name text,block text);CREATE TABLE plot_installments(id integer PRIMARY KEY,plot_id integer);
@@ -66,6 +76,7 @@ test('Cash Wallet requests never reserve cash and every debit must remain funded
     await query(`INSERT INTO loyalty_vault_transfers(id,organization_id,site_id,from_holder_type,from_holder_id,to_holder_id,sender_id,recipient_id,amount,idempotency_key)
       VALUES($1,1,10,'user',1,2,1,2,25,$2)`,[randomUUID(),legacy.idempotency_key]);
     await query("UPDATE loyalty_vault_accounts SET reserved_balance=25 WHERE holder_key='user:1'");
+    await projectionUp(db);
 
     await t.test('migration clears obsolete holds without rewriting money, approvals or history',async()=>{
       const sources=JSON.stringify((await query('SELECT * FROM cash_flow_entries ORDER BY id')).rows);
@@ -112,17 +123,25 @@ test('Cash Wallet requests never reserve cash and every debit must remain funded
     });
 
     await t.test('concurrent retry keys and decisions move cash once and reject changed payloads',async()=>{
-      const data=request(10000),results=await Promise.all([
-        createVaultTransfer({id:1},data,db),createVaultTransfer({id:1},data,db),
-      ]);
-      assert.equal(results[0].transfer.id,results[1].transfer.id);assert.equal(results[1].replayed,true);
+      const cachedKey='imprest|guard-regression-site-10';
+      await cacheSet(cachedKey,{available:'stale balance'},60);
+      const readRequest={method:'GET',path:'/site-balance',query:{site_id:10},headers:{},user:{id:2,role:'admin',organization_id:1}};
+      const readResponse={statusCode:200,setHeader(){},json(value){this.body=value;return value;},status(value){this.statusCode=value;return this;}};
+      await cacheResponse({namespace:'imprest'})(readRequest,readResponse,()=>{});
+      const generation=getCacheGeneration();
+      const data=request(10000),results=await Promise.all(Array.from({length:32},()=>createVaultTransfer({id:1},data,db)));
+      assert.equal(new Set(results.map(result=>result.transfer.id)).size,1);
+      assert.equal(results.filter(result=>!result.replayed).length,1);
+      assert.ok(getCacheGeneration()>generation);assert.equal(await cacheGet(cachedKey),null,'committed service calls clear stale downstream balances before returning');
+      readResponse.json({available:'pre-mutation read'});
+      assert.equal(await cacheGet(buildCacheKey(readRequest,'imprest')),null,'an old in-flight read cannot refill the cache after commit');
+      const afterCreation=getCacheGeneration();
+      await createVaultTransfer({id:1},data,db);
+      assert.equal(getCacheGeneration(),afterCreation,'an idempotent replay does not emit another mutation/invalidation');
       await assert.rejects(createVaultTransfer({id:1},{...data,note:'Changed'},db),status(409));
       const before=await count();
-      const decisions=await Promise.all([
-        resolveVaultTransfer({id:2},results[0].transfer.id,'accept',{site_id:10},db),
-        resolveVaultTransfer({id:2},results[0].transfer.id,'accept',{site_id:10},db),
-      ]);
-      assert.equal(decisions[1].replayed,true);assert.equal(await count(),before+2);
+      const decisions=await Promise.all(Array.from({length:32},()=>resolveVaultTransfer({id:2},results[0].transfer.id,'accept',{site_id:10},db)));
+      assert.equal(decisions.filter(result=>!result.replayed).length,1);assert.equal(await count(),before+2);
       assert.equal((await balance()).balance,'210000.00');
     });
 

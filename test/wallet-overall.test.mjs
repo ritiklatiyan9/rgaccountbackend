@@ -1,3 +1,4 @@
+import {up as projectionUp} from '../src/migrations/234_wallet_site_projection.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
@@ -54,6 +55,8 @@ test('overall wallet reconciles exact user custody across authorized sites witho
         (1,10,'user:3','user',3,-10.11),(1,11,'user:3','user',3,4.04),
         (1,NULL,'user:1','user',1,99.99),(1,10,'member:1','member',1,999.99),
         (2,20,'user:5','user',5,90000.00);`);
+    await pg.exec("CREATE TABLE app_schema_migrations(version text PRIMARY KEY);ALTER TABLE loyalty_vault_entries ADD COLUMN kind text DEFAULT 'credit';");
+    await projectionUp(database);
     const before = (await pg.query('SELECT * FROM loyalty_vault_entries ORDER BY id')).rows;
 
     await t.test('portfolio and per-site totals count each user posting exactly once, including negative paise', async () => {
@@ -84,7 +87,7 @@ test('overall wallet reconciles exact user custody across authorized sites witho
         assert.equal(new Set(site.holders.map(holder => holder.holder_key)).size, site.holders.length);
       }
       assert.equal(statements.filter(sql => sql.includes('FROM holder_sites h')).length, 1, 'all holders share one ledger aggregation');
-      assert.ok(statements.includes('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));
+      assert.ok(statements.some(sql=>sql.startsWith('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;')));
     });
 
     await t.test('a viewing grant keeps organization and site restrictions and omits global unallocated cash', async () => {

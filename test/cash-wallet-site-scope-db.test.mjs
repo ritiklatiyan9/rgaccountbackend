@@ -1,3 +1,4 @@
+import {up as projectionUp} from '../src/migrations/234_wallet_site_projection.js';
 import { walletHistoryParentsSql } from './helpers/walletHistoryParents.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,7 +21,8 @@ import {planWalletReportingOpening,saveWalletReportingOpening,readWalletReportin
 
 test('Cash Wallet separates real/test site custody and rejects cross-site spending and detail access', {skip:!process.env.PGLITE_MODULE},async t=>{
   const {PGlite}=await import(process.env.PGLITE_MODULE),pg=new PGlite();
-  const query=async(sql,args)=>{const result=args?.length?await pg.query(sql,args):(await pg.exec(sql)).at(-1);return {...result,rows:result?.rows||[],rowCount:result?.affectedRows??result?.rows?.length??0};};
+  let statementCount=0;
+  const query=async(sql,args)=>{statementCount++;const result=args?.length?await pg.query(sql,args):(await pg.exec(sql)).at(-1);return {...result,rows:result?.rows||[],rowCount:result?.affectedRows??result?.rows?.length??0};};
   // PGlite has one connection. Serialize the production read limiter while
   // still starting both promises together to exercise its site cache keys.
   const db={query,options:{max:3},connect:async()=>({query,release(){}})};
@@ -57,7 +59,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
         amount numeric,status text,from_own_float boolean DEFAULT false,confirmed_at timestamptz,created_at timestamptz DEFAULT now());
       CREATE TABLE imprest_transfers(id serial PRIMARY KEY,from_user_id integer,to_user_id integer,site_id integer,
         amount numeric,created_at timestamptz DEFAULT now());
-      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric);
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric,created_at timestamptz DEFAULT now());
       CREATE TABLE cash_flow_months(id integer PRIMARY KEY,site_id integer);
       CREATE TABLE farmers(id integer PRIMARY KEY,site_id integer);
       CREATE TABLE plots(id integer PRIMARY KEY,site_id integer,plot_no text,buyer_name text,block text);CREATE TABLE plot_installments(id integer PRIMARY KEY,plot_id integer);
@@ -67,7 +69,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       cash_flow_entry_id integer,expense_id integer,farmer_payment_id integer,commission_id integer,firm_transaction_id integer,plot_payment_id integer,vendor_payment_id integer,imprest_allocation_id integer,
       entry_transfer_id uuid,money_transfer_id uuid,is_firm_to_firm_transfer boolean,transfer_group_id uuid,is_financial_projection boolean,source_vendor_payment_id integer,is_imprest_internal boolean)`);
     await query(walletHistoryParentsSql);
-    await walletUp(db);await vaultUp(db);await unifiedUp(db);await up(db);await siteOverallUp(db);
+    await walletUp(db);await vaultUp(db);await unifiedUp(db);await up(db);await siteOverallUp(db);await projectionUp(db);
     const testReceipt=await entry({site_id:11,credit:1504000});
     const liveReceipt=await entry({site_id:10,credit:30000});
     // Legacy handovers have no proven project. They remain immutable and
@@ -560,7 +562,7 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
         const otherEntry=(await invoke(controller.history)).entries.find(row=>row.holder_key!=='user:1');
         assert.ok(otherEntry);
         assert.equal((await invokeAs(controller.historyDetail,{params:{id:otherEntry.id}})).entry.id,otherEntry.id);
-        assert.equal((await invokeAs(controller.siteBalance,{site:12})).cash_balance,4451000);
+        assert.equal((await invokeAs(controller.siteBalance,{site:12})).cash_balance,'4451000');
         await assert.rejects(invokeAs(controller.holders,{site:13}),status(403));
         await assert.rejects(invokeAs(controller.userDetail,{params:{id:4}}),status(404));
         const count=(await query('SELECT count(*)::int AS n FROM loyalty_vault_entries')).rows[0].n;
@@ -583,6 +585,32 @@ test('Cash Wallet separates real/test site custody and rejects cross-site spendi
       const result=await new Promise((resolve,reject)=>controller.assignedTransactions({path:'/overall/transactions',user:{id:2},query:{holder_type:'user',holder_id:2,module:'cash_flow_entries',actor_id:2,amount_min:'12.34',amount_max:'12.34',limit:1}},{set(){return this;},json:resolve},reject));
       assert.equal(result.scope,'overall_wallet_activity');assert.ok(result.included_site_ids.includes(10));assert.ok(!result.included_site_ids.includes(11));assert.ok(!result.included_site_ids.includes(20));
       assert.equal(result.total,1);assert.deepEqual(result.transactions.map(row=>row.id),[live]);assert.equal(Number(result.totals.credit),12.34);
+    });
+    await t.test('workspace shares one snapshot and heavy reads while preserving old endpoints and current privacy',async()=>{
+      statementCount=0;
+      const separateSummary=await invoke(controller.summary,{site:15});
+      const separateHolders=await invoke(controller.holders,{site:15,extraQuery:{include_members:false}});
+      const separateCount=statementCount;
+      statementCount=0;
+      const combined=await invoke(controller.workspace,{site:15});
+      const combinedCount=statementCount;
+      assert.equal(combined.site_id,15);
+      assert.equal(combined.vault.balance,separateSummary.vault.balance);
+      assert.equal(combined.vault.total_balance,separateSummary.vault.total_balance);
+      // JSON packets carry timestamps as strings, just as the HTTP serializer
+      // does for the standalone endpoint's pg Date instances.
+      assert.deepEqual(JSON.parse(JSON.stringify(combined.holders)),JSON.parse(JSON.stringify(separateHolders.holders)));
+      assert.equal(combined.site_cash_balance,'1000.00');
+      assert.ok(combinedCount<separateCount-4,`workspace ${combinedCount} statements must remove duplicate work from ${separateCount}`);
+      t.diagnostic(`workspace statements: separate=${separateCount}, combined=${combinedCount}`);
+      const staff=await invoke(controller.workspace,{user:3});
+      assert.ok(staff.holders.every(row=>row.holder_type==='user'&&row.holder_id===3));
+      assert.equal(staff.site_cash_balance,null,'private staff reads never gain the site cash stock');
+      await assert.rejects(invoke(controller.workspace,{site:20}),status(403));
+      await assert.rejects(invoke(controller.workspace,{extraQuery:{include_members:'invalid'}}),status(400));
+      await query("INSERT INTO user_permissions VALUES(3,'wallet',false,true)");
+      try {await assert.rejects(invoke(controller.workspace,{user:3}),status(403));}
+      finally {await query("DELETE FROM user_permissions WHERE user_id=3 AND module='wallet'");}
     });
   } finally {pool.query=originalQuery;pool.connect=originalConnect;await pg.close();}
 });

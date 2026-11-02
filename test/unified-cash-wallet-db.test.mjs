@@ -6,19 +6,23 @@ import { up as walletUp } from '../src/migrations/185_cash_wallets.js';
 import { up as detailsUp } from '../src/migrations/186_wallet_receipt_details.js';
 import { up as vaultUp } from '../src/migrations/199_loyalty_vault.js';
 import { up } from '../src/migrations/203_unified_cash_wallet.js';
+import { up as projectionUp } from '../src/migrations/234_wallet_site_projection.js';
 import { up as indexUp } from '../src/migrations/204_cash_wallet_read_indexes.js';
 import { postingPolicySql } from '../src/migrations/171_cheque_clearance_before_approval.js';
 import { createWalletTransfer,resolveWalletTransfer } from '../src/services/wallet.service.js';
 import { createVaultTransfer,resolveVaultTransfer } from '../src/services/loyaltyVault.service.js';
 import { LOYALTY_VAULT_SOURCE_TABLES } from '../src/services/loyaltyVaultContext.service.js';
-import { vaultTransactionsCte, vaultPendingTransactionsCte } from '../src/services/loyaltyVaultTransactions.service.js';
+import { vaultTransactionsCte, vaultPendingTransactionsCte, scopedVaultTransactionsCte } from '../src/services/loyaltyVaultTransactions.service.js';
 import pool from '../src/config/db.js';
 import * as controller from '../src/controllers/loyaltyVault.controller.js';
 
 test('one cash wallet preserves legacy funds and approvals without double-crediting sources', {skip:!process.env.PGLITE_MODULE},async t=>{
   const {PGlite}=await import(process.env.PGLITE_MODULE),pg=new PGlite();
   const query=async(sql,args)=>{const result=args?.length?await pg.query(sql,args):(await pg.exec(sql)).at(-1);return {...result,rows:result?.rows||[],rowCount:result?.affectedRows??result?.rows?.length??0};};
-  const db={query,connect:async()=>({query,release(){}})};
+  // The embedded fixture owns one connection. Concurrent controller snapshots
+  // must queue complete transactions, rather than nesting BEGIN on that one.
+  let connection=Promise.resolve();
+  const db={query,connect:async()=>{const before=connection;let release;connection=new Promise(resolve=>{release=resolve;});await before;return {query,release};}};
   const balance=async(id)=>(await query("SELECT balance::text,reserved_balance::text FROM loyalty_vault_accounts WHERE holder_key='user:'||$1::text",[id])).rows[0]||{balance:'0.00',reserved_balance:'0.00'};
   const count=async()=>Number((await query('SELECT count(*)::int AS n FROM loyalty_vault_entries')).rows[0].n);
   let serial=100;
@@ -26,6 +30,7 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
   const request=(amount,recipient_id=2)=>({amount,recipient_id,site_id:10,idempotency_key:randomUUID()});
   try {
     await query(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
+      CREATE TABLE application_settings(site_id integer,setting_key text,setting_value jsonb,updated_by integer,updated_at timestamptz,UNIQUE(site_id,setting_key));
       CREATE TABLE users(id integer PRIMARY KEY,name text,role text,organization_id integer,is_active boolean DEFAULT true);
       INSERT INTO users VALUES(1,'Accountant','sub_admin',1,true),(2,'Administrator','admin',1,true),(3,'Owner','super_admin',1,true),(4,'Outside admin','admin',2,true),(5,'Inactive','admin',1,false),(6,'Viewer','viewer',1,true);
       CREATE TABLE sites(id integer PRIMARY KEY,name text,organization_id integer);INSERT INTO sites VALUES(10,'A',1),(11,'B',1),(20,'Outside',2);
@@ -36,6 +41,15 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
         cash_type text,status text,cheque_status text,particular text,source_module text,source_id integer,date date DEFAULT CURRENT_DATE,
         created_at timestamptz DEFAULT now(),entry_transfer_id uuid,is_imprest_internal boolean,is_firm_transaction boolean,to_firm_id integer);
       CREATE TABLE cash_flow_months(id integer PRIMARY KEY,site_id integer);
+      CREATE TABLE ledger_entries(id text,site_id integer,entry_date date DEFAULT CURRENT_DATE,bucket text,
+        credit numeric DEFAULT 0,debit numeric DEFAULT 0,source_key text,source_id integer,notes text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_ledger(id serial PRIMARY KEY,site_id integer,user_id integer,amount numeric,type text,
+        reference_id integer,source_module text,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_allocations(id serial PRIMARY KEY,site_id integer,admin_id integer,sub_admin_id integer,
+        amount numeric,status text,from_own_float boolean DEFAULT false,created_at timestamptz DEFAULT now(),confirmed_at timestamptz);
+      CREATE TABLE imprest_transfers(id serial PRIMARY KEY,site_id integer,from_user_id integer,to_user_id integer,
+        amount numeric,created_at timestamptz DEFAULT now());
+      CREATE TABLE imprest_site_debit_reservations(site_id integer,amount numeric,created_at timestamptz DEFAULT now());
       CREATE TABLE farmers(id integer PRIMARY KEY,site_id integer);INSERT INTO farmers VALUES(1,10);
       CREATE TABLE plots(id integer PRIMARY KEY,site_id integer,plot_no text,buyer_name text,block text);CREATE TABLE plot_installments(id integer PRIMARY KEY,plot_id integer);
       CREATE TABLE firms(id integer PRIMARY KEY,site_id integer);INSERT INTO firms VALUES(1,10);
@@ -62,6 +76,7 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
     const beforeLegacy=JSON.stringify((await query('SELECT * FROM wallet_entries ORDER BY id')).rows);
     const beforeSettings=(await query('SELECT tracking_started_at FROM wallet_settings')).rows[0].tracking_started_at;
     await up(db);
+    await projectionUp(db);
     await t.test('read indexes are repeatable and do not change financial records or balances', async () => {
       const funds = JSON.stringify((await query('SELECT * FROM loyalty_vault_accounts ORDER BY holder_key')).rows);
       const history = await count();
@@ -165,6 +180,24 @@ test('one cash wallet preserves legacy funds and approvals without double-credit
       const endangered=await createVaultTransfer({id:1},request('100'),db);
       await query('UPDATE cash_flow_entries SET credit=0 WHERE id=$1',[legacy]);await assert.rejects(resolveVaultTransfer({id:2},endangered.transfer.id,'accept',{site_id:10},db),e=>e.statusCode===409);await resolveVaultTransfer({id:1},endangered.transfer.id,'cancel',{site_id:10},db);
       await assert.rejects(query("UPDATE loyalty_vault_entries SET amount=1 WHERE id=1"),/immutable/);
+    });
+    await t.test('site-scoped candidates preserve canonical results and null-site native attribution before JSON materialization',async()=>{
+      await entry({site_id:11,created_by:2,credit:13});
+      await entry({site_id:20,created_by:4,credit:17});
+      await query("INSERT INTO expenses(id,site_id,created_by,status,payment_mode) VALUES(95001,10,1,'pending','CASH')");
+      const nullSite=await entry({site_id:null,source_module:'expenses',source_id:95001,credit:19});
+      const fields='cash_flow_entry_id,holder_type,holder_id,site_id,status,credit::text,debit::text,source_table,source_id';
+      const expected=(await query(`${vaultTransactionsCte} SELECT ${fields} FROM assigned_transactions WHERE organization_id=$1 AND site_id=ANY($2::int[]) ORDER BY cash_flow_entry_id`,[1,[10]])).rows;
+      const scoped=scopedVaultTransactionsCte({organization:'$1',sites:'$2'});
+      const actual=(await query(`${scoped} SELECT ${fields} FROM assigned_transactions ORDER BY cash_flow_entry_id`,[1,[10]])).rows;
+      assert.deepEqual(actual,expected);
+      assert.ok(actual.some(row=>row.cash_flow_entry_id===nullSite),'legacy null mirror sites are resolved from the native source');
+      assert.ok(actual.every(row=>row.site_id===10));
+      const allCount=Number((await query(`${vaultTransactionsCte} SELECT count(*) FROM wallet_cash_rows`)).rows[0].count);
+      const scopedCount=Number((await query(`${scoped} SELECT count(*) FROM wallet_cash_rows`,[1,[10]])).rows[0].count);
+      assert.ok(scopedCount<=allCount-2,'foreign and other-site rows never enter the materialized cash/source JSON stage');
+      assert.deepEqual((await query(`${scoped} SELECT ${fields} FROM assigned_transactions`,[2,[10]])).rows,[]);
+      assert.throws(()=>scopedVaultTransactionsCte({organization:'$1; DROP TABLE users'}),/bound SQL parameters/);
     });
     await t.test('current cash list excludes bank while immutable audit preserves corrections and maker identity',async()=>{
       const originalQuery=pool.query,originalConnect=pool.connect;pool.query=query;pool.connect=db.connect;

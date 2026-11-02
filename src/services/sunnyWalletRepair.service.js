@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { installPermanentWalletGuards } from '../migrations/212_wallet_permanent_balance_guard.js';
+import { walletSiteProjectionExpectedSql,verifyWalletSiteProjection } from '../migrations/234_wallet_site_projection.js';
 
 export const SUNNY_WALLET_REPAIR = Object.freeze({
   userId:2,userName:'Sunny Latiyan',organizationId:1,siteId:2,siteName:'Mount Valley Residency',
@@ -17,6 +18,7 @@ const same=(a,b,message)=>check(isDeepStrictEqual(a,b),message);
 async function capture(db) {
   const rows=async(sql,args=[])=>(await db.query(sql,args)).rows;
   const archiveExists=(await rows("SELECT to_regclass('cash_wallet_voided_receipt_entries') AS name"))[0].name;
+  const projectionExists=(await rows("SELECT to_regclass('loyalty_vault_site_accounts') AS name"))[0].name;
   return {
     user:(await rows('SELECT id,name,role,organization_id FROM users WHERE id=$1',[t.userId]))[0],
     site:(await rows('SELECT id,name,organization_id FROM sites WHERE id=$1',[t.siteId]))[0],
@@ -27,7 +29,27 @@ async function capture(db) {
     payment:(await rows('SELECT to_jsonb(p) AS row FROM plot_payments p WHERE id=$1',[t.paymentId]))[0]?.row,
     transfer:(await rows('SELECT * FROM loyalty_vault_transfers WHERE id=$1',[t.transferId]))[0],
     archive:archiveExists?(await rows('SELECT * FROM cash_wallet_voided_receipt_entries WHERE original_entry_id=$1',[t.entryId]))[0]:null,
+    projection:projectionExists?await rows('SELECT * FROM loyalty_vault_site_accounts WHERE organization_id=$1 ORDER BY site_id,holder_key',[t.organizationId]):null,
   };
+}
+
+async function refreshReviewedSiteProjection(db) {
+  const exists=(await db.query("SELECT to_regclass('loyalty_vault_site_accounts') AS name")).rows[0].name;
+  if(!exists)return null; // The original reviewed workflow also predates 234.
+  // The existing repair holds ACCESS EXCLUSIVE locks on the financial tables,
+  // including immutable postings, from before its snapshot through COMMIT.
+  // This exceptional, approved deletion must refresh only its affected cache
+  // row in that same transaction. Normal posting immutability is unchanged.
+  const scope=[t.organizationId,t.siteId,key];
+  await db.query('DELETE FROM loyalty_vault_site_accounts WHERE organization_id=$1 AND site_id=$2 AND holder_key=$3',scope);
+  await db.query(`INSERT INTO loyalty_vault_site_accounts(organization_id,site_id,holder_key,holder_type,holder_id,
+    balance,total_in,total_received,total_handover,total_imprest_out,total_transfer_in,total_adjustments,entry_count,
+    updated_at,last_entry_id,aligned_id)
+    SELECT organization_id,site_id,holder_key,holder_type,holder_id,balance,total_in,total_received,total_handover,
+      total_imprest_out,total_transfer_in,total_adjustments,entry_count,updated_at,last_entry_id,aligned_id
+    FROM (${walletSiteProjectionExpectedSql}) expected
+    WHERE organization_id=$1 AND site_id=$2 AND holder_key=$3`,scope);
+  return verifyWalletSiteProjection(db);
 }
 const total=(entries,holder=key,site=undefined)=>entries.filter(e=>e.holder_key===holder&&(site===undefined||e.site_id===site))
   .reduce((sum,e)=>sum+Math.round(Number(e.amount)*100),0);
@@ -130,6 +152,7 @@ export async function repairSunnyWallet(database,{apply=false,writeSnapshot}={})
     // Recalculation must neither recreate the waived debit nor mint cash.
     await db.query('SELECT reconcile_loyalty_vault_entry($1)',[t.cashId]);
     await db.query('SELECT reconcile_loyalty_vault_entry($1)',[t.cashId]);
+    await refreshReviewedSiteProjection(db);
     await verifyProtection(db);
     const after=await capture(db);
     same(after.entries,before.entries.filter(e=>String(e.id)!==t.entryId),'Unrelated wallet movements changed.');
@@ -140,6 +163,8 @@ export async function repairSunnyWallet(database,{apply=false,writeSnapshot}={})
     same(afterSource,beforeSource,'The rejected receipt source attribution or posted amount changed.');
     same(after.transfer,before.transfer,'The accepted handover changed.');
     same(after.accounts.filter(a=>a.holder_key!==key),before.accounts.filter(a=>a.holder_key!==key),'Another holder balance changed.');
+    if(before.projection) same(after.projection.filter(a=>a.holder_key!==key||a.site_id!==t.siteId),
+      before.projection.filter(a=>a.holder_key!==key||a.site_id!==t.siteId),'Another holder or site projection changed.');
     same(after.archive.original_entry,JSON.parse(JSON.stringify(bad)),'The deleted debit must remain restorable from its full archive.');
     check(total(after.entries)===0&&total(after.entries,key,t.siteId)===0,'Sunny must finish at zero in the site and organization.');
     check(Number(after.accounts.find(a=>a.holder_key===key)?.balance)===0,'Sunny cache must finish at zero.');
