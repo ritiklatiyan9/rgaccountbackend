@@ -19,7 +19,7 @@ test('Seek permission: ask a chosen person per site, they (or an admin) decide o
   const foreignAdmin = { id: 9, role: 'admin', organization_id: 2 };
   const rejects = (promise, statusCode) => assert.rejects(promise, error => error.statusCode === statusCode);
   const pdf = { path: '/tmp/x', filename: 'q.pdf', originalname: 'quotation.pdf', mimetype: 'application/pdf', size: 1234 };
-  const fakeStore = async files => files.map(file => ({ url: `https://b.s3.ap-south-1.amazonaws.com/seek-permissions/${file.filename}`,
+  const fakeStore = async files => files.map(file => ({ url: `https://b.s3.ap-south-1.amazonaws.com/vouchers/${file.filename}`,
     name: file.originalname, type: file.mimetype, size: file.size }));
   const ask = (actor, body, files = [], store = fakeStore) => createSeekPermission(actor, { site_id: 1, asked_to: 1, title: 'x', ...body }, db, files, store);
   try {
@@ -92,15 +92,16 @@ test('Seek permission: ask a chosen person per site, they (or an admin) decide o
     await rejects(listSeekAccess(ravi, { site_id: 1 }, db), 403);
 
     // Attachments: a fresh signed link per view, only for people who can see the request,
-    // and only for keys under the module's own S3 prefix.
+    // and only for the existing voucher folder or the earlier Seek prefix.
     const sign = async url => `signed:${url}`;
-    assert.equal((await seekAttachmentUrl(sunny, asked.id, 0, db, sign)).url, 'signed:https://b.s3.ap-south-1.amazonaws.com/seek-permissions/q.pdf');
+    assert.equal((await seekAttachmentUrl(sunny, asked.id, 0, db, sign)).url, 'signed:https://b.s3.ap-south-1.amazonaws.com/vouchers/q.pdf');
     await rejects(seekAttachmentUrl(outsider, asked.id, 0, db, sign), 404);
     await rejects(seekAttachmentUrl(admin, asked.id, 1, db, sign), 404);
     await rejects(seekAttachmentUrl(admin, asked.id, 'x', db, sign), 404);
     const env = { AWS_S3_BUCKET_NAME: 'b', AWS_REGION: 'ap-south-1' };
     assert.equal(isOwnSeekAttachment('https://b.s3.ap-south-1.amazonaws.com/seek-permissions/q.pdf', env), true);
-    assert.equal(isOwnSeekAttachment('https://b.s3.ap-south-1.amazonaws.com/vouchers/kyc.pdf', env), false);
+    assert.equal(isOwnSeekAttachment('https://b.s3.ap-south-1.amazonaws.com/vouchers/q.pdf', env), true);
+    assert.equal(isOwnSeekAttachment('https://b.s3.ap-south-1.amazonaws.com/kyc_documents/q.pdf', env), false);
     assert.equal(isOwnSeekAttachment('https://evil.s3.ap-south-1.amazonaws.com/seek-permissions/q.pdf', env), false);
 
     // Decide: the person asked (or an admin), own organisation only, first decision wins.

@@ -34,17 +34,19 @@ const requireSeekActor = actor => {
   if (!['admin', 'super_admin', 'sub_admin'].includes(actor?.role)) throw fail('Access denied', 403);
 };
 
-// Attachments: the browser optimizes photos and PDFs first (lib/evidenceFile.js);
-// the server writes them under one S3 prefix and only ever signs keys from that
-// prefix, so a stored link can never be pointed at another private document.
-const ATTACHMENT_FOLDER = 'seek-permissions';
-export const isOwnSeekAttachment = (url, env = process.env) =>
-  memberDocumentStorage(url, env)?.Key.startsWith(`${ATTACHMENT_FOLDER}/`) === true;
+// Use the same voucher storage as expense photos and PDFs. The reader also
+// accepts the earlier prefix so existing requests remain recoverable. A file
+// is selected only from the already-authorized request's stored attachments.
+const ATTACHMENT_FOLDER = 'vouchers';
+export const isOwnSeekAttachment = (url, env = process.env) => {
+  const key = memberDocumentStorage(url, env)?.Key;
+  return Boolean(key && [ATTACHMENT_FOLDER, 'seek-permissions'].some(folder => key.startsWith(`${folder}/`)));
+};
 
 // ponytail: an INSERT that fails after upload leaves an orphan object (input is
 // validated first, so only a DB failure can); add an S3 lifecycle rule if it matters.
-export const storeSeekFiles = files => Promise.all(files.map(async file => ({
-  url: await uploadToS3(file.path, file.filename, file.mimetype, ATTACHMENT_FOLDER),
+export const storeSeekFiles = (files, upload = uploadToS3) => Promise.all(files.map(async file => ({
+  url: await upload(file.path, file.filename, file.mimetype, ATTACHMENT_FOLDER),
   name: String(file.originalname || 'Attachment').slice(0, 120),
   type: file.mimetype,
   size: file.size,

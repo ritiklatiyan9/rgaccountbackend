@@ -17,6 +17,11 @@ if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
 
 const s3Client = new S3Client(s3Config);
 
+// This SDK version can leave the body unsent when a distant S3 endpoint takes
+// over a second to acknowledge Expect: 100-continue. Send the body immediately;
+// signing, HTTPS, retries and multipart uploads still use the normal SDK path.
+s3Client.middlewareStack.remove('addExpectContinueMiddleware');
+
 // `folderOverride` keeps a module's files under its own prefix (signing is prefix-checked).
 export const uploadToS3 = async (filePath, fileName, contentType, folderOverride) => {
   const fileStream = fs.createReadStream(filePath);
