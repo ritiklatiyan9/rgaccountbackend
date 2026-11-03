@@ -40,6 +40,7 @@ import requireImprestSiteAccess, { requireImprestParticipant } from '../middlewa
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import uploadProofPhoto from '../middlewares/proofUpload.middleware.js';
 import walletImprestTransferRoutes from './walletImprestTransfer.routes.js';
+import { imprestHandoverSummary } from '../controllers/imprestHandoverSummary.controller.js';
 
 const cachedImprestRead = cacheResponse({ ttlSeconds: 30, namespace: 'imprest' });
 const imprestReadCache = (req, res, next) => req.user.role === 'sub_admin' ? next() : cachedImprestRead(req, res, next);
@@ -77,6 +78,7 @@ router.get('/balance', requireImprestBalanceAccess, accessByQuerySite, loadImpre
 router.get('/site-balance', requireImprestReadAccess, accessByQuerySite, imprestReadCache, getSiteBalance);
 router.get('/site-balances', requirePermission('imprest', 'read'), imprestReadCache, getSiteBalances);
 router.get('/ledger', requireImprestReadAccess, accessByQuerySite, loadImprestManagementVisibility, imprestReadCache, getLedger);
+router.get('/handover-summary', requireImprestReadAccess, accessByRequiredQuerySite, imprestHandoverSummary);
 router.get('/peers', requireImprestReadAccess, accessByQuerySite, loadImprestManagementVisibility, imprestReadCache, listTransferPeers);
 
 // ── Immediate balance-to-balance transfers ──

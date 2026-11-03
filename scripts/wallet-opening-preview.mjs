@@ -8,6 +8,8 @@ import {createWalletOpeningPreviewAuth} from '../src/middlewares/walletOpeningPr
 import {requestPerformance} from '../src/utils/requestPerformance.js';
 import errorMiddleware from '../src/middlewares/error.middleware.js';
 import {summary,workspace,holders,userDetail,reportingOpenings,amountBreakdown,history,transfers,assignedTransactions} from '../src/controllers/loyaltyVault.controller.js';
+import { imprestHandoverSummary } from '../src/controllers/imprestHandoverSummary.controller.js';
+import { requireImprestReadAccess } from '../src/middlewares/imprestPermission.middleware.js';
 const app=express();
 const mode=process.env.WALLET_OPENING_AUTH_MODE;
 const verifySession=['upstream','local'].includes(mode)
@@ -31,6 +33,7 @@ app.get('/wallet/holders',auth,holders);
 app.get('/wallet/users/:id',auth,userDetail);
 app.get('/wallet/reporting-openings',auth,reportingOpenings);
 app.get('/wallet/users/:id/breakdown',auth,amountBreakdown);
+app.get('/imprest/handover-summary',auth,requireImprestReadAccess,imprestHandoverSummary);
 for(const prefix of ['/wallet','/wallet/overall']){
   app.get(`${prefix}/history`,auth,history);
   app.get(`${prefix}/transfers`,auth,transfers);
