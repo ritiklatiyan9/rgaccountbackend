@@ -23,6 +23,8 @@ test('holder totals exclude staff approvals and float spending while gross givin
   CREATE TABLE application_settings(site_id int,setting_key text,setting_value jsonb);
   CREATE TABLE loyalty_vault_entries(organization_id int,site_id int,holder_key text,kind text,amount numeric,created_at timestamptz);
   CREATE TABLE cash_flow_entries(id int PRIMARY KEY,site_id int,created_by int,approved_by int,source_module text,source_id int);
+  CREATE TABLE farmers(id int PRIMARY KEY,site_id int);
+  CREATE TABLE farmer_payments(id int PRIMARY KEY,farmer_id int,created_by int);
   CREATE TABLE ledger_entries(id text,site_id int,bucket text,entry_date date,created_at timestamptz,source_key text,source_id int,debit numeric,credit numeric);
   CREATE TABLE imprest_ledger(site_id int,user_id int,created_at timestamptz,amount numeric,type text,source_module text,reference_id int);
   CREATE TABLE imprest_allocations(site_id int,admin_id int,amount numeric,status text,from_own_float boolean,created_at timestamptz,confirmed_at timestamptz);
@@ -144,4 +146,36 @@ test('recorded custody identifies module and float history that never debited th
   state:{balance:'879'},spending:{commission:'0',expenses:'100',other_cash_payments:'0'},imprestGiven:'50',siteId:2,holderId:8});
  assert.equal(result.cash_adjustment,'129.00');assert.equal(result.payment_total,'100.00');
  assert.deepEqual(result.reconciliation,{wallet_corrections:'-1.00',pending_cash_commitments:'0.00',module_activity_outside_wallet:'100.00',imprest_activity_outside_wallet:'30.00',other_cash_changes:'0.00'});
+});
+
+test('legacy farmer mirrors use the original maker only when its site is verified and the mirror maker is missing',async()=>{
+ const db=new PGlite();
+ try{
+  await db.exec(`CREATE TABLE sites(id int PRIMARY KEY,organization_id int);INSERT INTO sites VALUES(2,1),(3,1),(20,2);
+   CREATE TABLE farmers(id int PRIMARY KEY,site_id int);INSERT INTO farmers VALUES(1,2),(2,3),(3,20);
+   CREATE TABLE farmer_payments(id int PRIMARY KEY,farmer_id int,created_by int);
+   INSERT INTO farmer_payments VALUES(101,1,5),(102,1,5),(103,2,5),(104,3,5),(105,1,5),(106,1,5),(107,1,5),(108,1,5),(109,1,NULL);
+   CREATE TABLE cash_flow_entries(id int PRIMARY KEY,site_id int,created_by int,approved_by int,source_module text,source_id int);
+   INSERT INTO cash_flow_entries VALUES
+    (1,2,NULL,7,'farmer_payments',101),(2,2,7,7,'farmer_payments',102),
+    (3,2,NULL,7,'farmer_payments',103),(4,2,NULL,7,'farmer_payments',104),
+    (5,2,NULL,7,'farmer_payments',105),(6,2,NULL,7,'farmer_payments',106),
+    (7,2,NULL,7,'farmer_payments',107),(8,2,NULL,7,'farmer_payments',108),
+    (9,2,NULL,7,'farmer_payments',109),(10,2,NULL,7,'farmer_payments',999);
+   CREATE TABLE ledger_entries(id text,site_id int,bucket text,entry_date date,created_at timestamptz,source_key text,source_id int,debit numeric,credit numeric);
+   INSERT INTO ledger_entries SELECT id::text,2,'cash','2026-10-26','2026-10-26T10:00:00Z','farmer_payments',source_id,100,0 FROM cash_flow_entries;
+   UPDATE ledger_entries SET bucket='bank' WHERE id='5';UPDATE ledger_entries SET debit=0 WHERE id='6';
+   UPDATE ledger_entries SET id='8:cash',debit=25.15 WHERE id='8';
+   CREATE TABLE imprest_ledger(site_id int,user_id int,created_at timestamptz,amount numeric,type text,source_module text,reference_id int);
+   INSERT INTO imprest_ledger VALUES(2,5,'2026-10-26T10:00:00Z',-100,'EXPENSE','farmer_payment',107);`);
+  const {holderCashPaymentsCte}=await import('../src/services/walletCashDeductions.service.js');
+  const read=async(scopes,org=1)=>(await db.query(`WITH scopes AS (
+    SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(holder_key text,holder_id integer,started_at timestamptz)
+   ),${holderCashPaymentsCte} SELECT id,maker_id,payment_amount::text FROM holder_cash_payments ORDER BY id`,
+   [org,2,JSON.stringify(scopes),'2026-11-01'])).rows;
+  const rows=await read([{holder_key:'user:5',holder_id:5,started_at:null},{holder_key:'user:7',holder_id:7,started_at:null}]);
+  assert.deepEqual(rows,[{id:'1',maker_id:5,payment_amount:'100'},{id:'2',maker_id:7,payment_amount:'100'},{id:'8:cash',maker_id:5,payment_amount:'25.15'}]);
+  assert.deepEqual(await read([{holder_key:'user:5',holder_id:5,started_at:'2026-10-27T00:00:00Z'}]),[]);
+  assert.deepEqual(await read([{holder_key:'user:5',holder_id:5,started_at:null}],2),[]);
+ }finally{await db.close();}
 });

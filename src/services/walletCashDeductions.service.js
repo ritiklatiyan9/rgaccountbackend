@@ -42,20 +42,27 @@ export function walletCashDeductions({ opening, totals, state, spending, imprest
 }
 
 // ledger_entries owns the posted amount, sign and cash/bank policy. Its ID is
-// the canonical CFE ID, with :cash/:bank on split legs. CFE.created_by retains
-// the immutable original maker, including staff expenses approved by Admin.
+// the canonical CFE ID, with :cash/:bank on split legs. Keep the recorded CFE
+// maker; legacy farmer mirrors without one use the original payment's maker,
+// verified through its farmer's site and organization. Approvers never own it.
 // Reuse this CTE for the table aggregate and paginated deductions detail.
 // Callers supply scopes(holder_key,holder_id,started_at), $1 org, $2 site,
 // $3 scopes JSON and $4 exclusive India business-date cutoff.
 export const holderCashPaymentsCte = `holder_cash_payments AS MATERIALIZED (
-  SELECT r.holder_key,l.*,c.created_by AS maker_id,
+  SELECT r.holder_key,l.*,r.holder_id AS maker_id,
     GREATEST(l.debit,0)+GREATEST(-l.credit,0) AS payment_amount
   FROM scopes r JOIN ledger_entries l ON l.site_id=$2 AND l.bucket='cash'
     AND l.created_at>=COALESCE(r.started_at,'1900-01-01'::timestamptz)
     AND l.created_at<($4::date::timestamp AT TIME ZONE 'Asia/Kolkata') AND l.entry_date<$4::date
   JOIN sites s ON s.id=l.site_id AND s.organization_id=$1
   JOIN cash_flow_entries c ON c.id=NULLIF(split_part(l.id::text,':',1),'')::integer
-    AND c.site_id=l.site_id AND c.created_by=r.holder_id
+    AND c.site_id=l.site_id AND COALESCE(c.created_by,
+      CASE WHEN c.source_module='farmer_payments' THEN (
+        SELECT fp.created_by FROM farmer_payments fp
+        JOIN farmers f ON f.id=fp.farmer_id AND f.site_id=c.site_id
+        JOIN sites owner_site ON owner_site.id=f.site_id AND owner_site.organization_id=$1
+        WHERE fp.id=c.source_id
+      ) END)=r.holder_id
   WHERE GREATEST(l.debit,0)+GREATEST(-l.credit,0)>0
     AND NOT EXISTS (
       SELECT 1 FROM imprest_ledger il WHERE il.user_id=r.holder_id AND il.site_id=$2

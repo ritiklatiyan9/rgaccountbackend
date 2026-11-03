@@ -63,8 +63,9 @@ export async function readWalletDeductionEntries(db,{organizationId,siteId,userI
       l.payment_amount::text AS amount,l.particular AS description,
       concat_ws(E'\n',NULLIF(l.remarks,''),NULLIF(to_jsonb(l)->>'linked_detail','')) AS note,
       l.source_key AS source_table,l.source_id,to_jsonb(l)->>'entity_name' AS person_name,
-      to_jsonb(l)->>'created_by_name' AS actor_name
-    FROM holder_cash_payments l ORDER BY l.created_at DESC,l.id DESC LIMIT $5 OFFSET $6`,[...params,limit,offset]);
+      COALESCE(maker.name,to_jsonb(l)->>'created_by_name') AS actor_name
+    FROM holder_cash_payments l LEFT JOIN users maker ON maker.id=l.maker_id AND maker.organization_id=$1
+    ORDER BY l.created_at DESC,l.id DESC LIMIT $5 OFFSET $6`,[...params,limit,offset]);
   return {entries:rows,total:aggregate.total,entries_total:money(cents(aggregate.net)),page,limit};
 }
 

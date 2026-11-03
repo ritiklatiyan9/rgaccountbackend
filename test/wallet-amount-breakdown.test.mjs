@@ -75,7 +75,7 @@ test('amount pages reconcile all entries, paginate and enforce current wallet/si
         (2,7,'2026-10-26T10:00:00Z',99000,'Admin is excluded','manual',7);`);
     for (const table of LOYALTY_VAULT_SOURCE_TABLES) await db.exec(`CREATE TABLE ${table}(id int PRIMARY KEY,
       description text,particular text,narration text,remark text,remarks text,note text,reference_no text,
-      plot_id int,installment_id int,date date,payment_date date,site_id int DEFAULT 2,status text,approved_at timestamptz,approved_by int,created_by int)`);
+      plot_id int,installment_id int,farmer_id int,date date,payment_date date,site_id int DEFAULT 2,status text,approved_at timestamptz,approved_by int,created_by int)`);
     await db.exec(walletHistoryParentsSql);
     await db.exec(`ALTER TABLE cash_flow_entries ADD COLUMN source_module text,ADD COLUMN source_id integer;
       INSERT INTO cash_flow_entries(id,site_id,created_by,source_module,source_id)
@@ -125,5 +125,14 @@ test('amount pages reconcile all entries, paginate and enforce current wallet/si
     assert.equal(exact.entries_total,'300.15');assert.equal(exact.entries.length,2);
     assert.ok(exact.entries.every(row=>row.entry_type==='payment'&&row.maker_id===7));
     assert.ok(!JSON.stringify(exact).match(/STAFF PAYMENT|OWN FLOAT|Staff expense|Cash advanced/));
+    await db.exec(`INSERT INTO farmers(id,site_id,name) VALUES(501,2,'Farmer');
+      INSERT INTO farmer_payments(id,farmer_id,created_by,site_id,status) VALUES(501,501,7,2,'approved');
+      INSERT INTO cash_flow_entries(id,site_id,created_by,source_module,source_id) VALUES(10,2,NULL,'farmer_payments',501);
+      INSERT INTO ledger_entries VALUES(10,2,'cash','2026-10-27','2026-10-27T10:00:00Z','farmer_payments',501,375,0,'Farmer payment',NULL,'Farmer','System');`);
+    const recovered=await readWalletDeductionEntries(db,{organizationId:1,siteId:2,userId:7,opening,
+      endDate:'2026-10-31',page:1,limit:25,offset:0});
+    assert.equal(recovered.entries_total,'675.15');
+    assert.equal(recovered.entries.find(row=>row.source_table==='farmer_payments').actor_name,'Admin');
+    assert.equal(recovered.entries.find(row=>row.source_table==='farmer_payments').maker_id,7);
   } finally { await db.close(); }
 });
