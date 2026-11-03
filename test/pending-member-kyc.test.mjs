@@ -58,6 +58,11 @@ test('pending KYC follows current Clients records, excludes stale/deleted cases,
     assert.deepEqual((await readPendingMemberKycCases(db, 2)).cases.map(row => Number(row.id)), [13]);
     assert.equal((await db.query('SELECT COUNT(*)::int AS count FROM kyc_cases')).rows[0].count, 11);
     assert.equal((await db.query('SELECT COUNT(*)::int AS count FROM documents')).rows[0].count, 5);
+    await db.exec('UPDATE kyc_cases SET created_by=2 WHERE id=4; UPDATE members SET created_by=2 WHERE id=2;');
+    const own = await readPendingMemberKycCases(db, 1, 500, 2);
+    assert.deepEqual(own.cases.map(row=>Number(row.id)).sort((a,b)=>a-b),[-2,4]);
+    assert.equal(own.total,2);
+    assert.equal((await readPendingMemberKycCases(db, 2, 500, 2)).cases.length,0);
   } finally {
     await db.close();
   }

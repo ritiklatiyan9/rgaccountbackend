@@ -13,7 +13,7 @@ import { CHEQUE_STATUSES, updateChequeStatusRecord } from '../services/chequeSta
 import { decideTransferApproval } from './transactionTransfer.controller.js';
 import { assertConstructionSiteAccess, assertConstructionProjectAccess, constructionCanViewAll, projectAccessPredicate, recordConstructionActivity } from '../services/constructionWorkflow.service.js';
 import { translateVendorIntegrityError } from '../services/vendorPaymentIntegrity.service.js';
-import { enrichTransactionDocumentation } from '../services/transactionDocumentation.service.js';
+import { documentationPermission, enrichTransactionDocumentation } from '../services/transactionDocumentation.service.js';
 import { signApprovalVoucherLinks } from '../services/approvalVoucherLinks.service.js';
 import { signExpenseDocumentUrl } from '../utils/expenseDocumentUrls.js';
 
@@ -314,6 +314,22 @@ export const getApprovalVoucher = asyncHandler(async (req, res) => {
 export const listAllPending = asyncHandler(async (req, res) => {
   const { site_id, date_from, date_to, module, assigned_admin_id } = req.query;
   const allowedModules = await getAllowedModules(req.user, req.assignedApprovalsOnly);
+  const personalNotifications = req.query.scope === 'notifications' && req.user.role === 'sub_admin';
+  const ownReadableAliases = new Set();
+  if (personalNotifications) {
+    if (!/^\d+$/.test(String(site_id || '')) || Number(site_id) < 1) return res.status(400).json({ message: 'Select a valid site.' });
+    const access = await pool.query('SELECT 1 FROM user_sites us JOIN sites s ON s.id=us.site_id WHERE us.user_id=$1 AND us.site_id=$2 AND s.organization_id=$3',
+      [req.user.id, Number(site_id), Number(req.user.organization_id) || 1]);
+    if (!access.rows.length) return res.status(403).json({ message: 'This site is unavailable to your account.' });
+    const sources = { tar: 'daybook', pa: 'plot_payment', fp: 'farmer_payment', ldp: 'land_deal_payment', mie: 'misc_income_entry',
+      pc: 'plot_commission', pcp: 'plot_commission_payment', cfe: 'cash_flow_entry', ft: 'firm_transaction', pp: 'plot_payment',
+      pip: 'plot_installment_payment', e: 'expense', vp: 'vendor_payment', prp: 'plot_registry_payment', vip: 'vendor_inventory_payment', d: 'daybook' };
+    // Current module grants govern tracking one's own submissions; delegation
+    // still grants access to that assigned review without a module-wide grant.
+    for (const [alias, source] of Object.entries(sources)) {
+      if (await documentationPermission(req.user, source)) ownReadableAliases.add(alias);
+    }
+  }
 
   const results = [];
 
@@ -322,7 +338,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   //   don't hold a module grant but still need to see entries explicitly delegated to them).
   const buildWhere = (tableAlias, siteAlias, extraConditions = [], scopedAssigneeId = null, status = 'pending', dateColumn = 'date') => {
     const sAlias = siteAlias || tableAlias;
-    const conditions = [`${tableAlias}.status = '${status}'`, chequeReadySql(tableAlias), ...extraConditions];
+    const conditions = [`${tableAlias}.status = '${status}'`, personalNotifications ? 'TRUE' : chequeReadySql(tableAlias), ...extraConditions];
     const params = [];
     let idx = 1;
     if (site_id) {
@@ -337,7 +353,12 @@ export const listAllPending = asyncHandler(async (req, res) => {
       conditions.push(`${tableAlias}.${dateColumn} <= $${idx++}`);
       params.push(date_to);
     }
-    if (scopedAssigneeId) {
+    if (personalNotifications) {
+      const viewer = idx++;
+      params.push(Number(req.user.id));
+      conditions.push(`(${tableAlias}.assigned_admin_id = $${viewer}${ownReadableAliases.has(tableAlias)
+        ? ` OR COALESCE(to_jsonb(${tableAlias})->>'created_by',to_jsonb(${tableAlias})->>'requested_by') = $${viewer}::text` : ''})`);
+    } else if (scopedAssigneeId) {
       conditions.push(`${tableAlias}.assigned_admin_id = $${idx++}`);
       params.push(parseInt(scopedAssigneeId));
     } else if (assigned_admin_id) {
@@ -895,6 +916,13 @@ export const listAllPending = asyncHandler(async (req, res) => {
   });
 
   const entries = await signApprovalVoucherLinks(results, req.user, pool);
+  if (req.query.scope === 'notifications') {
+    for (const entry of entries) {
+      entry.can_decide = chequeReadyForApproval(entry) && (hasGlobalApprovalOverride(req.user)
+        || Number(entry.assigned_admin_id) === Number(req.user.id)
+        || (!entry.assigned_admin_id && !req.assignedApprovalsOnly && isModuleAllowed(allowedModules, entry.source)));
+    }
+  }
   res.json({ entries, total: entries.length });
 });
 

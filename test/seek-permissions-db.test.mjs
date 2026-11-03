@@ -129,6 +129,15 @@ test('Seek permission: ask a chosen person per site, they (or an admin) decide o
     await rejects(cancelSeekPermission(sunny, otherSite.id, db), 404);
     assert.equal((await cancelSeekPermission(ravi, otherSite.id, db)).status, 'cancelled');
     await rejects(decideSeekPermission(admin, otherSite.id, 'approve', '', db), 409);
+    await db.exec("INSERT INTO seek_permissions(site_id,requested_by,asked_to,title) SELECT 1,5,1,'Pending request '||n FROM generate_series(1,205) AS n");
+    assert.equal((await seekInbox(admin,{site_id:1},db)).received.length,200);
+    assert.equal((await seekInbox(ravi,{site_id:1},db)).sent.length,50);
+    const allReceived=await seekInbox(admin,{site_id:1,include_all_pending:true},db);
+    const allSent=await seekInbox(ravi,{site_id:1,include_all_pending:'true'},db);
+    assert.equal(allReceived.received.filter(row=>row.status==='pending').length,205);
+    assert.equal(allSent.sent.filter(row=>row.status==='pending').length,205);
+    assert.ok(allSent.sent.every(row=>row.site_id===1&&row.requested_by===5));
+    assert.equal((await seekInbox(outsider,{site_id:1,include_all_pending:true},db)).received.length,0);
   } finally { await db.close(); }
 });
 

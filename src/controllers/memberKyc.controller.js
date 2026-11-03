@@ -239,7 +239,8 @@ export const listPendingCases = asyncHandler(async (req, res) => {
     ? Math.min(Math.max(requestedLimit, 1), 500)
     : 300;
 
-  res.json(await readPendingMemberKycCases(pool, siteId, limit));
+  const ownerId = req.query.scope === 'mine' ? req.user.id : null;
+  res.json(await readPendingMemberKycCases(pool, siteId, limit, ownerId));
 });
 
 /** POST /member-kyc/cases */

@@ -17,7 +17,7 @@ export const PENDING_MEMBER_KYC_SQL = `WITH document_stats AS (
               k.id AS kyc_case_id,
               'KYC_CASE'::text AS source_kind,
               k.site_id, k.booking_id, k.client_member_id, k.mode, k.status,
-              k.created_at, k.updated_at,
+              k.created_at, k.updated_at, k.created_by,
               m.full_name AS client_name, m.phone AS client_phone,
               s.name AS site_name,
               COALESCE(u.name, u.email) AS created_by_name,
@@ -49,7 +49,7 @@ export const PENDING_MEMBER_KYC_SQL = `WITH document_stats AS (
               'PROFILE'::text AS mode,
               'PROFILE_INCOMPLETE'::text AS status,
               m.created_at,
-              m.updated_at,
+              m.updated_at, m.created_by,
               m.full_name AS client_name,
               m.phone AS client_phone,
               s.name AS site_name,
@@ -129,6 +129,7 @@ export const PENDING_MEMBER_KYC_SQL = `WITH document_stats AS (
      )
      SELECT lookout_cases.*, COUNT(*) OVER()::int AS total_count
        FROM lookout_cases
+      WHERE ($3::bigint IS NULL OR created_by = $3)
       ORDER BY
         CASE status
           WHEN 'OCR_DONE' THEN 0
@@ -140,8 +141,8 @@ export const PENDING_MEMBER_KYC_SQL = `WITH document_stats AS (
         id ASC
       LIMIT $2`;
 
-export async function readPendingMemberKycCases(db, siteId, limit = 500) {
-  const { rows } = await db.query(PENDING_MEMBER_KYC_SQL, [siteId, limit]);
+export async function readPendingMemberKycCases(db, siteId, limit = 500, ownerId = null) {
+  const { rows } = await db.query(PENDING_MEMBER_KYC_SQL, [siteId, limit, ownerId]);
   const total = rows[0]?.total_count || 0;
   return {
     cases: rows.map(({ total_count, ...record }) => record),

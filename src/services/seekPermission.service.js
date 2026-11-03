@@ -116,17 +116,21 @@ export const listSeekPermissions = (actor, { site_id } = {}, db = pool) =>
   queryRequests(actor, positiveId(site_id, 'site_id'), db);
 
 /** Header bell: every visible pending request and conversations with new replies. */
-export async function seekInbox(actor, { site_id } = {}, db = pool) {
+export async function seekInbox(actor, { site_id, include_all_pending } = {}, db = pool) {
   requireSeekActor(actor);
   const siteId = positiveId(site_id, 'site_id');
+  const allPending = include_all_pending === true || include_all_pending === 'true';
   const { rows: [inbox] } = await db.query(`WITH visible AS (${visibleSiteSql}) ${WITH_UNREAD},
     received AS (SELECT * FROM entries WHERE requested_by <> $2 AND (status = 'pending' OR unread_comments > 0)),
     sent AS (SELECT * FROM entries WHERE requested_by = $2)
     SELECT COALESCE((SELECT json_agg(r) FROM (SELECT * FROM received
-        ORDER BY COALESCE(last_comment_at, created_at) DESC, id DESC LIMIT 200) r), '[]'::json) AS received,
-      COALESCE((SELECT json_agg(r) FROM (SELECT * FROM sent ORDER BY
+        ${allPending ? "WHERE status='pending' OR id IN (SELECT id FROM received ORDER BY COALESCE(last_comment_at, created_at) DESC, id DESC LIMIT 200)" : ''}
+        ORDER BY COALESCE(last_comment_at, created_at) DESC, id DESC ${allPending ? '' : 'LIMIT 200'}) r), '[]'::json) AS received,
+      COALESCE((SELECT json_agg(r) FROM (SELECT * FROM sent
+        ${allPending ? "WHERE status='pending' OR id IN (SELECT id FROM sent ORDER BY COALESCE(last_comment_at, created_at) DESC, id DESC LIMIT 50)" : ''}
+        ORDER BY
         (unread_comments > 0 OR (status IN ('approved', 'rejected') AND requester_seen_at IS NULL)) DESC,
-        COALESCE(last_comment_at, created_at) DESC, id DESC LIMIT 50) r), '[]'::json) AS sent,
+        COALESCE(last_comment_at, created_at) DESC, id DESC ${allPending ? '' : 'LIMIT 50'}) r), '[]'::json) AS sent,
       (SELECT count(*)::int FROM received) AS received_count,
       (SELECT count(*)::int FROM sent WHERE status = 'pending') AS sent_pending_count,
       (SELECT count(*)::int FROM sent WHERE status IN ('approved', 'rejected') AND requester_seen_at IS NULL) AS sent_unseen_count,
