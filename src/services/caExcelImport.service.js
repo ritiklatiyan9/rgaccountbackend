@@ -1,5 +1,5 @@
 import pool from '../config/db.js';
-import permissionModel from '../models/permission.model.js';
+import permissionModel from '../models/Permission.model.js';
 import { assertImportSite, excelUploadAllowed } from './caWorkflow.service.js';
 import { CA_EXCEL_MODULES, publicImportModule } from './caExcelModules.js';
 
