@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { assertAppLoginAccess } from '../services/appLoginAccess.js';
 
 export const SEEK_PREVIEW_AUTH_URL = 'https://rgaccountbackend.onrender.com/auth/me';
-const ORIGINS = new Set(['http://127.0.0.1:5174', 'http://localhost:5174']);
+const ORIGINS = new Set(['http://127.0.0.1:5173', 'http://localhost:5173']);
 const fail = (message, statusCode = 401, code = 'SEEK_PREVIEW_SESSION_INVALID') => Object.assign(new Error(message), { statusCode, code });
 const unavailable = () => fail('Accounts session verification is temporarily unavailable. Please try again.', 503, 'SEEK_PREVIEW_AUTH_UNAVAILABLE');
 const uint = (value, zero = false) => Number.isSafeInteger(Number(value)) && Number(value) >= (zero ? 0 : 1)

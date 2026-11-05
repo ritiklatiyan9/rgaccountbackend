@@ -29,7 +29,7 @@ const auth=(req,res,next)=>{
   });
 };
 app.use(requestPerformance({poolStats:getDatabasePoolStats}));
-app.use(cors({origin:['http://127.0.0.1:5174','http://localhost:5174'],credentials:true,exposedHeaders:['Server-Timing']}));
+app.use(cors({origin:['http://127.0.0.1:5173','http://localhost:5173'],credentials:true,exposedHeaders:['Server-Timing']}));
 app.get('/health',(_req,res)=>res.json({service:'wallet-opening-reader',read_only:true,request_history_version:4}));
 app.get('/approvals/history',auth,requireRole('admin','sub_admin'),historyReadLimit,historyTransport,listRequestHistory,historyErrors);
 app.get('/wallet',auth,summary);

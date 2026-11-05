@@ -34,3 +34,9 @@ test('list and detail use the source bank target without ceiling or stale regist
   assert.equal(normalizeRegistrySize(unlinked), unlinked);
   assert.deepEqual(registryFinanceFromPlot({ to_receive_bank: '787000.03', circle_rate: '7206.96' }), { registry_payment: 787000.03, bank_amount: 787000.03, circle_rate: 7206.96 });
 });
+
+
+test('commercial shop registry sizes convert square feet to yards and metres', () => {
+  assert.deepEqual(registrySizeFromPlot({ plot_size: 900, unit_type: 'shop' }), { size_sqyard: 100, size_meter: 83.6127 });
+  assert.deepEqual(registrySizeFromPlot({ plot_size: 900, plot_size_mtr: 84, unit_type: 'shop' }), { size_sqyard: 100, size_meter: 84 });
+});

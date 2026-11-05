@@ -112,7 +112,7 @@ export const updateSite = asyncHandler(async (req, res) => {
       'SELECT unit_type, COUNT(*)::int AS count FROM plots WHERE site_id = $1 AND NOT (unit_type = ANY($2::text[])) GROUP BY unit_type',
       [Number(id), allowedUnitTypes(updateData.project_profile)],
     );
-    if (rows.length) return res.status(409).json({ message: 'This site has existing units of another type. Choose Flats + Plots to retain all inventory.' });
+    if (rows.length) return res.status(409).json({ message: 'This site has existing units of another type. Choose a project profile that includes every existing unit type.' });
   }
   const updated = await siteModel.update(parseInt(id), updateData, pool);
   if (updateData.include_in_overall !== undefined) {

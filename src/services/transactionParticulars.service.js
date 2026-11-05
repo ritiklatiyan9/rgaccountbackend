@@ -1,6 +1,7 @@
 // Presentation metadata comes from the owner, never from generated ledger
 // narration. Query only the identities already authorized by the statement.
 const SOURCES = {
+  pool_money_receipts: { from: 'pool_money_receipts s', party: 's.buyer_name', category: "'Booking token'" },
   expenses: {
     from: 'expenses s',
     party: "CASE WHEN s.debit > 0 THEN COALESCE(NULLIF(TRIM(s.to_entity), ''), NULLIF(TRIM(s.from_entity), '')) ELSE COALESCE(NULLIF(TRIM(s.from_entity), ''), NULLIF(TRIM(s.to_entity), '')) END",

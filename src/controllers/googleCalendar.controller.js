@@ -13,7 +13,7 @@ const settingsPage = (origin) => `${origin}/settings/calendar`;
 // returns to its own app. Never accept an arbitrary return address.
 const originFor = req => {
   const origin = req.get?.('Origin') || req.headers?.origin;
-  return [FRONTEND_URL, 'http://127.0.0.1:5174', 'http://localhost:5174'].includes(origin) ? origin : FRONTEND_URL;
+  return [FRONTEND_URL, 'http://127.0.0.1:5173', 'http://localhost:5173'].includes(origin) ? origin : FRONTEND_URL;
 };
 // openid+email are only used to learn which Google account was connected;
 // calendar.events is the least-privilege calendar scope (no calendar list/settings access).

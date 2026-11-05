@@ -7,7 +7,7 @@ test('local and hosted OAuth key whitespace agrees while legacy states and tampe
   const before = process.env.CALENDAR_TOKEN_ENC_KEY;
   try {
     process.env.CALENDAR_TOKEN_ENC_KEY = 'a'.repeat(64);
-    const state = signOAuthState({ orgId: 1, userId: 2, origin: 'http://127.0.0.1:5174' });
+    const state = signOAuthState({ orgId: 1, userId: 2, origin: 'http://127.0.0.1:5173' });
     process.env.CALENDAR_TOKEN_ENC_KEY = `  ${'a'.repeat(64)}\n`;
     assert.equal(verifyOAuthState(state)?.orgId, 1);
     const [payload] = state.split('.');

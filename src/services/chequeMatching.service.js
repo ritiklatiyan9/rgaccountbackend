@@ -26,6 +26,7 @@ const sourceCaseSql = `CASE cfe.source_module
   WHEN 'plot_commissions' THEN 'plot_commission'
   WHEN 'firm_transactions' THEN 'firm_transaction'
   WHEN 'plot_payments' THEN 'plot_payment'
+  WHEN 'pool_money_receipts' THEN 'pool_money_receipt'
   WHEN 'plot_installment_payments' THEN 'plot_installment_payment'
   WHEN 'expenses' THEN 'expense'
   WHEN 'vendor_payments' THEN 'vendor_payment'
@@ -144,7 +145,7 @@ export async function loadPendingChequeCandidates(db, organizationId, siteId, st
        AND ($3::text IS NULL OR UPPER(COALESCE(${sourceChequeStatusSql}, '')) = $3)
        AND (cfe.source_module IS NULL OR cfe.source_module IN (
          'farmer_payments', 'plot_commission_payments', 'plot_commissions', 'firm_transactions', 'plot_payments',
-         'plot_installment_payments', 'expenses', 'vendor_payments', 'vendor_inventory_payments',
+         'plot_installment_payments', 'pool_money_receipts', 'expenses', 'vendor_payments', 'vendor_inventory_payments',
          'plot_registry_payments', 'land_deal_payments', 'misc_income_entries', 'day_book'
        ))
        AND (cfe.source_module IS NULL OR cfe.source_id IS NOT NULL)

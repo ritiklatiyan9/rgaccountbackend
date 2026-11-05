@@ -6,6 +6,7 @@ const SOURCE_CONFIG = Object.freeze({
   plot_commission: { table: 'plot_commissions', mirror: 'plot_commissions' },
   firm_transaction: { table: 'firm_transactions', mirror: 'firm_transactions' },
   plot_payment: { table: 'plot_payments', mirror: 'plot_payments' },
+  pool_money_receipt: { table: 'pool_money_receipts', mirror: 'pool_money_receipts' },
   plot_installment_payment: { table: 'plot_installment_payments', mirror: 'plot_installment_payments' },
   expense: { table: 'expenses', mirror: 'expenses' },
   vendor_payment: { table: 'vendor_payments', mirror: 'vendor_payments' },
@@ -197,6 +198,12 @@ export async function updateChequeStatusRecord(db, {
     const locked = await db.query(`SELECT * FROM ${config.table} WHERE id = $1 FOR UPDATE`, [numericEntryId]);
     sourceBefore = locked.rows[0];
     if (!sourceBefore) throw new ChequeStatusError('Cheque entry not found.', 404, 'ENTRY_NOT_FOUND');
+    if (source === 'pool_money_receipt' && sourceBefore.plot_payment_id) {
+      throw new ChequeStatusError('This pool receipt has been allotted. Update its plot payment instead.', 409, 'POOL_RECEIPT_ALLOTTED');
+    }
+    if (source === 'pool_money_receipt' && String(sourceBefore.payment_type).toUpperCase() !== 'CHEQUE') {
+      throw new ChequeStatusError('This pool receipt was not collected by cheque.', 400, 'NOT_A_CHEQUE');
+    }
     requireClearanceDate(sourceBefore);
     if (requirePending && normalizedStatus(sourceBefore.cheque_status) !== 'PENDING') {
       throw new ChequeStatusError('This cheque is no longer pending.', 409, 'STALE_STATUS');

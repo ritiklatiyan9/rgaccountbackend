@@ -13,13 +13,13 @@ import { initSocket } from '../src/config/socket.js';
 import { up as migrateSeekComments } from '../src/migrations/230_seek_permission_comments.js';
 import { up as migrateSeekPriority } from '../src/migrations/231_seek_permission_priority.js';
 
-export const SEEK_PREVIEW_ORIGINS = Object.freeze(['http://127.0.0.1:5174', 'http://localhost:5174']);
+export const SEEK_PREVIEW_ORIGINS = Object.freeze(['http://127.0.0.1:5173', 'http://localhost:5173']);
 export const isSeekPreviewOrigin = origin => !origin || SEEK_PREVIEW_ORIGINS.includes(origin);
 
 const previewCors = {
   origin(origin, callback) {
     if (isSeekPreviewOrigin(origin)) return callback(null, true);
-    callback(Object.assign(new Error('This local preview only accepts the dashboard on localhost:5174.'), { statusCode: 403 }));
+    callback(Object.assign(new Error('This local preview only accepts the dashboard on localhost:5173.'), { statusCode: 403 }));
   },
   methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: ['Authorization', 'Content-Type', 'X-Session-ID', 'X-App-Context'],

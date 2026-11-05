@@ -13,7 +13,7 @@ import auditRequestMiddleware from '../src/middlewares/audit.middleware.js';
 import errorMiddleware from '../src/middlewares/error.middleware.js';
 
 const app = express();
-app.use(cors({ origin: ['http://127.0.0.1:5174', 'http://localhost:5174'], credentials: true }));
+app.use(cors({ origin: ['http://127.0.0.1:5173', 'http://localhost:5173'], credentials: true }));
 app.use(express.json());
 app.use(auditRequestMiddleware);
 app.get('/health', (_req, res) => res.json({ service: 'wallet-management-preview', ready: true }));

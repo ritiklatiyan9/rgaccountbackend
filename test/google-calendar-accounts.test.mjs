@@ -56,7 +56,7 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
       async revokeToken(token) { revocations.push(token); } };
     const context = { pool:database,asyncHandler:fn=>fn,console:{log(){},error(){}},Buffer,process:{env:configured},
       encrypt:value=>`enc:${value}`,decrypt:value=>value.slice(4),buildOAuthClient:()=>oauth,
-      signOAuthState:value=>JSON.stringify(value),verifyOAuthState:()=>({orgId:1,userId:1,origin:'http://127.0.0.1:5174',kind:'calendar'}),
+      signOAuthState:value=>JSON.stringify(value),verifyOAuthState:()=>({orgId:1,userId:1,origin:'http://127.0.0.1:5173',kind:'calendar'}),
       backfillOrgEvents:async (org,id)=>{backfills.push([org,id]);return {synced:1,failed:0};},handleDriveOAuthCallback:()=>{}, calendarSyncError };
     vm.createContext(context);
     vm.runInContext(`${script('../src/controllers/googleCalendar.controller.js')}\nthis.handlers={getConnectUrl,oauthCallback,getStatus,disconnect,syncFutureEvents};`,context);
@@ -65,7 +65,7 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
       await context.handlers[name]({user:{organization_id:1,id:1},query:{},body:{},...extra},result);return result;
     };
     const connected = await invoke('oauthCallback',{query:{code:'second',state:'valid'}});
-    assert.equal(connected.url,'http://127.0.0.1:5174/settings/calendar?google=connected');
+    assert.equal(connected.url,'http://127.0.0.1:5173/settings/calendar?google=connected');
     const second=(await query("SELECT * FROM google_calendar_connections WHERE google_account_email='second@example.test'")).rows[0];
     assert.equal((await query('SELECT count(*)::int AS n FROM google_calendar_connections WHERE organization_id=1')).rows[0].n,2);
     assert.equal(Number(backfills[0][1]),Number(second.id),'connecting one account backfills only that account');
@@ -76,7 +76,7 @@ test('calendar accounts migrate, connect, sync and disconnect independently', as
     assert.equal(status.body.connections[1].pending,1,'a future ERP date with no Google mapping must count as pending');
     assert.doesNotMatch(JSON.stringify(status.body),/access_token|refresh_token|enc:/);
     await invoke('getConnectUrl',{query:{connection_id:second.id}});assert.equal(authOptions.at(-1).prompt,'select_account consent');assert.equal(authOptions.at(-1).login_hint,'second@example.test');
-    await invoke('getConnectUrl',{headers:{origin:'http://127.0.0.1:5174'}});assert.equal(JSON.parse(authOptions.at(-1).state).origin,'http://127.0.0.1:5174');
+    await invoke('getConnectUrl',{headers:{origin:'http://127.0.0.1:5173'}});assert.equal(JSON.parse(authOptions.at(-1).state).origin,'http://127.0.0.1:5173');
     await invoke('getConnectUrl',{headers:{origin:'https://untrusted.example.test'}});assert.equal(JSON.parse(authOptions.at(-1).state).origin,'https://app.example.test');
     assert.equal((await invoke('getConnectUrl',{query:{connection_id:2}})).code,404);
     assert.equal((await invoke('disconnect',{body:{connection_id:2}})).code,404);

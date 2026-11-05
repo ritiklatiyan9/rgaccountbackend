@@ -1,3 +1,5 @@
+import { up as migratePoolMoney } from './migrations/238_pool_money.js';
+import { up as migrateCommercialShops } from './migrations/239_commercial_shop_units.js';
 import { warmRequestHistory } from './services/requestHistoryWarmup.service.js';
 import { up as migrateSeekPermissions } from './migrations/222_seek_permissions.js';
 import { up as migrateSeekTargets } from './migrations/223_seek_permission_targets.js';
@@ -81,6 +83,8 @@ connectDB().then(async () => {
   await migrateExistingVoucherGaps(pool);
   await migrateImprestApprovalIndexes(pool);
   await migrateTransactionDocumentation(pool);
+  await migratePoolMoney(pool);
+  await migrateCommercialShops(pool);
   if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [cashflowTransferVersion])).rows.length) await migrateCashflowTransfers(pool);
   const constructionStartup = await ensureConstructionStartup(pool);
   console.log(constructionStartup.current

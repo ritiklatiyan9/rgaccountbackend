@@ -1,5 +1,5 @@
 const positive = value => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
-const metresFromArea = (size, unitType) => Number((size * (unitType === 'flat' ? 0.09290304 : 0.8364)).toFixed(4));
+const metresFromArea = (size, unitType) => Number((size * (['flat', 'shop'].includes(unitType) ? 0.09290304 : 0.8364)).toFixed(4));
 
 // Plot Payments owns the bank target. Preserve paise and explicit zero values.
 export function registryFinanceFromPlot(plot) {
@@ -14,7 +14,7 @@ export function registryFinanceFromPlot(plot) {
 
 export function registrySizeFromPlot(plot) {
   const size = positive(plot?.plot_size);
-  const gaz = size == null ? null : plot.unit_type === 'flat' ? Number((size / 9).toFixed(4)) : size;
+  const gaz = size == null ? null : ['flat', 'shop'].includes(plot.unit_type) ? Number((size / 9).toFixed(4)) : size;
   return {
     size_sqyard: gaz,
     size_meter: positive(plot?.plot_size_mtr) ?? (size == null ? null : metresFromArea(size, plot?.unit_type)),

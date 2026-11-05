@@ -16,13 +16,13 @@ const date = (value, label) => {
   if (result && (!/^\d{4}-\d{2}-\d{2}$/.test(result) || Number.isNaN(Date.parse(result)) || new Date(result).toISOString().slice(0, 10) !== result)) fail(`Invalid ${label}`);
   return result;
 };
-export const allowedUnitTypes = (profile) => profile?.inventory_type === 'flats' ? ['flat'] : profile?.inventory_type === 'mixed' ? ['plot', 'flat'] : ['plot'];
+export const allowedUnitTypes = (profile) => ({ flats: ['flat'], shops: ['shop'], plots_shops: ['plot', 'shop'], mixed: ['plot', 'flat'] }[profile?.inventory_type] || ['plot']);
 
 export function validateProjectProfile(input) {
   object(input, 'Project profile');
   const p = { ...DEFAULT_PROJECT_PROFILE, ...input };
   const result = {
-    inventory_type: choice(p.inventory_type, ['plots', 'flats', 'mixed'], 'inventory type'),
+    inventory_type: choice(p.inventory_type, ['plots', 'flats', 'shops', 'plots_shops', 'mixed'], 'inventory type'),
     authority_type: choice(p.authority_type, ['unconfigured', 'local', 'mda', 'other'], 'approval authority'),
     rera_status: choice(p.rera_status, ['unconfigured', 'registered', 'applied', 'not_applicable'], 'RERA status'),
   };
@@ -39,7 +39,7 @@ export function validateProjectProfile(input) {
 }
 
 export function validateUnitMetadata(input, profile, existing = null) {
-  const type = choice(input.unit_type ?? existing?.unit_type ?? 'plot', ['plot', 'flat'], 'unit type');
+  const type = choice(input.unit_type ?? existing?.unit_type ?? 'plot', ['plot', 'flat', 'shop'], 'unit type');
   if (existing && type !== (existing.unit_type || 'plot')) fail('An existing unit cannot change type. Create a separate unit to preserve its area and payment history.', 409);
   if (!existing && !allowedUnitTypes(profile).includes(type)) fail('This unit type is not enabled in the site profile');
   if (input.unit_details === undefined && existing) return {};
@@ -57,8 +57,9 @@ export function validateUnitMetadata(input, profile, existing = null) {
     details[key] = Number(value);
   }
   if ('area_basis' in raw) details.area_basis = choice(raw.area_basis, ['carpet', 'built_up', 'super_built_up'], 'sale area basis');
-  if (type === 'flat') {
-    if (!details.tower || !details.floor || !details.bedrooms || !details.carpet_area || !details.area_basis) fail('Flats require tower, floor, configuration, carpet area and sale area basis');
+  if (type === 'flat' || type === 'shop') {
+    if (type === 'flat' && (!details.tower || !details.bedrooms)) fail('Flats require tower, floor, configuration, carpet area and sale area basis');
+    if (!details.floor || !details.carpet_area || !details.area_basis) fail(`${type === 'shop' ? 'Shops' : 'Flats'} require floor, carpet area and sale area basis`);
     if (!details[`${details.area_basis}_area`]) fail('Enter the area for the selected sale area basis');
     for (const key of ['built_up_area', 'super_built_up_area']) if (details[key] && details[key] < details.carpet_area) fail('Built-up areas cannot be smaller than carpet area');
   }
@@ -66,23 +67,23 @@ export function validateUnitMetadata(input, profile, existing = null) {
   return { unit_type: type, unit_details: details };
 }
 
-function validateFlatSaleArea(input, metadata, existing) {
+function validateBuiltUnitSaleArea(input, metadata, existing) {
   const type = metadata.unit_type || existing?.unit_type;
-  if (type !== 'flat') return;
+  if (!['flat', 'shop'].includes(type)) return;
   const details = metadata.unit_details || existing?.unit_details || {};
   const area = Number(input.plot_size ?? existing?.plot_size);
-  if (!Number.isFinite(area) || area <= 0 || Math.abs(area - Number(details[`${details.area_basis}_area`])) > 0.01) fail('Flat sale area must match the selected area basis');
+  if (!Number.isFinite(area) || area <= 0 || Math.abs(area - Number(details[`${details.area_basis}_area`])) > 0.01) fail(`${type === 'shop' ? 'Shop' : 'Flat'} sale area must match the selected area basis`);
 }
 
 export async function unitMetadataForWrite(input, siteId, db, existing = null) {
   if (existing && input.unit_details === undefined) {
     const metadata = validateUnitMetadata(input, null, existing);
-    if (input.plot_size !== undefined) validateFlatSaleArea(input, metadata, existing);
+    if (input.plot_size !== undefined) validateBuiltUnitSaleArea(input, metadata, existing);
     return metadata;
   }
   const { rows: [site] } = await db.query('SELECT project_profile FROM sites WHERE id = $1', [siteId]);
   if (!site) fail('Site not found', 404);
   const metadata = validateUnitMetadata(input, site.project_profile, existing);
-  validateFlatSaleArea(input, metadata, existing);
+  validateBuiltUnitSaleArea(input, metadata, existing);
   return metadata;
 }

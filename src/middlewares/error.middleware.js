@@ -1,6 +1,9 @@
 import { isDatabaseUnavailable } from '../utils/databaseError.js';
 
 const errorMiddleware = (err, req, res, next) => {
+  if (['pool_money_receipt_locked','pool_money_period_locked'].includes(err.constraint)) {
+    return res.status(409).json({code:'POOL_RECEIPT_LOCKED',message:err.message});
+  }
   if (err.constraint === 'cashflow_transfer_immutable') {
     return res.status(409).json({ code: 'TRANSFER_IMMUTABLE', message: 'This record belongs to a completed money transfer and cannot be edited or deleted.' });
   }

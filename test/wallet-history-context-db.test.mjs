@@ -155,8 +155,15 @@ test('wallet history preserves module descriptions, transfer parties and site-on
       await pg.query(`INSERT INTO loyalty_vault_entries(organization_id,site_id,holder_key,holder_type,holder_id,actor_id,
         amount,kind,description,source_table,source_id) VALUES(1,10,'user:1','user',1,1,10,'credit','Cash receipt',$1,100)`,[table]);
     }
+    await pg.exec("ALTER TABLE pool_money_receipts ADD COLUMN buyer_name text, ADD COLUMN reference text; UPDATE pool_money_receipts SET buyer_name='Pool applicant Anita',reference='BK0001' WHERE id=100");
     const moduleRows=(await invoke()).entries.filter(row=>row.source_id===100);
     assert.equal(moduleRows.length,LOYALTY_VAULT_SOURCE_TABLES.size);
+    const poolReceipt = moduleRows.find(row => row.source_table === 'pool_money_receipts');
+    assert.equal(poolReceipt.source_details.party_name, 'Pool applicant Anita');
+    assert.equal(poolReceipt.source_details.module_name, 'Pool Money');
+    assert.equal(poolReceipt.source_details.reference, 'BK0001');
+    assert.equal(poolReceipt.source_details.source_available, true);
+    assert.equal((await invoke(history, { module: 'pool_money_receipts', q: 'BK0001' })).total, 1);
     for(const [table,[,,name]] of Object.entries(parents)) assert.equal(moduleRows.find(row=>row.source_table===table).source_details.party_name,name,table);
     assert.equal(moduleRows.find(row=>row.source_table==='expenses').source_details.from_entity,'Cash payer');
     assert.equal(moduleRows.find(row=>row.source_table==='expenses').source_details.category,'Material refund');

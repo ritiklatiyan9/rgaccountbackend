@@ -56,6 +56,7 @@ const SOURCE_MODULES = Object.freeze({
   farmer_payment: 'farmer_payments', plot_commission: 'plot_commissions',
   plot_commission_payment: 'plot_commission_payments', commission: 'plot_commission_payments',
   firm_transaction: 'firm_transactions', plot_payment: 'plot_payments',
+  pool_money_receipt: 'pool_money_receipts',
   plot_installment_payment: 'plot_installment_payments', expense: 'expenses',
   vendor_payment: 'vendor_payments', vendor_inventory_payment: 'vendor_inventory_payments',
   plot_registry_payment: 'plot_registry_payments', land_deal_payment: 'land_deal_payments',

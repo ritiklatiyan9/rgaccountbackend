@@ -20,6 +20,7 @@ const displayFields = ['party_name','category','sub_category','from_entity','to_
 const sourceRows = [...LOYALTY_VAULT_SOURCE_TABLES].map(table => {
   const owner = sourceOwners[table];
   const fields = Object.fromEntries(displayFields.map(field => [field, `NULLIF(BTRIM(to_jsonb(native)->>'${field}'),'')`]));
+  if (table === 'pool_money_receipts') { fields.party_name = "NULLIF(BTRIM(to_jsonb(native)->>'buyer_name'),'')"; fields.category = "'Booking token'"; }
   if (owner?.party) fields.party_name = `COALESCE(${fields.party_name},${owner.party})`;
   for (const [field, expression] of Object.entries(owner?.fields || {})) fields[field] = `COALESCE(${fields[field] || 'NULL'},${expression})`;
   const metadata = Object.entries(fields).flatMap(([field, expression]) => [`'${field}'`, expression]).join(',');
@@ -38,7 +39,7 @@ const moduleName = `CASE e.source_table
   WHEN 'plot_installment_payments' THEN 'Plot Installments' WHEN 'plot_commission_payments' THEN 'Commission Payments'
   WHEN 'vendor_payments' THEN 'Vendor Payments' WHEN 'vendor_inventory_payments' THEN 'Vendor Inventory'
   WHEN 'land_deal_payments' THEN 'Land Deals' WHEN 'misc_income_entries' THEN 'Miscellaneous Income'
-  WHEN 'partner_profit_payments' THEN 'Partner Profit'
+  WHEN 'partner_profit_payments' THEN 'Partner Profit' WHEN 'pool_money_receipts' THEN 'Pool Money'
   ELSE CASE WHEN e.transfer_id IS NOT NULL THEN 'Wallet Transfer' ELSE 'Cash Wallet' END END`;
 
 export const walletHistoryJoins = `FROM site_history e
@@ -67,7 +68,7 @@ export const walletHistoryJoins = `FROM site_history e
       NULLIF(BTRIM(to_jsonb(cash)->>'particular'),''),e.description) AS source_description,
     COALESCE(NULLIF(e.details->>'remarks',''),NULLIF(wallet_source.record->>'remark',''),
       NULLIF(wallet_source.record->>'remarks',''),NULLIF(wallet_source.record->>'note','')) AS notes,
-    COALESCE(NULLIF(e.details->>'reference',''),NULLIF(wallet_source.record->>'reference_no',''),
+    COALESCE(NULLIF(e.details->>'reference',''),NULLIF(wallet_source.record->>'reference_no',''),NULLIF(wallet_source.record->>'reference',''),
       NULLIF(wallet_source.record->>'bank_reference',''),NULLIF(wallet_source.record->>'transaction_id',''),
       NULLIF(wallet_source.record->>'voucher_no',''),NULLIF(wallet_source.record->>'receipt_no','')) AS reference,
     ${moduleName} AS module_name) context ON true`;

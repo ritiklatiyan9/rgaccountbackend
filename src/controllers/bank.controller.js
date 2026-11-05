@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
+import { bookingMoneyPredicate, bankBookingPending } from '../services/bankBookingMoney.service.js';
 
 /**
  * Bank Accounts (migrations 089 + 140) — a site-owned list of real bank
@@ -17,7 +18,7 @@ const MAP_SOURCES = new Set([
   'firm_transactions', 'plot_payments', 'plot_installment_payments',
   'vendor_payments', 'plot_commission_payments', 'land_deal_payments',
   'vendor_inventory_payments', 'plot_registry_payments',
-  'misc_income_entries', 'cashflow_entry',
+  'misc_income_entries', 'cashflow_entry', 'pool_money_receipts',
 ]);
 
 const requestError = (statusCode, message, code) => Object.assign(new Error(message), { statusCode, code });
@@ -338,35 +339,59 @@ export const mapEntryToBank = asyncHandler(async (req, res) => {
   res.json({ message: bankId == null ? 'Bank unmapped' : 'Entry mapped to bank', ledger_id: result.rows[0].id });
 });
 
-// All ledger entries of one bank in the selected site (the drill-in page).
-export const listBankEntries = asyncHandler(async (req, res) => {
-  const bankId = parseInt(req.params.id);
-  const { site_id, date_from, date_to, limit } = req.query;
-  const site = await assertSiteAccess(pool, req.user, site_id);
-  const { rows: bankRows } = await pool.query('SELECT * FROM bank_accounts WHERE id = $1 AND site_id = $2', [bankId, site.id]);
-  if (!bankRows.length) return res.status(404).json({ message: 'Bank account not found' });
-
-  const params = [bankId, site.id];
-  const where = ['le.bank_account_id = $1', 'le.site_id = $2'];
+// Balance is accumulated over the full mapped history before filtering or
+// limiting the displayed rows, then returned in reverse chronological order.
+export async function bankAccountEntries(db, bankId, siteId, { date_from, date_to, limit, source = 'all' } = {}) {
+  if (!['all', 'booking', 'other'].includes(source)) throw requestError(400, 'Select a valid bank transaction source.', 'INVALID_BANK_SOURCE');
+  const params = [bankId, siteId];
+  const where = ['TRUE'];
+  if (source !== 'all') {
+    const booking = await bookingMoneyPredicate(db);
+    where.push(source === 'booking' ? `${booking} AND (le.credit<>0 OR le.debit<>0)` : `NOT ${booking}`);
+  }
   if (date_from) { params.push(date_from); where.push(`le.entry_date >= $${params.length}::date`); }
   if (date_to) { params.push(date_to); where.push(`le.entry_date <= $${params.length}::date`); }
-  params.push(Math.min(parseInt(limit) || 1000, 5000));
-
-  const { rows } = await pool.query(
-    `SELECT le.*, TO_CHAR(le.entry_date, 'YYYY-MM-DD') AS entry_date, s.name AS site_name
-       FROM ledger_entries le
-       LEFT JOIN sites s ON s.id = le.site_id
+  params.push(Math.max(1, Math.min(parseInt(limit) || 1000, 5000)));
+  const { rows } = await db.query(
+    `WITH bank_history AS (
+       SELECT le.*, SUM(COALESCE(le.credit,0)-COALESCE(le.debit,0)) OVER (
+         ORDER BY le.entry_date ASC NULLS FIRST, le.created_at ASC NULLS FIRST, le.id ASC
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       )::numeric AS balance,
+       SUM(COALESCE(le.credit,0)-COALESCE(le.debit,0)) OVER ()::numeric AS bank_balance
+       FROM ledger_entries le WHERE le.bank_account_id = $1 AND le.site_id = $2
+     )
+     SELECT le.*, TO_CHAR(le.entry_date, 'YYYY-MM-DD') AS entry_date, s.name AS site_name,
+       SUM(le.credit) OVER ()::numeric AS filtered_total_credit,
+       SUM(le.debit) OVER ()::numeric AS filtered_total_debit,
+       COUNT(*) OVER ()::integer AS filtered_count
+       FROM bank_history le LEFT JOIN sites s ON s.id=le.site_id
       WHERE ${where.join(' AND ')}
-      ORDER BY le.entry_date DESC, le.created_at DESC
+      ORDER BY le.entry_date DESC NULLS LAST, le.created_at DESC NULLS LAST, le.id DESC
       LIMIT $${params.length}`,
     params
   );
+  return rows;
+}
+
+// All ledger entries of one bank in the selected site (the drill-in page).
+export const listBankEntries = asyncHandler(async (req, res) => {
+  const bankId = parseInt(req.params.id);
+  const site = await assertSiteAccess(pool, req.user, req.query.site_id);
+  const { rows: bankRows } = await pool.query('SELECT * FROM bank_accounts WHERE id = $1 AND site_id = $2', [bankId, site.id]);
+  if (!bankRows.length) return res.status(404).json({ message: 'Bank account not found' });
+  const rows = await bankAccountEntries(pool, bankId, site.id, req.query);
+  const bookingPending = req.query.source === 'booking'
+    ? await bankBookingPending(pool, Number(req.user.organization_id) || 1, site.id, bankRows[0]) : [];
   let total_debit = 0, total_credit = 0;
   for (const r of rows) { total_debit += parseFloat(r.debit) || 0; total_credit += parseFloat(r.credit) || 0; }
+  total_credit = Number(rows[0]?.filtered_total_credit ?? total_credit);
+  total_debit = Number(rows[0]?.filtered_total_debit ?? total_debit);
   res.json({
-    bank: bankRows[0],
-    entries: rows,
-    summary: { entries: rows.length, total_debit, total_credit, net: total_credit - total_debit },
+    bank: bankRows[0], entries: rows, booking_pending: bookingPending,
+    summary: { entries: Number(rows[0]?.filtered_count ?? rows.length), total_debit, total_credit, net: total_credit - total_debit,
+      closing_balance: rows.length ? Number(rows[0].bank_balance) : null,
+      booking_pending_amount: Math.round(bookingPending.reduce((sum, receipt) => sum + Number(receipt.amount), 0) * 100) / 100 },
   });
 });
 

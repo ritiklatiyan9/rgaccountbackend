@@ -1,5 +1,6 @@
 import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
+import { createPoolMoneyRouter } from './poolMoney.routes.js';
 const router = express.Router();
 
 import {
@@ -22,6 +23,9 @@ import requirePermission from '../middlewares/permission.middleware.js';
 import requirePlotSiteAccess from '../middlewares/plotSiteAccess.middleware.js';
 import { transferPlotMoney } from '../controllers/plotMoneyTransfer.controller.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
+
+// Pool Money uses the shared booking sources and its own guarded routes.
+router.use(createPoolMoneyRouter());
 
 // All plot routes require auth
 router.use(authMiddleware);

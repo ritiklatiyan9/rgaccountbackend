@@ -20,6 +20,7 @@ test('cheque date support is advertised only after the schema-backed list read s
   try {
     pool.query = async (sql) => {
       if (sql.includes('FROM sites s')) return { rows: [{ id: 8, name: 'Site', organization_id: 1, assigned: true }] };
+      if (sql.includes("to_regclass('public.bookings')")) return { rows: [{ bookings: false, draws: false, recorded: false }] };
       assert.match(sql, /cfe\.cheque_transaction_date/);
       if (!schemaReadSucceeds) throw Object.assign(new Error('column does not exist'), { code: '42703' });
       return { rows: [] };

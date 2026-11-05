@@ -62,7 +62,7 @@ export function configuredPaymentReceipt(event, data, inputDesign) {
   const moduleLabel = event === 'INSTALLMENT_RECEIVED' ? 'Plot Installment' : 'Plot Payment';
   const values = {
     module: [moduleLabel, data.plot_no && `Plot ${text(data.plot_no)}`].filter(Boolean).join(' · '),
-    plot_no: text(data.plot_no), plot_size: /^\d+(?:\.\d+)?$/.test(text(data.plot_size)) ? `${text(data.plot_size)} ${data.unit_type === 'flat' ? 'sq. ft.' : 'sq. yd.'}` : text(data.plot_size),
+    plot_no: text(data.plot_no), plot_size: /^\d+(?:\.\d+)?$/.test(text(data.plot_size)) ? `${text(data.plot_size)} ${['flat', 'shop'].includes(data.unit_type) ? 'sq. ft.' : 'sq. yd.'}` : text(data.plot_size),
     plot_rate: Number(data.plot_rate) > 0 ? `₹${money(data.plot_rate)}` : text(data.plot_rate),
     plot_buyer: text(data.full_name), received_by: text(data.received_by), payment_mode: paymentMode,
     reference: [

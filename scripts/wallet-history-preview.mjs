@@ -7,7 +7,7 @@ import auth from '../src/middlewares/auth.middleware.js';
 import { history, historyDetail, transfers } from '../src/controllers/loyaltyVault.controller.js';
 
 const app = express();
-app.use(cors({ origin: ['http://127.0.0.1:5174', 'http://localhost:5174'], credentials: true }));
+app.use(cors({ origin: ['http://127.0.0.1:5173', 'http://localhost:5173'], credentials: true }));
 app.get('/wallet/history', auth, history);
 app.get('/wallet/history/:id', auth, historyDetail);
 app.get('/wallet/transfers', auth, transfers);

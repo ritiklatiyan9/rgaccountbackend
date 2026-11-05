@@ -1,3 +1,5 @@
+import { up as migratePoolMoney } from './migrations/238_pool_money.js';
+import { up as migrateCommercialShops } from './migrations/239_commercial_shop_units.js';
 import { up as migrateSeekPermissions } from './migrations/222_seek_permissions.js';
 import { up as migrateSeekTargets } from './migrations/223_seek_permission_targets.js';
 import { up as migrateSeekComments } from './migrations/230_seek_permission_comments.js';
@@ -61,6 +63,8 @@ connectDB().then(async () => {
   await migrateCreditWalletImprestDebits(pool);
   await migrateCashWalletSiteScope(pool);
   await migrateTransactionDocumentation(pool);
+  await migratePoolMoney(pool);
+  await migrateCommercialShops(pool);
   server.listen(port, '127.0.0.1', () => {
     console.log(`Local API ready at http://127.0.0.1:${port}`);
   });

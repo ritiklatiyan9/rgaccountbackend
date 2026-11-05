@@ -3,7 +3,7 @@ import pg from 'pg';
 
 export const LOYALTY_VAULT_SOURCE_TABLES = new Set([
   'cash_flow_entries', 'day_book', 'expenses', 'farmer_payments', 'firm_transactions',
-  'plot_payments', 'plot_installment_payments',
+  'plot_payments', 'plot_installment_payments', 'pool_money_receipts',
   'plot_commission_payments', 'vendor_payments', 'vendor_inventory_payments',
   'land_deal_payments', 'misc_income_entries', 'partner_profit_payments',
 ]);

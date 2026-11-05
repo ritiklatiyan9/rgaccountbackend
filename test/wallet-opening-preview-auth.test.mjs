@@ -130,7 +130,7 @@ function localReader({load=async()=>({rows:[authUser]})}={}){
     queries,
     get remoteCalls(){return remoteCalls;},
     async invoke({token=tokenFor(),headers={}}={}){
-      const requestHeaders={Authorization:token?`Bearer ${token}`:undefined,'X-Session-ID':'123',Origin:'http://localhost:5174',...headers};
+      const requestHeaders={Authorization:token?`Bearer ${token}`:undefined,'X-Session-ID':'123',Origin:'http://localhost:5173',...headers};
       const req={header:name=>requestHeaders[name]};
       const res={statusCode:200,status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};
       let allowed=false,error;

@@ -18,7 +18,7 @@ test('local approval and RERA registration can coexist', () => {
   assert.deepEqual(allowedUnitTypes(p), ['plot', 'flat']);
 });
 test('profile validation rejects incomplete and malformed professional fields', () => {
-  for (const p of [null, [], { inventory_type: 'shops' }, { authority_type: 'mda' }, { rera_status: 'registered' }, { rera_status: 'applied' }, { rera_status: 'not_applicable' }, { expected_completion: '2026-02-30' }, { promoter_name: {} }, { promoter_name: 'a'.repeat(201) }]) assert.throws(() => validateProjectProfile(p), e => e.statusCode === 400);
+  for (const p of [null, [], { inventory_type: 'warehouses' }, { authority_type: 'mda' }, { rera_status: 'registered' }, { rera_status: 'applied' }, { rera_status: 'not_applicable' }, { expected_completion: '2026-02-30' }, { promoter_name: {} }, { promoter_name: 'a'.repeat(201) }]) assert.throws(() => validateProjectProfile(p), e => e.statusCode === 400);
 });
 test('approval dates are coherent and inactive profile fields are retained', () => {
   assert.throws(() => validateProjectProfile({ authority_type: 'other', authority_name: 'Authority', approval_number: '12', approval_date: '2026-09-01', approval_valid_until: '2026-08-01' }));
@@ -61,4 +61,27 @@ test('flat contracted sale area follows its selected area basis', async () => {
   assert.equal(metadata.unit_details.carpet_area, 850);
   assert.equal('plot_size' in metadata, false);
   assert.throws(() => validateUnitMetadata({ unit_type: 'flat', unit_details: { ...flatDetails, area_basis: 'super_built_up' } }, mixed), /selected sale area basis/);
+});
+
+
+test('commercial shop profiles enable only compatible units and retain legacy mixed semantics', () => {
+  assert.deepEqual(allowedUnitTypes(validateProjectProfile({ inventory_type: 'shops' })), ['shop']);
+  assert.deepEqual(allowedUnitTypes(validateProjectProfile({ inventory_type: 'plots_shops' })), ['plot', 'shop']);
+  assert.deepEqual(allowedUnitTypes(mixed), ['plot', 'flat']);
+  const shop = { unit_type: 'shop', unit_details: { floor: 'G', carpet_area: '300', built_up_area: '360', area_basis: 'built_up' } };
+  assert.equal(validateUnitMetadata(shop, { inventory_type: 'shops' }).unit_details.built_up_area, 360);
+  for (const profile of [{}, mixed, { inventory_type: 'flats' }]) assert.throws(() => validateUnitMetadata(shop, profile), /not enabled/);
+  for (const patch of [{ floor: '' }, { carpet_area: 0 }, { built_up_area: 250 }, { area_basis: 'gaz' }]) {
+    assert.throws(() => validateUnitMetadata({ ...shop, unit_details: { ...shop.unit_details, ...patch } }, { inventory_type: 'shops' }));
+  }
+  assert.throws(() => validateUnitMetadata({ unit_type: 'shop', unit_details: shop.unit_details }, { inventory_type: 'plots_shops' }, { unit_type: 'plot' }), e => e.statusCode === 409);
+});
+
+test('shop contracted sale area follows its basis when creating and editing', async () => {
+  const details = { floor: 'G', carpet_area: 300, built_up_area: 360, area_basis: 'built_up' };
+  const db = { query: async () => ({ rows: [{ project_profile: { inventory_type: 'shops' } }] }) };
+  await assert.rejects(unitMetadataForWrite({ unit_type: 'shop', plot_size: 300, unit_details: details }, 9, db), /Shop sale area must match/);
+  const metadata = await unitMetadataForWrite({ unit_type: 'shop', plot_size: 360, unit_details: details }, 9, db);
+  assert.equal(metadata.unit_type, 'shop');
+  await assert.rejects(unitMetadataForWrite({ plot_size: 300 }, 9, db, { unit_type: 'shop', plot_size: 360, unit_details: details }), /must match/);
 });

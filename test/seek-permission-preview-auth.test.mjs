@@ -21,7 +21,7 @@ function fixture(options = {}) {
     if (state.offline) throw new Error('offline');
     return { status: state.status, ok: state.status === 200, json: async () => ({ user: state.remote }) };
   } });
-  const credentials = { token: token(), sessionId: 123, appContext: 'accounts', origin: 'http://127.0.0.1:5174' };
+  const credentials = { token: token(), sessionId: 123, appContext: 'accounts', origin: 'http://127.0.0.1:5173' };
   return { state, bridge, credentials };
 }
 const rejects = (promise, status) => assert.rejects(promise, error => error.statusCode === status);
@@ -118,7 +118,7 @@ test('expired, mismatched, invalid upstream and spoofed application/origin proof
   }
   const { bridge, state, credentials } = fixture();
   for (const changes of [{ appContext: 'booking_accounts' }, { origin: 'https://www.dgbooking.com' },
-    { origin: 'http://127.0.0.1:5174.evil.example' }, { sessionId: '123oops' }]) {
+    { origin: 'http://127.0.0.1:5173.evil.example' }, { sessionId: '123oops' }]) {
     await assert.rejects(bridge.resolve({ ...credentials, ...changes }));
   }
   assert.equal(state.calls.length, 0, 'untrusted app/origin/session input never reaches an arbitrary upstream');

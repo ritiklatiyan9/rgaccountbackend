@@ -67,7 +67,7 @@ test('preview mounts only Seek Permission, keeps real authentication, and enforc
       INSERT INTO seek_permissions(site_id,requested_by,asked_to,title) VALUES (1,5,1,'Advance approval');`);
     pool.query = (...args) => db.query(...args);
     const app = createSeekPermissionPreviewApp({ authenticate: normalAuthentication });
-    const origin = 'http://127.0.0.1:5174';
+    const origin = 'http://127.0.0.1:5173';
     assert.equal((await request(app)).status, 200);
     assert.equal((await request(app, { path: '/wallet' })).status, 404);
     assert.equal((await request(app, { path: '/seek-permissions?site_id=1' })).status, 401);
@@ -110,13 +110,13 @@ test('preview checks base schema before module migrations and restricts HTTP/soc
     await db.exec(`CREATE TABLE app_schema_migrations(version text); CREATE TABLE sites(id int PRIMARY KEY);
       CREATE TABLE users(id int PRIMARY KEY); ${requestsSql} ${targetsSql}`);
     assert.equal((await assertSeekPreviewBaseSchema(db)).requests, true);
-    for (const origin of ['http://localhost:5174', 'http://127.0.0.1:5174', undefined]) assert.equal(isSeekPreviewOrigin(origin), true);
-    for (const origin of ['http://localhost:5175', 'https://evil.example', 'http://127.0.0.1:5174.evil.example']) assert.equal(isSeekPreviewOrigin(origin), false);
+    for (const origin of ['http://localhost:5173', 'http://127.0.0.1:5173', undefined]) assert.equal(isSeekPreviewOrigin(origin), true);
+    for (const origin of ['http://localhost:5175', 'https://evil.example', 'http://127.0.0.1:5173.evil.example']) assert.equal(isSeekPreviewOrigin(origin), false);
     let socketOptions;
     const preview = createSeekPermissionPreviewServer({ socketInitializer: (_server, options) => { socketOptions = options; return {}; } });
     assert.equal(preview.server.listening, false);
     socketOptions.allowRequest({ headers: { origin: 'https://evil.example' } }, (_error, allowed) => assert.equal(allowed, false));
-    socketOptions.allowRequest({ headers: { origin: 'http://localhost:5174' } }, (_error, allowed) => assert.equal(allowed, true));
+    socketOptions.allowRequest({ headers: { origin: 'http://localhost:5173' } }, (_error, allowed) => assert.equal(allowed, true));
     assert.equal(seekPreviewPort('8006'), 8006);
     for (const port of [0, 65536, 'NaN', '8006oops']) assert.throws(() => seekPreviewPort(port));
   } finally { await db.close(); }

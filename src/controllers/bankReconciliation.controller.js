@@ -11,6 +11,7 @@ import {
   serializeMatchResult,
 } from '../services/chequeMatching.service.js';
 import { ChequeStatusError, updateChequeStatusRecord } from '../services/chequeStatus.service.js';
+import { loadUnrecordedPoolCheques } from '../services/poolMoneyCheques.service.js';
 
 const numericId = (value, label = 'id') => {
   const parsed = Number.parseInt(value, 10);
@@ -329,8 +330,12 @@ export async function listPendingCheques(req, res) {
   try {
     const site = await assertSiteAccess(pool, req.user, req.query.site_id ?? req.query.siteId);
     const status = requireChequeListStatus(req.query.status);
-    const entries = await loadPendingChequeCandidates(pool, site.organization_id, site.id, status === 'ALL' ? null : status);
-    return res.json({ entries, total: entries.length, status, cheque_dates_supported: true, site: { id: site.id, name: site.name } });
+    const [entries, unrecordedPoolCheques] = await Promise.all([
+      loadPendingChequeCandidates(pool, site.organization_id, site.id, status === 'ALL' ? null : status),
+      loadUnrecordedPoolCheques(pool, site.organization_id, site.id, status === 'ALL' ? null : status),
+    ]);
+    return res.json({ entries, total: entries.length, unrecorded_pool_cheques: unrecordedPoolCheques,
+      status, cheque_dates_supported: true, site: { id: site.id, name: site.name } });
   } catch (error) {
     return sendError(res, error);
   }

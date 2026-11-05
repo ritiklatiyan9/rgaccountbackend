@@ -662,7 +662,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
          LEFT JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
          LEFT JOIN plots p ON pcm.plot_id = p.id
         WHERE cfe.site_id = $1 AND ${daybookMirrorDateSql('cfe')} = $2::date
-          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'vendor_inventory_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements')
+          AND cfe.source_module IN ('plot_installment_payments', 'vendor_payments', 'vendor_inventory_payments', 'plot_commission_payments', 'land_deal_payments', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements', 'pool_money_receipts')
           AND UPPER(COALESCE(cfe.cheque_status, '')) NOT IN ('BOUNCED', 'RETURNED')
           AND LOWER(COALESCE(cfe.status, 'approved')) != 'rejected'
           AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))`,
@@ -1069,6 +1069,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // read_only: these are managed in their own module pages — Day Book only
   // displays them so its totals tie to the Remaining cards + Balance Sheet.
   const MODULE_LEDGER_META = {
+    pool_money_receipts: { prefix: 'pool', entry_type: 'POOL MONEY', source: 'pool_money_receipt', category: 'BOOKING TOKEN' },
     tds_settlements: { prefix: 'tds', entry_type: 'TDS SETTLEMENT', source: 'tds_settlement', category: 'TDS SETTLEMENT' },
     partner_profit_payments: { prefix: 'ppp', entry_type: 'PARTNER PROFIT PAYMENT', source: 'partner_profit_payment', category: 'PARTNER PROFIT' },
     plot_installment_payments: { prefix: 'pip', entry_type: 'PLOT INSTALLMENT', source: 'plot_installment', category: 'PLOT PAYMENT' },
@@ -1123,7 +1124,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     });
 
   // Merge and sort ASC by id
-  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000, vip: 1000000, ppp: 1100000, tds: 1200000 };
+  const ID_OFFSET = { expense: 100000, fp: 200000, comm: 300000, cf: 400000, ft: 500000, pp: 600000, pip: 700000, vp: 800000, pcp: 900000, vip: 1000000, ppp: 1100000, tds: 1200000, pool: 1300000 };
   const sortId = (x) => {
     if (typeof x.id === 'string') {
       const [prefix, n] = x.id.split('_');
@@ -1731,6 +1732,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
   const visibility = await resolveEntryVisibility(req.user, 'daybook', created_by);
 
   const SRC_LABEL = {
+    pool_money_receipts:       'Pool Money · Booking Tokens',
     plot_payments:             'Plot Sales (Direct)',
     plot_installment_payments: 'Plot Installments',
     plot_registry_payments:    'Registry Payments',
