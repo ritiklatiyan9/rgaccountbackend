@@ -28,3 +28,26 @@ test('a migration or recovered connection restores reads without restarting the 
     assert.equal(calls, 2, 'available schema objects stay cached');
   }
 });
+
+test('batch schema probes share one query with concurrent single probes and retry missing objects', async () => {
+  const source = readFileSync(new URL('../src/utils/schemaProbe.js', import.meta.url), 'utf8')
+    .replace(/^import .*;\n/m, '').replace(/export /g, '');
+  let calls = 0, finish;
+  const context = vm.createContext({ pool: { query() {
+    calls++;
+    return new Promise(resolve => { finish = resolve; });
+  } } });
+  vm.runInContext(`${source}\nthis.batch=hasRelations;this.single=hasRelation;`, context);
+  const batch = context.batch(['expenses', 'seek_permissions', 'expenses']);
+  const concurrent = context.single('expenses');
+  assert.equal(calls, 1);
+  finish({ rows: [{ name: 'expenses', present: true }, { name: 'seek_permissions', present: false }] });
+  assert.equal((await batch).get('expenses'), true);
+  assert.equal(await concurrent, true);
+  const retry = context.batch(['expenses', 'seek_permissions']);
+  assert.equal(calls, 2);
+  finish({ rows: [{ name: 'seek_permissions', present: true }] });
+  assert.equal((await retry).get('seek_permissions'), true);
+  assert.equal(await context.single('expenses'), true);
+  assert.equal(calls, 2);
+});

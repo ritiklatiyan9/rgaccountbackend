@@ -240,6 +240,7 @@ export const listAllSitesCommissions = asyncHandler(async (req, res) => {
   if (!validDate(date_from) || !validDate(date_to) || (date_from && date_to && date_from > date_to)) {
     return res.status(400).json({ message: 'Invalid date range' });
   }
+  const entryVisibility = await resolveEntryVisibility(req.user, 'commissions', req.query.created_by);
   const { rows } = await pool.query(
     `WITH payment_rollup AS (
        SELECT pcp.plot_commission_id,
@@ -251,6 +252,7 @@ export const listAllSitesCommissions = asyncHandler(async (req, res) => {
               MAX(pcp.date) FILTER (WHERE ($1::date IS NULL OR pcp.date >= $1::date) AND ($2::date IS NULL OR pcp.date <= $2::date)) AS last_payment_date
          FROM plot_commission_payments pcp
         WHERE ${commissionPaymentPostsSql('pcp')}
+          AND ($3::text IS NULL OR pcp.created_by = ANY(string_to_array($3::text, ',')::int[]))
           AND pcp.date BETWEEN DATE '1900-01-01' AND DATE '2100-12-31'
         GROUP BY pcp.plot_commission_id
      )
@@ -293,8 +295,9 @@ export const listAllSitesCommissions = asyncHandler(async (req, res) => {
        LEFT JOIN farmers df ON df.id = d.farmer_id
        LEFT JOIN payment_rollup pr ON pr.plot_commission_id = pc.id
       WHERE s.include_in_overall -- sites switched off on the Sites page stay out
+        AND ($4::int[] IS NULL OR pc.site_id = ANY($4::int[]))
       ORDER BY m.full_name ASC, s.name ASC, pc.created_at DESC, pc.id DESC`,
-    [date_from || null, date_to || null],
+    [date_from || null, date_to || null, entryVisibility.creatorId, req.overallSiteIds ?? null],
   );
 
   res.json({ commissions: rows.map((item) => ({

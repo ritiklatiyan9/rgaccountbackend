@@ -19,12 +19,17 @@ test('permission batches use one normal read and preserve existing and missing g
     assert.equal(grants.get('clients').can_read, false);
     assert.equal(grants.get('vendors').can_view_all, true);
     calls = 0;
-    const seeded = await permissionModel.getPermissions(1, ['clients', 'farmers', 'tds', 'unknown'], measured);
+    const seeded = await permissionModel.getPermissions(1, ['clients', 'farmers', 'tds', 'all_sites_commission', 'all_sites_personal_ledger', 'unknown'], measured);
     assert.equal(calls, 3, 'missing known defaults are seeded as one batch then current grants are re-read');
     assert.equal(seeded.get('clients').can_read, false, 'explicit denial stays denied');
     assert.equal(seeded.get('farmers').can_read, true, 'legacy default matches getPermission');
     assert.equal(seeded.get('farmers').can_view_all, false);
     assert.equal(seeded.get('tds').can_read, false, 'restricted defaults stay fail-closed');
+    for (const module of ['all_sites_commission', 'all_sites_personal_ledger']) {
+      for (const action of ['read', 'write', 'update', 'delete', 'restore', 'view_all']) {
+        assert.equal(seeded.get(module)[`can_${action}`], false, `${module} starts without ${action} access`);
+      }
+    }
     assert.equal(seeded.has('unknown'), false);
     const other = await permissionModel.getPermissions(2, ['clients'], measured);
     assert.equal(other.get('clients').can_read, true, 'grants remain scoped by user');

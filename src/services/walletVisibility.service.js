@@ -7,7 +7,8 @@ export const canViewAllWallets = actor => isWalletAdmin(actor) || actor.wallet_v
 
 export async function withWalletVisibility(actor, database = pool) {
   if (isWalletAdmin(actor)) return actor;
-  const { rows } = await database.query(
+  const cached = actor.permissionsByModule;
+  const { rows } = cached instanceof Map && cached.has('wallet') ? { rows: [cached.get('wallet')] } : await database.query(
     "SELECT can_read, can_view_all FROM user_permissions WHERE user_id=$1 AND module='wallet'",
     [actor.id]
   );

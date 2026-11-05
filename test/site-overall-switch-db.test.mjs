@@ -14,7 +14,7 @@ import { cacheResponse, buildCacheKey } from '../src/middlewares/cache.middlewar
 import { cacheGet, cacheSet } from '../src/config/cache.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
-const invoke = (handler, req) => new Promise((resolve, reject) => handler(req, {
+const invoke = (handler, req) => new Promise((resolve, reject) => handler({ user: { id: 1, role: 'admin' }, query: {}, ...req }, {
   status(code) { this.code = code; return this; },
   json(body) { resolve({ status: this.code || 200, body }); },
 }, reject));
@@ -57,6 +57,10 @@ test('a site switched off on the Sites page leaves the all-sites commission and 
         date date, payment_mode text, status text, cheque_status text);
       INSERT INTO plot_commission_payments VALUES (1, 1, 400, 0, '2026-01-05', 'BANK', 'approved', NULL), (2, 2, 2500, 0, '2026-01-06', 'CASH', 'approved', NULL);
       CREATE TABLE users(id int PRIMARY KEY, name text, email text, phone text, role text);
+      CREATE TABLE user_sites(user_id int, site_id int);
+      INSERT INTO user_sites VALUES (7, 1);
+      ALTER TABLE plot_commission_payments ADD COLUMN created_by int;
+      UPDATE plot_commission_payments SET created_by = 7;
       CREATE TABLE cash_flow_months(id int PRIMARY KEY, site_id int, month int, year int, ledger_name text, ledger_type text,
         opening_balance numeric DEFAULT 0, linked_user_id int, linked_member_id int);
       INSERT INTO cash_flow_months(id, site_id, month, year, ledger_name, ledger_type)
@@ -105,6 +109,36 @@ test('a site switched off on the Sites page leaves the all-sites commission and 
     assert.deepEqual(await commissionSites(), [1, 2]);
     assert.deepEqual((await cachedPortfolio('plot-commissions', listAllSitesCommissions)).body.commissions.map(row => row.site_id), [1, 2]);
     assert.deepEqual((await cachedPortfolio('cashflow', listPersonalLedgerPortfolio)).body.ledgers.map(row => row.site_id).sort(), [1, 2]);
+
+    // New overview grants never widen assigned sites or the parent's entry scope.
+    await pg.exec(`UPDATE cash_flow_entries SET created_by = 7;
+      INSERT INTO cash_flow_entries(id, cash_flow_month_id, debit, cash_type, status, created_by)
+        VALUES (3, 1, 50, 'cash', 'approved', 8);
+      INSERT INTO plot_commission_payments VALUES (3, 1, 100, 0, '2026-01-07', 'CASH', 'approved', NULL, 8);`);
+    const scopedRequest = async (module, canViewAll = false, id = 7) => {
+      const req = { query: { created_by: 'all' }, user: { id, role: 'sub_admin', permissionsByModule: new Map([
+        [module, { can_read: true, can_view_all: canViewAll }],
+      ]) } };
+      await new Promise((resolve, reject) => requireOverallSiteScope(req, {}, error => error ? reject(error) : resolve()));
+      return req;
+    };
+    const personalOwn = await scopedRequest('cashflow');
+    const ownLedger = (await invoke(listPersonalLedgerPortfolio, personalOwn)).body.ledgers;
+    assert.deepEqual(ownLedger.map(row => row.site_id), [1]);
+    assert.equal(Number(ownLedger[0].total_debit), 300);
+    const personalAll = await scopedRequest('cashflow', true);
+    assert.notEqual(personalAll.cacheDataScope, personalOwn.cacheDataScope, 'scope changes bypass stale own-entry caches');
+    assert.equal(Number((await invoke(listPersonalLedgerPortfolio, personalAll)).body.ledgers[0].total_debit), 350);
+    const ownCommission = (await invoke(listAllSitesCommissions, await scopedRequest('commissions'))).body.commissions;
+    assert.deepEqual(ownCommission.map(row => row.site_id), [1]);
+    assert.equal(ownCommission[0].total_paid, 400);
+    assert.equal((await invoke(listAllSitesCommissions, await scopedRequest('commissions', true))).body.commissions[0].total_paid, 500);
+    const unassigned = await scopedRequest('cashflow', true, 99);
+    assert.deepEqual((await invoke(listPersonalLedgerPortfolio, unassigned)).body.ledgers, []);
+    assert.deepEqual((await invoke(listAllSitesCommissions, await scopedRequest('commissions', true, 99))).body.commissions, []);
+    await switchSite(1, false);
+    assert.deepEqual((await invoke(listPersonalLedgerPortfolio, await scopedRequest('cashflow', true))).body.ledgers, []);
+    await switchSite(1, true);
     await switchSite(1, false); await switchSite(2, false);
     assert.deepEqual((await cachedPortfolio('plot-commissions', listAllSitesCommissions)).body.commissions, []);
     assert.deepEqual((await cachedPortfolio('cashflow', listPersonalLedgerPortfolio)).body.ledgers, []);

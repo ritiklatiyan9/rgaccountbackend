@@ -22,9 +22,15 @@ import {
 import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import { getWalletManagement, updateWalletManagement } from '../controllers/walletManagement.controller.js';
 import { getExpenseManagement, updateExpenseManagement } from '../controllers/expenseManagement.controller.js';
+import { getCaWorkflow, updateCaWorkflow, getExcelUploadAccess, getExcelImportCatalog } from '../controllers/caWorkflow.controller.js';
 
 const router = express.Router();
 const bustRegistryCache = invalidateCacheOnSuccess(['registries|']);
+
+router.get('/ca-workflow/access', authMiddleware, getExcelUploadAccess);
+router.get('/ca-workflow/imports', authMiddleware, getExcelImportCatalog);
+router.get('/ca-workflow', authMiddleware, requireRole('admin'), getCaWorkflow);
+router.put('/ca-workflow/:userId', authMiddleware, requireRole('admin'), updateCaWorkflow);
 
 router.get('/wallet-management', authMiddleware, requireRole('admin'), getWalletManagement);
 router.put('/wallet-management/:userId', authMiddleware, requireRole('admin'), invalidateCacheOnSuccess(['permissions|']), updateWalletManagement);

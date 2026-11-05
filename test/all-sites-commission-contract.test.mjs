@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-test('portfolio route is admin-only, cached, and ordered before dynamic commission routes', async () => {
+test('portfolio route requires both explicit overview access and register access before the cache', async () => {
   const source = await readFile(new URL('../src/routes/plotCommissionV2.routes.js', import.meta.url), 'utf8');
   const portfolio = source.indexOf("router.get('/portfolio'");
   const dynamic = source.indexOf("router.get('/:id'");
   assert.ok(portfolio > 0 && portfolio < dynamic);
-  assert.match(source.slice(portfolio, source.indexOf('\n', portfolio)), /requireRole\('admin'\).*plotCommissionReadCache/);
+  assert.match(source.slice(portfolio, source.indexOf('\n', portfolio)), /requireRole\('admin', 'sub_admin'\).*requirePermission\('commissions', 'read'\).*requirePermission\('all_sites_commission', 'read'\).*requireOverallSiteScope.*plotCommissionReadCache/);
 });
 
 test('portfolio query covers plot and land subjects and only posted payments', async () => {

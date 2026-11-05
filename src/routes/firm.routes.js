@@ -10,6 +10,7 @@ import {
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
+import { requireExcelUpload } from '../services/caWorkflow.service.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const firmReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'firms' });
@@ -40,7 +41,7 @@ router.get('/transactions/list', requireRole('admin', 'sub_admin'), requirePermi
 router.post('/transactions/firm-to-firm', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, transactionDateMiddleware, createFirmToFirmTransfer);
 router.get('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'read'), firmReadCache, getTransaction);
 router.post('/transactions', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, transactionDateMiddleware, createTransaction);
-router.post('/transactions/bulk', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), bustFirmCache, bulkCreateTransactions);     // Bulk import
+router.post('/transactions/bulk', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'write'), requireExcelUpload, bustFirmCache, bulkCreateTransactions);     // Bulk import
 router.put('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'update'), bustFirmCache, transactionDateMiddleware, updateTransaction);
 router.delete('/transactions/:id', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'delete'), bustFirmCache, deleteTransaction);
 router.post('/transactions/bulk-delete', requireRole('admin', 'sub_admin'), requirePermission('firm_transactions', 'delete'), bustFirmCache, bulkDeleteTransactions);

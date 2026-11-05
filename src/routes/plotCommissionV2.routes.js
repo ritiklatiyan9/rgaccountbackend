@@ -39,9 +39,8 @@ router.use(authMiddleware);
 // These permissions use the existing 'commissions' module permission identifier for backward compatibility/simplicity
 router.get('/plots', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotsForCommissionCache, getPlotsForCommission);
 router.post('/create', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'), bustPlotCommissionCache, createPlotCommission);
-// Organisation-wide broker portfolio. Admin-only because it intentionally
-// crosses every site rather than following the selected/assigned site.
-router.get('/portfolio', requireRole('admin'), requirePermission('commissions', 'read'), requireOverallSiteScope, plotCommissionReadCache, listAllSitesCommissions);
+// Explicit overview access retains the register's entry scope and assigned sites.
+router.get('/portfolio', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), requirePermission('all_sites_commission', 'read'), requireOverallSiteScope, plotCommissionReadCache, listAllSitesCommissions);
 router.get('/list', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listPlotCommissions);
 // Land Commission (subject = land purchase / land sale) — same engine, same permission key.
 router.get('/land', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, listLandCommissions);

@@ -104,6 +104,16 @@ const visibleSiteSql = `${ROW_SQL}
     LEFT JOIN seek_permission_access a ON a.site_id = sp.site_id AND a.user_id = $2
     WHERE sp.site_id = $1 AND s.organization_id = $3 AND ${VIEWER_ACTIVE} AND ${SITE_ACCESS} AND ${SCOPE.visible}`;
 
+// Reuse the exact site, organisation, current-account and Studio visibility
+// predicates for the complete paginated archive; never reuse the capped inbox.
+export const seekHistorySource = (actor, siteId) => ({
+  sql: `SELECT visible.*, 'seek_permission'::text AS source,'seek'::text AS _type,
+    'Permission request'::text AS module_label,visible.title AS entity_name,
+    visible.requested_by_name AS created_by_name,visible.asked_to_name AS assigned_admin_name
+    FROM (${visibleSiteSql}) visible`,
+  params: [siteId, actor.id, orgOf(actor), isSeekAdmin(actor)],
+});
+
 async function queryRequests(actor, siteId, db) {
   requireSeekActor(actor);
   const { rows } = await db.query(`WITH visible AS (${visibleSiteSql}

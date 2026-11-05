@@ -11,9 +11,10 @@ import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisib
 //  CASH FLOW MONTH ENDPOINTS
 // ══════════════════════════════════════════════════
 
-/** GET /cashflow/portfolio — admin-only personal ledger balances across sites. */
-export const listPersonalLedgerPortfolio = asyncHandler(async (_req, res) => {
-  const ledgers = await cashFlowMonthModel.findAllPersonal(pool);
+/** GET /cashflow/portfolio — personal ledger balances in the authorized overview scope. */
+export const listPersonalLedgerPortfolio = asyncHandler(async (req, res) => {
+  const entryVisibility = await resolveEntryVisibility(req.user, 'cashflow', req.query.created_by);
+  const ledgers = await cashFlowMonthModel.findAllPersonal(pool, entryVisibility.creatorId, req.overallSiteIds);
   res.json({ ledgers });
 });
 

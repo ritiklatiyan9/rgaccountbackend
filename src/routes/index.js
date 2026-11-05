@@ -72,6 +72,10 @@ import transactionDocumentationRoutes from './transactionDocumentation.routes.js
 import seekPermissionRoutes from './seekPermission.routes.js';
 import accountWhatsAppRoutes from './accountWhatsApp.routes.js';
 import mobilePortalRoutes from './mobilePortal.routes.js';
+import authMiddleware from '../middlewares/auth.middleware.js';
+import { routeExcelImport } from '../controllers/caWorkflow.controller.js';
+
+router.post('/ca-excel-import', authMiddleware, routeExcelImport);
 
 router.use('/api/mobile', mobilePortalRoutes);
 router.use('/auth', authRoutes);

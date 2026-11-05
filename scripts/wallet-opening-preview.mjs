@@ -1,3 +1,6 @@
+import { listRequestHistory } from '../src/controllers/approval.controller.js';
+import { requireApprovalAccess } from '../src/middlewares/permission.middleware.js';
+import { historyReadLimit, historyTransport, historyErrors } from '../src/middlewares/historyTransport.middleware.js';
 // Authenticated, loopback-only reader for wallet balances, openings and amount explanations. Financial modules
 // keep their normal API; there are no write endpoints or startup migrations.
 import 'dotenv/config';
@@ -26,7 +29,8 @@ const auth=(req,res,next)=>{
 };
 app.use(requestPerformance({poolStats:getDatabasePoolStats}));
 app.use(cors({origin:['http://127.0.0.1:5174','http://localhost:5174'],credentials:true,exposedHeaders:['Server-Timing']}));
-app.get('/health',(_req,res)=>res.json({service:'wallet-opening-reader',read_only:true}));
+app.get('/health',(_req,res)=>res.json({service:'wallet-opening-reader',read_only:true,request_history_version:2}));
+app.get('/approvals/history',auth,requireApprovalAccess,historyReadLimit,historyTransport,listRequestHistory,historyErrors);
 app.get('/wallet',auth,summary);
 app.get('/wallet/workspace',auth,workspace);
 app.get('/wallet/holders',auth,holders);

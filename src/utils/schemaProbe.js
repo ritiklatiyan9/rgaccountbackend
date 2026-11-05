@@ -25,5 +25,25 @@ export function hasRelation(name) {
   return probes.get(name);
 }
 
+/** Warm a read surface's optional relations in one round trip, sharing probes. */
+export async function hasRelations(names) {
+  const unique = [...new Set(names)];
+  const missing = unique.filter(name => !probes.has(name));
+  if (missing.length) {
+    const pending = pool.query(`SELECT name,to_regclass('public.' || name) IS NOT NULL AS present
+      FROM unnest($1::text[]) AS names(name)`, [missing])
+      .then(({ rows }) => new Map(rows.map(row => [row.name, row.present === true])))
+      .catch(() => new Map());
+    for (const name of missing) {
+      probes.set(name, pending.then(result => {
+        const present = result.get(name) === true;
+        if (!present) probes.delete(name);
+        return present;
+      }));
+    }
+  }
+  return new Map(await Promise.all(unique.map(async name => [name, await probes.get(name)])));
+}
+
 // Tests and migration runners re-probe after creating the object.
 export const forgetRelationProbes = () => probes.clear();

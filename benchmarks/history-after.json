@@ -1,0 +1,72 @@
+{
+  "phase": "after",
+  "fixture_rows": 40000,
+  "page_size": 20,
+  "auth": "fixture token; hosted auth excluded",
+  "engine": "PGlite, disposable fixture",
+  "results": [
+    {
+      "case": "first_page",
+      "samples": 20,
+      "concurrency": 5,
+      "sequential": {
+        "p50_ms": 26.9,
+        "p95_ms": 28.3,
+        "p99_ms": 28.7,
+        "wire_bytes": 812,
+        "json_bytes": 8311,
+        "data_queries": 20
+      },
+      "concurrent": {
+        "p50_ms": 131.06,
+        "p95_ms": 142.11,
+        "p99_ms": 142.19,
+        "wire_bytes": 814,
+        "json_bytes": 8311,
+        "data_queries": 20
+      }
+    },
+    {
+      "case": "deep_page",
+      "samples": 20,
+      "concurrency": 5,
+      "sequential": {
+        "p50_ms": 8.02,
+        "p95_ms": 8.27,
+        "p99_ms": 8.36,
+        "wire_bytes": 800,
+        "json_bytes": 8338,
+        "data_queries": 20
+      },
+      "concurrent": {
+        "p50_ms": 32.91,
+        "p95_ms": 40.64,
+        "p99_ms": 40.74,
+        "wire_bytes": 800,
+        "json_bytes": 8338,
+        "data_queries": 19
+      }
+    },
+    {
+      "case": "literal_search",
+      "samples": 20,
+      "concurrency": 5,
+      "sequential": {
+        "p50_ms": 87.67,
+        "p95_ms": 149.89,
+        "p99_ms": 244.79,
+        "wire_bytes": 796,
+        "json_bytes": 8240,
+        "data_queries": 20
+      },
+      "concurrent": {
+        "p50_ms": 353.04,
+        "p95_ms": 439.74,
+        "p99_ms": 439.81,
+        "wire_bytes": 801,
+        "json_bytes": 8242,
+        "data_queries": 19
+      }
+    }
+  ]
+}

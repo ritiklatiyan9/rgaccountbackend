@@ -15,7 +15,7 @@ class CashFlowMonthModel extends MasterModel {
    *
    *  Now: a single LATERAL aggregation that scans cash_flow_entries once
    *  per month and computes all six sums + the count using FILTER clauses. */
-  async findBySiteId(siteId, pool, creatorId = null, personalPortfolio = false) {
+  async findBySiteId(siteId, pool, creatorId = null, personalPortfolio = false, allowedSiteIds = null) {
     const query = `
       SELECT cfm.*, s.name AS site_name,
         lu.name AS linked_user_name,
@@ -72,15 +72,16 @@ class CashFlowMonthModel extends MasterModel {
         -- The all-sites portfolio (no site given) leaves out sites switched off on
         -- the Sites page; a site's own Personal Ledger report keeps them.
         AND ($1::int IS NOT NULL OR s.include_in_overall)
+        AND ($4::int[] IS NULL OR cfm.site_id = ANY($4::int[]))
       ORDER BY cfm.year DESC, cfm.month DESC, cfm.ledger_name ASC
     `;
-    const result = await pool.query(query, [siteId, creatorId, personalPortfolio]);
+    const result = await pool.query(query, [siteId, creatorId, personalPortfolio, allowedSiteIds]);
     return result.rows;
   }
 
-  /** Admin-only portfolio; reuse the site register's posting and duplicate rules. */
-  async findAllPersonal(pool) {
-    return this.findBySiteId(null, pool, null, true);
+  /** Reuse the site register's entry visibility, posting and duplicate rules. */
+  async findAllPersonal(pool, creatorId = null, allowedSiteIds = null) {
+    return this.findBySiteId(null, pool, creatorId, true, allowedSiteIds);
   }
 
   /** Find a specific month record by period + ledger name */

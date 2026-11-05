@@ -3,6 +3,7 @@ const router = express.Router();
 
 import {
   listAllPending,
+  listRequestHistory,
   getApprovalVoucher,
   getPendingCounts,
   approveEntry,
@@ -16,6 +17,7 @@ import {
 import authMiddleware from '../middlewares/auth.middleware.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission, { requireApprovalAccess } from '../middlewares/permission.middleware.js';
+import { historyReadLimit, historyTransport, historyErrors } from '../middlewares/historyTransport.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
 const cachedApprovalRead = cacheResponse({ ttlSeconds: 30, namespace: 'approvals' });
@@ -29,6 +31,7 @@ router.use(authMiddleware);
 router.use(requireRole('admin', 'sub_admin'));
 
 router.get('/pending', requireApprovalAccess, approvalReadCache, listAllPending);
+router.get('/history', requireApprovalAccess, historyReadLimit, historyTransport, listRequestHistory, historyErrors);
 router.get('/counts', requireApprovalAccess, approvalReadCache, getPendingCounts);
 router.get('/:id/voucher', requireApprovalAccess, getApprovalVoucher);
 router.put('/:id/approve', requireApprovalAccess, bustApprovalCache, approveEntry);

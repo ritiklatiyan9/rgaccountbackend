@@ -22,8 +22,8 @@ const cashflowMetaCache = cacheResponse({ ttlSeconds: 300, namespace: 'cashflow-
 // Anchored prefix so 'cashflow|...' is busted but 'cashflow-meta|...' survives.
 const bustCashflowCache = invalidateCacheOnSuccess(['cashflow|', '/daybook']);
 
-// Matches the organisation-wide commission page's admin-only scope.
-router.get('/portfolio', requireRole('admin'), requirePermission('cashflow', 'read'), requireOverallSiteScope, cashflowReadCache, listPersonalLedgerPortfolio);
+// The overview is an explicit opt-in in addition to the underlying register.
+router.get('/portfolio', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), requirePermission('all_sites_personal_ledger', 'read'), requireOverallSiteScope, cashflowReadCache, listPersonalLedgerPortfolio);
 
 // ── Month endpoints ──
 router.get('/months', requireRole('admin', 'sub_admin'), requirePermission('cashflow', 'read'), cashflowReadCache, listMonths);                                // ?site_id=X

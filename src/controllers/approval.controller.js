@@ -1,9 +1,13 @@
+import { getPlotDocUrl } from '../utils/plotDocStorage.js';
+import { createRequestHistoryReader, requestHistoryOptions, HISTORY_TABLES } from '../services/requestHistory.service.js';
+import { operationalHistorySources } from '../services/operationalRequestHistory.service.js';
 import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { chequeReadyForApproval, chequeReadySql } from '../utils/chequeWorkflow.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
-import { hasRelation } from '../utils/schemaProbe.js';
+import { hasRelation, hasRelations } from '../utils/schemaProbe.js';
+import permissionModel from '../models/Permission.model.js';
 import {
   postApprovedImprestDebit,
   reverseApprovedImprestDebit,
@@ -262,7 +266,10 @@ async function attachApprovalClientLinks(entries) {
 }
 
 export const vendorApprovalScope = async (alias,req,params,{inventory=false}={}) => {
-  const userIndex=params.push(req.user.id),orgIndex=params.push(req.user.organization_id),allIndex=params.push(await constructionCanViewAll(pool,req.user));
+  const cached = req.user.permissionsByModule;
+  const canViewAll = hasGlobalApprovalOverride(req.user) || (cached instanceof Map && cached.has('construction')
+    ? cached.get('construction')?.can_view_all === true : await constructionCanViewAll(pool,req.user));
+  const userIndex=params.push(req.user.id),orgIndex=params.push(req.user.organization_id),allIndex=params.push(canViewAll);
   const admin=hasGlobalApprovalOverride(req.user);
   const project=inventory?`(SELECT o.project_id FROM vendor_inventory_orders o WHERE o.id=${alias}.order_id)`:`(SELECT c.project_id FROM vendor_commitments c WHERE c.id=${alias}.commitment_id)`;
   return `EXISTS(SELECT 1 FROM sites vendor_site WHERE vendor_site.id=${alias}.site_id AND vendor_site.organization_id=$${orgIndex}) AND (${admin?'TRUE':'FALSE'} OR (EXISTS(SELECT 1 FROM user_sites permitted WHERE permitted.site_id=${alias}.site_id AND permitted.user_id=$${userIndex}) AND (${alias}.assigned_admin_id=$${userIndex} OR ${project} IS NULL OR EXISTS(SELECT 1 FROM construction_projects vendor_project WHERE vendor_project.id=${project} AND ${projectAccessPredicate('vendor_project',`$${userIndex}`,`$${allIndex}`)}))))`;
@@ -294,7 +301,9 @@ export const getApprovalVoucher = asyncHandler(async (req, res) => {
   if (!hasGlobalApprovalOverride(req.user)) {
     const access = await pool.query('SELECT 1 FROM user_sites WHERE user_id=$1 AND site_id=$2', [req.user.id, siteId]);
     const allowed = await getAllowedModules(req.user, req.assignedApprovalsOnly);
-    if (!access.rows.length || (Number(row.entry.assigned_admin_id) !== Number(req.user.id) && !isModuleAllowed(allowed, source))) {
+    const readableOwnRequest = Number(row.entry.created_by ?? row.entry.requested_by) === Number(req.user.id)
+      && await documentationPermission(req.user, source);
+    if (!access.rows.length || (Number(row.entry.assigned_admin_id) !== Number(req.user.id) && !isModuleAllowed(allowed, source) && !readableOwnRequest)) {
       return res.status(403).json({ message: 'Access denied to this voucher.' });
     }
     if (['vendor_payment', 'vendor_inventory_payment'].includes(source) && Number(row.entry.assigned_admin_id) !== Number(req.user.id)) {
@@ -311,34 +320,69 @@ export const getApprovalVoucher = asyncHandler(async (req, res) => {
   res.json({ url: await signExpenseDocumentUrl(voucher) });
 });
 
-export const listAllPending = asyncHandler(async (req, res) => {
-  const { site_id, date_from, date_to, module, assigned_admin_id } = req.query;
-  const allowedModules = await getAllowedModules(req.user, req.assignedApprovalsOnly);
-  const personalNotifications = req.query.scope === 'notifications' && req.user.role === 'sub_admin';
+const listApprovalEntries = async (req, res, { history = false } = {}) => {
+  const historyOptions = history ? requestHistoryOptions(req.query) : null;
+  const historyReader = history ? createRequestHistoryReader(pool, historyOptions) : null;
+  if (history) {
+    const access = await pool.query(`SELECT 1 FROM sites s WHERE s.id=$1
+      AND ($2::boolean OR s.organization_id=$3)
+      AND ($4::boolean OR EXISTS(SELECT 1 FROM user_sites us WHERE us.site_id=s.id AND us.user_id=$5))`,
+    [historyOptions.siteId, req.user.role==='super_admin', Number(req.user.organization_id)||1, hasGlobalApprovalOverride(req.user), req.user.id]);
+    if (!access.rows.length) return res.status(403).json({ message: 'This site is unavailable to your account.' });
+    res.set('Cache-Control', 'private, no-store');
+    await Promise.all([historyReader.prepare(), hasRelations(['transaction_transfer_approval_requests', 'plot_status_approvals', 'transaction_documentation',
+      'transaction_party_links', 'edit_requests', 'seek_permissions', 'loyalty_vault_transfers', 'wallet_imprest_transfers',
+      'imprest_expense_requests', 'imprest_returns', 'imprest_allocations'])]);
+    if (req.user.role === 'sub_admin') {
+      // One fresh snapshot for this request; no cross-request grant cache.
+      const permissions = await permissionModel.getPermissions(req.user.id,
+        ['daybook', 'plot_payments', 'farmers', 'misc_income', 'commissions', 'cashflow', 'firm_transactions',
+          'expenses', 'vendors', 'plot_registry', 'construction', 'wallet', 'imprest', 'imprest_management']);
+      if (!(req.user.permissionsByModule instanceof Map)) req.user.permissionsByModule = new Map();
+      for (const [module, permission] of permissions) req.user.permissionsByModule.set(module, permission);
+    }
+    historyOptions.authorizationScope = [req.user.id, req.user.role, req.user.organization_id, req.user.version,
+      req.sessionId, [...(req.user.permissionsByModule || [])].map(([module, row]) =>
+        [module,row?.can_read === true,row?.can_view_all === true]).sort(([a],[b]) => a.localeCompare(b))];
+  }
+  const { site_id, date_from, date_to, module: requestedModule, assigned_admin_id } = req.query;
+  const module = requestedModule || (historyOptions?.source?.startsWith('daybook') ? 'daybook' : historyOptions?.source);
+  // History never exposes decisions or module-wide sub-admin queues: its
+  // visibility below is requester/reviewer based, independent of decision grants.
+  const allowedModules = history ? hasGlobalApprovalOverride(req.user) ? null : new Set() : await getAllowedModules(req.user, req.assignedApprovalsOnly);
+  const personalNotifications = (history || req.query.scope === 'notifications') && req.user.role === 'sub_admin';
   const ownReadableAliases = new Set();
+  const notificationSources = { tar: 'transaction_transfer', pa: 'plot_status', fp: 'farmer_payment', ldp: 'land_deal_payment', mie: 'misc_income_entry',
+    pc: 'plot_commission', pcp: 'plot_commission_payment', cfe: 'cash_flow_entry', ft: 'firm_transaction', pp: 'plot_payment',
+    pip: 'plot_installment_payment', e: 'expense', vp: 'vendor_payment', prp: 'plot_registry_payment', vip: 'vendor_inventory_payment', d: 'daybook' };
   if (personalNotifications) {
     if (!/^\d+$/.test(String(site_id || '')) || Number(site_id) < 1) return res.status(400).json({ message: 'Select a valid site.' });
-    const access = await pool.query('SELECT 1 FROM user_sites us JOIN sites s ON s.id=us.site_id WHERE us.user_id=$1 AND us.site_id=$2 AND s.organization_id=$3',
-      [req.user.id, Number(site_id), Number(req.user.organization_id) || 1]);
-    if (!access.rows.length) return res.status(403).json({ message: 'This site is unavailable to your account.' });
-    const sources = { tar: 'daybook', pa: 'plot_payment', fp: 'farmer_payment', ldp: 'land_deal_payment', mie: 'misc_income_entry',
-      pc: 'plot_commission', pcp: 'plot_commission_payment', cfe: 'cash_flow_entry', ft: 'firm_transaction', pp: 'plot_payment',
-      pip: 'plot_installment_payment', e: 'expense', vp: 'vendor_payment', prp: 'plot_registry_payment', vip: 'vendor_inventory_payment', d: 'daybook' };
+    if (!history) {
+      const access = await pool.query('SELECT 1 FROM user_sites us JOIN sites s ON s.id=us.site_id WHERE us.user_id=$1 AND us.site_id=$2 AND s.organization_id=$3',
+        [req.user.id, Number(site_id), Number(req.user.organization_id) || 1]);
+      if (!access.rows.length) return res.status(403).json({ message: 'This site is unavailable to your account.' });
+    }
     // Current module grants govern tracking one's own submissions; delegation
     // still grants access to that assigned review without a module-wide grant.
-    for (const [alias, source] of Object.entries(sources)) {
+    await Promise.all(Object.entries(notificationSources).map(async ([alias, rawSource]) => {
+      const source = rawSource === 'transaction_transfer' ? 'daybook' : rawSource === 'plot_status' ? 'plot_payment' : rawSource;
       if (await documentationPermission(req.user, source)) ownReadableAliases.add(alias);
-    }
+    }));
   }
 
   const results = [];
+  const collectEntries = async (sql, params, map = row => row) => {
+    if (history) return historyReader.add(sql, params, map);
+    const { rows } = await pool.query(sql, params);
+    results.push(...rows.map(map));
+  };
 
   // Helper to build WHERE clause.
   //   scopedAssigneeId: when set, forces assigned_admin_id = that user (used for sub-admins who
   //   don't hold a module grant but still need to see entries explicitly delegated to them).
   const buildWhere = (tableAlias, siteAlias, extraConditions = [], scopedAssigneeId = null, status = 'pending', dateColumn = 'date') => {
     const sAlias = siteAlias || tableAlias;
-    const conditions = [`${tableAlias}.status = '${status}'`, personalNotifications ? 'TRUE' : chequeReadySql(tableAlias), ...extraConditions];
+    const conditions = [history ? `${tableAlias}.status IN ('approved','rejected')` : `${tableAlias}.status = '${status}'`, history || personalNotifications ? 'TRUE' : chequeReadySql(tableAlias), ...extraConditions];
     const params = [];
     let idx = 1;
     if (site_id) {
@@ -356,8 +400,12 @@ export const listAllPending = asyncHandler(async (req, res) => {
     if (personalNotifications) {
       const viewer = idx++;
       params.push(Number(req.user.id));
+      const creator = tableAlias === 'tar' ? 'requested_by' : 'created_by';
+      const requester = history && historyReader.hasColumn(HISTORY_TABLES[notificationSources[tableAlias]], creator)
+        ? `${tableAlias}.${creator} = $${viewer}`
+        : `COALESCE(to_jsonb(${tableAlias})->>'created_by',to_jsonb(${tableAlias})->>'requested_by') = $${viewer}::text`;
       conditions.push(`(${tableAlias}.assigned_admin_id = $${viewer}${ownReadableAliases.has(tableAlias)
-        ? ` OR COALESCE(to_jsonb(${tableAlias})->>'created_by',to_jsonb(${tableAlias})->>'requested_by') = $${viewer}::text` : ''})`);
+        ? ` OR ${requester}` : ''})`);
     } else if (scopedAssigneeId) {
       conditions.push(`${tableAlias}.assigned_admin_id = $${idx++}`);
       params.push(parseInt(scopedAssigneeId));
@@ -377,7 +425,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if ((!module || module === 'transaction_transfer') && await hasRelation('transaction_transfer_approval_requests')) {
     const scopedReviewer = req.user.role === 'sub_admin' ? req.user.id : null;
     const { where, params } = buildWhere('tar', 'tar', [], scopedReviewer, 'pending', 'transfer_date');
-    const { rows } = await pool.query(`
+    await collectEntries(`
       SELECT tar.*,tar.transfer_date AS date,tar.amount AS debit,tar.amount AS credit,
         'INTERNAL' AS payment_mode,s.name AS site_name,
         requester.name AS created_by_name,reviewer.name AS assigned_admin_name,
@@ -388,30 +436,28 @@ export const listAllPending = asyncHandler(async (req, res) => {
       LEFT JOIN users requester ON requester.id=tar.requested_by
       LEFT JOIN users reviewer ON reviewer.id=tar.assigned_admin_id
       WHERE ${where}
-      ORDER BY tar.created_at DESC,tar.id DESC`, params);
-    results.push(...rows.map((row) => ({
+      ORDER BY tar.created_at DESC,tar.id DESC`, params, (row) => ({
       ...row,
       module_label: 'Transfer Entry',
       particular: `Transfer ${row.source_label} to ${row.target_label}`,
       entry_label: `${row.source_label} → ${row.target_label} · approval pending`,
-    })));
+    }));
   }
 
   const visPlot = moduleVisibility(req.user, allowedModules, 'plot_status');
   // Plot-status review needs migration 158; skip the source until it is run.
   if ((!module || module === 'plot_status') && visPlot.include && await hasRelation('plot_status_approvals')) {
     const { where, params } = buildWhere('pa', 'pa', [], visPlot.scoped ? req.user.id : null);
-    const { rows } = await pool.query(`
+    await collectEntries(`
       SELECT pa.*, s.name AS site_name, u.name AS created_by_name, aa.name AS assigned_admin_name,
         pa.buyer_name AS entity_name, pa.plot_no AS entity_plot_no,
         'Plot status' AS entity_type, 'plot_status' AS source
       FROM plot_status_approvals pa JOIN sites s ON s.id = pa.site_id
       LEFT JOIN users u ON u.id = pa.created_by
       LEFT JOIN users aa ON aa.id = pa.assigned_admin_id
-      WHERE ${where} ORDER BY pa.created_at DESC, pa.id DESC`, params);
-    results.push(...rows.map(row => ({ ...row, module_label: 'Plot status approval',
+      WHERE ${where} ORDER BY pa.created_at DESC, pa.id DESC`, params, row => ({ ...row, module_label: 'Plot status approval',
       entry_label: `Plot ${row.plot_no} updated — ${row.plot_status === 'BOOKED' ? 'BOOKING' : row.plot_status} · Approval pending${row.scheme ? ` · Scheme: ${row.scheme}` : ''}`,
-    })));
+    }));
   }
 
   // 1. Farmer Payments (from farmer_payments table)
@@ -434,12 +480,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
       WHERE ${where}
       ORDER BY fp.date DESC, fp.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       entry_label: `${row.farmer_name} - ₹${row.amount}`,
       module_label: 'Lands Payment',
-    })));
+    }));
   }
 
   // 1b. Land sale receipts (Land Profit — sub-module of farmers, shares its grant and tab)
@@ -462,12 +507,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
       WHERE ${where}
       ORDER BY ldp.date DESC, ldp.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       entry_label: `LAND SALE - ${row.buyer_name} - ₹${row.amount}`,
       module_label: 'Land Sale Receipt',
-    })));
+    }));
   }
 
   // 1c. Miscellaneous income (its own approval module key: misc_income_entry)
@@ -490,15 +534,14 @@ export const listAllPending = asyncHandler(async (req, res) => {
       WHERE ${where}
       ORDER BY mie.date DESC, mie.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       // Debits are refunds: surface them as money out so the reviewer sees the direction.
       debit: row.direction === 'debit' ? row.amount : 0,
       credit: row.direction === 'debit' ? 0 : row.amount,
       entry_label: `${row.direction === 'debit' ? 'MISC INCOME REFUND' : 'MISC INCOME'} - ${row.category_name}${row.party_name ? ' - ' + row.party_name : ''} - ₹${row.amount}`,
       module_label: 'Misc Income',
-    })));
+    }));
   }
 
   // 2. Plot Commissions (Legacy)
@@ -519,12 +562,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
       WHERE ${where}
       ORDER BY pc.date DESC, pc.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       entry_label: `${row.particular} - ₹${row.amount}`,
       module_label: 'Plot Commission (Legacy)',
-    })));
+    }));
   }
 
   // 2.5 Plot Commission Payments (V2)
@@ -555,12 +597,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
       WHERE ${where}
       ORDER BY pcp.date DESC, pcp.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       entry_label: `${row.agent_name} (${row.subject_label || 'Commission'}) - ₹${row.amount}`,
       module_label: row.plot_no ? 'Project Commission payment' : 'Land Commission payout',
-    })));
+    }));
   }
 
   // 3. Cash Flow Entries (exclude trigger-synced duplicates from other modules)
@@ -568,7 +609,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
   if ((!module || module === 'cash_flow_entry') && visCfe.include) {
     const { where, params } = buildWhere('cfe', 'cfe', [], visCfe.scoped ? req.user.id : null);
     const q = `
-                  SELECT cfe.*, cfe.site_id, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
+                  SELECT cfe.*, s.name AS site_name, COALESCE(u.name, u.email) AS created_by_name,
                     COALESCE(aa.name, aa.email) AS assigned_admin_name,
              cfm.ledger_name, cfm.ledger_type, cfm.month, cfm.year, cfm.linked_user_id,
              lu.name AS linked_user_name, lu.email AS linked_user_email,
@@ -594,12 +635,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
         AND cfe.source_module IS NULL
       ORDER BY cfe.date DESC, cfe.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       entry_label: `${row.particular} - Dr:₹${row.debit} Cr:₹${row.credit}`,
       module_label: 'Cash Flow',
-    })));
+    }));
   }
 
   // 4. Firm Transactions
@@ -626,14 +666,13 @@ export const listAllPending = asyncHandler(async (req, res) => {
       WHERE ${where}
       ORDER BY ft.date DESC, ft.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       entry_label: row.is_firm_to_firm_transfer
         ? `${row.firm_name} -> ${row.transfer_to_firm_name || row.name || 'Target'} (${row.transfer_to_site_name || 'Site'}) - ₹${parseFloat(row.debit) || parseFloat(row.credit) || 0}`
         : `${row.firm_name}: ${row.description} - Dr:₹${row.debit} Cr:₹${row.credit}`,
       module_label: 'Firm Transaction',
-    })));
+    }));
   }
 
   // 5. Plot Payments
@@ -656,12 +695,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
       WHERE ${where}
       ORDER BY pp.date DESC, pp.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       entry_label: `Plot ${row.plot_no} (${row.buyer_name || 'N/A'}) - ₹${row.amount}`,
       module_label: 'Plot Payment',
-    })));
+    }));
   }
 
   // 5b. Plot installment payments
@@ -685,12 +723,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
        WHERE ${where}
        ORDER BY pip.payment_date DESC, pip.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map((row) => ({
+    await collectEntries(q, params, (row) => ({
       ...row,
       entry_label: `Plot ${row.entity_plot_no || 'N/A'} installment - ₹${row.amount}`,
       module_label: 'Plot Installment Payment',
-    })));
+    }));
   }
 
   // 6. Expenses
@@ -719,12 +756,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
       WHERE ${where}
       ORDER BY e.date DESC, e.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map(row => ({
+    await collectEntries(q, params, row => ({
       ...row,
       entry_label: `${row.to_entity || row.remark || 'Expense'} - Dr:₹${row.debit} Cr:₹${row.credit}`,
       module_label: 'Expense',
-    })));
+    }));
   }
 
   // 7. Vendor payments
@@ -747,12 +783,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
        WHERE ${where}
        ORDER BY vp.payment_date DESC, vp.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map((row) => ({
+    await collectEntries(q, params, (row) => ({
       ...row,
       entry_label: `${row.entity_name || 'Vendor'} - ₹${row.amount}`,
       module_label: 'Vendor Payment',
-    })));
+    }));
   }
 
   // 8. Standalone registry payments. Linked rows inherit the source plot
@@ -779,12 +814,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
        WHERE ${where}
        ORDER BY prp.payment_date DESC, prp.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map((row) => ({
+    await collectEntries(q, params, (row) => ({
       ...row,
       entry_label: `Registry Plot ${row.entity_plot_no || 'N/A'} - ₹${row.amount}`,
       module_label: 'Registry Payment',
-    })));
+    }));
   }
 
   // 8b. Standalone inventory payments. Item allocations linked to a vendor
@@ -813,12 +847,11 @@ export const listAllPending = asyncHandler(async (req, res) => {
        WHERE ${where}
        ORDER BY vip.payment_date DESC, vip.id DESC
     `;
-    const r = await pool.query(q, params);
-    results.push(...r.rows.map((row) => ({
+    await collectEntries(q, params, (row) => ({
       ...row,
       entry_label: `${row.entity_name || 'Inventory payment'} - ₹${row.amount}`,
       module_label: 'Vendor Inventory Payment',
-    })));
+    }));
   }
 
   // 9. Day Book entries (farmer payments, commissions, expenses auto-created in day_book)
@@ -842,7 +875,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
     if (module === 'farmer_payment') entryTypeFilter = `d.entry_type = 'FARMER PAYMENT'`;
     else if (module === 'plot_commission') entryTypeFilter = `d.entry_type = 'PLOT COMMISSION'`;
     else if (module === 'expense') entryTypeFilter = `d.entry_type = 'EXPENSE'`;
-    else if (module && !['farmer_payment', 'plot_commission', 'expense'].includes(module)) entryTypeFilter = null;
+    else if (module && !['farmer_payment', 'plot_commission', 'expense', 'daybook'].includes(module)) entryTypeFilter = null;
 
     if (entryTypeFilter) {
       const { where, params } = buildWhere('d', 'd', [], visDb.scoped ? req.user.id : null);
@@ -892,8 +925,7 @@ export const listAllPending = asyncHandler(async (req, res) => {
           AND (d.entry_type <> 'FARMER PAYMENT' OR d.farmer_payment_id IS NULL)
         ORDER BY d.date DESC, d.id DESC
       `;
-      const r = await pool.query(q, params);
-      results.push(...r.rows.map(row => {
+      await collectEntries(q, params, row => {
         const src = DAYBOOK_TYPE_MAP[row.entry_type] || 'daybook';
         return {
           ...row,
@@ -901,30 +933,61 @@ export const listAllPending = asyncHandler(async (req, res) => {
           entry_label: `${row.to_entity || row.particular || 'Entry'} - Dr:₹${row.debit || 0} Cr:₹${row.credit || 0}`,
           module_label: DAYBOOK_LABEL_MAP[row.entry_type] || 'Day Book',
         };
-      }));
+      });
     }
   }
 
-  await attachModuleChequeDates(results, pool, (row) => String(row.source).startsWith('daybook') ? 'day_book' : row.source);
-  await attachApprovalClientLinks(results);
-  if (await hasRelation('transaction_documentation')) await enrichTransactionDocumentation(results,req.user);
+  let historyTotal = 0, historyPage;
+  if (history) {
+    if (!historyOptions.source || ['edit_request','seek_permission','wallet_transfer','wallet_imprest_transfer','imprest','imprest_return','imprest_allocation'].includes(historyOptions.source)) {
+      for (const source of await operationalHistorySources(pool, req.user, historyOptions.siteId, {source:historyOptions.source})) {
+        await collectEntries(source.sql, source.params);
+      }
+    }
+    const page = await historyReader.read();
+    historyPage = page;
+    historyTotal = page.total;
+    results.splice(0, results.length, ...page.rows);
+    if (historyOptions.summary) {
+      return res.json({ entries: results, total: historyTotal, page: historyOptions.page, page_size: historyOptions.pageSize,
+        has_more: page.hasMore, ...(historyOptions.cursorMode ? { next_cursor: page.nextCursor, snapshot: page.snapshot } : {}) });
+    }
+  }
+  await Promise.all([
+    attachModuleChequeDates(history ? results.filter(row => Object.hasOwn(ALLOWED_TABLES, row.source) || String(row.source).startsWith('daybook')) : results, pool, (row) => String(row.source).startsWith('daybook') ? 'day_book' : row.source),
+    attachApprovalClientLinks(results),
+    (async () => { if (await hasRelation('transaction_documentation')) await enrichTransactionDocumentation(results,req.user); })(),
+  ]);
 
   // Sort combined results by date DESC
-  results.sort((a, b) => {
+  if (!history) results.sort((a, b) => {
     const dA = new Date(a.source === 'plot_status' ? a.created_at : a.date), dB = new Date(b.source === 'plot_status' ? b.created_at : b.date);
     return dB - dA || b.id - a.id;
   });
 
   const entries = await signApprovalVoucherLinks(results, req.user, pool);
-  if (req.query.scope === 'notifications') {
+  if (!history && req.query.scope === 'notifications') {
     for (const entry of entries) {
       entry.can_decide = chequeReadyForApproval(entry) && (hasGlobalApprovalOverride(req.user)
         || Number(entry.assigned_admin_id) === Number(req.user.id)
         || (!entry.assigned_admin_id && !req.assignedApprovalsOnly && isModuleAllowed(allowedModules, entry.source)));
     }
   }
+  if (history) {
+    await Promise.all(entries.map(async entry => {
+      entry.can_decide = false;
+      if (entry.source === 'seek_permission') entry.attachments = (entry.attachments || []).map(({ name, type, size }) => ({ name, type, size }));
+      if (entry.proof_photo_url) entry.proof_photo_url = await signExpenseDocumentUrl(entry.proof_photo_url);
+      if (entry.proof_key) { entry.proof_url = await getPlotDocUrl(entry.proof_key); delete entry.proof_key; }
+    }));
+    return res.json({ entries, total: historyTotal, page: historyOptions.page, page_size: historyOptions.pageSize,
+      has_more: historyPage.hasMore, ...(historyOptions.cursorMode ? { next_cursor: historyPage.nextCursor, snapshot: historyPage.snapshot } : {}) });
+  }
   res.json({ entries, total: entries.length });
-});
+};
+
+export const listAllPending = asyncHandler((req, res) => listApprovalEntries(req, res));
+export const listRequestHistory = asyncHandler((req, res) => listApprovalEntries(req, res, { history: true }));
 
 /**
  * GET /approvals/counts

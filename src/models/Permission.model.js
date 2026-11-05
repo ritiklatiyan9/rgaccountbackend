@@ -12,9 +12,11 @@ export const ALL_MODULES = Object.freeze([
     'vendors',
     'farmers',
     'commissions',
+    'all_sites_commission',
     'daybook',
     'balance_sheet',
     'cashflow',
+    'all_sites_personal_ledger',
     'firm_transactions',
     'plot_payments',
     'plot_registry',
@@ -52,11 +54,13 @@ export const ALL_MODULES = Object.freeze([
     'tds',
 ]);
 
-const READ_ONLY_MODULES = new Set(['home', 'dashboard', 'wallet', 'finance_forecast', 'balance_sheet', 'reports', 'settings', 'audit_logs', 'management_analytics']);
+const READ_ONLY_MODULES = new Set(['home', 'dashboard', 'wallet', 'finance_forecast', 'balance_sheet', 'reports', 'settings', 'audit_logs', 'management_analytics', 'all_sites_commission', 'all_sites_personal_ledger']);
 // Modules introduced after the original permission rollout stay fail-closed for
 // existing sub-admins. An administrator must opt users into these sensitive
 // document/payment surfaces from the permission matrix.
 const RESTRICTED_MODULES = new Set([
+    'all_sites_commission',
+    'all_sites_personal_ledger',
     'imprest_management',
     // Database-wide downloads and restoration are granted explicitly.
     'backups',
