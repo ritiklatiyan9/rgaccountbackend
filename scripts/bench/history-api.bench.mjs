@@ -81,7 +81,7 @@ try {
     const after=encodeHistoryCursor({...payload,key:{time:timestamp,source,id:String(n)}});
     cases[0][1]={pagination:'cursor',view:'summary',include_total:'true'};
     cases[1][1]={pagination:'cursor',view:'summary',include_total:'false',after};
-    cases[2][1]={pagination:'cursor',view:'summary',include_total:'true',q:'50%_'};
+    cases[2][1]={pagination:'cursor',view:'summary',include_total:'false',q:'50%_'};
   }
   const results=[];
   for(const[name,query]of cases){
