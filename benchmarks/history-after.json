@@ -10,19 +10,19 @@
       "samples": 20,
       "concurrency": 5,
       "sequential": {
-        "p50_ms": 26.9,
-        "p95_ms": 28.3,
-        "p99_ms": 28.7,
-        "wire_bytes": 812,
+        "p50_ms": 27.28,
+        "p95_ms": 28.34,
+        "p99_ms": 33.16,
+        "wire_bytes": 810,
         "json_bytes": 8311,
         "data_queries": 20
       },
       "concurrent": {
-        "p50_ms": 131.06,
-        "p95_ms": 142.11,
-        "p99_ms": 142.19,
-        "wire_bytes": 814,
-        "json_bytes": 8311,
+        "p50_ms": 137,
+        "p95_ms": 157.01,
+        "p99_ms": 157.13,
+        "wire_bytes": 802,
+        "json_bytes": 8306,
         "data_queries": 20
       }
     },
@@ -31,20 +31,20 @@
       "samples": 20,
       "concurrency": 5,
       "sequential": {
-        "p50_ms": 8.02,
-        "p95_ms": 8.27,
-        "p99_ms": 8.36,
+        "p50_ms": 8.13,
+        "p95_ms": 8.87,
+        "p99_ms": 9.42,
         "wire_bytes": 800,
         "json_bytes": 8338,
         "data_queries": 20
       },
       "concurrent": {
-        "p50_ms": 32.91,
-        "p95_ms": 40.64,
-        "p99_ms": 40.74,
+        "p50_ms": 38.71,
+        "p95_ms": 39.25,
+        "p99_ms": 39.31,
         "wire_bytes": 800,
         "json_bytes": 8338,
-        "data_queries": 19
+        "data_queries": 20
       }
     },
     {
@@ -52,20 +52,20 @@
       "samples": 20,
       "concurrency": 5,
       "sequential": {
-        "p50_ms": 87.67,
-        "p95_ms": 149.89,
-        "p99_ms": 244.79,
-        "wire_bytes": 796,
-        "json_bytes": 8240,
+        "p50_ms": 26.42,
+        "p95_ms": 28.66,
+        "p99_ms": 29.01,
+        "wire_bytes": 802,
+        "json_bytes": 8243,
         "data_queries": 20
       },
       "concurrent": {
-        "p50_ms": 353.04,
-        "p95_ms": 439.74,
-        "p99_ms": 439.81,
-        "wire_bytes": 801,
-        "json_bytes": 8242,
-        "data_queries": 19
+        "p50_ms": 129.75,
+        "p95_ms": 133.3,
+        "p99_ms": 133.37,
+        "wire_bytes": 802,
+        "json_bytes": 8243,
+        "data_queries": 20
       }
     }
   ]
