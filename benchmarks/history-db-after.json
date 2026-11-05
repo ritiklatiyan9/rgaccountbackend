@@ -1,0 +1,1613 @@
+{
+  "phase": "after",
+  "scope": "read-only observational plans on busiest expense site; planning actor only; no financial rows returned",
+  "profiles": [
+    {
+      "case": "first_page",
+      "kind": "authorization",
+      "client_ms": 362.4521669999999
+    },
+    {
+      "case": "first_page",
+      "kind": "schema",
+      "client_ms": 920.3362910000001
+    },
+    {
+      "case": "first_page",
+      "kind": "relations",
+      "client_ms": 1234.8836669999996
+    },
+    {
+      "case": "first_page",
+      "kind": "history",
+      "client_ms": 2872.12075,
+      "execution_ms": 28.525,
+      "planning_ms": 466.795,
+      "sort_spills": 0,
+      "shared_hits": 21325,
+      "shared_reads": 0,
+      "index_scans": 121,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 27275,
+          "loops": 1092
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 58,
+          "loops": 2
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 19,
+          "loops": 2
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 2,
+          "loops": 2
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 30,
+          "loops": 2
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 20,
+          "loops": 2
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 8,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 40,
+          "loops": 11
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 46,
+          "loops": 1
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 73,
+          "loops": 3
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 25,
+          "loops": 3
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 177,
+          "loops": 3
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "legacy_offset_exact_count",
+      "kind": "authorization",
+      "client_ms": 270.5464579999998
+    },
+    {
+      "case": "legacy_offset_exact_count",
+      "kind": "history",
+      "client_ms": 1024.989708000001,
+      "execution_ms": 85.747,
+      "planning_ms": 61.83,
+      "sort_spills": 0,
+      "shared_hits": 43465,
+      "shared_reads": 0,
+      "index_scans": 152,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "plots",
+          "rows_removed": 1326,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 54550,
+          "loops": 2182
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 87,
+          "loops": 3
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 37,
+          "loops": 3
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 3,
+          "loops": 3
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 45,
+          "loops": 3
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 30,
+          "loops": 3
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 12,
+          "loops": 3
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 60,
+          "loops": 7
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 92,
+          "loops": 2
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 67,
+          "loops": 3
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 24,
+          "loops": 3
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 165,
+          "loops": 3
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "status",
+      "kind": "authorization",
+      "client_ms": 264.2591250000005
+    },
+    {
+      "case": "status",
+      "kind": "history",
+      "client_ms": 3184.9436669999996,
+      "execution_ms": 9.671,
+      "planning_ms": 53.326,
+      "sort_spills": 0,
+      "shared_hits": 3008,
+      "shared_reads": 0,
+      "index_scans": 121,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 104,
+          "loops": 4
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 59,
+          "loops": 2
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 24,
+          "loops": 2
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 2,
+          "loops": 2
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 30,
+          "loops": 2
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 20,
+          "loops": 2
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 8,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 40,
+          "loops": 10
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 48,
+          "loops": 1
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 87,
+          "loops": 3
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 26,
+          "loops": 3
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 189,
+          "loops": 3
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "date_range",
+      "kind": "authorization",
+      "client_ms": 341.38324999999895
+    },
+    {
+      "case": "date_range",
+      "kind": "history",
+      "client_ms": 2300.7387500000004,
+      "execution_ms": 13.718,
+      "planning_ms": 54.152,
+      "sort_spills": 0,
+      "shared_hits": 4065,
+      "shared_reads": 0,
+      "index_scans": 112,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 8,
+          "loops": 1
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 27275,
+          "loops": 1092
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 58,
+          "loops": 2
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 19,
+          "loops": 2
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 2,
+          "loops": 2
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 30,
+          "loops": 2
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 20,
+          "loops": 2
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 8,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 40,
+          "loops": 11
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 46,
+          "loops": 1
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 41,
+          "loops": 2
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 92,
+          "loops": 2
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "search",
+      "kind": "authorization",
+      "client_ms": 302.1402079999989
+    },
+    {
+      "case": "search",
+      "kind": "history",
+      "client_ms": 778.4511249999996,
+      "execution_ms": 91.249,
+      "planning_ms": 78.819,
+      "sort_spills": 0,
+      "shared_hits": 53297,
+      "shared_reads": 0,
+      "index_scans": 135,
+      "seq_scans": [
+        {
+          "table": "users",
+          "rows_removed": 40,
+          "loops": 11586
+        },
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 27275,
+          "loops": 1092
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 58,
+          "loops": 2
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 19,
+          "loops": 2
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 2,
+          "loops": 13
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 2073
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 30,
+          "loops": 13
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 20,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 8,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 46,
+          "loops": 1
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 73,
+          "loops": 3
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 25,
+          "loops": 3
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 177,
+          "loops": 3
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "explicit_exact_count",
+      "kind": "authorization",
+      "client_ms": 284.19304199999897
+    },
+    {
+      "case": "explicit_exact_count",
+      "kind": "history",
+      "client_ms": 955.9484580000008,
+      "execution_ms": 54.8,
+      "planning_ms": 71.636,
+      "sort_spills": 0,
+      "shared_hits": 57615,
+      "shared_reads": 0,
+      "index_scans": 172,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 54550,
+          "loops": 2183
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 87,
+          "loops": 3
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 37,
+          "loops": 3
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 3,
+          "loops": 3
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 45,
+          "loops": 3
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 30,
+          "loops": 3
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 12,
+          "loops": 3
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 60,
+          "loops": 12
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 92,
+          "loops": 2
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 99,
+          "loops": 4
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 33,
+          "loops": 4
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 250,
+          "loops": 4
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    }
+  ],
+  "slowest_five": [
+    {
+      "case": "search",
+      "kind": "history",
+      "client_ms": 778.4511249999996,
+      "execution_ms": 91.249,
+      "planning_ms": 78.819,
+      "sort_spills": 0,
+      "shared_hits": 53297,
+      "shared_reads": 0,
+      "index_scans": 135,
+      "seq_scans": [
+        {
+          "table": "users",
+          "rows_removed": 40,
+          "loops": 11586
+        },
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 27275,
+          "loops": 1092
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 58,
+          "loops": 2
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 19,
+          "loops": 2
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 2,
+          "loops": 13
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 2073
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 30,
+          "loops": 13
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 20,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 8,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 46,
+          "loops": 1
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 73,
+          "loops": 3
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 25,
+          "loops": 3
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 177,
+          "loops": 3
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "legacy_offset_exact_count",
+      "kind": "history",
+      "client_ms": 1024.989708000001,
+      "execution_ms": 85.747,
+      "planning_ms": 61.83,
+      "sort_spills": 0,
+      "shared_hits": 43465,
+      "shared_reads": 0,
+      "index_scans": 152,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "plots",
+          "rows_removed": 1326,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 54550,
+          "loops": 2182
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 87,
+          "loops": 3
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 37,
+          "loops": 3
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 3,
+          "loops": 3
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 45,
+          "loops": 3
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 30,
+          "loops": 3
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 12,
+          "loops": 3
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 60,
+          "loops": 7
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 92,
+          "loops": 2
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 67,
+          "loops": 3
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 24,
+          "loops": 3
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 165,
+          "loops": 3
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "explicit_exact_count",
+      "kind": "history",
+      "client_ms": 955.9484580000008,
+      "execution_ms": 54.8,
+      "planning_ms": 71.636,
+      "sort_spills": 0,
+      "shared_hits": 57615,
+      "shared_reads": 0,
+      "index_scans": 172,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 54550,
+          "loops": 2183
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 87,
+          "loops": 3
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 37,
+          "loops": 3
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 3,
+          "loops": 3
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 45,
+          "loops": 3
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 30,
+          "loops": 3
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 12,
+          "loops": 3
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 60,
+          "loops": 12
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 92,
+          "loops": 2
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 3
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 99,
+          "loops": 4
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 33,
+          "loops": 4
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 250,
+          "loops": 4
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "first_page",
+      "kind": "history",
+      "client_ms": 2872.12075,
+      "execution_ms": 28.525,
+      "planning_ms": 466.795,
+      "sort_spills": 0,
+      "shared_hits": 21325,
+      "shared_reads": 0,
+      "index_scans": 121,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 27275,
+          "loops": 1092
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 58,
+          "loops": 2
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 19,
+          "loops": 2
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 2,
+          "loops": 2
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 30,
+          "loops": 2
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 20,
+          "loops": 2
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 8,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 40,
+          "loops": 11
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 46,
+          "loops": 1
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 73,
+          "loops": 3
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 25,
+          "loops": 3
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 177,
+          "loops": 3
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    },
+    {
+      "case": "date_range",
+      "kind": "history",
+      "client_ms": 2300.7387500000004,
+      "execution_ms": 13.718,
+      "planning_ms": 54.152,
+      "sort_spills": 0,
+      "shared_hits": 4065,
+      "shared_reads": 0,
+      "index_scans": 112,
+      "seq_scans": [
+        {
+          "table": "sites",
+          "rows_removed": 8,
+          "loops": 1
+        },
+        {
+          "table": "farmers",
+          "rows_removed": 27275,
+          "loops": 1092
+        },
+        {
+          "table": "land_deal_payments",
+          "rows_removed": 58,
+          "loops": 2
+        },
+        {
+          "table": "misc_income_entries",
+          "rows_removed": 19,
+          "loops": 2
+        },
+        {
+          "table": "plot_commissions",
+          "rows_removed": 2,
+          "loops": 2
+        },
+        {
+          "table": "firm_transactions",
+          "rows_removed": 30,
+          "loops": 2
+        },
+        {
+          "table": "firms",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "plot_installment_payments",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "vendor_payments",
+          "rows_removed": 20,
+          "loops": 2
+        },
+        {
+          "table": "vendor_commitments",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "vendor_inventory_payments",
+          "rows_removed": 8,
+          "loops": 2
+        },
+        {
+          "table": "vendor_inventory_orders",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "users",
+          "rows_removed": 40,
+          "loops": 11
+        },
+        {
+          "table": "seek_permissions",
+          "rows_removed": 0,
+          "loops": 0
+        },
+        {
+          "table": "loyalty_vault_transfers",
+          "rows_removed": 46,
+          "loops": 1
+        },
+        {
+          "table": "wallet_imprest_transfers",
+          "rows_removed": 0,
+          "loops": 2
+        },
+        {
+          "table": "imprest_expense_requests",
+          "rows_removed": 41,
+          "loops": 2
+        },
+        {
+          "table": "imprest_returns",
+          "rows_removed": 16,
+          "loops": 2
+        },
+        {
+          "table": "imprest_allocations",
+          "rows_removed": 92,
+          "loops": 2
+        },
+        {
+          "table": "plots",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "plot_commissions_v2",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "cash_flow_months",
+          "rows_removed": 0,
+          "loops": 1
+        },
+        {
+          "table": "farmer_payments",
+          "rows_removed": 0,
+          "loops": 0
+        }
+      ]
+    }
+  ],
+  "round_trip": {
+    "samples": 7,
+    "p50_ms": 252.91,
+    "p95_ms": 264.89
+  },
+  "statistics": [
+    {
+      "relname": "cash_flow_entries",
+      "n_live_tup": "28241",
+      "n_dead_tup": "410",
+      "last_autovacuum": "2026-10-29T07:56:29.794Z",
+      "last_autoanalyze": "2026-10-26T18:23:54.724Z",
+      "last_analyze": "2026-11-05T08:29:18.274Z",
+      "bytes": "29949952"
+    },
+    {
+      "relname": "expenses",
+      "n_live_tup": "14509",
+      "n_dead_tup": "2436",
+      "last_autovacuum": null,
+      "last_autoanalyze": null,
+      "last_analyze": "2026-11-05T08:29:15.288Z",
+      "bytes": "13418496"
+    },
+    {
+      "relname": "plot_payments",
+      "n_live_tup": "7366",
+      "n_dead_tup": "505",
+      "last_autovacuum": null,
+      "last_autoanalyze": null,
+      "last_analyze": "2026-11-05T08:28:52.744Z",
+      "bytes": "6619136"
+    },
+    {
+      "relname": "day_book",
+      "n_live_tup": "1121",
+      "n_dead_tup": "263",
+      "last_autovacuum": null,
+      "last_autoanalyze": null,
+      "last_analyze": "2026-11-05T08:28:58.597Z",
+      "bytes": "1622016"
+    },
+    {
+      "relname": "edit_requests",
+      "n_live_tup": "226",
+      "n_dead_tup": "83",
+      "last_autovacuum": null,
+      "last_autoanalyze": null,
+      "last_analyze": "2026-11-05T08:29:06.947Z",
+      "bytes": "737280"
+    },
+    {
+      "relname": "loyalty_vault_transfers",
+      "n_live_tup": "48",
+      "n_dead_tup": "47",
+      "last_autovacuum": null,
+      "last_autoanalyze": "2026-10-28T06:24:37.790Z",
+      "last_analyze": "2026-11-05T08:29:29.164Z",
+      "bytes": "212992"
+    },
+    {
+      "relname": "seek_permissions",
+      "n_live_tup": "20",
+      "n_dead_tup": "19",
+      "last_autovacuum": null,
+      "last_autoanalyze": "2026-11-04T12:14:22.559Z",
+      "last_analyze": "2026-11-05T08:29:47.988Z",
+      "bytes": "131072"
+    }
+  ],
+  "settings": [
+    {
+      "name": "autovacuum",
+      "setting": "on",
+      "unit": null
+    },
+    {
+      "name": "autovacuum_analyze_scale_factor",
+      "setting": "0.1",
+      "unit": null
+    },
+    {
+      "name": "autovacuum_vacuum_scale_factor",
+      "setting": "0.2",
+      "unit": null
+    },
+    {
+      "name": "max_connections",
+      "setting": "225",
+      "unit": null
+    },
+    {
+      "name": "statement_timeout",
+      "setting": "15000",
+      "unit": "ms"
+    }
+  ],
+  "indexes": {
+    "total": 22,
+    "valid": 22
+  },
+  "redis_configured": false
+}

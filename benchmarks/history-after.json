@@ -9,20 +9,21 @@
       "case": "first_page",
       "samples": 20,
       "concurrency": 5,
+      "exact_count_requested": false,
       "sequential": {
-        "p50_ms": 27.28,
-        "p95_ms": 28.34,
-        "p99_ms": 33.16,
-        "wire_bytes": 810,
-        "json_bytes": 8311,
+        "p50_ms": 10.51,
+        "p95_ms": 12.89,
+        "p99_ms": 14.08,
+        "wire_bytes": 814,
+        "json_bytes": 8310,
         "data_queries": 20
       },
       "concurrent": {
-        "p50_ms": 137,
-        "p95_ms": 157.01,
-        "p99_ms": 157.13,
-        "wire_bytes": 802,
-        "json_bytes": 8306,
+        "p50_ms": 49.5,
+        "p95_ms": 56.04,
+        "p99_ms": 56.15,
+        "wire_bytes": 815,
+        "json_bytes": 8310,
         "data_queries": 20
       }
     },
@@ -30,19 +31,20 @@
       "case": "deep_page",
       "samples": 20,
       "concurrency": 5,
+      "exact_count_requested": false,
       "sequential": {
-        "p50_ms": 8.13,
-        "p95_ms": 8.87,
-        "p99_ms": 9.42,
-        "wire_bytes": 800,
+        "p50_ms": 8.45,
+        "p95_ms": 11.25,
+        "p99_ms": 12.12,
+        "wire_bytes": 798,
         "json_bytes": 8338,
         "data_queries": 20
       },
       "concurrent": {
-        "p50_ms": 38.71,
-        "p95_ms": 39.25,
-        "p99_ms": 39.31,
-        "wire_bytes": 800,
+        "p50_ms": 39.39,
+        "p95_ms": 42.11,
+        "p99_ms": 42.19,
+        "wire_bytes": 798,
         "json_bytes": 8338,
         "data_queries": 20
       }
@@ -51,18 +53,19 @@
       "case": "literal_search",
       "samples": 20,
       "concurrency": 5,
+      "exact_count_requested": false,
       "sequential": {
-        "p50_ms": 26.42,
-        "p95_ms": 28.66,
-        "p99_ms": 29.01,
-        "wire_bytes": 802,
+        "p50_ms": 26.7,
+        "p95_ms": 28.01,
+        "p99_ms": 31.97,
+        "wire_bytes": 801,
         "json_bytes": 8243,
         "data_queries": 20
       },
       "concurrent": {
-        "p50_ms": 129.75,
-        "p95_ms": 133.3,
-        "p99_ms": 133.37,
+        "p50_ms": 128.5,
+        "p95_ms": 144.1,
+        "p99_ms": 144.17,
         "wire_bytes": 802,
         "json_bytes": 8243,
         "data_queries": 20

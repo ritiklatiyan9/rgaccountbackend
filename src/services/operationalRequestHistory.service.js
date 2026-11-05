@@ -59,6 +59,7 @@ export async function operationalHistorySources(db, actor, siteId, {source: requ
   });
   if (['wallet_transfer','wallet_imprest_transfer'].includes(requestedSource) || !personal && !management) return sources;
   const visible = management && !admin ? await visibleImprestPeople(db, actor, siteId) : [];
+  visible.sort((a,b)=>a-b);
   const params = [siteId, actor.id, admin, personal, management, visible];
   for (const [table, type, source, label, credit] of [
     ['imprest_expense_requests', 'imprest', 'imprest', 'Imprest request', false],

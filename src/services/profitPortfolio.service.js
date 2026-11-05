@@ -6,7 +6,7 @@ import { profitFrom } from '../graphql/services/kpi.service.js';
 const number = value => Number(value) || 0;
 const money = value => Math.round(number(value) * 100) / 100;
 const pct = (value, basis) => basis > 0 ? money(value / basis * 100) : 0;
-const operatingSources = `'firm_transactions', 'personal_ledger', 'plot_payments', 'plot_installment_payments',
+const operatingSources = `'firm_transactions', 'cashflow_transfers', 'personal_ledger', 'plot_payments', 'plot_installment_payments',
   'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements'`;
 
 // One scoped ledger scan feeds every site's books. Keep the same canonical TDS
@@ -116,12 +116,13 @@ export const profitPortfolioQueries = {
       UNION ALL SELECT site_id, tds_amount FROM operating_tds
     ) costs GROUP BY site_id
   ), ledger_balances AS (
-    SELECT site_id, SUM(credit)::numeric AS total_money_in, SUM(debit)::numeric AS total_money_out,
+    SELECT site_id, SUM(credit) FILTER (WHERE source_key <> 'cashflow_transfers')::numeric AS total_money_in,
+           SUM(debit) FILTER (WHERE source_key <> 'cashflow_transfers')::numeric AS total_money_out,
            SUM(credit - debit) FILTER (WHERE bucket = 'cash')::numeric AS cash_balance,
            SUM(credit - debit) FILTER (WHERE bucket <> 'cash')::numeric AS bank_balance,
            SUM(credit - debit)::numeric AS balance_before_imprest,
-           SUM(credit) FILTER (WHERE entry_date >= DATE '1900-01-01')::numeric AS period_money_in,
-           SUM(debit) FILTER (WHERE entry_date >= DATE '1900-01-01')::numeric AS period_money_out,
+           SUM(credit) FILTER (WHERE entry_date >= DATE '1900-01-01' AND source_key <> 'cashflow_transfers')::numeric AS period_money_in,
+           SUM(debit) FILTER (WHERE entry_date >= DATE '1900-01-01' AND source_key <> 'cashflow_transfers')::numeric AS period_money_out,
            SUM(credit - debit) FILTER (WHERE entry_date >= DATE '1900-01-01')::numeric AS period_net
       FROM ledger GROUP BY site_id
   ), user_imprest AS (

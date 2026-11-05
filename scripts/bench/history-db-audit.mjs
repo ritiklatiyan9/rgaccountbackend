@@ -23,19 +23,19 @@ try{
       index_scans:nodes.filter(node=>/Index.*Scan/.test(node['Node Type'])).length,seq_scans:[...scans.values()]});
     return {rows:[{entries:[],total:0}]};
   };
-  const common={view:'summary',pagination:'cursor',include_total:'true'};
-  for(const[name,query]of[['first_page',common],['deep_page',{view:'summary',page:'1000'}],['status',{...common,status:'rejected'}],
-    ['date_range',{...common,from:'2026-01-01',to:'2026-11-05'}],['search',{...common,q:'payment'}],['cursor_no_count',{...common,include_total:'false'}]]){
+  const common={view:'summary',pagination:'cursor',include_total:'false'};
+  for(const[name,query]of[['first_page',common],['legacy_offset_exact_count',{view:'summary',page:'1000'}],['status',{...common,status:'rejected'}],
+    ['date_range',{...common,from:'2026-01-01',to:'2026-11-05'}],['search',{...common,q:'payment'}],['explicit_exact_count',{...common,include_total:'true'}]]){
     scenario=name;await new Promise((resolve,reject)=>listRequestHistory({user:{id:0,role:'admin',organization_id:site.organization_id},query:{site_id:String(site.id),...query}},
       {set(){return this;},status(code){reject(new Error(`Plan response ${code}`));return this;},json(){resolve();}},reject));
   }
   const ping=[];for(let i=0;i<7;i++){const start=performance.now();await client.query('SELECT 1');ping.push(performance.now()-start);}
   const tables=['cash_flow_entries','expenses','day_book','plot_payments','edit_requests','seek_permissions','loyalty_vault_transfers'];
   const {rows:statistics}=await client.query(`SELECT relname,n_live_tup,n_dead_tup,last_autovacuum,last_autoanalyze,last_analyze,
-    pg_total_relation_size(relid) AS bytes FROM pg_stat_user_tables WHERE relname=ANY($1) ORDER BY n_live_tup DESC`,[tables]);
+    pg_total_relation_size(relid) AS bytes FROM pg_stat_user_tables WHERE schemaname='public' AND relname=ANY($1) ORDER BY n_live_tup DESC`,[tables]);
   const {rows:settings}=await client.query("SELECT name,setting,unit FROM pg_settings WHERE name=ANY($1)",[['autovacuum','autovacuum_vacuum_scale_factor','autovacuum_analyze_scale_factor','statement_timeout','max_connections']]);
   const {rows:indexes}=await client.query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE i.indisvalid)::int AS valid
-    FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid WHERE c.relname LIKE 'request_history_%'`);
+    FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid WHERE c.relnamespace='public'::regnamespace AND c.relname LIKE 'request_history_%'`);
   const sorted=[...ping].sort((a,b)=>a-b);
   const report={phase:'after',scope:'read-only observational plans on busiest expense site; planning actor only; no financial rows returned',
     profiles,slowest_five:[...profiles].filter(row=>row.kind==='history').sort((a,b)=>b.execution_ms-a.execution_ms).slice(0,5),

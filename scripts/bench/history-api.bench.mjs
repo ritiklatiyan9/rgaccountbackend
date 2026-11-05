@@ -8,7 +8,8 @@ import { gunzipSync } from 'node:zlib';
 import express from 'express';
 import { PGlite } from '@electric-sql/pglite';
 
-const phase = process.env.HISTORY_BENCH_PHASE || 'before';
+const phase = process.env.HISTORY_BENCH_PHASE || 'after';
+if(!['before','after'].includes(phase))throw new Error('HISTORY_BENCH_PHASE must be before or after');
 const modulePath = phase === 'before' ? fileURLToPath(new URL('../../benchmarks/baseline/requestHistory.service.mjs',import.meta.url))
   : fileURLToPath(new URL('../../src/services/requestHistory.service.js', import.meta.url));
 const { createRequestHistoryReader, requestHistoryOptions } = await import(pathToFileURL(modulePath));
@@ -79,7 +80,7 @@ try {
     const source=orderedSources[boundaryRank%sources.length];
     const timestamp=`2025-01-01T00:00:00.${String(n).padStart(6,'0')}+00:00`;
     const after=encodeHistoryCursor({...payload,key:{time:timestamp,source,id:String(n)}});
-    cases[0][1]={pagination:'cursor',view:'summary',include_total:'true'};
+    cases[0][1]={pagination:'cursor',view:'summary',include_total:'false'};
     cases[1][1]={pagination:'cursor',view:'summary',include_total:'false',after};
     cases[2][1]={pagination:'cursor',view:'summary',include_total:'false',q:'50%_'};
   }
@@ -94,7 +95,8 @@ try {
     for(let i=0;i<4;i++)concurrent.push(...await Promise.all(Array.from({length:5},()=>request(query))));
     const describe=rows=>({p50_ms:+percentile(rows.map(row=>row.ms),.50).toFixed(2),p95_ms:+percentile(rows.map(row=>row.ms),.95).toFixed(2),
       p99_ms:+percentile(rows.map(row=>row.ms),.99).toFixed(2),wire_bytes:rows[0].wire_bytes,json_bytes:rows[0].json_bytes});
-    results.push({case:name,samples,concurrency:5,sequential:{...describe(sequential),data_queries:sequentialQueries},
+    results.push({case:name,samples,concurrency:5,exact_count_requested:phase==='before'||query.include_total!=='false',
+      sequential:{...describe(sequential),data_queries:sequentialQueries},
       concurrent:{...describe(concurrent),data_queries:dataQueries-burstStart}});
   }
   const report={phase,fixture_rows:perSource*sources.length,page_size:20,auth:'fixture token; hosted auth excluded',engine:'PGlite, disposable fixture',results};

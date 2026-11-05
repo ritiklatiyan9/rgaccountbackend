@@ -1,5 +1,6 @@
+import { warmRequestHistory } from '../src/services/requestHistoryWarmup.service.js';
 import { listRequestHistory } from '../src/controllers/approval.controller.js';
-import { requireApprovalAccess } from '../src/middlewares/permission.middleware.js';
+import requireRole from '../src/middlewares/role.middleware.js';
 import { historyReadLimit, historyTransport, historyErrors } from '../src/middlewares/historyTransport.middleware.js';
 // Authenticated, loopback-only reader for wallet balances, openings and amount explanations. Financial modules
 // keep their normal API; there are no write endpoints or startup migrations.
@@ -29,8 +30,8 @@ const auth=(req,res,next)=>{
 };
 app.use(requestPerformance({poolStats:getDatabasePoolStats}));
 app.use(cors({origin:['http://127.0.0.1:5174','http://localhost:5174'],credentials:true,exposedHeaders:['Server-Timing']}));
-app.get('/health',(_req,res)=>res.json({service:'wallet-opening-reader',read_only:true,request_history_version:2}));
-app.get('/approvals/history',auth,requireApprovalAccess,historyReadLimit,historyTransport,listRequestHistory,historyErrors);
+app.get('/health',(_req,res)=>res.json({service:'wallet-opening-reader',read_only:true,request_history_version:4}));
+app.get('/approvals/history',auth,requireRole('admin','sub_admin'),historyReadLimit,historyTransport,listRequestHistory,historyErrors);
 app.get('/wallet',auth,summary);
 app.get('/wallet/workspace',auth,workspace);
 app.get('/wallet/holders',auth,holders);
@@ -47,6 +48,6 @@ app.use(errorMiddleware);
 const port=Number(process.env.WALLET_OPENING_PREVIEW_PORT||8003);
 // Establish the two bounded read connections before advertising readiness.
 // This warms transport only; every wallet balance is still read from the DB.
-await Promise.all([pool.query('SELECT 1'),pool.query('SELECT 1')]);
+await Promise.all([pool.query('SELECT 1'),pool.query('SELECT 1'),warmRequestHistory(pool)]);
 const server=app.listen(port,'127.0.0.1',()=>console.log(`Wallet opening reader ready on http://127.0.0.1:${port}`));
 for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>server.close(()=>pool.end().finally(()=>process.exit(0))));

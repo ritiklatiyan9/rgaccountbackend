@@ -278,7 +278,7 @@ export async function getExpenseBreakdown(siteId, start, end, withRunning = fals
         WHERE le.site_id = $1 ${from('le')} AND le.entry_date < $3
           AND (le.debit <> 0 OR le.credit <> 0)
           AND le.source_key NOT IN (
-            'firm_transactions', 'personal_ledger', 'plot_payments',
+            'firm_transactions', 'cashflow_transfers', 'personal_ledger', 'plot_payments',
             'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements'
           )
           AND le.ledger_type <> 'person'
@@ -321,7 +321,7 @@ export async function getRunningExpense(siteId, end) {
       WHERE le.site_id = $1 AND le.entry_date < $2::date
         AND (le.debit <> 0 OR le.credit <> 0)
         AND le.source_key NOT IN (
-          'firm_transactions', 'personal_ledger', 'plot_payments',
+          'firm_transactions', 'cashflow_transfers', 'personal_ledger', 'plot_payments',
           'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'partner_profit_payments', 'tds_settlements'
         )
         AND le.ledger_type <> 'person'
@@ -354,18 +354,19 @@ export async function getMiscIncome(siteId, start, end) {
 // as imprest. Staff float and pending site-funded cash handovers reduce that
 // distributable cash; Admins do not have a separate personal imprest float.
 // Period movement is returned separately; a time filter must never turn a
-// stock balance into only today's movement.
+// stock balance into only today's movement. Internal transfers change stock,
+// but are excluded from external money-in/out totals.
 export async function getSiteBalanceDetail(siteId, start, end, db = pool) {
   const { rows } = await db.query(
     `WITH ledger AS (
        SELECT
-         COALESCE(SUM(credit) FILTER (WHERE entry_date < $3::date), 0)::numeric AS total_money_in,
-         COALESCE(SUM(debit) FILTER (WHERE entry_date < $3::date), 0)::numeric AS total_money_out,
+         COALESCE(SUM(credit) FILTER (WHERE entry_date < $3::date AND source_key <> 'cashflow_transfers'), 0)::numeric AS total_money_in,
+         COALESCE(SUM(debit) FILTER (WHERE entry_date < $3::date AND source_key <> 'cashflow_transfers'), 0)::numeric AS total_money_out,
          COALESCE(SUM(credit - debit) FILTER (WHERE entry_date < $3::date AND bucket = 'cash'), 0)::numeric AS cash_balance,
          COALESCE(SUM(credit - debit) FILTER (WHERE entry_date < $3::date AND bucket <> 'cash'), 0)::numeric AS bank_balance,
          COALESCE(SUM(credit - debit) FILTER (WHERE entry_date < $3::date), 0)::numeric AS balance_before_imprest,
-         COALESCE(SUM(credit) FILTER (WHERE entry_date >= $2::date AND entry_date < $3::date), 0)::numeric AS period_money_in,
-         COALESCE(SUM(debit) FILTER (WHERE entry_date >= $2::date AND entry_date < $3::date), 0)::numeric AS period_money_out,
+         COALESCE(SUM(credit) FILTER (WHERE entry_date >= $2::date AND entry_date < $3::date AND source_key <> 'cashflow_transfers'), 0)::numeric AS period_money_in,
+         COALESCE(SUM(debit) FILTER (WHERE entry_date >= $2::date AND entry_date < $3::date AND source_key <> 'cashflow_transfers'), 0)::numeric AS period_money_out,
          COALESCE(SUM(credit - debit) FILTER (WHERE entry_date >= $2::date AND entry_date < $3::date), 0)::numeric AS period_net
        FROM ledger_entries
        WHERE site_id = $1
@@ -499,7 +500,8 @@ export async function getSiteCashflow(siteId, start, end) {
      FROM cash_flow_entries cfe
      JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
      WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
-       AND LOWER(cfm.ledger_type) = 'site'`,
+       AND LOWER(cfm.ledger_type) = 'site'
+       AND cfe.source_module IS DISTINCT FROM 'cashflow_transfers'`,
     [siteId, start, end]
   );
   const credit = parseFloat(rows[0].total_credit) || 0;
@@ -534,6 +536,7 @@ export async function getPersonalLedgerCredit(siteId, start, end) {
      WHERE cfe.site_id = $1 ${dateFilter('cfe.date', 2)}
        AND LOWER(cfm.ledger_type) = 'person'
        AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
+       AND cfe.source_module IS DISTINCT FROM 'cashflow_transfers'
        AND cfe.credit > 0
        AND financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)`,
     [siteId, start, end]

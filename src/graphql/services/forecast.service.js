@@ -48,7 +48,7 @@ const HISTORICAL_SQL = `
            COUNT(*)::int AS transactions
       FROM ledger_entries
      WHERE site_id = $1
-       AND source_key <> 'firm_transactions'
+       AND source_key NOT IN ('firm_transactions', 'cashflow_transfers')
        AND entry_date >= date_trunc('month', CURRENT_DATE) - make_interval(months => $2::int)
        AND entry_date <= CURRENT_DATE
      GROUP BY 1
@@ -189,7 +189,7 @@ const WEEKDAY_SQL = `
          COALESCE(SUM(debit), 0)::float8 AS outflow,
          COUNT(*)::int AS transactions
     FROM ledger_entries
-   WHERE site_id = $1 AND source_key <> 'firm_transactions'
+   WHERE site_id = $1 AND source_key NOT IN ('firm_transactions', 'cashflow_transfers')
      AND entry_date >= date_trunc('month', CURRENT_DATE) - make_interval(months => $2::int)
      AND entry_date <= CURRENT_DATE
    GROUP BY 1 ORDER BY 1`;
@@ -200,7 +200,7 @@ const SOURCE_SQL = `
          COALESCE(SUM(debit), 0)::float8 AS outflow,
          COUNT(*)::int AS transactions
     FROM ledger_entries
-   WHERE site_id = $1 AND source_key <> 'firm_transactions'
+   WHERE site_id = $1 AND source_key NOT IN ('firm_transactions', 'cashflow_transfers')
      AND entry_date >= date_trunc('month', CURRENT_DATE) - make_interval(months => $2::int)
      AND entry_date <= CURRENT_DATE
    GROUP BY source_key

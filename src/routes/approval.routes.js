@@ -31,7 +31,9 @@ router.use(authMiddleware);
 router.use(requireRole('admin', 'sub_admin'));
 
 router.get('/pending', requireApprovalAccess, approvalReadCache, listAllPending);
-router.get('/history', requireApprovalAccess, historyReadLimit, historyTransport, listRequestHistory, historyErrors);
+// History has its own fresh requester/reviewer grants; no approval-decision
+// grant lookup is needed on this read-only route. The router role guard applies.
+router.get('/history', historyReadLimit, historyTransport, listRequestHistory, historyErrors);
 router.get('/counts', requireApprovalAccess, approvalReadCache, getPendingCounts);
 router.get('/:id/voucher', requireApprovalAccess, getApprovalVoucher);
 router.put('/:id/approve', requireApprovalAccess, bustApprovalCache, approveEntry);

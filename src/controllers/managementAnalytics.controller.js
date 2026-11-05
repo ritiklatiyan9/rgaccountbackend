@@ -155,6 +155,7 @@ const overviewData = async (siteId, { from, to }) => {
               COALESCE(SUM(credit),0)::numeric(18,2) AS credit, COALESCE(SUM(debit),0)::numeric(18,2) AS debit,
               COUNT(*)::int AS count, COUNT(*) FILTER (WHERE debit > 0)::int AS debit_count
          FROM ledger_entries WHERE site_id = $1 AND entry_date >= $2::date AND entry_date <= LEAST($3::date, CURRENT_DATE)
+           AND source_key <> 'cashflow_transfers'
         GROUP BY 1, 2, 3, 4`, P),
     // Site Balance exactly as the Dashboard computes it (cash + bank − imprest held); end is exclusive there.
     getSiteBalanceDetail(siteId, from, nextDay(to < today() ? to : today())).catch(() => null),
@@ -245,7 +246,8 @@ const overviewData = async (siteId, { from, to }) => {
   //   Total Incoming  = Plot + land receipts + misc + personal-ledger credit
   //   Total Expenses  = operating debits; person/day-book/firm transfers excluded
   //   Current Profit  = Plot receipts + sold-land receipts − Total Expenses
-  // gross_in/gross_out (+ cash/bank splits, by_source) are EVERY ledger row — shown as the module breakdown only.
+  // Internal fund movements remain in site balances and transfer history;
+  // incoming, expense and gross cashflow totals describe external movements.
   const PLOT_SRC = new Set(['plot_payments', 'plot_installment_payments']);
   const LAND_SRC = 'land_deal_payments';
   const NON_EXPENSE_SRC = new Set(['personal_ledger', 'plot_payments', 'plot_installment_payments', LAND_SRC, 'day_book', 'misc_income_entries', 'firm_transactions', 'partner_profit_payments']);
@@ -292,7 +294,7 @@ const overviewData = async (siteId, { from, to }) => {
       site_balance: r2(balance?.siteBalance), cash_balance: r2(balance?.cashBalance), bank_balance: r2(balance?.bankBalance), imprest_held: r2(balance?.imprestHeld),
       // aliases kept for the AI snapshot / insights / older readers — same numbers as the Dashboard cards
       inflow: totalIncoming, outflow: totalExpense, net: profit, revenue_plots: plotPayments,
-      // gross ledger movement (every source, incl. personal ledger / firm / day book) — module breakdown only
+      // Gross external ledger movement — module breakdown only.
       gross_in: r2(m.gross_in), gross_out: r2(m.gross_out),
       cash_in: r2(m.cash_in), bank_in: r2(m.bank_in), cash_out: r2(m.cash_out), bank_out: r2(m.bank_out),
       definitions: {
@@ -300,7 +302,7 @@ const overviewData = async (siteId, { from, to }) => {
         total_expense: 'Farmer + expenses + commissions + vendors; personal ledger, firm transfers and day book excluded',
         profit: 'Plot receipts + sold-land receipts − Total expenses (Dashboard: Current Profit)',
         site_balance: 'All posted credits − all posted debits − staff imprest held (Dashboard: Admin Site Balance)',
-        gross: 'Every approved ledger row, all modules (gross, never netted)',
+        gross: 'Approved ledger movements excluding internal money transfers (gross, never netted)',
       },
       monthly: months.map((r) => { const mo = monthRow(r.month); const currentProfit = mo.plot_payments + mo.land_receipts - mo.total_expense; return { month: r.month, label: r.label, plot_payments: r2(mo.plot_payments), land_receipts: r2(mo.land_receipts), personal_ledger_credit: r2(mo.personal_ledger_credit), total_expense: r2(mo.total_expense), profit: r2(currentProfit), inflow: r2(mo.plot_payments + mo.land_receipts + mo.personal_ledger_credit), outflow: r2(mo.total_expense), net: r2(currentProfit), gross_in: r2(mo.gross_in), gross_out: r2(mo.gross_out) }; }),
       by_source: [...bySrc.entries()].map(([k, s]) => ({ source_key: k, label: sourceLabel(k), inflow: r2(s.inflow), outflow: r2(s.outflow), count: s.count })).sort((a, b) => b.inflow - a.inflow),

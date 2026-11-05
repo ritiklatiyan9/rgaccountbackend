@@ -94,7 +94,7 @@ export const OPERATING_TDS_SQL = `
       WHERE le.site_id = t.site_id AND le.source_key = t.source_key AND le.source_id = t.source_id
         AND le.ledger_type <> 'person'
         AND le.source_key NOT IN (
-          'firm_transactions', 'personal_ledger', 'plot_payments',
+          'firm_transactions', 'cashflow_transfers', 'personal_ledger', 'plot_payments',
           'plot_installment_payments', 'land_deal_payments', 'day_book',
           'misc_income_entries', 'partner_profit_payments', 'tds_settlements'
         )

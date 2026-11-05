@@ -52,6 +52,8 @@ const SOURCE_BY_TABLE = Object.fromEntries(
 const IMPREST_DEBIT_SOURCES = new Set([
   'expense', 'farmer_payment', 'plot_commission_payment', 'vendor_payment', 'vendor_inventory_payment', 'daybook',
 ]);
+const HISTORY_PERMISSION_MODULES = ['daybook','plot_payments','farmers','misc_income','commissions','cashflow','firm_transactions',
+  'expenses','vendors','plot_registry','construction','wallet','imprest','imprest_management'];
 
 function getTableName(source) {
   const table = ALLOWED_TABLES[source];
@@ -324,22 +326,30 @@ const listApprovalEntries = async (req, res, { history = false } = {}) => {
   const historyOptions = history ? requestHistoryOptions(req.query) : null;
   const historyReader = history ? createRequestHistoryReader(pool, historyOptions) : null;
   if (history) {
-    const access = await pool.query(`SELECT 1 FROM sites s WHERE s.id=$1
+    const proof = req.requestHistoryAccess;
+    const verified = proof && proof.siteId === historyOptions.siteId && proof.userId === Number(req.user.id)
+      && proof.role === req.user.role && proof.organizationId === Number(req.user.organization_id);
+    const {rows:[access]} = verified ? {rows:[proof]} : await pool.query(`SELECT EXISTS(SELECT 1 FROM sites s WHERE s.id=$1
       AND ($2::boolean OR s.organization_id=$3)
-      AND ($4::boolean OR EXISTS(SELECT 1 FROM user_sites us WHERE us.site_id=s.id AND us.user_id=$5))`,
-    [historyOptions.siteId, req.user.role==='super_admin', Number(req.user.organization_id)||1, hasGlobalApprovalOverride(req.user), req.user.id]);
-    if (!access.rows.length) return res.status(403).json({ message: 'This site is unavailable to your account.' });
+      AND ($4::boolean OR EXISTS(SELECT 1 FROM user_sites us WHERE us.site_id=s.id AND us.user_id=$5))) AS site_allowed,
+      CASE WHEN $6::boolean THEN COALESCE((SELECT jsonb_agg(p) FROM user_permissions p
+        WHERE p.user_id=$5 AND p.module=ANY($7::text[])),'[]'::jsonb) ELSE '[]'::jsonb END AS permissions`,
+    [historyOptions.siteId, req.user.role==='super_admin', Number(req.user.organization_id)||1, hasGlobalApprovalOverride(req.user), req.user.id,
+      req.user.role==='sub_admin',HISTORY_PERMISSION_MODULES]);
+    if (!access?.site_allowed) return res.status(403).json({ message: 'This site is unavailable to your account.' });
     res.set('Cache-Control', 'private, no-store');
     await Promise.all([historyReader.prepare(), hasRelations(['transaction_transfer_approval_requests', 'plot_status_approvals', 'transaction_documentation',
       'transaction_party_links', 'edit_requests', 'seek_permissions', 'loyalty_vault_transfers', 'wallet_imprest_transfers',
       'imprest_expense_requests', 'imprest_returns', 'imprest_allocations'])]);
     if (req.user.role === 'sub_admin') {
       // One fresh snapshot for this request; no cross-request grant cache.
-      const permissions = await permissionModel.getPermissions(req.user.id,
-        ['daybook', 'plot_payments', 'farmers', 'misc_income', 'commissions', 'cashflow', 'firm_transactions',
-          'expenses', 'vendors', 'plot_registry', 'construction', 'wallet', 'imprest', 'imprest_management']);
       if (!(req.user.permissionsByModule instanceof Map)) req.user.permissionsByModule = new Map();
-      for (const [module, permission] of permissions) req.user.permissionsByModule.set(module, permission);
+      for(const module of HISTORY_PERMISSION_MODULES)req.user.permissionsByModule.delete(module);
+      for (const permission of access.permissions) req.user.permissionsByModule.set(permission.module,permission);
+      const missing=HISTORY_PERMISSION_MODULES.filter(module=>!req.user.permissionsByModule.has(module));
+      // Preserve legacy auto-seeding only when a stored grant is actually absent.
+      if(missing.length){const permissions=await permissionModel.getPermissions(req.user.id,missing);
+        for(const[module,permission]of permissions)req.user.permissionsByModule.set(module,permission);}
     }
     historyOptions.authorizationScope = [req.user.id, req.user.role, req.user.organization_id, req.user.version,
       req.sessionId, [...(req.user.permissionsByModule || [])].map(([module, row]) =>

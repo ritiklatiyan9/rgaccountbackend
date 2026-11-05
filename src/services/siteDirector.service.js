@@ -3,6 +3,7 @@ import pool from '../config/db.js';
 export const SITE_DIRECTOR_MODULE_LABELS = {
   personal_ledger: 'Personal Ledger',
   cash_flow_entries: 'Personal Ledger',
+  cashflow_transfers: 'Internal Money Transfers',
   farmer_payments: 'Farmer Payments',
   plot_commission_payments: 'Project Commission',
   plot_commissions: 'Project Commission',
@@ -76,8 +77,8 @@ const OVERVIEW_SQL = `
       site_id,
       COALESCE(SUM(credit - debit) FILTER (WHERE bucket = 'cash'), 0)::numeric AS cash_book,
       COALESCE(SUM(credit - debit) FILTER (WHERE bucket <> 'cash'), 0)::numeric AS bank_balance,
-      COALESCE(SUM(credit), 0)::numeric AS total_inflow,
-      COALESCE(SUM(debit), 0)::numeric AS total_outflow,
+      COALESCE(SUM(credit) FILTER (WHERE source_key <> 'cashflow_transfers'), 0)::numeric AS total_inflow,
+      COALESCE(SUM(debit) FILTER (WHERE source_key <> 'cashflow_transfers'), 0)::numeric AS total_outflow,
       COUNT(*)::int AS transaction_count
     FROM ledger_entries
     WHERE entry_date <= $2::date
@@ -96,6 +97,7 @@ const OVERVIEW_SQL = `
     WHERE ($1::date IS NULL OR entry_date >= $1::date)
       AND entry_date <= $2::date
       AND source_key !~ '_person$'
+      AND source_key <> 'cashflow_transfers'
     GROUP BY site_id
   ),
   month_movement AS (
@@ -107,6 +109,7 @@ const OVERVIEW_SQL = `
     WHERE entry_date >= date_trunc('month', CURRENT_DATE)
       AND entry_date <= CURRENT_DATE
       AND source_key !~ '_person$'
+      AND source_key <> 'cashflow_transfers'
     GROUP BY site_id
   ),
   imprest AS (
@@ -203,6 +206,7 @@ const TREND_SQL = `
     WHERE entry_date >= date_trunc('month', CURRENT_DATE) - interval '11 months'
       AND entry_date <= CURRENT_DATE
       AND source_key !~ '_person$'
+      AND source_key <> 'cashflow_transfers'
     GROUP BY 1, 2
   )
   SELECT

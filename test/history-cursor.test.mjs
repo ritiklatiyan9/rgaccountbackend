@@ -64,3 +64,17 @@ test('ordering index migration replaces rather than duplicates archive indexes a
     assert.equal((await db.query("SELECT indexname FROM pg_indexes WHERE indexname LIKE 'rh_%' AND tablename='expenses'")).rows.length,0);
   }finally{await db.close();}
 });
+
+test('summary edit history preserves legacy string snapshot identities without returning private snapshot fields',async()=>{
+  const db=new PGlite();try{
+    await db.exec(`CREATE TABLE users(id int PRIMARY KEY,name text,email text);
+      CREATE TABLE edit_requests(id int PRIMARY KEY,site_id int,status text,created_at timestamptz,original_data jsonb);`);
+    const original={buyer_name:'Fixture buyer',plot_no:'A-10',private_audit:'sensitive fixture snapshot'};
+    await db.query(`INSERT INTO edit_requests VALUES(1,1,'approved','2025-01-01',$1::jsonb)`,[JSON.stringify(JSON.stringify(original))]);
+    const read=async(view)=>{const reader=createRequestHistoryReader(db,requestHistoryOptions({site_id:'1',view,q:'Fixture buyer'}));
+      reader.add("SELECT e.*,'edit_request' AS source FROM edit_requests e WHERE site_id=$1",[1]);return reader.read();};
+    const summary=await read('summary');assert.equal(summary.rows.length,1);
+    assert.deepEqual(summary.rows[0].original_data,{buyer_name:'Fixture buyer',plot_no:'A-10'});
+    assert.equal((await read('full')).rows[0].original_data,JSON.stringify(original));
+  }finally{await db.close();}
+});

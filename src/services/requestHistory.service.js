@@ -20,7 +20,9 @@ const schemaCache = new WeakMap();
 async function sourceSchema(db) {
   let entry = schemaCache.get(db);
   if (!entry || entry.expires <= Date.now()) {
-    entry = { expires: Date.now() + 60000, promise: db.query(`SELECT table_name,column_name,data_type,udt_name,is_nullable,current_setting('TimeZone') AS history_timezone
+    const previous = entry?.value;
+    entry = { expires: Infinity, value: previous };
+    entry.promise = db.query(`SELECT table_name,column_name,data_type,udt_name,is_nullable,current_setting('TimeZone') AS history_timezone
       FROM information_schema.columns WHERE table_schema='public' AND table_name=ANY($1::text[])`, [Object.values(HISTORY_TABLES)])
       .then(({ rows }) => {
         const tables = new Map();
@@ -28,12 +30,26 @@ async function sourceSchema(db) {
           if (!tables.has(row.table_name)) tables.set(row.table_name, new Map());
           tables.get(row.table_name).set(row.column_name, row);
         }
+        entry.value = tables;
+        entry.expires = Date.now() + 60000;
         return tables;
-      }).catch(error => { schemaCache.delete(db); throw error; }) };
+      }).catch(error => {
+        if (schemaCache.get(db) === entry) {
+          if (previous) { entry.expires = Date.now() + 5000; entry.promise = Promise.resolve(previous); }
+          else schemaCache.delete(db);
+        }
+        throw error;
+      });
     schemaCache.set(db, entry);
+    // Only table/column metadata is retained. User/session/permission checks
+    // and financial rows remain fresh on every request. A periodic catalog
+    // refresh must not put the interactive list behind a slow metadata query.
+    if (previous) void entry.promise.catch(() => {});
   }
-  return entry.promise;
+  return entry.value || entry.promise;
 }
+export const warmRequestHistorySchema = db => sourceSchema(db);
+
 const fail = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 const positive = (value, fallback, max) => {
   if (value == null) return fallback;
@@ -41,6 +57,7 @@ const positive = (value, fallback, max) => {
   return Number(value);
 };
 export function requestHistoryOptions(query) {
+  if(Object.values(query).some(value=>value!=null&&typeof value==='object'))fail('History filters must be single values.');
   const siteId = positive(query.site_id, null, 2147483647);
   if (!siteId) fail('Select a valid site.');
   const status = query.status || 'all';
@@ -63,9 +80,9 @@ export function requestHistoryOptions(query) {
   const cursorMode = query.pagination === 'cursor';
   if (query.after && !cursorMode) fail('A history cursor requires cursor pagination.');
   return { siteId, status, search, source, recordId, summary: query.view === 'summary', cursorMode,
-    includeTotal: query.include_total !== 'false' && query.include_total !== false,
+    includeTotal: query.include_total !== 'false' && query.include_total !== false, fresh:String(query.nocache).toLowerCase()==='true',
     cursor: query.after ? decodeHistoryCursor(query.after) : null,
-    from: dates[0], to: dates[1], page: positive(query.page, 1, 100000), pageSize: positive(query.page_size, 20, 50) };
+    from: dates[0], to: dates[1], page: positive(query.page, 1, 100000), pageSize: positive(query.page_size, 10, 50) };
 }
 
 const SUMMARY_FIELDS = `id site_id status source _type module module_label entity_name entity_type entity_plot_no title
@@ -129,6 +146,7 @@ export function createRequestHistoryReader(db, options) {
             const fields = SEARCH_FIELDS.filter(field => known.has(field)).map(field => `COALESCE(h.${field}::text,'')`);
             if(source.key === 'edit_request' && columns?.has('original_data')) {
               for(const field of ['party_name','buyer_name','customer_name','full_name','name','to_entity','from_entity','plot_no']) fields.push(`COALESCE(h.original_data->>'${field}','')`);
+              fields.push("CASE WHEN jsonb_typeof(h.original_data)='string' THEN h.original_data #>> '{}' ELSE '' END");
             }
             where.push(`strpos(lower(concat_ws(' ',${fields.join(',')})),lower(${searchParam}))>0`);
           } else where.push(`strpos(lower(to_jsonb(h)::text),lower(${searchParam}))>0`);
@@ -190,7 +208,7 @@ export function createRequestHistoryReader(db, options) {
           payload = jsonObject(SUMMARY_FIELDS.filter(field => known.has(field)).map(field => `'${field}',h.${field}${numericFields.has(field) ? '::text' : ''}`));
           if (source.key === 'edit_request' && columns?.has('original_data')) {
             const names=['party_name','buyer_name','customer_name','full_name','name','to_entity','from_entity','plot_no'];
-            payload += ` || jsonb_build_object('original_data',jsonb_strip_nulls(${jsonObject(names.map(field => `'${field}',h.original_data->'${field}'`))}))`;
+            payload += ` || jsonb_build_object('original_data',CASE WHEN jsonb_typeof(h.original_data)='object' THEN jsonb_strip_nulls(${jsonObject(names.map(field => `'${field}',h.original_data->'${field}'`))}) ELSE h.original_data END)`;
           }
           if (source.key === 'plot_status') {
             const snapshots=['approval_original_data','approval_proposed_data'].filter(field=>known.has(field));
@@ -216,8 +234,16 @@ export function createRequestHistoryReader(db, options) {
             'history_at',r.history_at,'history_decided_at',r.history_decided_at,'history_decided_by_name',COALESCE(decider.name,decider.email))) ORDER BY ${order('r')})
             FROM hydrated r LEFT JOIN users decider ON decider.id=r.decider_id),'[]'::jsonb) AS entries`;
       const sharedKey = historyFingerprint([fingerprint, options.page, options.cursor || null, options.recordId, options.includeTotal]);
-      const { rows: [result] } = await runHistoryQuery(db,sql,values,sharedKey);
-      const rows = (result?.entries || []).map(({source_index,entry}) => ({...sources[source_index].map(entry),can_decide:false,...(options.summary ? {history_summary:true} : {})}));
+      const { rows: [result] } = await runHistoryQuery(db,sql,values,sharedKey,{fresh:options.fresh});
+      const rows = (result?.entries || []).map(({source_index,entry}) => {
+        const row={...sources[source_index].map(entry),can_decide:false,...(options.summary?{history_summary:true}:{})};
+        if(options.summary && row.source==='edit_request' && typeof row.original_data==='string') {
+          let original;try{original=JSON.parse(row.original_data);}catch{original={};}
+          row.original_data=Object.fromEntries(['party_name','buyer_name','customer_name','full_name','name','to_entity','from_entity','plot_no']
+            .filter(field=>original && typeof original==='object' && original[field]!=null).map(field=>[field,original[field]]));
+        }
+        return row;
+      });
       const actualSnapshot = result?.snapshot || snapshot;
       const nextCursor = options.cursorMode && result?.has_more && result.next_key ? encodeHistoryCursor({v:1,fingerprint,
         snapshot:actualSnapshot,expires:options.cursor?.expires || Date.now()+15*60*1000,key:result.next_key}) : null;

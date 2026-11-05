@@ -1,5 +1,6 @@
 import { historyFingerprint } from './requestHistoryCursor.js';
 import pg from 'pg';
+import {getCacheGeneration} from '../config/cache.js';
 
 const flights = new WeakMap();
 const concurrency=Math.max(1,Math.min(4,Number.parseInt(process.env.HISTORY_QUERY_CONCURRENCY||'2',10)||2));
@@ -16,10 +17,10 @@ function acquire(){
 }
 export const historyReadQueueStats=()=>({active,queued:queue.length,concurrency,maxPending:32});
 /** Only concurrent, identical reads share work. Completed financial data is never cached. */
-export function runHistoryQuery(db, sql, values, scope) {
+export function runHistoryQuery(db, sql, values, scope, {fresh=false}={}) {
   let pending = flights.get(db);
   if (!pending) { pending = new Map(); flights.set(db, pending); }
-  const key = scope || historyFingerprint([sql, values]);
+  const key = fresh ? Symbol('fresh-history-read') : `${getCacheGeneration()}:${scope || historyFingerprint([sql, values])}`;
   const copy = result => ({ rows: structuredClone(result.rows) });
   if (pending.has(key)) return pending.get(key).then(copy);
   if (pending.size >= 64) return Promise.reject(Object.assign(new Error('History is busy. Please retry shortly.'), { statusCode: 503, code: 'HISTORY_BUSY' }));

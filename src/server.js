@@ -1,3 +1,4 @@
+import { warmRequestHistory } from './services/requestHistoryWarmup.service.js';
 import { up as migrateSeekPermissions } from './migrations/222_seek_permissions.js';
 import { up as migrateSeekTargets } from './migrations/223_seek_permission_targets.js';
 import { up as migrateSeekComments } from './migrations/230_seek_permission_comments.js';
@@ -6,6 +7,7 @@ import { up as migrateImprestVisibility } from './migrations/229_imprest_managem
 import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
 import { ensureWalletStartup } from './services/walletStartup.service.js';
 import { ensureConstructionStartup } from './services/constructionStartup.service.js';
+import { up as migrateCashflowTransfers, VERSION as cashflowTransferVersion } from './migrations/237_cashflow_money_transfers.js';
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
@@ -79,10 +81,12 @@ connectDB().then(async () => {
   await migrateExistingVoucherGaps(pool);
   await migrateImprestApprovalIndexes(pool);
   await migrateTransactionDocumentation(pool);
+  if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [cashflowTransferVersion])).rows.length) await migrateCashflowTransfers(pool);
   const constructionStartup = await ensureConstructionStartup(pool);
   console.log(constructionStartup.current
     ? '[startup] Construction schema current; installed migrations skipped'
     : `[startup] Construction migrations applied: ${constructionStartup.applied.join(', ')}`);
+  await warmRequestHistory(pool);
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

@@ -254,3 +254,26 @@ test('local DB failures stay denied without fallback and are not cached',async()
 test('unknown preview auth modes fail at configuration time',()=>{
   assert.throws(()=>createWalletOpeningPreviewAuth({mode:'automatic'}),/must be local or upstream/);
 });
+
+test('history bridge checks current site access with the existing user read and never shares a site proof across sites or requests',async()=>{
+  const queries=[];let allowed=true,remoteCalls=0;
+  const auth=createWalletOpeningPreviewAuth({
+    request:async()=>{remoteCalls++;return {status:200,ok:true,json:async()=>({user})};},
+    database:{query:async(sql,args)=>{queries.push({sql,args});return {rows:[{...user,history_site_allowed:allowed,history_permissions:[]}]};}},
+  });
+  const invoke=async site=>{
+    const req={route:{path:'/approvals/history'},query:{site_id:String(site)},header:name=>name==='Authorization'?'Bearer fixture':name==='X-Session-ID'?'123':undefined};
+    let next=false;await auth(req,{status(){return this},json(){return this}},error=>{assert.ifError(error);next=true;});
+    assert.equal(next,true);return req;
+  };
+  const [a,b]=await Promise.all([invoke(1),invoke(2)]);
+  assert.equal(remoteCalls,2);assert.equal(queries.length,2);
+  assert.deepEqual(queries.map(query=>query.args[2]).sort(),[1,2]);
+  assert.equal(a.requestHistoryAccess.siteId,1);assert.equal(b.requestHistoryAccess.siteId,2);
+  assert.equal(a.requestHistoryAccess.site_allowed,true);
+  assert.equal(a.user.history_permissions,undefined,'internal permission proof stays out of the public user object');
+  allowed=false;
+  const revoked=await invoke(1);
+  assert.equal(revoked.requestHistoryAccess.site_allowed,false,'the next request immediately observes revoked membership');
+  assert.equal(queries.length,3,'completed proofs are never cached');
+});

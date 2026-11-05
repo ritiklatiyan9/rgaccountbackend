@@ -277,7 +277,8 @@ export const REPORTS = Object.freeze({
     from: `cash_flow_entries ce LEFT JOIN bank_accounts ba ON ba.id = ce.bank_account_id AND ba.site_id = ce.site_id`,
     siteCol: 'ce.site_id',
     dateCol: 'ce.date',
-    where: `financial_transaction_posts('credit', ce.status, ce.cash_type, ce.cheque_status)`,
+    where: `financial_transaction_posts('credit', ce.status, ce.cash_type, ce.cheque_status)
+      AND ce.source_module IS DISTINCT FROM 'cashflow_transfers'`,
     amount: 'ce.credit',
     amountLabel: 'Cash in',
     dimension: { expr: `COALESCE(NULLIF(ce.cash_type, ''), 'UNSPECIFIED')`, label: 'Cash type' },

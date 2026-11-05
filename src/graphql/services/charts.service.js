@@ -79,7 +79,7 @@ export async function getRevenueVsExpense(siteId, start, end, resolution = 'MONT
        FROM ledger_entries le
        WHERE le.site_id = $1 AND le.entry_date >= $2 AND le.entry_date < $3
          AND (le.debit <> 0 OR le.credit <> 0)
-         AND le.source_key NOT IN ('plot_payments', 'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'firm_transactions', 'partner_profit_payments', 'tds_settlements')
+         AND le.source_key NOT IN ('plot_payments', 'plot_installment_payments', 'land_deal_payments', 'day_book', 'misc_income_entries', 'firm_transactions', 'cashflow_transfers', 'partner_profit_payments', 'tds_settlements')
          AND le.ledger_type <> 'person'
          AND ${excludeLinkedTdsSettlement('le')}
        UNION ALL

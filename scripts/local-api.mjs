@@ -12,6 +12,7 @@ import { up as migrateWalletBalanceGuards } from '../src/migrations/210_wallet_b
 import { up as migrateLockedCashCollector } from '../src/migrations/211_locked_cash_collector.js';
 import { up as migratePermanentWalletGuard } from '../src/migrations/212_wallet_permanent_balance_guard.js';
 import pool from '../src/config/db.js';
+import { up as migrateCashflowTransfers, VERSION as cashflowTransferVersion } from '../src/migrations/237_cashflow_money_transfers.js';
 import { initSocket } from '../src/config/socket.js';
 import { initCache } from '../src/config/cache.js';
 import { backupMaintenanceEnabled } from '../src/middlewares/backupMaintenance.middleware.js';
@@ -25,6 +26,7 @@ await migrateWalletBalanceGuards(pool);
 await migrateLockedCashCollector(pool);
 await migratePermanentWalletGuard(pool);
 await migrateTransactionDocumentation(pool);
+if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [cashflowTransferVersion])).rows.length) await migrateCashflowTransfers(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

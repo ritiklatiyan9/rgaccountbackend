@@ -37,7 +37,8 @@ test('history merges pages across modules, preserves cents, and filters the enti
 
 test('invalid site, pagination, status, reversed dates and impossible calendar dates fail before querying', () => {
   for(const query of [{site_id:''},{site_id:'1 OR 1=1'},{site_id:'1',page:'0'},{site_id:'1',page_size:'200'},
-    {site_id:'1',status:'pending'},{site_id:'1',from:'2026-02-30'},{site_id:'1',from:'2026-11-05',to:'2026-11-04'},{site_id:'1',q:'a'.repeat(201)}]) {
+    {site_id:'1',status:'pending'},{site_id:'1',from:'2026-02-30'},{site_id:'1',from:'2026-11-05',to:'2026-11-04'},{site_id:'1',q:'a'.repeat(201)},
+    {site_id:'1',source:['expense']},{site_id:'1',q:{value:'query'}}]) {
     assert.throws(()=>requestHistoryOptions(query),error=>error.statusCode===400);
   }
 });
@@ -46,6 +47,7 @@ test('financial history preserves site, organisation and requester/reviewer acce
   const db = new PGlite();
   try {
     await db.exec(`CREATE TABLE sites(id int,name text,organization_id int); CREATE TABLE user_sites(user_id int,site_id int);
+      CREATE TABLE user_permissions(user_id int,module text,can_read boolean,can_view_all boolean);
       CREATE TABLE users(id int,name text,email text); CREATE TABLE members(id int,full_name text,member_type text);
       CREATE TABLE expenses(id int,site_id int,status text,date date,assigned_admin_id int,created_by int,assigned_user_id int,
         to_entity text,from_entity text,category text,debit numeric,credit numeric,remark text,payment_mode text,voucher_url text,approved_by int,approved_at timestamptz);

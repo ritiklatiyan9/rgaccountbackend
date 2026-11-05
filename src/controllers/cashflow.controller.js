@@ -41,62 +41,80 @@ export const createMonth = asyncHandler(async (req, res) => {
   const prevYear  = mInt === 1 ? yInt - 1 : yInt;
   const explicitOpening = (opening_balance === 0 || opening_balance === '0' || opening_balance) ? parseFloat(opening_balance) || 0 : null;
 
-  // ── Single CTE round-trip ──
-  // 1) `dup` flags whether this period already exists.
-  // 2) `prev_close` computes the previous month's closing if the caller
-  //    didn't pass an explicit opening_balance.
-  // 3) `ins` inserts the new month, picking the explicit opening if given,
-  //    otherwise the previous closing, otherwise 0.
-  // Previously: 1 dup-check + 1 prev-month lookup + 1 closing aggregation
-  //           + 1 INSERT = 4 round-trips.
-  const result = await pool.query(
-    `WITH dup AS (
-       SELECT 1 FROM cash_flow_months
-        WHERE site_id = $1 AND month = $2 AND year = $3
-          AND ledger_name = $4
-        LIMIT 1
-     ),
-     prev_close AS (
-       SELECT cfm.id,
-              cfm.opening_balance
-                + COALESCE(SUM(cfe.credit) FILTER (
-                    WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
-                  ), 0)
-                - COALESCE(SUM(cfe.debit) FILTER (
-                    WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
-                  ), 0) AS closing_balance
-         FROM cash_flow_months cfm
-         LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
-          AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
-        WHERE cfm.site_id = $1 AND cfm.month = $9 AND cfm.year = $10 AND cfm.ledger_name = $4
-        GROUP BY cfm.id, cfm.opening_balance
-     ),
-     ins AS (
-       INSERT INTO cash_flow_months (
-         site_id, month, year, opening_balance, ledger_name, ledger_type, notes, created_by
+  // Site and ledger-lineage locks precede the carry-forward query. Acquiring
+  // them only during INSERT is too late: the CTE may already have read the
+  // closing balance from before a concurrently committing money transfer.
+  const client = await pool.connect();
+  let result;
+  let discard;
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='20s'");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('imprest-site-' || $1::text))", [siteIdInt]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('cashflow-ledger-lineage'),hashtext($1))", [`${siteIdInt}:${name || ''}`]);
+    // ── One statement after the financial locks: one fresh snapshot ──
+    // 1) `dup` flags whether this period already exists.
+    // 2) `prev_close` computes the previous month's closing if the caller
+    //    didn't pass an explicit opening_balance.
+    // 3) `ins` inserts the new month, picking the explicit opening if given,
+    //    otherwise the previous closing, otherwise 0.
+    // Previously: 1 dup-check + 1 prev-month lookup + 1 closing aggregation
+    //           + 1 INSERT = 4 round-trips.
+    result = await client.query(
+      `WITH dup AS (
+         SELECT 1 FROM cash_flow_months
+          WHERE site_id = $1 AND month = $2 AND year = $3
+            AND ledger_name = $4
+          LIMIT 1
+       ),
+       prev_close AS (
+         SELECT cfm.id,
+                cfm.opening_balance
+                  + COALESCE(SUM(cfe.credit) FILTER (
+                      WHERE financial_transaction_posts('credit', cfe.status, cfe.cash_type, cfe.cheque_status)
+                    ), 0)
+                  - COALESCE(SUM(cfe.debit) FILTER (
+                      WHERE financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
+                    ), 0) AS closing_balance
+           FROM cash_flow_months cfm
+           LEFT JOIN cash_flow_entries cfe ON cfe.cash_flow_month_id = cfm.id
+            AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
+          WHERE cfm.site_id = $1 AND cfm.month = $9 AND cfm.year = $10 AND cfm.ledger_name = $4
+          GROUP BY cfm.id, cfm.opening_balance
+       ),
+       ins AS (
+         INSERT INTO cash_flow_months (
+           site_id, month, year, opening_balance, ledger_name, ledger_type, notes, created_by
+         )
+         SELECT $1, $2, $3,
+                COALESCE($5::numeric, (SELECT closing_balance FROM prev_close), 0),
+                $4, $6, $7, $8
+         WHERE NOT EXISTS (SELECT 1 FROM dup)
+         RETURNING *
        )
-       SELECT $1, $2, $3,
-              COALESCE($5::numeric, (SELECT closing_balance FROM prev_close), 0),
-              $4, $6, $7, $8
-       WHERE NOT EXISTS (SELECT 1 FROM dup)
-       RETURNING *
-     )
-     SELECT
-       (SELECT row_to_json(ins) FROM ins) AS month,
-       EXISTS (SELECT 1 FROM dup) AS is_dup`,
-    [
-      siteIdInt,                       // $1
-      mInt,                            // $2
-      yInt,                            // $3
-      name,                            // $4
-      explicitOpening,                 // $5 (may be NULL)
-      type,                            // $6
-      notes ? notes.trim() : null,     // $7
-      req.user.id,                     // $8
-      prevMonth,                       // $9
-      prevYear,                        // $10
-    ]
-  );
+       SELECT
+         (SELECT row_to_json(ins) FROM ins) AS month,
+         EXISTS (SELECT 1 FROM dup) AS is_dup`,
+      [
+        siteIdInt,                       // $1
+        mInt,                            // $2
+        yInt,                            // $3
+        name,                            // $4
+        explicitOpening,                 // $5 (may be NULL)
+        type,                            // $6
+        notes ? notes.trim() : null,     // $7
+        req.user.id,                     // $8
+        prevMonth,                       // $9
+        prevYear,                        // $10
+      ]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (rollbackError) { discard = rollbackError; }
+    throw error;
+  } finally {
+    client.release(discard);
+  }
 
   const row = result.rows[0];
   if (row.is_dup) {

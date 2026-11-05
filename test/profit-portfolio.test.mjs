@@ -144,6 +144,24 @@ test('batched portfolio preserves every existing profit book, shares, payments a
       assert.deepEqual(await buildProfitPortfolio([], '2026-10-31', false, { db: unexpected, financialDb: unexpected }),
         { data: [], failures: [], completed: 0, total: 0 });
     });
+    await t.test('internal transfers preserve profit and external totals while moving site balances', async () => {
+      const options = { db, financialDb: db };
+      const before = await buildProfitPortfolio([1,2], '2026-10-31', false, options);
+      await db.exec(`INSERT INTO ledger_entries(id,site_id,source_key,entry_date,debit,credit,ledger_type) VALUES
+        (901,1,'cashflow_transfers','2026-06-01',100,0,'site'),
+        (902,1,'cashflow_transfers','2026-06-01',0,100,'person'),
+        (903,1,'cashflow_transfers','2026-06-01',200,0,'site'),
+        (904,2,'cashflow_transfers','2026-06-01',0,200,'site')`);
+      const after = await buildProfitPortfolio([1,2], '2026-10-31', false, options);
+      assert.deepEqual(after.failures, []);
+      for (let i = 0; i < 2; i++) {
+        for (const field of ['runningExpense', 'currentProfit', 'expectedProfit']) assert.equal(after.data[i].profit[field], before.data[i].profit[field]);
+        assert.equal(after.data[i].profit.siteBalance, before.data[i].profit.siteBalance + (i === 0 ? -200 : 200));
+        const canonical = await getProfitKpis(i + 1, '2026-10-31', false);
+        assert.deepEqual(after.data[i].profit.siteBalanceDetail, canonical.siteBalanceDetail);
+      }
+      assert.equal(after.data.reduce((sum, site) => sum + site.profit.siteBalance, 0), before.data.reduce((sum, site) => sum + site.profit.siteBalance, 0));
+    });
   } finally { pool.query = originalQuery; await db.close(); }
 });
 

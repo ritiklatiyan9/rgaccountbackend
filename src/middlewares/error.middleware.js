@@ -1,7 +1,14 @@
 import { isDatabaseUnavailable } from '../utils/databaseError.js';
 
 const errorMiddleware = (err, req, res, next) => {
+  if (err.constraint === 'cashflow_transfer_immutable') {
+    return res.status(409).json({ code: 'TRANSFER_IMMUTABLE', message: 'This record belongs to a completed money transfer and cannot be edited or deleted.' });
+  }
   const requestPath=String(req.originalUrl||`${req.baseUrl||''}${req.path||''}`).split('?')[0];
+  if (/^\/cashflow(?:\/|$)/.test(requestPath) && ['57014','55P03','40P01','40001'].includes(err.code)) {
+    res.set('Retry-After', '2');
+    return res.status(503).json({ code: 'CASHFLOW_DATABASE_BUSY', message: 'Cashflow is temporarily busy. Retry the same request in a few seconds.' });
+  }
   if (/^\/(?:wallet|loyalty-vault)(?:\/|$)/.test(requestPath) && ['57014','55P03'].includes(err.code)) {
     const mutation=['POST','PUT','PATCH','DELETE'].includes(String(req.method||'').toUpperCase());
     // The transfer service preserves the original SQLSTATE and rolls back

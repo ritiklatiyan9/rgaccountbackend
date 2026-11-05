@@ -541,6 +541,7 @@ class ExpenseModel extends MasterModel {
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
+          AND cfe.source_module IS DISTINCT FROM 'cashflow_transfers'
 
         UNION ALL
 
@@ -799,6 +800,7 @@ class ExpenseModel extends MasterModel {
         JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.site_id = $1 AND LOWER(cfm.ledger_type) = 'person' AND cfe.debit > 0
           AND (cfe.source_module IS NULL OR cfe.source_module !~ '_person$')
+          AND cfe.source_module IS DISTINCT FROM 'cashflow_transfers'
           AND financial_transaction_posts('debit', cfe.status, cfe.cash_type, cfe.cheque_status)
         UNION ALL
         SELECT d.date, d.payment_mode, d.category, NULL::varchar as sub_category, d.to_entity, d.from_entity, d.particular as remark, d.account_no, d.branch, d.debit, d.credit, d.created_by, d.status, ${missingBillFlag('daybook', 'd.id', 'd.site_id', 'd')}
