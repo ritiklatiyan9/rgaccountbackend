@@ -962,7 +962,13 @@ export async function updateAccountWhatsAppTemplate(
       )
     ).rows[0];
     if (!row) throw fail("Template not found", 404);
-    if (input.archived === true) await assertUnused(row, client);
+    if (input.archived === true) {
+      await assertUnused(row, client);
+      if (row.event === 'INSTALLMENT_OVERDUE') await client.query(
+        "DELETE FROM application_settings WHERE site_id=$1 AND setting_key=$2 AND setting_value->>'template_name'=$3",
+        [siteId, PENDING_OVERDUE_TEMPLATE_KEY, row.name],
+      );
+    }
     return (
       await client.query(
         `UPDATE account_whatsapp_templates SET title=$2,archived_at=CASE WHEN $3::boolean THEN COALESCE(archived_at,now()) ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING *`,
@@ -1014,6 +1020,10 @@ export async function deleteAccountWhatsAppTemplate(
     await client.query(
       "UPDATE account_whatsapp_templates SET status='DELETED',updated_at=now() WHERE id=$1",
       [row.id],
+    );
+    if (row.event === 'INSTALLMENT_OVERDUE') await client.query(
+      "DELETE FROM application_settings WHERE site_id=$1 AND setting_key=$2 AND setting_value->>'template_name'=$3",
+      [siteId, PENDING_OVERDUE_TEMPLATE_KEY, row.name],
     );
     return { deleted: name };
   });

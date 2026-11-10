@@ -243,6 +243,12 @@ test('only the explicitly requested approved overdue version activates; pausing 
   await requestActivation();
   await db.query("UPDATE application_settings SET setting_value=jsonb_set(setting_value,'{annual_rate}','19') WHERE setting_key='installment_overdue_notice_policy_v1'");
   assert.equal(await activateRequestedOverdueTemplates({ db }), 0);
+  await saveAccountWhatsAppStage(admin, 'INSTALLMENT_OVERDUE', { site_id: 1, template_name: null }, { db });
+  await db.query("UPDATE application_settings SET setting_value=jsonb_set(setting_value,'{annual_rate}','18') WHERE setting_key='installment_overdue_notice_policy_v1'");
+  await requestActivation();
+  await updateAccountWhatsAppTemplate(admin, template.name, { site_id: 1, archived: true }, { db });
+  await updateAccountWhatsAppTemplate(admin, template.name, { site_id: 1, archived: false }, { db });
+  assert.equal(await activateRequestedOverdueTemplates({ db }), 0, 'restore cannot resurrect an archived activation request');
 });
 async function apply(db, event, siteId = 1) {
   const template = await createAccountWhatsAppTemplate(
