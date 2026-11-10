@@ -175,6 +175,23 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "If you have already paid, please contact our office to reconcile your account.",
     ),
   ),
+  INSTALLMENT_OVERDUE: event(
+    "Overdue installment penalty",
+    "Installment tracker",
+    "Overdue penalty notices",
+    "After the due date, while an installment remains unpaid",
+    "Project-specific penalty notice, using current posted receipts including cash. Only installments becoming overdue after activation are eligible.",
+    {
+      ...PLOT,
+      installment_name: field("Installment name", "Installment 2", (d) => clean(d.installment_name)),
+      amount_due: field("Unpaid overdue installment", "₹50,000.00", (d) => money(d.remaining)),
+      due_date: field("Due date", "09 Nov 2026", (d) => date(d.due_date)),
+      days_overdue: field("Days overdue", "1", (d) => clean(d.days_overdue)),
+      penalty_amount: field("Penalty / current unpaid balance interest estimate", "₹24.66", (d) => money(d.penalty_amount)),
+      as_of_date: field("Notice calculation date", "10 Nov 2026", (d) => date(d.as_of_date)),
+    },
+    "*Overdue installment notice*\n\nDear {customer_name},\n\nYour {installment_name} for unit {plot_no} at {project} was due on {due_date}.\n*Unpaid amount:* {amount_due}\n\nPlease contact our office to settle the overdue installment and review the applicable project penalty.\n\nDefence Garden Group",
+  ),
   REGISTRY_COMPLETED: event(
     "Registry congratulations",
     "Plot registry",

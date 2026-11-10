@@ -3,6 +3,7 @@ import pool from "../config/db.js";
 import { PLOT_BUYER_MEMBER_JOIN } from "./plotMemberLinks.service.js";
 import { registryDeedScopeSql } from "../utils/registryDocuments.js";
 import { allocateInstallmentPayments } from "./installmentAllocation.service.js";
+import { indiaDate, loadOverduePolicy, normalizeOverduePolicy, overdueNotice, overdueDedupeKey, overdueTemplateBody, OVERDUE_POLICY_KEY, PENDING_OVERDUE_TEMPLATE_KEY } from "./installmentOverduePolicy.service.js";
 import { classifyAccountWhatsAppPayment } from "./accountWhatsAppWorkflow.policy.js";
 import { getReceiptDesign } from "./receiptDesign.service.js";
 import {
@@ -614,6 +615,7 @@ export async function accountWhatsAppStudio(
 ) {
   const siteId = await assertAccountWhatsAppSite(user, requestedSiteId, db);
   const ready = await accountWhatsAppSchemaReady(db);
+  const overduePolicy = ready ? await loadOverduePolicy(siteId, db) : null;
   let info = null;
   let error = ready
     ? null
@@ -663,7 +665,8 @@ export async function accountWhatsAppStudio(
       quality: info.quality,
     },
     templates,
-    stages: Object.entries(EVENTS).map(([key, spec]) => {
+    overdue_policy: overduePolicy,
+    stages: Object.entries(EVENTS).filter(([key]) => key !== 'INSTALLMENT_OVERDUE' || overduePolicy || templates.some((t) => t.event === key)).map(([key, spec]) => {
       const saved = settings.find((s) => s.event === key) || {
         event: key,
         enabled: false,
@@ -677,8 +680,8 @@ export async function accountWhatsAppStudio(
         module: spec.module,
         submodule: spec.submodule,
         trigger: spec.trigger,
-        description: spec.description,
-        default_body: spec.body,
+        description: key === 'INSTALLMENT_OVERDUE' && !overduePolicy ? 'Penalty notice template prepared. Confirm and configure the project penalty basis before enabling automatic notices.' : spec.description,
+        default_body: key === 'INSTALLMENT_OVERDUE' && overduePolicy ? overdueTemplateBody(overduePolicy) : spec.body,
         fields: Object.entries(spec.fields).map(([name, f]) => ({
           name,
           label: f.label,
@@ -705,7 +708,7 @@ export async function saveAccountWhatsAppStage(
   user,
   event,
   input,
-  { db = pool } = {},
+  { db = pool, requireUnassigned = false, activationRequest = null } = {},
 ) {
   assertEvent(event);
   const siteId = await assertAccountWhatsAppSite(user, input.site_id, db);
@@ -732,6 +735,14 @@ export async function saveAccountWhatsAppStage(
       [siteId, event],
     );
     const previous = await stageSettings(siteId, event, client);
+    if (activationRequest) {
+      const pending = (await client.query('SELECT 1 FROM application_settings WHERE site_id=$1 AND setting_key=$2 AND setting_value=$3::jsonb', [siteId, PENDING_OVERDUE_TEMPLATE_KEY, activationRequest])).rows[0];
+      const current = await loadOverduePolicy(siteId, client);
+      if (!pending || JSON.stringify(current) !== JSON.stringify(normalizeOverduePolicy(activationRequest.policy)))
+        throw fail('The requested activation was cancelled or its project penalty policy changed', 409);
+    }
+    if (requireUnassigned && previous.template_name && previous.template_name !== input.template_name)
+      throw fail('A different template has been applied; automatic activation was cancelled', 409);
     const name =
       input.template_name === undefined
         ? previous.template_name
@@ -739,6 +750,8 @@ export async function saveAccountWhatsAppStage(
     const nextEnabled =
       input.enabled ??
       (input.template_name === null ? false : previous.enabled);
+    if (event === 'INSTALLMENT_OVERDUE' && nextEnabled && !(await loadOverduePolicy(siteId, client)))
+      throw fail('Configure the project overdue penalty policy before enabling this event', 409);
     if (name) {
       const template = (
         await client.query(
@@ -765,6 +778,9 @@ export async function saveAccountWhatsAppStage(
         "Apply an approved template before enabling this automation",
         409,
       );
+    if (event === 'INSTALLMENT_OVERDUE') await client.query(
+      'DELETE FROM application_settings WHERE site_id=$1 AND setting_key=$2', [siteId, PENDING_OVERDUE_TEMPLATE_KEY],
+    );
     return (
       await client.query(
         `UPDATE account_whatsapp_stage_settings SET enabled=$3,template_name=$4,lead_days=$5,
@@ -1133,6 +1149,7 @@ const RECEIPT_PLOT_COLUMNS = `to_jsonb(p)->>'plot_size' AS plot_size,to_jsonb(p)
 const CLIENT_PREDICATE = `'CLIENT'=ANY(COALESCE(m.member_types,ARRAY[m.member_type])) AND UPPER(COALESCE(to_jsonb(m)->>'status','ACTIVE'))='ACTIVE'`;
 const PLOT_CLIENT_PREDICATE = `'CLIENT'=ANY(COALESCE(plot_buyer.member_types,ARRAY[plot_buyer.member_type])) AND UPPER(COALESCE(to_jsonb(plot_buyer)->>'status','ACTIVE'))='ACTIVE'`;
 const ACTIVE_INSTALLMENT_PLOT = `UPPER(TRIM(p.status)) IN ('BOOKED','REGISTRY') AND LOWER(COALESCE(to_jsonb(p)->>'approval_status',''))='approved' AND UPPER(COALESCE(to_jsonb(p)->>'plot_tag','')) <> 'OLD'`;
+const ACTIVE_OVERDUE_PLOT = `UPPER(TRIM(p.status)) IN ('BOOKED','REGISTRY','UNDER CANCELLATION') AND LOWER(COALESCE(to_jsonb(p)->>'approval_status',''))='approved' AND UPPER(COALESCE(to_jsonb(p)->>'plot_tag','')) <> 'OLD'`;
 /** Re-read canonical records at delivery. Hooks never supply phone numbers, amounts or template parameters. */
 export async function loadAccountWhatsAppContext(
   event,
@@ -1153,6 +1170,8 @@ export async function loadAccountWhatsAppContext(
     query = `SELECT ${PLOT_COLUMNS},${RECEIPT_PLOT_COLUMNS},${receiptRecordColumns("pip")},pip.id AS source_id,'plot_installment_payment' AS receipt_module,pip.amount,pip.payment_mode,pip.payment_date,'ACK-' || pip.id::text AS receipt_no,pip.status,pip.cheque_status,to_jsonb(pip)->>'entry_transfer_id' AS entry_transfer_id,pi.installment_name FROM plot_installment_payments pip JOIN plots p ON p.id=pip.plot_id JOIN sites s ON s.id=p.site_id LEFT JOIN plot_installments pi ON pi.id=pip.installment_id AND pi.plot_id=p.id ${PLOT_BUYER_MEMBER_JOIN} WHERE pip.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "INSTALLMENT_DUE")
     query = `SELECT ${PLOT_COLUMNS},pi.id AS installment_id,p.id AS plot_id,pi.installment_name,pi.amount,pi.due_date FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pi.id=$1 AND p.site_id=$2 AND ${ACTIVE_INSTALLMENT_PLOT} AND ${PLOT_CLIENT_PREDICATE}`;
+  else if (event === "INSTALLMENT_OVERDUE")
+    query = `SELECT ${PLOT_COLUMNS},to_jsonb(p)->>'unit_type' AS unit_type,pi.id AS installment_id,p.id AS plot_id,pi.installment_name,pi.amount,pi.due_date FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pi.id=$1 AND p.site_id=$2 AND ${ACTIVE_OVERDUE_PLOT} AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "REGISTRY_COMPLETED")
     query = `SELECT ${PLOT_COLUMNS},pr.registry_date FROM plot_registries pr JOIN LATERAL (SELECT source.* FROM plots source WHERE source.site_id=pr.site_id AND (source.id=pr.plot_id OR (pr.plot_id IS NULL AND UPPER(source.plot_no)=UPPER(to_jsonb(pr)->>'plot_no') AND UPPER(COALESCE(to_jsonb(source)->>'plot_tag','')) <> 'OLD' AND (SELECT COUNT(*) FROM plots candidate WHERE candidate.site_id=pr.site_id AND UPPER(candidate.plot_no)=UPPER(to_jsonb(pr)->>'plot_no') AND UPPER(COALESCE(to_jsonb(candidate)->>'plot_tag','')) <> 'OLD')=1)) ORDER BY source.id DESC LIMIT 1) p ON TRUE JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pr.id=$1 AND pr.site_id=$2 AND pr.registry_date IS NOT NULL AND EXISTS(SELECT 1 FROM registry_document_handovers h WHERE h.registry_id=pr.id) AND EXISTS(SELECT 1 FROM documents d WHERE ${registryDeedScopeSql("p.id")}) AND ${PLOT_CLIENT_PREDICATE}`;
   else return null;
@@ -1226,7 +1245,7 @@ export async function loadAccountWhatsAppContext(
       data.assigned_to = approver?.name || "";
     }
   }
-  if (event === "INSTALLMENT_DUE") {
+  if (["INSTALLMENT_DUE", "INSTALLMENT_OVERDUE"].includes(event)) {
     const [{ rows: installments }, { rows: generic }, { rows: direct }] =
       await Promise.all([
         db.query(
@@ -1254,6 +1273,11 @@ export async function loadAccountWhatsAppContext(
         (r) => Number(r.id) === Number(data.installment_id),
       )?.remaining || 0;
     if (data.remaining <= 0.005) return null;
+    if (event === "INSTALLMENT_OVERDUE") {
+      const notice = overdueNotice(await loadOverduePolicy(siteId, db), data, data.unit_type);
+      if (!notice) return null;
+      Object.assign(data, notice);
+    }
   }
   return data;
 }
@@ -1289,6 +1313,8 @@ export async function queueAccountWhatsApp(event, refId, options = {}) {
         INSTALLMENT_RECEIVED:
           "SELECT p.site_id FROM plot_installment_payments pip JOIN plots p ON p.id=pip.plot_id WHERE pip.id=$1",
         INSTALLMENT_DUE:
+          "SELECT p.site_id FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id WHERE pi.id=$1",
+        INSTALLMENT_OVERDUE:
           "SELECT p.site_id FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id WHERE pi.id=$1",
         REGISTRY_COMPLETED: "SELECT site_id FROM plot_registries WHERE id=$1",
       };
@@ -1368,6 +1394,62 @@ export async function scheduleAccountWhatsAppReminders({
   }
   return queued;
 }
+
+/** First overdue day in India time. Never backfill an existing overdue portfolio. */
+export async function scheduleAccountWhatsAppOverdue({ db = pool, scanLimit = 500 } = {}) {
+  if ((inTest() || !enabled()) && db === pool) return 0;
+  if (!(await accountWhatsAppSchemaReady(db))) return 0;
+  const limit = Math.max(1, Math.min(1000, Math.floor(Number(scanLimit) || 500)));
+  let cursor = 0;
+  let queued = 0;
+  while (true) {
+    const { rows } = await db.query(
+      `SELECT pi.id,p.id AS plot_id,p.site_id,pi.due_date::text,a.setting_value AS policy
+       FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled
+       JOIN account_whatsapp_stage_settings s ON s.site_id=p.site_id AND s.event='INSTALLMENT_OVERDUE' AND s.enabled AND s.template_name IS NOT NULL
+       JOIN application_settings a ON a.site_id=p.site_id AND a.setting_key=$3
+       WHERE ${ACTIVE_OVERDUE_PLOT} AND pi.id>$1
+         AND pi.due_date=(now() AT TIME ZONE 'Asia/Kolkata')::date-1
+         AND s.enabled_at IS NOT NULL AND pi.due_date >= (s.enabled_at AT TIME ZONE 'Asia/Kolkata')::date
+       ORDER BY pi.id LIMIT $2`, [cursor, limit, OVERDUE_POLICY_KEY],
+    );
+    for (const row of rows) {
+      cursor = Number(row.id);
+      const data = await loadAccountWhatsAppContext('INSTALLMENT_OVERDUE', row.id, row.site_id, db);
+      if (!data) continue;
+      const result = await queueAccountWhatsApp('INSTALLMENT_OVERDUE', row.id, {
+        siteId: row.site_id,
+        dedupeKey: overdueDedupeKey(data.policy, row.id, row.plot_id, row.due_date), db,
+      });
+      if (result.queued) queued++;
+    }
+    if (rows.length < limit) break;
+  }
+  return queued;
+}
+
+/** Explicit requests pin one specific version; unrelated approved versions never auto-apply. */
+export async function activateRequestedOverdueTemplates({ db = pool } = {}) {
+  const requests = (await db.query('SELECT site_id,setting_value FROM application_settings WHERE setting_key=$1', [PENDING_OVERDUE_TEMPLATE_KEY])).rows;
+  let applied = 0;
+  for (const request of requests) {
+    const expected = request.setting_value;
+    const policy = await loadOverduePolicy(request.site_id, db);
+    if (!policy || JSON.stringify(policy) !== JSON.stringify(normalizeOverduePolicy(expected.policy))) continue;
+    const template = (await db.query("SELECT name FROM account_whatsapp_templates WHERE site_id=$1 AND name=$2 AND event='INSTALLMENT_OVERDUE' AND status='APPROVED' AND archived_at IS NULL", [request.site_id, expected.template_name])).rows[0];
+    if (!template) continue;
+    const user = (await db.query("SELECT u.id,u.role,u.organization_id FROM users u JOIN sites s ON s.organization_id=u.organization_id WHERE s.id=$1 AND u.id=$2 AND u.is_active AND u.role IN ('admin','super_admin')", [request.site_id, expected.requested_by])).rows[0];
+    if (!user) continue;
+    try {
+      await saveAccountWhatsAppStage(user, 'INSTALLMENT_OVERDUE', { site_id: request.site_id, template_name: template.name, enabled: true }, { db, requireUnassigned: true, activationRequest: expected });
+      applied++;
+    } catch (error) {
+      console.error('[account-whatsapp] Requested overdue template not activated:', request.site_id, error.message);
+    }
+  }
+  return applied;
+}
+
 export async function deliverAccountWhatsApp(
   row,
   {
@@ -1468,6 +1550,14 @@ export async function deliverAccountWhatsApp(
           "SKIPPED",
           "Installment due date changed or is now historical",
         );
+    }
+    if (row.event === 'INSTALLMENT_OVERDUE') {
+      const key = overdueDedupeKey(data.policy, data.installment_id, data.plot_id, data.due_date);
+      const createdDay = Date.parse(indiaDate(new Date(row.created_at)));
+      const firstOverdueDay = Date.parse(indiaDate(data.due_date)) + 86400000;
+      if (row.dedupe_key !== key || createdDay !== firstOverdueDay ||
+          !settings.enabled_at || indiaDate(data.due_date) < indiaDate(new Date(settings.enabled_at)))
+        return finish('SKIPPED', 'Overdue due date or project penalty policy changed, or installment predates activation');
     }
     phone =
       accountWhatsAppPhone(data.whatsapp) || accountWhatsAppPhone(data.phone);
@@ -1595,10 +1685,12 @@ export function startAccountWhatsAppWorker(intervalMs = 10_000) {
       warnedSchema = false;
       if (Date.now() - lastRefresh > 600_000) {
         await refreshAccountWhatsAppTemplates();
+        await activateRequestedOverdueTemplates();
         lastRefresh = Date.now();
       }
       if (Date.now() - lastSchedule > 60_000) {
         await scheduleAccountWhatsAppReminders();
+        await scheduleAccountWhatsAppOverdue();
         lastSchedule = Date.now();
       }
       await drainAccountWhatsApp();

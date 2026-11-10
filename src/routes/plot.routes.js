@@ -14,6 +14,7 @@ import {
   recordInstallmentPayment, listInstallmentPayments,
   paymentManagementList, paymentReminders, paymentAnalytics,
   sendPaymentReminderSms, paymentReminderSmsLog,
+  installmentOverduePolicy,
 } from '../controllers/installment.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import { pendingPlotPayments, createPercentagePaymentPlan, setFullPaymentDue } from '../controllers/pendingPlotPayments.controller.js';
@@ -55,6 +56,7 @@ router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payme
 router.get('/search', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, searchPlots);                                 // ?site_id=X&q=A67
 router.get('/autocomplete', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotMetaCache, getAutocomplete);                      // ?site_id=X
 router.get('/payment-management', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentManagementList);           // ?site_id=X
+router.get('/installment-overdue-policy', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, installmentOverduePolicy);
 router.get('/pending-payments', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, pendingPlotPayments);
 router.get('/reports', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, projectPaymentReport);
 router.get('/payment-reminders', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, paymentReminders);                  // ?site_id=X&page=1&limit=10
