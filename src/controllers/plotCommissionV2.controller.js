@@ -11,6 +11,8 @@ import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.js';
 import { transactionMovesMoney } from '../utils/transactionPosting.js';
+import { assertAllocationSite, positiveId, replaceCommissionAllocations, commissionAllocationRevision } from '../services/commissionAllocations.service.js';
+import permissionModel from '../models/Permission.model.js';
 
 const commissionPaymentPostsSql = (alias = '') => {
   const p = alias ? `${alias}.` : '';
@@ -89,6 +91,66 @@ const autoUpdateCommissionStatus = async (commissionId, poolConn) => {
   }
 };
 
+/** Small organization directory for dealer pickers; every member type is eligible. */
+export const getCommissionReceivers = asyncHandler(async (req, res) => {
+  const siteId = positiveId(req.query.site_id);
+  await assertAllocationSite(pool, req.user, siteId);
+  const cursor = req.query.cursor == null || req.query.cursor === '' ? 0 : positiveId(req.query.cursor);
+  const limit = Math.max(1, Math.min(100, Number.parseInt(req.query.limit, 10) || 30));
+  const query = String(req.query.q || '').trim().slice(0, 100);
+  const escaped = query.toLowerCase().replace(/[\\%_]/g, value => `\\${value}`);
+  const rawDigits = query.replace(/\D/g, '');
+  const digits = ((rawDigits.length===12 && rawDigits.startsWith('91'))
+    || (rawDigits.length===14 && rawDigits.startsWith('0091'))
+    || (rawDigits.length===11 && rawDigits.startsWith('0'))) ? rawDigits.slice(-10) : rawDigits;
+  const { rows } = await pool.query(`SELECT m.id,m.full_name,m.phone,m.member_type,
+      ('BROKER'=ANY(COALESCE(m.member_types,ARRAY[m.member_type]))
+       AND COALESCE(to_jsonb(m)->>'is_active','true')<>'false'
+       AND UPPER(TRIM(COALESCE(to_jsonb(m)->>'status','ACTIVE'))) NOT IN ('INACTIVE','BLOCKED','DISABLED','DEACTIVATED','DELETED','SUSPENDED')
+       AND length(COALESCE(m.phone,''))<=32 AND regexp_replace(COALESCE(m.phone,''),'[[:space:]()+-]','','g') ~ '^(0091|91|0)?[6-9][0-9]{9}$'
+       AND length(COALESCE(m.aadhar_no,''))<=32 AND regexp_replace(COALESCE(m.aadhar_no,''),'[[:space:]-]','','g') ~ '^[2-9][0-9]{11}$') AS partner_app_eligible
+    FROM members m JOIN sites s ON s.id=m.site_id
+    WHERE s.organization_id=$1 AND m.id>$2
+      AND ($3::text='' OR lower(m.full_name) LIKE $4 ESCAPE '\\'
+        OR ($5::text<>'' AND regexp_replace(COALESCE(m.phone,''),'[^0-9]','','g') LIKE $6))
+    ORDER BY m.id ASC LIMIT $7`, [req.user.organization_id, cursor, query, `%${escaped}%`, digits, `%${digits}%`, limit + 1]);
+  const members = rows.slice(0, limit);
+  res.json({ members, has_more: rows.length > limit, next_cursor: rows.length > limit ? String(members.at(-1).id) : null });
+});
+
+// The split editor needs only allocation metadata and immutable-history flags.
+// Keep it independent of receipt signing, transaction visibility and resales.
+export const getCommissionAllocations = asyncHandler(async (req, res) => {
+  const siteId=positiveId(req.query.site_id), plotId=positiveId(req.query.plot_id);
+  await assertAllocationSite(pool,req.user,siteId);
+  const [plotResult,agentsResult]=await Promise.all([
+    pool.query(`SELECT p.id AS plot_id,p.site_id,p.plot_no,p.buyer_name,p.plot_size,p.plot_rate,p.plot_commission,
+      COALESCE(to_jsonb(p)->>'unit_type','plot') AS unit_type FROM plots p WHERE p.id=$1 AND p.site_id=$2`,[plotId,siteId]),
+    pool.query(`SELECT pc.id AS commission_id,pc.agent_id,m.full_name AS agent_name,m.phone AS agent_phone,
+      pc.total_commission,pc.remarks,to_jsonb(pc)->>'updated_at' AS revision_updated_at,to_jsonb(pc)->>'allocation_type' AS allocation_type,
+      to_jsonb(pc)->>'allocation_value' AS allocation_value,to_jsonb(pc)->>'allocation_base' AS allocation_base,
+      COUNT(p.id)::int AS payment_history_count
+      FROM plot_commissions_v2 pc JOIN members m ON m.id=pc.agent_id
+      LEFT JOIN plot_commission_payments p ON p.plot_commission_id=pc.id
+      WHERE pc.plot_id=$1 AND pc.site_id=$2 GROUP BY pc.id,m.id ORDER BY pc.id`,[plotId,siteId]),
+  ]);
+  if(!plotResult.rows[0]) return res.status(404).json({message:'Plot or shop not found'});
+  res.json({plot:plotResult.rows[0],revision:commissionAllocationRevision(plotResult.rows[0],agentsResult.rows),agents:agentsResult.rows.map(row=>({...row,total_commission:num(row.total_commission),
+    allocation_value:row.allocation_value==null?null:Number(row.allocation_value),allocation_base:row.allocation_base==null?null:num(row.allocation_base)}))});
+});
+
+export const saveCommissionAllocations = asyncHandler(async (req, res) => {
+  let canUpdate = ['admin','super_admin'].includes(req.user.role);
+  if (!canUpdate) {
+    const cached = req.user.permissionsByModule;
+    const permission = cached instanceof Map && cached.has('commissions') ? cached.get('commissions')
+      : await permissionModel.getPermission(req.user.id, 'commissions');
+    canUpdate = permission?.can_update === true;
+  }
+  const payload = await replaceCommissionAllocations(pool, req.user, req.body, { canUpdate });
+  res.status(201).json({ ...payload, message: 'Dealer commission breakdown saved' });
+});
+
 /**
  * GET /plot-commission/plots
  * Load plots from plot payments module that belong to the site.
@@ -97,9 +159,11 @@ export const getPlotsForCommission = asyncHandler(async (req, res) => {
   const { site_id } = req.query;
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
-  // Get active plots where there's no commission assigned yet, or you can allow multiple
+  await assertAllocationSite(pool, req.user, positiveId(site_id));
+
   const query = `
-    SELECT p.id, p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.block, p.plot_tag
+    SELECT p.id, p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.block, p.plot_tag,
+           COALESCE(to_jsonb(p)->>'unit_type','plot') AS unit_type, p.plot_commission
     FROM plots p
     WHERE p.site_id = $1
     ORDER BY p.plot_no ASC
@@ -349,7 +413,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
   if (!plotMeta) {
     const metaRes = await pool.query(
       `SELECT p.id AS plot_id, p.plot_no, p.plot_size, p.plot_rate, p.buyer_name,
-              p.commission_rate, p.plot_tag, COALESCE(p.plot_commission, 0) AS plot_commission,
+              p.commission_rate, p.plot_tag, COALESCE(to_jsonb(p)->>'unit_type','plot') AS unit_type, COALESCE(p.plot_commission, 0) AS plot_commission,
               s.name AS site_name, p.site_id
          FROM plots p JOIN sites s ON p.site_id = s.id
         WHERE p.id = $1 AND p.site_id = $2`,
@@ -407,6 +471,9 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
            'agent_name', m.full_name,
            'agent_phone', m.phone,
            'total_commission', pc.total_commission,
+           'allocation_type', to_jsonb(pc)->>'allocation_type',
+           'allocation_value', to_jsonb(pc)->>'allocation_value',
+           'allocation_base', to_jsonb(pc)->>'allocation_base',
            'status', pc.status,
            'remarks', pc.remarks,
            'total_paid', COALESCE(paid_agg.total_paid, 0),
@@ -518,6 +585,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     buyer_name: plotMeta.buyer_name,
     commission_rate: plotMeta.commission_rate,
     plot_tag: plotMeta.plot_tag,
+    unit_type: plotMeta.unit_type || 'plot',
     plot_commission: parseFloat(plotMeta.plot_commission) || 0,
     site_name: plotMeta.site_name,
     site_id: plotMeta.site_id,
@@ -536,6 +604,9 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     agent_name: c.agent_name,
     agent_phone: c.agent_phone,
     total_commission: c.total_commission,
+    allocation_type: c.allocation_type || null,
+    allocation_value: c.allocation_value == null ? null : Number(c.allocation_value),
+    allocation_base: c.allocation_base == null ? null : Number(c.allocation_base),
     total_paid: totalPaid,
     total_paid_all: totalPaidAll,
     balance: (parseFloat(c.total_commission) || 0) - totalPaidAll,
@@ -544,6 +615,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     created_at: c.created_at,
     payments: scopedPayments,
     payment_count: scopedPayments.length,
+    payment_history_count: Number(c.payment_history_count) || 0,
   });
   });
 
@@ -574,13 +646,14 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     { total_commission: 0, total_paid: 0, total_paid_all: 0, booking_count: 0 }
   );
   grand.balance = grand.total_commission - grand.total_paid_all;
+  const allocatedCommission = agents.reduce((sum, agent) => sum + num(agent.total_commission), 0);
 
   return {
     plot: plotInfo,
     agents,
-    totals: { total_commission: totalCommission, total_paid: totalPaid, total_paid_all: totalPaidAll, balance: totalCommission - totalPaidAll },
+    totals: { total_commission: totalCommission, allocated_commission: allocatedCommission, unallocated_commission: Math.max(0, totalCommission - allocatedCommission), total_paid: totalPaid, total_paid_all: totalPaidAll, balance: totalCommission - totalPaidAll },
     grand,
-    is_resale: commissions.length > 1 || timeline.length > 1,
+    is_resale: timeline.length > 1,
     timeline,
     entryVisibility,
   };
@@ -591,6 +664,7 @@ export const getPlotCommissionByPlot = asyncHandler(async (req, res) => {
   if (isNaN(numPlotId)) return res.status(400).json({ message: 'Invalid plot ID' });
   if (!req.query.site_id) return res.status(400).json({ message: 'site_id is required' });
   const entryVisibility = await resolveEntryVisibility(req.user, 'commissions', req.query.created_by);
+  if (req.user.organization_id) await assertAllocationSite(pool, req.user, positiveId(req.query.site_id));
   const payload = await plotDetail(numPlotId, parseInt(req.query.site_id), entryVisibility);
   if (!payload) return res.status(404).json({ message: 'Plot not found' });
   res.json(payload);
@@ -877,6 +951,11 @@ export const getPlotCommissionAnalytics = asyncHandler(async (req, res) => {
  */
 export const updatePlotCommission = asyncHandler(async (req, res) => {
   const { total_commission, remarks } = req.body;
+  const current = (await pool.query('SELECT pc.*,to_jsonb(pc)->>\'allocation_type\' AS allocation_type FROM plot_commissions_v2 pc WHERE pc.id=$1', [positiveId(req.params.id)])).rows[0];
+  if (!current) return res.status(404).json({ message: 'Commission not found' });
+  await assertCommissionSite(req.user, current.site_id);
+  if (current.allocation_type) return res.status(409).json({ code: 'COMMISSION_USE_BREAKDOWN', message: 'Edit this dealer in the property commission breakdown so the split stays balanced.' });
+  if (!Number.isFinite(Number(total_commission)) || Number(total_commission) <= 0) return res.status(400).json({ message: 'A positive commission amount is required' });
 
   // Atomic UPDATE — saves a SELECT round-trip. UPDATE returns the row or
   // none (404).

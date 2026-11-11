@@ -171,7 +171,10 @@ class PlotCommissionV2Model extends MasterModel {
     const query = `
       SELECT
         pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission, pc.remarks, pc.status, pc.created_at,
+        COUNT(pcp.id)::int AS payment_history_count,
+        to_jsonb(pc)->>'allocation_type' AS allocation_type, to_jsonb(pc)->>'allocation_value' AS allocation_value, to_jsonb(pc)->>'allocation_base' AS allocation_base,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.commission_rate, p.plot_tag,
+        COALESCE(to_jsonb(p)->>'unit_type','plot') AS unit_type,
         COALESCE(p.plot_commission, 0) AS plot_commission,
         s.name AS site_name,
         m.full_name AS agent_name, m.phone AS agent_phone,

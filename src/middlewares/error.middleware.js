@@ -1,6 +1,9 @@
 import { isDatabaseUnavailable } from '../utils/databaseError.js';
 
 const errorMiddleware = (err, req, res, next) => {
+  if (err.constraint === 'commission_allocation_guard' || err.constraint === 'commission_allocation_metadata') {
+    return res.status(409).json({ code: 'COMMISSION_ALLOCATION_CONFLICT', message: err.message });
+  }
   if (['pool_money_receipt_locked','pool_money_period_locked'].includes(err.constraint)) {
     return res.status(409).json({code:'POOL_RECEIPT_LOCKED',message:err.message});
   }

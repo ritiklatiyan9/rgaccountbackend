@@ -208,7 +208,8 @@ const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssigned
 
   // Skip if commission already exists for this plot-agent pair.
   const existingResult = await pool.query(
-    `SELECT id FROM plot_commissions_v2 WHERE plot_id = $1 AND agent_id = $2 LIMIT 1`,
+    `SELECT pc.id FROM plot_commissions_v2 pc WHERE pc.plot_id = $1
+       AND (pc.agent_id = $2 OR to_jsonb(pc)->>'allocation_type' IS NOT NULL) LIMIT 1`,
     [parseInt(plot.id), parseInt(member.id)]
   );
   if (existingResult.rows[0]) return existingResult.rows[0];

@@ -1,9 +1,12 @@
 import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
-const router = express.Router();
+
 
 import {
   getPlotsForCommission,
+  getCommissionReceivers,
+  getCommissionAllocations,
+  saveCommissionAllocations,
   createPlotCommission,
   listPlotCommissions,
   getPlotCommissionDetail,
@@ -24,17 +27,30 @@ import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import { requireOverallSiteScope } from '../middlewares/overallSiteScope.middleware.js';
+import pool from '../config/db.js';
+import { assertAllocationSite, positiveId } from '../services/commissionAllocations.service.js';
 
 const plotCommissionReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'plot-commissions' });
+const authorizeCommissionSiteHit = async req => {
+  await assertAllocationSite(pool,req.user,positiveId(req.query.site_id));
+  return true;
+};
+export const commissionAllocationReadCache = cacheResponse({ttlSeconds:30,namespace:'plot-commissions',authorizeHit:authorizeCommissionSiteHit});
 // /plots is just the list of plots a commission can be assigned to — it
 // rarely changes, so it gets its own namespace with a longer TTL and is
 // NOT busted by every commission/payment write.
-const plotsForCommissionCache = cacheResponse({ ttlSeconds: 300, namespace: 'plot-commissions-plots' });
+const plotsForCommissionCache = cacheResponse({ ttlSeconds: 300, namespace: 'plot-commissions-plots', authorizeHit: authorizeCommissionSiteHit });
 // Anchored prefix so the dedicated cache survives writes.
 const bustPlotCommissionCache = invalidateCacheOnSuccess(['plot-commissions|', 'members|']);
 
+export function createPlotCommissionRouter({ authenticate = authMiddleware } = {}) {
+const router = express.Router();
 // All routes require auth
-router.use(authMiddleware);
+router.use(authenticate);
+router.get('/receivers', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), commissionAllocationReadCache, getCommissionReceivers);
+router.get('/allocations', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), commissionAllocationReadCache, getCommissionAllocations);
+router.post('/allocations', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'write'),
+  invalidateCacheOnSuccess(['plot-commissions|','plot-commissions-plots|','members|']), saveCommissionAllocations);
 
 // These permissions use the existing 'commissions' module permission identifier for backward compatibility/simplicity
 router.get('/plots', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotsForCommissionCache, getPlotsForCommission);
@@ -56,11 +72,13 @@ router.post('/payment/bulk-delete', requireRole('admin', 'sub_admin'), requirePe
 router.get('/analytics/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getPlotCommissionAnalytics);
 
 // Plot-level detail route (all commissions for a plot)
-router.get('/plot/:plotId', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getPlotCommissionByPlot);
+router.get('/plot/:plotId', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), commissionAllocationReadCache, getPlotCommissionByPlot);
 
 // Master commission routes (less specific, come last)
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'read'), plotCommissionReadCache, getPlotCommissionDetail);
 router.put('/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'update'), bustPlotCommissionCache, updatePlotCommission);
 router.delete('/:id', requireRole('admin', 'sub_admin'), requirePermission('commissions', 'delete'), bustPlotCommissionCache, deletePlotCommission);
 
-export default router;
+return router;
+}
+export default createPlotCommissionRouter();

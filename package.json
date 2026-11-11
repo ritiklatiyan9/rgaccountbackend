@@ -269,7 +269,9 @@
     "migrate:commercial-shops": "node src/migrations/239_commercial_shop_units.js",
     "test:commercial-shops": "node --test test/project-profile.test.mjs test/commercial-shop-units-db.test.mjs test/registry-size.test.mjs",
     "dev:pool-money-preview": "node scripts/pool-money-preview.mjs",
-    "test:bank-accounts": "node --test test/bank-account-running-balance.test.mjs"
+    "test:bank-accounts": "node --test test/bank-account-running-balance.test.mjs",
+    "migrate:plot-commission-allocations": "node src/migrations/241_plot_commission_allocations.js && node src/migrations/242_plot_commission_allocation_guards.js",
+    "test:plot-commission-allocations": "node --test test/commission-allocations*.test.mjs test/plot-commission-visibility.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

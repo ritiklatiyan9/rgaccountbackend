@@ -1,3 +1,5 @@
+import { up as migrateCommissionAllocationGuards } from './migrations/242_plot_commission_allocation_guards.js';
+import { up as migrateCommissionAllocations } from './migrations/241_plot_commission_allocations.js';
 import { up as migratePoolMoney } from './migrations/238_pool_money.js';
 import { up as migrateCommercialShops } from './migrations/239_commercial_shop_units.js';
 import { warmRequestHistory } from './services/requestHistoryWarmup.service.js';
@@ -86,6 +88,8 @@ connectDB().then(async () => {
   await migrateTransactionDocumentation(pool);
   await migratePoolMoney(pool);
   await migrateCommercialShops(pool);
+  await migrateCommissionAllocations(pool);
+  await migrateCommissionAllocationGuards(pool);
   if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [cashflowTransferVersion])).rows.length) await migrateCashflowTransfers(pool);
   if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [quickTransferVersion])).rows.length) await migrateQuickTransfers(pool);
   const constructionStartup = await ensureConstructionStartup(pool);
