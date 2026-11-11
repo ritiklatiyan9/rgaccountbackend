@@ -1,0 +1,47 @@
+{
+  "checked_at": "2026-11-10T16:59:47.944Z",
+  "backend_commit": "2ee1e1e",
+  "templates": [
+    {
+      "site_id": 5,
+      "name": "dgg_acc_s5_installment_overdue_e36327dacbf9",
+      "title": "OM ASSOCIATES overdue interest notice",
+      "status": "PENDING",
+      "category": "UTILITY",
+      "meta_template_id": "4596439170645211",
+      "body": "*Overdue installment penalty notice*\n\nDear {customer_name},\n\nYour {installment_name} for Plot {plot_no} at {project}, due on {due_date}, remains unpaid.\n*Unpaid installment amount:* {amount_due}\n\nOverdue interest at 18% per year is calculated daily only on the unpaid installment amount that has become due. Future installments are excluded.\n\nPlease settle the overdue amount. If you have already paid, contact our office to reconcile your account.\n\nDefence Garden Group",
+      "rejected_reason": null
+    },
+    {
+      "site_id": 7,
+      "name": "dgg_acc_s7_installment_overdue_c189c6a19490",
+      "title": "Naya Baazar shop overdue penalty notice",
+      "status": "PENDING",
+      "category": "UTILITY",
+      "meta_template_id": "1614017070495789",
+      "body": "*Overdue installment penalty notice*\n\nDear {customer_name},\n\nYour {installment_name} for Shop {plot_no} at {project}, due on {due_date}, remains unpaid.\n*Unpaid installment amount:* {amount_due}\n\nAn overdue installment attracts a Rs. 50,000 increase in the shop price, once per shop.\n\nPlease settle the overdue amount. If you have already paid, contact our office to reconcile your account.\n\nDefence Garden Group",
+      "rejected_reason": null
+    }
+  ],
+  "settings": [],
+  "pending_activation": [
+    {
+      "site_id": 5,
+      "template_name": "dgg_acc_s5_installment_overdue_e36327dacbf9"
+    },
+    {
+      "site_id": 7,
+      "template_name": "dgg_acc_s7_installment_overdue_c189c6a19490"
+    }
+  ],
+  "validation": {
+    "backend_tests_passed": 67,
+    "frontend_tests_passed": 30,
+    "optional_frontend_interaction_tests_skipped": 23,
+    "frontend_build": "passed",
+    "existing_sidebar_contract_test": "fails on pre-existing Layout.jsx mapping",
+    "existing_plot_payments_lint": "8 pre-existing errors; newly added components pass"
+  },
+  "deployment": "Verified in the authenticated localhost frontend against the hosted Accountancy API: nine module events including Overdue installment penalty; backend commit 2ee1e1e is on main and repository checks passed.",
+  "repository_checks": "passed"
+}

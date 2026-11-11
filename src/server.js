@@ -10,6 +10,7 @@ import { up as migrateBookingAccountsLogin } from './migrations/228_booking_acco
 import { ensureWalletStartup } from './services/walletStartup.service.js';
 import { ensureConstructionStartup } from './services/constructionStartup.service.js';
 import { up as migrateCashflowTransfers, VERSION as cashflowTransferVersion } from './migrations/237_cashflow_money_transfers.js';
+import { up as migrateQuickTransfers, VERSION as quickTransferVersion } from './migrations/240_quick_personal_ledger_transfers.js';
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
@@ -86,6 +87,7 @@ connectDB().then(async () => {
   await migratePoolMoney(pool);
   await migrateCommercialShops(pool);
   if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [cashflowTransferVersion])).rows.length) await migrateCashflowTransfers(pool);
+  if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [quickTransferVersion])).rows.length) await migrateQuickTransfers(pool);
   const constructionStartup = await ensureConstructionStartup(pool);
   console.log(constructionStartup.current
     ? '[startup] Construction schema current; installed migrations skipped'

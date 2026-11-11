@@ -52,11 +52,17 @@ CREATE TABLE IF NOT EXISTS cashflow_transfer_audit (
 );
 ALTER TABLE cash_flow_entries ADD COLUMN IF NOT EXISTS money_transfer_id UUID REFERENCES cashflow_transfers(id) DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE cash_flow_entries ADD COLUMN IF NOT EXISTS money_transfer_leg TEXT;
+-- Migration 240 extends this constraint for direct wallet/imprest transfers.
+-- A repeat installation of 237 must retain that newer, stricter link shape.
+DO $migration$ BEGIN
+IF NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cash_flow_entries'::regclass AND attname='quick_transfer_id' AND NOT attisdropped) THEN
 ALTER TABLE cash_flow_entries DROP CONSTRAINT IF EXISTS cashflow_money_transfer_link;
 ALTER TABLE cash_flow_entries ADD CONSTRAINT cashflow_money_transfer_link CHECK(
  (money_transfer_id IS NULL AND money_transfer_leg IS NULL AND COALESCE(source_module,'')<>'cashflow_transfers') OR
  (money_transfer_id IS NOT NULL AND money_transfer_leg IS NOT NULL AND money_transfer_leg IN ('debit','credit') AND source_module IS NOT NULL AND source_module='cashflow_transfers' AND source_id IS NULL)
 );
+END IF;
+END $migration$;
 CREATE UNIQUE INDEX IF NOT EXISTS cashflow_money_transfer_one_leg ON cash_flow_entries(money_transfer_id,money_transfer_leg,cash_type) WHERE money_transfer_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS cashflow_money_transfer_ledger_entries ON cash_flow_entries(cash_flow_month_id,id);
 
@@ -94,6 +100,7 @@ BEGIN
  PERFORM m.id FROM cash_flow_months m WHERE m.id IN(SELECT cash_flow_month_id FROM cash_flow_entries WHERE id=ANY(source_ids)) ORDER BY m.id FOR UPDATE;
  PERFORM id FROM cash_flow_entries WHERE id=ANY(source_ids) ORDER BY id FOR UPDATE;
  IF EXISTS(SELECT 1 FROM cash_flow_entries e WHERE e.id=ANY(source_ids) AND (e.money_transfer_id IS NOT NULL
+  OR NULLIF(to_jsonb(e)->>'quick_transfer_id','') IS NOT NULL
   OR EXISTS(SELECT 1 FROM cashflow_transfer_allocations a WHERE a.source_entry_id=e.id))) THEN
   RAISE EXCEPTION 'This receipt is already allocated to a Cashflow money transfer' USING ERRCODE='23514',CONSTRAINT='cashflow_transfer_immutable';
  END IF;

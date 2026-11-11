@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import express from 'express';
 import { gunzipSync } from 'node:zlib';
 import { PGlite } from '@electric-sql/pglite';
-import { createMobilePortalService, normalizeMobile, projectMobilePlot } from '../src/services/mobilePortal.service.js';
+import { createMobilePortalService, normalizeMobile, projectMobilePlot, PLOT_ACCESS_UNAVAILABLE_MESSAGE } from '../src/services/mobilePortal.service.js';
 import { createMobilePortalRouter, createMobileLoginLimiter } from '../src/routes/mobilePortal.routes.js';
 import { postingPolicySql } from '../src/migrations/171_cheque_clearance_before_approval.js';
 
@@ -149,6 +149,175 @@ test('refunds in one receipt bucket cannot overstate installment funding', () =>
   assert.equal(directOverpayment.balanceAmount, 50);
 });
 
+test('current status and client association revoke cancelled and resale access, including warmed financial data', async t => {
+  const db = await fixture();
+  t.after(() => db.close());
+  const queries = [];
+  const service = createMobilePortalService({ query: (sql, args) => { queries.push(sql); return db.query(sql, args); } });
+  const previous = { members: [{ id: 1, site_id: 1 }] };
+  const next = { members: [{ id: 3, site_id: 1 }] };
+  const unassigned = { members: [{ id: 4, site_id: 1 }] };
+  const denied = session => assert.rejects(service.plot(session, '1'), {
+    statusCode: 404, message: PLOT_ACCESS_UNAVAILABLE_MESSAGE,
+  });
+
+  for (const status of ['BOOKED', 'REGISTRY', 'UNDER CANCELLATION', 'TRANSFERRED']) {
+    await db.query('UPDATE plots SET status=$1 WHERE id=1', [status]);
+    assert.equal((await service.plot(previous, '1')).plot.status, status);
+  }
+  for (const status of [' cancelled ', 'Canceled', ' resale ']) {
+    await db.query('UPDATE plots SET status=$1 WHERE id=1', [status]);
+    queries.length = 0;
+    await denied(previous);
+    await denied(next);
+    await denied(unassigned);
+    const portfolio = await service.portfolio(previous, { includeDetails: true });
+    assert.deepEqual(portfolio.plots, []);
+    assert.deepEqual(portfolio.details, []);
+    assert.equal(portfolio.summary.totalAmount, 0);
+    assert.equal(portfolio.summary.paidAmount, 0);
+    assert.equal(portfolio.accessNotice, PLOT_ACCESS_UNAVAILABLE_MESSAGE);
+    assert.ok(queries.every(sql => !/FROM plot_(?:installments|payments)\b/.test(sql)), 'denied plots never load financial data');
+    assert.ok(!JSON.stringify(portfolio).includes('BANK-1'));
+    assert.ok(!JSON.stringify(portfolio).includes('A-01'));
+  }
+
+  // Resale keeps the former purchase row and creates a new purchase row.
+  await db.exec(`UPDATE plots SET status='RESALE' WHERE id=1;
+    INSERT INTO plots(id,site_id,plot_no,plot_size,sale_price,booking_date,status,buyer_member_id)
+      VALUES(9,1,'A-01',100,900,'2026-11-01','BOOKED',3);
+    INSERT INTO plot_payments VALUES(20,1,9,90,'2026-11-01','CASH','approved',NULL,'NEW-CLIENT-RECEIPT');`);
+  await denied(previous);
+  await assert.rejects(service.plot(previous, '9'), { statusCode: 404, message: PLOT_ACCESS_UNAVAILABLE_MESSAGE });
+  const newPurchase = (await service.plot(next, '9')).plot;
+  assert.equal(newPurchase.status, 'BOOKED');
+  assert.equal(newPurchase.totalAmount, 900);
+  assert.equal(newPurchase.paidAmount, 90);
+  assert.deepEqual(newPurchase.payments.map(row => row.reference), ['NEW-CLIENT-RECEIPT']);
+  await denied(next);
+
+  // Explicit reassignment also denies the former client immediately.
+  await db.exec("UPDATE plots SET status='BOOKED',buyer_member_id=3 WHERE id=1");
+  await denied(previous);
+  assert.equal((await service.plot(next, '1')).plot.id, '1');
+  await denied(unassigned);
+  await db.exec('UPDATE plots SET buyer_member_id=NULL WHERE id=1');
+  await denied(previous);
+  await denied(next);
+  await denied(unassigned);
+});
+
+test('latest cancelled or invalid booking and invalid explicit buyer never revive a historical client', async t => {
+  const db = await fixture();
+  t.after(() => db.close());
+  const service = createMobilePortalService(db);
+  const previous = { members: [{ id: 1, site_id: 1 }] };
+  const next = { members: [{ id: 3, site_id: 1 }] };
+  await db.exec(`UPDATE plots SET buyer_member_id=NULL WHERE id=1;
+    INSERT INTO bookings VALUES(10,1,1,1,'CONFIRMED'),(11,1,1,3,'CANCELLED');`);
+  for (const session of [previous, next]) {
+    await assert.rejects(service.plot(session, '1'), { statusCode: 404, message: PLOT_ACCESS_UNAVAILABLE_MESSAGE });
+    assert.equal((await service.portfolio(session)).accessNotice, PLOT_ACCESS_UNAVAILABLE_MESSAGE);
+  }
+  await db.exec("UPDATE bookings SET status='CONFIRMED' WHERE id=11");
+  assert.equal((await service.plot(next, '1')).plot.id, '1');
+  await assert.rejects(service.plot(previous, '1'), { statusCode: 404 });
+  await db.exec('UPDATE bookings SET client_member_id=2 WHERE id=11');
+  await assert.rejects(service.plot(previous, '1'), { statusCode: 404 });
+  await db.exec('UPDATE bookings SET client_member_id=1 WHERE id=11; UPDATE plots SET buyer_member_id=999 WHERE id=1');
+  await assert.rejects(service.plot(previous, '1'), { statusCode: 404 });
+  await db.exec('UPDATE plots SET buyer_member_id=2 WHERE id=1');
+  await assert.rejects(service.plot(previous, '1'), { statusCode: 404 });
+});
+
+test('financial cache is scoped to the current owner, status and ownership revision', async t => {
+  const db = await fixture();
+  t.after(() => db.close());
+  await db.exec('ALTER TABLE plots ADD COLUMN updated_at timestamptz');
+  const service = createMobilePortalService(db);
+  const previous = { members: [{ id: 1, site_id: 1 }] };
+  const next = { members: [{ id: 3, site_id: 1 }] };
+  assert.equal((await service.plot(previous, '1')).plot.paidAmount, 350);
+  await db.exec(`UPDATE plots SET buyer_member_id=3 WHERE id=1;
+    INSERT INTO plot_payments VALUES(20,1,1,10,'2026-11-01','CASH','approved',NULL,'AFTER-REASSIGNMENT');`);
+  assert.equal((await service.plot(next, '1')).plot.paidAmount, 360);
+  await assert.rejects(service.plot(previous, '1'), { statusCode: 404 });
+  await db.exec(`UPDATE plots SET status='REGISTRY' WHERE id=1;
+    INSERT INTO plot_payments VALUES(21,1,1,10,'2026-11-01','CASH','approved',NULL,'AFTER-STATUS-CHANGE');`);
+  assert.equal((await service.plot(next, '1')).plot.paidAmount, 370);
+  await db.exec(`UPDATE plots SET updated_at='2026-11-07T10:00:00Z' WHERE id=1;
+    INSERT INTO plot_payments VALUES(22,1,1,10,'2026-11-01','CASH','approved',NULL,'AFTER-REVISION');`);
+  assert.equal((await service.plot(next, '1')).plot.paidAmount, 380);
+});
+
+test('HTTP plot and expanded portfolio responses withhold cancelled data and return the contact-office message', async t => {
+  const db = await fixture();
+  t.after(() => db.close());
+  const service = createMobilePortalService(db);
+  const session = { members: [{ id: 1, site_id: 1 }] };
+  const router = createMobilePortalRouter({ ...service, getSession: async () => session });
+  const invoke = url => new Promise((resolve, reject) => {
+    const req = { method: 'GET', url, query: { include: 'details' }, headers: { authorization: 'Bearer synthetic-only' },
+      get(name) { return this.headers[name.toLowerCase()]; } };
+    const res = { statusCode: 200, headers: {}, set(key, value) { this.headers[key] = value; return this; },
+      vary() {}, status(value) { this.statusCode = value; return this; },
+      json(body) { resolve({ status: this.statusCode, headers: this.headers, body }); } };
+    router.handle(req, res, error => reject(error || new Error('No route matched')));
+  });
+  assert.equal((await invoke('/plots/1')).body.plot.paidAmount, 350);
+  await db.exec("UPDATE plots SET status='CANCELLED' WHERE id=1");
+  for (const id of ['1', '999', 'invalid']) {
+    const response = await invoke(`/plots/${id}`);
+    assert.equal(response.status, 404);
+    assert.equal(response.headers['Cache-Control'], 'private, no-store');
+    assert.deepEqual(response.body, { message: PLOT_ACCESS_UNAVAILABLE_MESSAGE });
+  }
+  const response = await invoke('/plots?include=details');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.accessNotice, PLOT_ACCESS_UNAVAILABLE_MESSAGE);
+  assert.deepEqual(response.body.plots, []);
+  assert.deepEqual(response.body.details, []);
+  assert.ok(!JSON.stringify(response.body).includes('BANK-1'));
+});
+
+test('access changes during a pending financial read cannot return the earlier plot details', async t => {
+  for (const change of [
+    { name: 'cancellation', sql: "UPDATE plots SET status='CANCELLED' WHERE id=1" },
+    { name: 'resale', sql: "UPDATE plots SET status='RESALE' WHERE id=1" },
+    { name: 'reassignment', sql: 'UPDATE plots SET buyer_member_id=3,sale_price=900 WHERE id=1' },
+    { name: 'ownership revision', sql: "UPDATE plots SET updated_at='2026-11-07T12:00:00Z' WHERE id=1" },
+  ]) await t.test(change.name, async t => {
+    const db = await fixture();
+    t.after(() => db.close());
+    await db.exec('ALTER TABLE plots ADD COLUMN updated_at timestamptz');
+    let markStarted;
+    let release;
+    const started = new Promise(resolve => { markStarted = resolve; });
+    const blocked = new Promise(resolve => { release = resolve; });
+    let waiting = true;
+    const service = createMobilePortalService({ query: async (sql, args) => {
+      const result = await db.query(sql, args);
+      if (waiting && /FROM plot_payments\b/.test(sql)) {
+        waiting = false;
+        markStarted();
+        await blocked;
+      }
+      return result;
+    } });
+    const previous = { members: [{ id: 1, site_id: 1 }] };
+    const pending = service.plot(previous, '1');
+    const rejection = assert.rejects(pending, { statusCode: 404, message: PLOT_ACCESS_UNAVAILABLE_MESSAGE });
+    await started;
+    await db.exec(change.sql);
+    release();
+    await rejection;
+    if (change.name === 'reassignment') {
+      const next = { members: [{ id: 3, site_id: 1 }] };
+      assert.equal((await service.plot(next, '1')).plot.totalAmount, 900);
+    }
+  });
+});
+
 test('configured overdue interest matches Accounts and remains separate from principal', () => {
   const plot = { id: 1, site_id: 1, sale_price: 300, interest_enabled: true, interest_rate: 3, interest_type: 'per_month' };
   const schedule = [
@@ -223,7 +392,7 @@ test('batch portfolio reuses financial reads while ownership remains current and
   const service = createMobilePortalService({ query: (sql, args) => { queries++; return db.query(sql, args); } }, { now: () => time });
   const session = { members: [{ id: 1, site_id: 1 }, { id: 2, site_id: 2 }] };
   const first = await service.portfolio(session, { includeDetails: true });
-  assert.equal(queries, 3, 'one ownership query plus two batched financial queries, regardless of plot count');
+  assert.equal(queries, 4, 'two ownership queries surround two batched financial queries, regardless of plot count');
   assert.equal(first.details.length, first.plots.length);
   assert.deepEqual(first.details.map(row => row.plot.id), first.plots.map(row => row.id));
   assert.ok(first.plots.every(row => row.projectName === 'Your Property'));
@@ -231,10 +400,10 @@ test('batch portfolio reuses financial reads while ownership remains current and
   assert.ok(!JSON.stringify(first).includes('Lake Estate'));
   queries = 0;
   await service.portfolio(session, { includeDetails: true });
-  assert.equal(queries, 1, 'financial cache never removes the ownership read');
+  assert.equal(queries, 2, 'financial cache never removes either ownership read');
   queries = 0;
   assert.equal((await service.plot(session, '1')).plot.paidAmount, 350);
-  assert.equal(queries, 1, 'detail reuses the batched financial result');
+  assert.equal(queries, 2, 'detail reuses the batched financial result with current ownership checks');
   await db.query('UPDATE plots SET buyer_member_id=3 WHERE id=1');
   await assert.rejects(service.plot(session, '1'), { statusCode: 404 });
   await db.query('UPDATE plots SET buyer_member_id=1 WHERE id=1');
@@ -243,7 +412,7 @@ test('batch portfolio reuses financial reads while ownership remains current and
   queries = 0;
   const fresh = await service.plot(session, '1', { forceFresh: true });
   assert.equal(fresh.plot.paidAmount, 375);
-  assert.equal(queries, 3);
+  assert.equal(queries, 4);
   await db.query("INSERT INTO plot_payments VALUES (21,1,1,25,'2026-10-27','CASH','approved',NULL,'NEWER-RECEIPT')");
   time += 5001;
   assert.equal((await service.plot(session, '1')).plot.paidAmount, 400, 'financial snapshots expire after five seconds');
@@ -259,7 +428,7 @@ test('simultaneous portfolio reads share one financial batch', async t => {
     service.portfolio(session, { includeDetails: true }),
     service.portfolio(session, { includeDetails: true }),
   ]);
-  assert.equal(queries, 4, 'two independent ownership checks share just two financial queries');
+  assert.equal(queries, 6, 'two requests each check ownership twice and share just two financial queries');
   assert.deepEqual(a, b);
 });
 

@@ -37,7 +37,7 @@ function selectedIds(value,optional=false) {
  return ids.sort((a,b)=>a-b);
 }
 const settingsKey=org=>`cashflow_transfer_approval_limit:organization:${org}`;
-async function actorFor(user,db,write=false) {
+export async function actorFor(user,db,write=false) {
  const {rows}=await db.query(`SELECT u.id,u.name,u.role,u.organization_id,u.is_active,p.can_read,p.can_write,p.can_view_all
   FROM users u LEFT JOIN user_permissions p ON p.user_id=u.id AND p.module='cashflow' WHERE u.id=$1${write?' FOR SHARE OF u':''}`,[positiveId(user?.id)]);
  const actor=rows[0];
@@ -69,16 +69,16 @@ export const transferLedgerBalanceSql=`SELECT m.id,m.site_id,m.ledger_name,m.led
   sum(l.credit-l.debit) FILTER(WHERE l.bucket<>'cash') AS bank
   FROM ledger_entries l WHERE l.cash_flow_month_id=m.id AND l.entry_date<=(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date) b ON true
  WHERE m.id=ANY($1::int[]) AND ${accessSql()} ORDER BY m.id`;
-async function ledgerRows(db,actor,ids) {
+export async function ledgerRows(db,actor,ids) {
  return (await db.query(transferLedgerBalanceSql,[ids,actor.organization_id,actor.is_admin,actor.id])).rows;
 }
-const ledgerReason=row=>row.is_locked?'This ledger is locked.':row.is_future?'Transfers cannot post into a future ledger period.':!row.is_latest?'Use the latest ledger period; older balances may already have been carried forward.':null;
+export const ledgerReason=row=>row.is_locked?'This ledger is locked.':row.is_future?'Transfers cannot post into a future ledger period.':!row.is_latest?'Use the latest ledger period; older balances may already have been carried forward.':null;
 async function sourceLedger(db,actor,id) {
  const source=(await ledgerRows(db,actor,[id]))[0];
  if(!source) fail('LEDGER_NOT_FOUND','Choose a ledger in a site you can access.',404);
  return source;
 }
-async function readLimit(db,actor,lock=false) {
+export async function readLimit(db,actor,lock=false) {
  const row=(await db.query(`SELECT setting_value FROM application_settings WHERE site_id IS NULL AND setting_key=$1${lock?' FOR SHARE':''}`,[settingsKey(actor.organization_id)])).rows[0];
  // A new installation fails closed. Wallet cash is NOT an approval limit.
  return amount(row?.setting_value?.approval_limit??'0.00',true);
@@ -90,6 +90,7 @@ export const transferEligibilitySql=`SELECT e.id,e.credit::text,e.cash_type,
   AND e.date<=(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
   AND COALESCE(e.source_module,'')!~'_person$'
   AND NULLIF(to_jsonb(e)->>'entry_transfer_id','') IS NULL
+  AND NULLIF(to_jsonb(e)->>'quick_transfer_id','') IS NULL
   AND NULLIF(to_jsonb(e)->>'reversed_at','') IS NULL
   AND COALESCE(to_jsonb(e)->>'is_reversed','false')<>'true'
   AND NOT EXISTS(SELECT 1 FROM cashflow_transfer_legacy_sources legacy WHERE legacy.id=e.id)
@@ -201,7 +202,7 @@ export async function listCashflowTransfers(user,query={},db=pool) {
 }
 
 export const TRANSFER_CACHE_PREFIXES=['cashflow|','cashflow-meta|','/daybook','wallet|','wallet-workspace|','wallet-imprest|','imprest|','balance-sheet|','site-profit|','dashboard:','management-analytics|','reports|'];
-async function transaction(database,run) {
+export async function transaction(database,run) {
  let db,result,discard,connectionError;
  const connectionFailed=error=>{connectionError=error;};
  try {

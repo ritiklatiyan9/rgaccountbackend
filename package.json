@@ -255,6 +255,8 @@
     "migrate:history-keyset": "node src/migrations/236_history_keyset_order.js",
     "rollback:history-keyset": "node src/migrations/236_history_keyset_order.js --down",
     "migrate:cashflow-transfers": "node src/migrations/237_cashflow_money_transfers.js",
+    "migrate:quick-ledger-transfers": "node src/migrations/240_quick_personal_ledger_transfers.js",
+    "test:quick-ledger-transfers": "node --test test/quick-personal-ledger-transfers-db.test.mjs",
     "rollback:cashflow-transfers": "node src/migrations/237_cashflow_money_transfers.js --down",
     "test:cashflow-transfers": "node --test test/cashflow-money-transfers*.test.mjs test/cashflow-transfer-reporting-db.test.mjs test/cashflow-month-carryforward.test.mjs",
     "benchmark:history-api": "node scripts/bench/history-api.bench.mjs",

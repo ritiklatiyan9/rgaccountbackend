@@ -27,12 +27,21 @@ tokens. Sign-in is limited to 10 attempts per mobile and 40 per IP per 15 minute
 per process. A multiple-instance production deployment should enforce matching
 limits in a shared gateway or store. Use HTTPS in production.
 
-Property access requires `plots.buyer_member_id` or the latest noncancelled
-booking's `client_member_id`, always in the same site. Legacy plots linked only
+Property access requires `plots.buyer_member_id` or, when no explicit link exists,
+the latest booking's `client_member_id`, always in the same site. Invalid explicit
+links and cancelled latest bookings fail closed rather than restoring an older
+booking. Legacy plots linked only
 by a buyer's name stay hidden until an operator links the correct KYC member in
 Accounts. Name matching is intentionally insufficient for customer access.
 Available/company inventory is omitted even if it retains a stale member link.
-Owned historical rows remain separate; physical plot-number matching never
+Cancelled (including Canceled) and Resale records are also withheld from client
+lists, expanded details and totals. Booked, Registry and Under Cancellation stay
+visible to their current client. Resale creates a new purchase row for its new
+client; the previous purchase remains inaccessible. An optional `accessNotice`
+reports withheld prior links without exposing plot data. Inaccessible or unknown
+plot requests return 404 with “This plot is no longer available in your account.
+Please contact the Admin Office for assistance.” Admin plot routes are unchanged.
+Historical rows remain separate; physical plot-number matching never
 imports another owner's receipts. Plot IDs outside PostgreSQL integer range
 return the same generic 404 as unknown or inaccessible IDs.
 
@@ -97,14 +106,16 @@ The app requests `/plots?include=details` once to populate both the portfolio an
 its per-plot views. Previously the portfolio query already loaded all schedules
 and receipts, discarded them, and the app repeated a full authenticated detail
 request for each plot. The expanded response removes that `1 + plot count`
-request pattern. Service query count is constant: one current ownership read
-and two financial batch reads, irrespective of plot count. Authentication still
+request pattern. Service query count is constant: two current ownership reads
+around two financial batch reads, irrespective of plot count. Authentication still
 revalidates the current member identity on every HTTP request.
 
 Financial rows have a bounded, process-local five-second cache (maximum 256 plot
 entries and 8 MiB); overlapping requests share in-flight financial reads. Current
-ownership is checked before any cache lookup, so a removed owner loses access
-immediately. Cached rows contain no Aadhaar. Financial edits may take up to five
+status and ownership are checked before any cache lookup and after financial
+reads, so a removed owner loses access immediately. Cache scopes include the
+current owner, status and plot revision. Cached rows contain no Aadhaar.
+Financial edits may take up to five
 seconds to appear during ordinary reads. Explicit pull-to-refresh sends
 `Cache-Control: no-cache`, bypassing both caches. The response `updatedAt` is the
 oldest financial snapshot used, rather than falsely describing cached rows as

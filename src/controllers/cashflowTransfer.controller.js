@@ -2,6 +2,7 @@ import {
  createCashflowTransfer,transferEligibility,transferDestinations,listCashflowTransfers,
  getCashflowTransfer,getTransferSettings,updateTransferSettings,
 } from '../services/cashflowTransfer.service.js';
+import {createQuickPersonalLedgerTransfer,quickTransferContext} from '../services/quickPersonalLedgerTransfer.service.js';
 
 // A small boundary keeps financial error codes stable without exposing SQL or
 // acknowledging an uncertain commit as a new request. Clients retain their key.
@@ -26,3 +27,8 @@ export const listTransfers=handle(async(req,res)=>res.json(await listCashflowTra
 export const getTransfer=handle(async(req,res)=>res.json(await getCashflowTransfer(req.user,req.params.id)));
 export const getSettings=handle(async(req,res)=>res.json(await getTransferSettings(req.user,req.query)));
 export const putSettings=handle(async(req,res)=>res.json(await updateTransferSettings(req.user,req.body)));
+export const quickContext=handle(async(req,res)=>res.json(await quickTransferContext(req.user,req.query)));
+export const createQuickTransfer=handle(async(req,res)=>{
+ const result=await createQuickPersonalLedgerTransfer(req.user,req.body);
+ res.status(result.replayed?200:201).json(result);
+});

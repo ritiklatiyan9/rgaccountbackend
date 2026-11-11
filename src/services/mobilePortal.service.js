@@ -4,6 +4,7 @@ import { allocateInstallmentPayments } from './installmentAllocation.service.js'
 
 const ISSUER = 'my-real-assets';
 const AUDIENCE = 'my-real-assets-client';
+export const PLOT_ACCESS_UNAVAILABLE_MESSAGE = 'This plot is no longer available in your account. Please contact the Admin Office for assistance.';
 const fail = (statusCode, message) => { throw Object.assign(new Error(message), { statusCode }); };
 const unauthorized = () => fail(401, 'Please sign in again.');
 const amount = value => Math.round((Number(value) || 0) * 100) / 100;
@@ -46,12 +47,22 @@ const memberSelect = `SELECT m.id,m.site_id,m.full_name,m.phone,m.aadhar_no
 
 // Public customers require an explicit link. Staff-only name matching must
 // never turn a similarly named member into the owner of a property.
-const ownershipSql = `p.site_id=ANY($2::integer[]) AND COALESCE(
-  (SELECT m.id FROM members m WHERE m.id=p.buyer_member_id AND m.site_id=p.site_id),
-  (SELECT b.client_member_id FROM bookings b JOIN members m ON m.id=b.client_member_id AND m.site_id=b.site_id
-    WHERE b.plot_id=p.id AND b.site_id=p.site_id AND lower(COALESCE(b.status,'')) NOT LIKE 'cancel%'
+// A stale/invalid explicit link must not fall back to a historical booking.
+// Likewise, cancellation of the latest booking must never revive an older one.
+const currentOwnerSql = `CASE
+  WHEN p.buyer_member_id IS NOT NULL THEN
+    (SELECT m.id FROM members m WHERE m.id=p.buyer_member_id AND m.site_id=p.site_id)
+  ELSE (SELECT CASE WHEN lower(trim(COALESCE(b.status,''))) NOT LIKE 'cancel%'
+      AND EXISTS (SELECT 1 FROM members m WHERE m.id=b.client_member_id AND m.site_id=b.site_id)
+      THEN b.client_member_id END
+    FROM bookings b WHERE b.plot_id=p.id AND b.site_id=p.site_id
     ORDER BY b.id DESC LIMIT 1)
-) = ANY($1::integer[])`;
+  END`;
+const relatedPlotSql = `p.site_id=ANY($2::integer[]) AND (
+  EXISTS (SELECT 1 FROM members m WHERE m.id=p.buyer_member_id AND m.site_id=p.site_id AND m.id=ANY($1::integer[]))
+  OR EXISTS (SELECT 1 FROM bookings b JOIN members m ON m.id=b.client_member_id AND m.site_id=b.site_id
+    WHERE b.plot_id=p.id AND b.site_id=p.site_id AND b.client_member_id=ANY($1::integer[]))
+)`;
 
 // Sign-encoded refunds are debits and require approval. Pending ordinary
 // credits follow the Accounts credit-first policy; uncleared cheques never post.
@@ -196,27 +207,30 @@ export function createMobilePortalService(db, {
     for (const row of receipts.rows) grouped.get(row.plot_id)?.receipts.push(row);
     return grouped;
   }
-  async function financialsFor(ids, { forceFresh = false } = {}) {
+  async function financialsFor(ids, { forceFresh = false, cacheScopes = new Map() } = {}) {
     const values = new Map();
     const waiting = new Map();
     const missing = [];
+    const keys = new Map(ids.map(id => [id, `${id}:${cacheScopes.get(id) || ''}`]));
     for (const id of ids) {
-      const cached = forceFresh ? null : cachedFinance(id);
+      const key = keys.get(id);
+      const cached = forceFresh ? null : cachedFinance(key);
       if (cached) values.set(id, cached);
-      else if (!forceFresh && financePending.has(id)) waiting.set(id, financePending.get(id).promise);
+      else if (!forceFresh && financePending.has(key)) waiting.set(id, financePending.get(key).promise);
       else missing.push(id);
     }
     if (missing.length) {
       const token = Symbol('financial-read');
       const batch = queryFinancials(missing);
       for (const id of missing) {
+        const key = keys.get(id);
         const promise = batch.then(grouped => {
           const value = grouped.get(id);
           // A newer explicit refresh wins even if an older request finishes last.
-          if (financePending.get(id)?.token === token) rememberFinance(id, value);
+          if (financePending.get(key)?.token === token) rememberFinance(key, value);
           return value;
-        }).finally(() => { if (financePending.get(id)?.token === token) financePending.delete(id); });
-        financePending.set(id, { token, promise });
+        }).finally(() => { if (financePending.get(key)?.token === token) financePending.delete(key); });
+        financePending.set(key, { token, promise });
         waiting.set(id, promise);
       }
     }
@@ -251,31 +265,53 @@ export function createMobilePortalService(db, {
   async function loadPlots(session, plotId = null, options = {}) {
     const parameters = [session.members.map(row => row.id), [...new Set(session.members.map(row => row.site_id))]];
     if (plotId !== null) {
-      if (!/^[1-9]\d*$/.test(String(plotId)) || !Number.isSafeInteger(Number(plotId)) || Number(plotId) > 2147483647) fail(404, 'Property unavailable.');
+      if (!/^[1-9]\d*$/.test(String(plotId)) || !Number.isSafeInteger(Number(plotId)) || Number(plotId) > 2147483647) fail(404, PLOT_ACCESS_UNAVAILABLE_MESSAGE);
       parameters.push(Number(plotId));
     }
-    const { rows: plots } = await db.query(`SELECT p.id,p.site_id,p.plot_no,p.plot_size,p.sale_price,p.booking_date,p.status,
+    const { rows: candidates } = await db.query(`SELECT p.id,p.site_id,p.plot_no,p.plot_size,p.sale_price,p.booking_date,p.status,
+      owner_link.member_id AS current_owner_id,to_jsonb(p)->>'updated_at' AS ownership_updated_at,
+      COALESCE(owner_link.member_id=ANY($1::integer[])
+        AND upper(trim(COALESCE(p.status,''))) NOT IN ('CANCELLED','CANCELED','RESALE'),false) AS can_view,
       COALESCE((to_jsonb(p)->>'full_payment_due')::boolean,false) AS full_payment_due,
       to_jsonb(p)->>'full_payment_due_date' AS full_payment_due_date,
       COALESCE(to_jsonb(p)->>'unit_type','plot') AS unit_type,
       COALESCE((to_jsonb(p)->>'interest_enabled')::boolean,false) AS interest_enabled,
       COALESCE((to_jsonb(p)->>'interest_rate')::numeric,0) AS interest_rate,
       COALESCE(to_jsonb(p)->>'interest_type','per_month') AS interest_type
-      FROM plots p WHERE ${ownershipSql}
+      FROM plots p LEFT JOIN LATERAL (SELECT ${currentOwnerSql} AS member_id) owner_link ON true
+      WHERE ${relatedPlotSql}
       AND upper(trim(COALESCE(p.status,''))) NOT IN ('AVAILABLE','COMPANY')
       ${plotId !== null ? 'AND p.id=$3' : ''} ORDER BY p.site_id,p.plot_no,p.id LIMIT 1001`, parameters);
-    if (plots.length > 1000) fail(503, 'Your portfolio is temporarily unavailable.');
-    if (plotId !== null && !plots.length) fail(404, 'Property unavailable.');
-    if (!plots.length) return { details: [], updatedAt: new Date(now()).toISOString() };
+    if (candidates.length > 1000) fail(503, 'Your portfolio is temporarily unavailable.');
+    const plots = candidates.filter(plot => plot.can_view);
+    let accessNotice = candidates.some(plot => !plot.can_view) ? PLOT_ACCESS_UNAVAILABLE_MESSAGE : undefined;
+    if (plotId !== null && !plots.length) fail(404, PLOT_ACCESS_UNAVAILABLE_MESSAGE);
+    if (!plots.length) return { details: [], updatedAt: new Date(now()).toISOString(), accessNotice };
     const ids = plots.map(row => row.id);
-    const financials = await financialsFor(ids, options);
+    const cacheScopes = new Map(plots.map(plot => [plot.id,
+      JSON.stringify([plot.current_owner_id, plot.status, plot.ownership_updated_at])]));
+    const financials = await financialsFor(ids, { ...options, cacheScopes });
+    // Financial reads can wait on a shared in-flight batch. Recheck current
+    // access before returning it, including changes made while that read waited.
+    const { rows: current } = await db.query(`SELECT p.id,p.status,
+      owner_link.member_id AS current_owner_id,to_jsonb(p)->>'updated_at' AS ownership_updated_at
+      FROM plots p LEFT JOIN LATERAL (SELECT ${currentOwnerSql} AS member_id) owner_link ON true
+      WHERE p.site_id=ANY($2::integer[]) AND p.id=ANY($3::integer[])
+      AND owner_link.member_id=ANY($1::integer[])
+      AND upper(trim(COALESCE(p.status,''))) NOT IN ('AVAILABLE','COMPANY','CANCELLED','CANCELED','RESALE')`,
+    [parameters[0], parameters[1], ids]);
+    const currentScopes = new Map(current.map(plot => [plot.id,
+      JSON.stringify([plot.current_owner_id, plot.status, plot.ownership_updated_at])]));
+    const authorized = plots.filter(plot => currentScopes.get(plot.id) === cacheScopes.get(plot.id));
+    if (authorized.length !== plots.length) accessNotice = PLOT_ACCESS_UNAVAILABLE_MESSAGE;
+    if (plotId !== null && !authorized.length) fail(404, PLOT_ACCESS_UNAVAILABLE_MESSAGE);
     const today = todayInIndia();
-    const details = plots.map(plot => {
+    const details = authorized.map(plot => {
       const data = financials.get(plot.id);
       return projectMobilePlot(plot, data.schedules, data.receipts, today);
     });
-    const updatedAt = [...financials.values()].map(row => row.updatedAt).sort()[0] || new Date(now()).toISOString();
-    return { details, updatedAt };
+    const updatedAt = authorized.map(plot => financials.get(plot.id).updatedAt).sort()[0] || new Date(now()).toISOString();
+    return { details, updatedAt, accessNotice };
   }
   return {
     getSession,
@@ -297,7 +333,7 @@ export function createMobilePortalService(db, {
       };
     },
     async portfolio(session, { includeDetails = false, forceFresh = false } = {}) {
-      const { details, updatedAt } = await loadPlots(session, null, { forceFresh });
+      const { details, updatedAt, accessNotice } = await loadPlots(session, null, { forceFresh });
       const plots = details.map(({ paymentPlan, installments, payments, ...plot }) => plot);
       return { plots, summary: {
         plotCount: plots.length, totalAmount: amount(plots.reduce((sum, row) => sum + row.totalAmount, 0)),
@@ -306,7 +342,7 @@ export function createMobilePortalService(db, {
         interestAmount: amount(plots.reduce((sum, row) => sum + row.interestAmount, 0)),
         totalDueAmount: amount(plots.reduce((sum, row) => sum + row.totalDueAmount, 0)),
         upcomingCount: details.reduce((sum, row) => sum + row.installments.filter(item => item.balanceAmount > 0).length, 0),
-      }, updatedAt, ...(includeDetails ? { details: details.map(plot => ({ plot, updatedAt })) } : {}) };
+      }, updatedAt, ...(accessNotice ? { accessNotice } : {}), ...(includeDetails ? { details: details.map(plot => ({ plot, updatedAt })) } : {}) };
     },
     async plot(session, id, { forceFresh = false } = {}) {
       const { details, updatedAt } = await loadPlots(session, id, { forceFresh });

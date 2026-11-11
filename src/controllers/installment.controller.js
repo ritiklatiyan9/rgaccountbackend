@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { installmentModel, installmentPaymentModel } from '../models/Installment.model.js';
 import { plotModel } from '../models/Plot.model.js';
 import pool from '../config/db.js';
+import { indiaDate, loadOverduePolicy } from '../services/installmentOverduePolicy.service.js';
 import { resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import {
   allocateInstallmentPayments,
@@ -11,6 +12,25 @@ import {
 const plotPaymentPosts = (alias = '') => {
   const p = alias ? `${alias}.` : '';
   return `financial_transaction_posts('credit', ${p}status, ${p}payment_type, ${p}cheque_status)`;
+};
+
+/** Read-only policy summary for the payment and tracker workspaces. */
+export const installmentOverduePolicy = asyncHandler(async (req, res) => {
+  const siteId = Number(req.query.site_id);
+  const policy = await loadOverduePolicy(siteId, pool);
+  const settings = (await pool.query(
+    `SELECT s.enabled,t.status AS template_status FROM account_whatsapp_stage_settings s
+     LEFT JOIN account_whatsapp_templates t ON t.site_id=s.site_id AND t.name=s.template_name AND t.archived_at IS NULL
+     WHERE s.site_id=$1 AND s.event='INSTALLMENT_OVERDUE'`, [siteId],
+  )).rows[0];
+  res.json({ policy, automation_enabled: process.env.WHATSAPP_ENABLED === 'true' && Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID && settings?.enabled && settings?.template_status === 'APPROVED') });
+});
+
+const applyProjectInterestPolicy = (plot, policy) => {
+  if (policy?.kind === 'annual_interest') Object.assign(plot, {
+    interest_enabled: true, interest_rate: policy.annual_rate, interest_type: 'per_year',
+  });
+  return plot;
 };
 const installmentPaymentPosts = (alias = '') => {
   const p = alias ? `${alias}.` : '';
@@ -37,8 +57,8 @@ const hasGracePeriodColumn = async () => {
 
 function calculateInterest(remainingAmount, rate, type, fromDate, toDate) {
   if (!rate || rate <= 0 || remainingAmount <= 0) return 0;
-  const from = new Date(fromDate);
-  const to = new Date(toDate);
+  const from = new Date(indiaDate(fromDate));
+  const to = new Date(indiaDate(toDate));
   if (to <= from) return 0;
 
   const diffMs = to - from;
@@ -66,7 +86,7 @@ function calculateInterest(remainingAmount, rate, type, fromDate, toDate) {
  * job, so both agree on who is overdue/due and by how much.
  */
 export const buildPaymentReminders = async (site_id, creatorId = null) => {
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = indiaDate();
   const todayMs = new Date(todayStr).getTime();
   const DAY = 86400000;
   const fmt = (n) => Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
@@ -490,6 +510,7 @@ export const updateInstallmentSettings = asyncHandler(async (req, res) => {
     updateData.penalty_type = validPenaltyTypes.includes(penalty_type) ? penalty_type : 'per_day';
   }
   if (free_to_sale_days !== undefined) updateData.free_to_sale_days = Math.max(0, parseInt(free_to_sale_days) || 0);
+  applyProjectInterestPolicy(updateData, await loadOverduePolicy(plot.site_id, pool));
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
@@ -506,9 +527,10 @@ export const listInstallments = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const plot = await plotModel.findById(parseInt(id), pool);
   if (!plot) return res.status(404).json({ message: 'Plot not found' });
+  applyProjectInterestPolicy(plot, await loadOverduePolicy(plot.site_id, pool));
 
   const installments = await installmentModel.findByPlotId(parseInt(id), pool);
-  const today = new Date(new Date().toISOString().split('T')[0]);
+  const today = new Date(indiaDate());
 
   // Canonical plot receipts waterfall in schedule order. Any older directly
   // linked installment receipts keep their assignment and are applied first.
@@ -853,7 +875,7 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
   const visibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
   const creatorId = visibility.creatorId;
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = indiaDate();
 
   // ── Fetch all plots for this site ──
   let plotQuery = `
@@ -875,6 +897,8 @@ export const paymentManagementList = asyncHandler(async (req, res) => {
   plotQuery += ` ORDER BY p.plot_no ASC`;
 
   const plotResult = await pool.query(plotQuery, plotParams);
+  const overduePolicy = await loadOverduePolicy(Number(site_id), pool);
+  for (const plot of plotResult.rows) applyProjectInterestPolicy(plot, overduePolicy);
 
   const EMPTY_SUMMARY = {
     total_count: 0, paid_count: 0, pending_count: 0, partial_count: 0, overdue_count: 0,
@@ -1161,8 +1185,8 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
   const visibility = await resolveEntryVisibility(req.user, 'plot_payments', req.query.created_by);
   const creatorId = visibility.creatorId;
 
-  const today = new Date();
-  const todayStr = today.toISOString().split('T')[0];
+  const todayStr = indiaDate();
+  const today = new Date(todayStr);
   const todayMs = today.getTime();
   const DAY = 86400000;
 
@@ -1178,6 +1202,8 @@ export const paymentAnalytics = asyncHandler(async (req, res) => {
     [parseInt(site_id)]
   );
   if (plotRes.rows.length === 0) return res.json({ results: [], summary: {} });
+  const overduePolicy = await loadOverduePolicy(Number(site_id), pool);
+  for (const plot of plotRes.rows) applyProjectInterestPolicy(plot, overduePolicy);
 
   const plotIds = plotRes.rows.map(r => r.id);
 

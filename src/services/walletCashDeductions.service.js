@@ -64,6 +64,9 @@ export const holderCashPaymentsCte = `holder_cash_payments AS MATERIALIZED (
         WHERE fp.id=c.source_id
       ) END)=r.holder_id
   WHERE GREATEST(l.debit,0)+GREATEST(-l.credit,0)>0
+    -- Quick transfers already debit wallet custody (or the maker's Imprest).
+    -- Their accounting debit is not a second payment from the same holder.
+    AND NULLIF(to_jsonb(c)->>'quick_transfer_id','') IS NULL
     AND NOT EXISTS (
       SELECT 1 FROM imprest_ledger il WHERE il.user_id=r.holder_id AND il.site_id=$2
         AND il.type='EXPENSE' AND il.amount<0 AND il.reference_id=COALESCE(c.source_id,c.id)

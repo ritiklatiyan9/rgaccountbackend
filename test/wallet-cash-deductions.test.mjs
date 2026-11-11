@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
-import { addWalletCashDeductions, addHolderWalletActivity, walletCashDeductions } from '../src/services/walletCashDeductions.service.js';
+import { addWalletCashDeductions, addHolderWalletActivity, walletCashDeductions, holderCashPaymentsCte } from '../src/services/walletCashDeductions.service.js';
 const opening={version:1,organization_id:1,site_id:2,holder_type:'user',holder_id:7,started_at:'2026-10-25T11:12:42.570Z',operation_key:'test-opening-2026',opening_cash:'4945079.26',received_at_start:'0',handovers_at_start:'0',adjustments_at_start:'0',recorded_balance_at_start:'4945079.26'};
 const spending={commission:'20000',expenses:'0',other_cash_payments:'0'};
 test('the reported ₹20,000 gap is exactly commission, with decimal balances preserved',()=>{
@@ -177,5 +177,37 @@ test('legacy farmer mirrors use the original maker only when its site is verifie
   assert.deepEqual(rows,[{id:'1',maker_id:5,payment_amount:'100'},{id:'2',maker_id:7,payment_amount:'100'},{id:'8:cash',maker_id:5,payment_amount:'25.15'}]);
   assert.deepEqual(await read([{holder_key:'user:5',holder_id:5,started_at:'2026-10-27T00:00:00Z'}]),[]);
   assert.deepEqual(await read([{holder_key:'user:5',holder_id:5,started_at:null}],2),[]);
+ }finally{await db.close();}
+});
+
+test('quick transfer accounting legs do not duplicate wallet handovers or staff Imprest spending',async()=>{
+ const db=new PGlite();
+ try{
+  await db.exec(`CREATE TABLE sites(id int PRIMARY KEY,organization_id int);INSERT INTO sites VALUES(2,1);
+   CREATE TABLE farmers(id int PRIMARY KEY,site_id int);
+   CREATE TABLE farmer_payments(id int PRIMARY KEY,farmer_id int,created_by int);
+   CREATE TABLE cash_flow_entries(id int PRIMARY KEY,site_id int,created_by int,source_module text,source_id int,quick_transfer_id uuid);
+   INSERT INTO cash_flow_entries VALUES
+    (1,2,7,NULL,NULL,NULL),
+    (2,2,7,'cashflow_transfers',NULL,'00000000-0000-4000-8000-000000000001'),
+    (3,2,8,'cashflow_transfers',NULL,'00000000-0000-4000-8000-000000000002');
+   CREATE TABLE ledger_entries(id text,site_id int,bucket text,entry_date date,created_at timestamptz,source_key text,source_id int,debit numeric,credit numeric);
+   INSERT INTO ledger_entries VALUES
+    ('1',2,'cash','2026-10-26','2026-10-26T10:00:00Z','personal_ledger',NULL,50,0),
+    ('2',2,'cash','2026-10-26','2026-10-26T10:00:00Z','cashflow_transfers',NULL,100,0),
+    ('3',2,'cash','2026-10-26','2026-10-26T10:00:00Z','cashflow_transfers',NULL,200,0);
+   CREATE TABLE imprest_ledger(site_id int,user_id int,amount numeric,type text,source_module text,reference_id int);
+   INSERT INTO imprest_ledger VALUES(2,8,-200,'EXPENSE','quick_personal_transfer',3);`);
+  const rows=(await db.query(`WITH scopes AS (
+    SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(holder_key text,holder_id integer,started_at timestamptz)
+   ),${holderCashPaymentsCte} SELECT id,maker_id,payment_amount::text FROM holder_cash_payments ORDER BY id`,
+   [1,2,JSON.stringify([{holder_key:'user:7',holder_id:7,started_at:null},{holder_key:'user:8',holder_id:8,started_at:null}]),'2026-11-01'])).rows;
+  assert.deepEqual(rows,[{id:'1',maker_id:7,payment_amount:'50'}]);
+  const deductions=walletCashDeductions({opening:{...opening,opening_cash:'500'},
+   totals:{total_received:'0',total_handover:'100'},state:{balance:'350'},
+   spending:{commission:'0',expenses:'0',other_cash_payments:rows[0].payment_amount},siteId:2,holderId:7});
+  assert.equal(deductions.handed_over,'100.00');
+  assert.equal(deductions.payment_total,'50.00');
+  assert.equal(deductions.other_adjustments,'0.00');
  }finally{await db.close();}
 });

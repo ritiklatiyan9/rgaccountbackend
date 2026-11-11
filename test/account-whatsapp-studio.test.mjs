@@ -27,6 +27,8 @@ import {
   drainAccountWhatsApp,
   loadAccountWhatsAppContext,
   scheduleAccountWhatsAppReminders,
+  scheduleAccountWhatsAppOverdue,
+  activateRequestedOverdueTemplates,
   startAccountWhatsAppWorker,
   stopAccountWhatsAppWorker,
   listAccountWhatsAppRemoteTemplates,
@@ -148,6 +150,105 @@ const localTransport = (status = "APPROVED") => ({
   rejection: async () => null,
   remove: async () => {},
   list: async () => [],
+});
+async function prepareOverdue(db, policy = { enabled: true, kind: 'annual_interest', annual_rate: 18 }) {
+  await up(db);
+  await db.query("INSERT INTO application_settings(site_id,setting_key,setting_value) VALUES(1,'installment_overdue_notice_policy_v1',$1)", [policy]);
+  await db.query("ALTER TABLE plots ADD COLUMN unit_type text DEFAULT 'plot'");
+  await db.query("UPDATE plot_installments SET due_date=(now() AT TIME ZONE 'Asia/Kolkata')::date-1 WHERE id=50");
+  await apply(db, 'INSTALLMENT_OVERDUE');
+  await db.query("UPDATE account_whatsapp_stage_settings SET enabled_at=now()-interval '2 days' WHERE event='INSTALLMENT_OVERDUE'");
+}
+
+test('overdue scheduler queues once after activation, uses posted cash, and cancels a notice paid before delivery', async (t) => {
+  const { db } = await fixture(t);
+  await prepareOverdue(db);
+  const context = await loadAccountWhatsAppContext('INSTALLMENT_OVERDUE', 50, 1, db);
+  assert.equal(context.remaining, 3500);
+  assert.equal(context.days_overdue, 1);
+  assert.equal(context.penalty_amount, 1.73);
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db, scanLimit: 1 }), 1);
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db, scanLimit: 1 }), 0);
+  await db.query("INSERT INTO plot_payments(id,plot_id,site_id,amount,payment_type,date,status) VALUES(41,20,1,3500,'CASH',CURRENT_DATE,'approved')");
+  const sent = [];
+  await drainAccountWhatsApp({ db, send: async (...args) => sent.push(args) });
+  assert.equal(sent.length, 0);
+  assert.equal((await db.query("SELECT status FROM account_whatsapp_messages WHERE event='INSTALLMENT_OVERDUE'")).rows[0].status, 'SKIPPED');
+});
+
+test('overdue delivery uses the assigned project template and rechecks changed due dates', async (t) => {
+  const { db } = await fixture(t);
+  await prepareOverdue(db);
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db }), 1);
+  const sent = [];
+  await drainAccountWhatsApp({ db, send: async (...args) => { sent.push(args); return 'accepted-overdue'; } });
+  assert.equal(sent.length, 1);
+  assert.equal((await db.query("SELECT status FROM account_whatsapp_messages WHERE event='INSTALLMENT_OVERDUE'")).rows[0].status, 'SENT');
+  await db.query("DELETE FROM account_whatsapp_messages WHERE event='INSTALLMENT_OVERDUE'");
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db }), 1);
+  await db.query("UPDATE plot_installments SET due_date=due_date-1 WHERE id=50");
+  await drainAccountWhatsApp({ db, send: async (...args) => sent.push(args) });
+  assert.equal(sent.length, 1);
+});
+
+test('overdue activation never backfills historical installments or messages another project', async (t) => {
+  const { db } = await fixture(t);
+  await prepareOverdue(db);
+  assert.equal(await loadAccountWhatsAppContext('INSTALLMENT_OVERDUE', 50, 2, db), null);
+  await db.query("UPDATE account_whatsapp_stage_settings SET enabled_at=now() WHERE event='INSTALLMENT_OVERDUE'");
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db }), 0);
+  await db.query("UPDATE account_whatsapp_stage_settings SET enabled_at=now()-interval '10 days' WHERE event='INSTALLMENT_OVERDUE'");
+  await db.query("UPDATE plot_installments SET due_date=(now() AT TIME ZONE 'Asia/Kolkata')::date-7 WHERE id=50");
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db }), 0);
+  await db.query("UPDATE plot_installments SET due_date=(now() AT TIME ZONE 'Asia/Kolkata')::date WHERE id=50");
+  assert.equal(await loadAccountWhatsAppContext('INSTALLMENT_OVERDUE', 50, 1, db), null);
+  await db.query("UPDATE account_whatsapp_stage_settings SET enabled=false WHERE event='INSTALLMENT_OVERDUE'");
+  await db.query("UPDATE plot_installments SET due_date=(now() AT TIME ZONE 'Asia/Kolkata')::date-1 WHERE id=50");
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db }), 0);
+});
+
+test('Naya-style shop notice never applies to plots and sends once per shop across two overdue installments', async (t) => {
+  const { db } = await fixture(t);
+  await prepareOverdue(db, { enabled: true, kind: 'shop_price_increase', amount: 50000, frequency: 'once_per_shop' });
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db }), 0);
+  await db.query("UPDATE plots SET unit_type='shop' WHERE id=20");
+  await db.query("INSERT INTO plot_installments(id,plot_id,installment_name,amount,due_date,sort_order) SELECT 51,20,'Installment 2',5000,due_date,1 FROM plot_installments WHERE id=50");
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db, scanLimit: 1 }), 1);
+  assert.equal((await loadAccountWhatsAppContext('INSTALLMENT_OVERDUE', 50, 1, db)).penalty_amount, 50000);
+  const sent = [];
+  await drainAccountWhatsApp({ db, send: async (...args) => { sent.push(args); return 'accepted-shop'; } });
+  assert.equal(sent.length, 1);
+  assert.equal(await scheduleAccountWhatsAppOverdue({ db }), 0);
+});
+
+test('only the explicitly requested approved overdue version activates; pausing cancels a pending request', async (t) => {
+  const { db } = await fixture(t);
+  await prepareOverdue(db);
+  await db.query("ALTER TABLE users ADD COLUMN role text DEFAULT 'admin'; ALTER TABLE users ADD COLUMN organization_id integer DEFAULT 1; ALTER TABLE users ADD COLUMN is_active boolean DEFAULT true");
+  const template = (await db.query("SELECT * FROM account_whatsapp_templates WHERE event='INSTALLMENT_OVERDUE'")).rows[0];
+  await saveAccountWhatsAppStage(admin, 'INSTALLMENT_OVERDUE', { site_id: 1, template_name: null }, { db });
+  const policy = { enabled: true, kind: 'annual_interest', annual_rate: 18 };
+  const request = { template_name: template.name, policy, requested_by: 1, requested_at: '2026-11-10' };
+  const requestActivation = () => db.query("INSERT INTO application_settings(site_id,setting_key,setting_value) VALUES(1,'installment_overdue_requested_template_v1',$1)", [request]);
+  await requestActivation();
+  await db.query("UPDATE account_whatsapp_templates SET status='PENDING' WHERE id=$1", [template.id]);
+  assert.equal(await activateRequestedOverdueTemplates({ db }), 0);
+  await db.query("UPDATE account_whatsapp_templates SET status='APPROVED' WHERE id=$1", [template.id]);
+  assert.equal(await activateRequestedOverdueTemplates({ db }), 1);
+  assert.equal((await db.query("SELECT enabled FROM account_whatsapp_stage_settings WHERE event='INSTALLMENT_OVERDUE'")).rows[0].enabled, true);
+  assert.equal(await activateRequestedOverdueTemplates({ db }), 0);
+  await requestActivation();
+  await saveAccountWhatsAppStage(admin, 'INSTALLMENT_OVERDUE', { site_id: 1, enabled: false }, { db });
+  assert.equal(await activateRequestedOverdueTemplates({ db }), 0);
+  await requestActivation();
+  await db.query("UPDATE application_settings SET setting_value=jsonb_set(setting_value,'{annual_rate}','19') WHERE setting_key='installment_overdue_notice_policy_v1'");
+  assert.equal(await activateRequestedOverdueTemplates({ db }), 0);
+  await saveAccountWhatsAppStage(admin, 'INSTALLMENT_OVERDUE', { site_id: 1, template_name: null }, { db });
+  await db.query("UPDATE application_settings SET setting_value=jsonb_set(setting_value,'{annual_rate}','18') WHERE setting_key='installment_overdue_notice_policy_v1'");
+  await requestActivation();
+  await updateAccountWhatsAppTemplate(admin, template.name, { site_id: 1, archived: true }, { db });
+  await updateAccountWhatsAppTemplate(admin, template.name, { site_id: 1, archived: false }, { db });
+  assert.equal(await activateRequestedOverdueTemplates({ db }), 0, 'restore cannot resurrect an archived activation request');
 });
 async function apply(db, event, siteId = 1) {
   const template = await createAccountWhatsAppTemplate(

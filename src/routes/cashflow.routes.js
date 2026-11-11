@@ -11,7 +11,7 @@ import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import { requireOverallSiteScope } from '../middlewares/overallSiteScope.middleware.js';
-import { createTransfer,eligibility,destinations,listTransfers,getTransfer,getSettings,putSettings } from '../controllers/cashflowTransfer.controller.js';
+import { createTransfer,eligibility,destinations,listTransfers,getTransfer,getSettings,putSettings,quickContext,createQuickTransfer } from '../controllers/cashflowTransfer.controller.js';
 
 // All cashflow routes require auth
 router.use(authMiddleware);
@@ -25,6 +25,8 @@ router.put('/transfer-settings', requireRole('admin'), putSettings);
 router.get('/transfers', requireRole('admin','sub_admin'), listTransfers);
 router.get('/transfers/:id', requireRole('admin','sub_admin'), getTransfer);
 router.post('/transfers', requireRole('admin','sub_admin'), createTransfer);
+router.get('/quick-transfer-context', requireRole('admin','sub_admin'), quickContext);
+router.post('/quick-transfers', requireRole('admin','sub_admin'), createQuickTransfer);
 
 const cashflowReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'cashflow' });
 // Firms list + particulars autocomplete rarely change; longer TTL in a
