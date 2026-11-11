@@ -10,7 +10,8 @@ import requireRole from '../src/middlewares/role.middleware.js';
 import auditRequestMiddleware from '../src/middlewares/audit.middleware.js';
 import errorMiddleware from '../src/middlewares/error.middleware.js';
 import { updateSite } from '../src/controllers/site.controller.js';
-import { createPlot, updatePlot } from '../src/controllers/plot.controller.js';
+import { getCommissionAllocations, getCommissionReceivers } from '../src/controllers/plotCommissionV2.controller.js';
+import { createPlot, updatePlot, cancelBooking, rebookPlot } from '../src/controllers/plot.controller.js';
 import requirePermission from '../src/middlewares/permission.middleware.js';
 import requirePlotSiteAccess from '../src/middlewares/plotSiteAccess.middleware.js';
 import { invalidateCacheOnSuccess } from '../src/middlewares/cache.middleware.js';
@@ -43,37 +44,45 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     allowedHeaders: ['Authorization', 'Content-Type', 'X-Session-ID', 'X-App-Context', 'X-Transaction-Date', 'X-Transaction-Time'],
   }));
   app.use(express.json({ limit: '128kb' }));
-  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter) }));
+  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true }));
   app.use(['/plots/pool-money', '/sites'], authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.use(audit);
   app.use('/plots', poolMoneyRouter);
   if (commissionRouter) app.use('/plot-commission', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, commissionRouter);
 
-  const shopBody = (req, res, next) => (req.body?.unit_type === 'shop'
-    || (req.method === 'PUT' && req.body?.unit_type === undefined))
-    ? next() : res.status(400).json({ message: 'This preview accepts only commercial shop inventory.' });
+  const shopBody = (req, res, next) => (['plot','flat','shop'].includes(req.body?.unit_type)
+    || req.body?.unit_type === undefined)
+    ? next() : res.status(400).json({ message: 'Choose a supported property unit type.' });
   const shopOrganization = async (req, res, next) => {
     try {
       const isUpdate = req.params.id !== undefined;
       const value = isUpdate ? req.params.id : req.body.site_id;
       if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) {
-        return res.status(400).json({ message: 'A valid site and shop are required.' });
+        return res.status(400).json({ message: 'A valid site and property are required.' });
       }
       const { rows } = await database.query(isUpdate
         ? 'SELECT p.site_id,p.unit_type FROM plots p JOIN sites s ON s.id=p.site_id WHERE p.id=$1 AND s.organization_id=$2'
         : 'SELECT id AS site_id FROM sites WHERE id=$1 AND organization_id=$2', [Number(value), req.user.organization_id]);
-      if (!rows.length) return res.status(404).json({ message: 'Site or shop not found.' });
-      if (isUpdate && req.body.unit_type !== 'shop' && rows[0].unit_type !== 'shop') {
-        return res.status(400).json({ message: 'This preview accepts only commercial shop inventory.' });
-      }
+      if (!rows.length) return res.status(404).json({ message: 'Site or property not found.' });
       if (req.body.site_id != null && Number(req.body.site_id) !== Number(rows[0].site_id)) {
-        return res.status(400).json({ message: 'A shop cannot be moved to a different site.' });
+        return res.status(400).json({ message: 'A property cannot be moved to a different site.' });
       }
       next();
     } catch (error) { next(error); }
   };
   const bustPlotCache = invalidateCacheOnSuccess(['approvals|', '/approvals', 'plots|', 'plots:pageData:', 'plot-commissions|',
     'plot-commissions-plots|', 'members|', '/daybook', 'registries|', 'registries-meta|']);
+  app.get('/plots/booking-receivers', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
+    (_req, res, next) => { res.set('Cache-Control','no-store'); next(); }, getCommissionReceivers);
+  app.get('/plots/:id/booking-allocations', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
+    requirePlotSiteAccess({ entity: 'plot', source: 'params', key: 'id' }),
+    (req, res, next) => { res.set('Cache-Control','no-store'); req.query.plot_id=req.params.id; next(); }, getCommissionAllocations);
+  app.get('/plots/:id/cancellation-preview',authenticate,requireRole('admin','sub_admin'),requirePermission('plot_payments','update'),
+    requirePlotSiteAccess({entity:'plot',source:'params',key:'id'}),(req,res,next)=>{res.set('Cache-Control','no-store');req.query.plot_id=req.params.id;req.includeSettlementBalances=true;next();},getCommissionAllocations);
+  app.post('/plots/:id/cancel-booking', authenticate, requireRole('admin','sub_admin'), requirePermission('plot_payments','update'),
+    requirePlotSiteAccess({entity:'plot',source:'params',key:'id'}),bustPlotCache,cancelBooking);
+  app.post('/plots/:id/rebook', authenticate, requireRole('admin','sub_admin'), requirePermission('plot_payments','write'),requirePermission('plot_payments','update'),
+    requirePlotSiteAccess({entity:'plot',source:'params',key:'id'}),bustPlotCache,rebookPlot);
   app.post('/plots', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), shopBody,
     shopOrganization, requirePlotSiteAccess({ entity: 'site', source: 'body', key: 'site_id' }), bustPlotCache, createShop);
   app.put('/plots/:id', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), shopBody,

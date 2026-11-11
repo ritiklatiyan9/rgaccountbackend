@@ -1,3 +1,5 @@
+import { cancelPlotBooking, withPlotRebooking } from '../services/plotBookingHistory.service.js';
+import { withPlotBookingAllocations } from '../services/plotBookingAllocations.service.js';
 import { chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet, vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
@@ -256,7 +258,7 @@ const maybeAutoCreatePlotCommission = async ({ plot, createdBy, fallbackAssigned
 // ══════════════════════════════════════════════════
 
 /** POST /plots — Create a new plot */
-export const createPlot = asyncHandler(async (req, res) => {
+const createPlotRecord = async (req, res) => {
   const { site_id, plot_no, block, buyer_name, plot_size, plot_size_mtr, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value, commission_rate, plot_commission, force_duplicate } = req.body;
 
   if (!site_id) return res.status(400).json({ message: 'Site is required' });
@@ -280,7 +282,8 @@ export const createPlot = asyncHandler(async (req, res) => {
 
   var newPlotTag = undefined;
   if (existingPlots.length > 0) {
-    const nonResale = existingPlots.filter(p => p.status !== 'RESALE' || (p.approval_status && p.approval_status !== 'approved'));
+    if (existingPlots.some(row => row.booking_cancelled_at) && !req.rebookingSourcePlotId) return res.status(409).json({code:'PLOT_REBOOK_REQUIRED',message:'Use Rebook to preserve the previous booking and its broker settlements.'});
+    const nonResale = existingPlots.filter(p => !p.booking_cancelled_at && (p.status !== 'RESALE' || (p.approval_status && p.approval_status !== 'approved')));
     const allResale = nonResale.length === 0;
     const dupInfo = existingPlots.map(p => ({ id: p.id, status: p.status, plot_tag: p.plot_tag, buyer_name: p.buyer_name }));
 
@@ -342,6 +345,7 @@ export const createPlot = asyncHandler(async (req, res) => {
     team: team ? team.trim().toUpperCase() : null,
     assigned_admin_id: assigned_admin_id ? parseInt(assigned_admin_id) : null,
     created_by: req.user.id,
+    ...(req.rebookingSourcePlotId ? {previous_booking_plot_id:req.rebookingSourcePlotId} : {}),
   };
 
   if (req.body.buyer_member_id != null) {
@@ -390,7 +394,7 @@ export const createPlot = asyncHandler(async (req, res) => {
 
   let autoCommission = null;
   try {
-    autoCommission = await maybeAutoCreatePlotCommission({
+    if (!req.body.booking_allocations) autoCommission = await maybeAutoCreatePlotCommission({
       plot,
       createdBy: req.user?.id,
       fallbackAssignedAdminId: data.assigned_admin_id,
@@ -400,9 +404,12 @@ export const createPlot = asyncHandler(async (req, res) => {
     if (err?.code !== '42P01') throw err;
   }
 
-  await accountWhatsAppHooks.plotBooked(plot);
+  if (!req.body.booking_allocations && !req.rebookingSourcePlotId) await accountWhatsAppHooks.plotBooked(plot);
   res.status(201).json({ plot, auto_commission: autoCommission, auto_registry: null });
-});
+};
+export const createPlot = asyncHandler(withPlotBookingAllocations(createPlotRecord));
+export const rebookPlot = asyncHandler(withPlotRebooking(withPlotBookingAllocations(createPlotRecord)));
+export const cancelBooking = asyncHandler(async(req,res)=>res.json(await cancelPlotBooking(pool,req.user,req.params.id,req.body)));
 
 /** GET /plots?site_id=X — List all plots for a site */
 export const listPlots = asyncHandler(async (req, res) => {
@@ -455,12 +462,15 @@ export const linkPlotBuyer = asyncHandler(async (req, res) => {
 });
 
 /** PUT /plots/:id — Update plot details */
-export const updatePlot = asyncHandler(async (req, res) => {
+export const updatePlot = asyncHandler(withPlotBookingAllocations(async (req, res) => {
   const { id } = req.params;
   const { plot_no, block, buyer_name, plot_size, plot_size_mtr, plot_rate, sale_price, registry_area, circle_rate, to_receive_bank, first_installment, booking_by, booking_date, status, notes, plc_charges, team, assigned_admin_id, commission_enabled, commission_type, commission_value, commission_rate, plot_commission, original_plot_rate } = req.body;
 
   const existing = await plotModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
+  if (['CANCELLED','CANCEL','CANCELLATION','RESALE','TRANSFERRED'].includes(String(existing.status||'').toUpperCase()) && status!==undefined && !['CANCELLED','CANCEL','CANCELLATION','RESALE','TRANSFERRED'].includes(String(status||'').toUpperCase())) return res.status(409).json({code:'PLOT_REBOOK_REQUIRED',message:'Create a new booking with Rebook so past buyer and broker records remain separate.'});
+  if (existing.booking_cancelled_at) return res.status(409).json({code:'BOOKING_HISTORY_IMMUTABLE',message:'This cancelled booking is preserved. Record broker payments or recoveries in its commission ledger, or create a new booking.'});
+
 
   const statusOnly = Object.keys(req.body).length === 1 && typeof status === 'string';
   const approvalRequired = statusOnly
@@ -569,7 +579,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
   // booking agent changes we delete the PREVIOUS agent's AUTO-created commission
   // — but only if NO payments were recorded against it, so money is never lost.
   if (
-    updateData.booking_by !== undefined &&
+    !req.body.booking_allocations && updateData.booking_by !== undefined &&
     String(existing.booking_by || '').trim() &&
     String(updateData.booking_by || '').trim().toUpperCase() !== String(existing.booking_by || '').trim().toUpperCase()
   ) {
@@ -581,6 +591,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
             AND pc.agent_id = m.id
             AND UPPER(m.full_name) = UPPER($2)
             AND pc.remarks = 'Auto-created from Plot Payments booking'
+            AND to_jsonb(pc)->>'allocation_type' IS NULL
             AND NOT EXISTS (
               SELECT 1 FROM plot_commission_payments p WHERE p.plot_commission_id = pc.id
             )`,
@@ -596,13 +607,20 @@ export const updatePlot = asyncHandler(async (req, res) => {
     const prevRate = parseFloat(existing.circle_rate) || 0;
     const nextRate = parseFloat(updateData.circle_rate) || 0;
     if (prevRate !== nextRate) {
+      const historySavepoint = Boolean(req.body.booking_allocations);
+      if (historySavepoint) await pool.query('SAVEPOINT booking_circle_history');
       try {
         await pool.query(
           `INSERT INTO plot_circle_rate_history (plot_id, previous_circle_rate, new_circle_rate, changed_by)
            VALUES ($1, $2, $3, $4)`,
           [parseInt(id), prevRate, nextRate, req.user?.id || null]
         );
+        if (historySavepoint) await pool.query('RELEASE SAVEPOINT booking_circle_history');
       } catch (err) {
+        if (historySavepoint) {
+          await pool.query('ROLLBACK TO SAVEPOINT booking_circle_history');
+          await pool.query('RELEASE SAVEPOINT booking_circle_history');
+        }
         // Ignore if migration table is not present yet.
         if (err?.code !== '42P01') throw err;
       }
@@ -613,7 +631,7 @@ export const updatePlot = asyncHandler(async (req, res) => {
   try {
     // Property metadata and identity-only edits must not create financial records.
     const commissionFields = ['booking_by', 'sale_price', 'commission_enabled', 'commission_type', 'commission_value', 'commission_rate', 'plot_commission'];
-    if (commissionFields.some(key => Object.hasOwn(updateData, key))) {
+    if (!req.body.booking_allocations && commissionFields.some(key => Object.hasOwn(updateData, key))) {
       autoCommission = await maybeAutoCreatePlotCommission({
         plot: updated,
         createdBy: req.user?.id,
@@ -625,9 +643,9 @@ export const updatePlot = asyncHandler(async (req, res) => {
     if (err?.code !== '42P01') throw err;
   }
 
-  await accountWhatsAppHooks.plotBooked(updated, existing);
+  if (!req.body.booking_allocations) await accountWhatsAppHooks.plotBooked(updated, existing);
   res.json({ plot: updated, auto_commission: autoCommission, auto_registry: null });
-});
+}));
 
 /** DELETE /plots/:id — Delete a plot and all its commissions + payments */
 export const deletePlot = asyncHandler(async (req, res) => {

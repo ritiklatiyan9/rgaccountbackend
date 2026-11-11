@@ -19,11 +19,11 @@ class PlotCommissionV2Model extends MasterModel {
   async findBySiteIdWithDetails(siteId, pool) {
     const query = `
       SELECT
-        pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission, p.commission_rate, pc.remarks, pc.status, pc.created_at,
+        pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission AS original_commission, CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END AS total_commission, p.commission_rate, pc.remarks, pc.status, pc.created_at,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.plot_tag,
         m.full_name AS agent_name, m.phone AS agent_phone,
         COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) AS total_paid,
-        (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount), 0)) AS balance
+        ((CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END) - COALESCE(SUM(pcp.amount + pcp.tds_amount), 0)) AS balance
       FROM plot_commissions_v2 pc
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id
@@ -43,12 +43,12 @@ class PlotCommissionV2Model extends MasterModel {
   async findByIdWithDetails(id, pool) {
     const query = `
       SELECT
-        pc.*,
+        pc.*,pc.total_commission AS original_commission, CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END AS total_commission,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.commission_rate,
         m.full_name AS agent_name, m.phone AS agent_phone,
         COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid,
         COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
-        (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
+        ((CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END) - COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
       FROM plot_commissions_v2 pc
       LEFT JOIN plots p ON pc.plot_id = p.id -- a land commission has no plot (migration 155)
       JOIN members m ON pc.agent_id = m.id
@@ -83,6 +83,11 @@ class PlotCommissionV2Model extends MasterModel {
           p.id AS plot_id,
           pc.agent_id,
           pc.total_commission,
+          CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END AS effective_agent_commission,
+          to_jsonb(pc)->>'allocation_type' AS allocation_type,
+          CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END AS settlement_approval_status,
+          to_jsonb(p)->>'booking_cancelled_at' AS booking_cancelled_at,
+          CASE WHEN CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END='approved' THEN COALESCE((to_jsonb(p)->>'booking_settlement_commission')::numeric,p.plot_commission,0) ELSE COALESCE(p.plot_commission,0) END AS effective_plot_commission,
           pc.remarks,
           pc.status,
           pc.created_at,
@@ -99,6 +104,7 @@ class PlotCommissionV2Model extends MasterModel {
           m.full_name AS agent_name,
           m.phone AS agent_phone,
           COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) AS lifetime_paid,
+          COALESCE(SUM(pcp.amount),0) AS lifetime_received,
           COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS total_paid,
           COUNT(pcp.id) FILTER (WHERE ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date))::int AS payment_count,
           -- Cash vs bank split via ledger_bucket() — the single mode→book rule
@@ -106,7 +112,7 @@ class PlotCommissionV2Model extends MasterModel {
           -- here equals the Day Book's Plot Commissions figure.
           COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) = 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS cash_paid,
           COALESCE(SUM(pcp.amount) FILTER (WHERE ledger_bucket(pcp.payment_mode) <> 'cash' AND ($2::date IS NULL OR pcp.date >= $2::date) AND ($3::date IS NULL OR pcp.date <= $3::date)), 0) AS bank_paid,
-          (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount), 0)) AS balance,
+          ((CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END) - COALESCE(SUM(pcp.amount + pcp.tds_amount), 0)) AS balance,
           ROW_NUMBER() OVER (PARTITION BY p.id ORDER BY pc.created_at DESC, pc.id DESC) AS rn
         FROM plots p
         LEFT JOIN plot_commissions_v2 pc ON pc.plot_id = p.id AND pc.site_id = p.site_id
@@ -135,6 +141,7 @@ class PlotCommissionV2Model extends MasterModel {
           ca.plot_status,
           ca.site_id,
           MAX(ca.booking_date) AS booking_date,
+          MAX(ca.booking_cancelled_at) AS booking_cancelled_at,
           MAX(ca.plot_created_at) AS plot_created_at,
           -- latest agent info (rn=1)
           MAX(CASE WHEN ca.rn = 1 THEN ca.id END) AS latest_commission_id,
@@ -146,13 +153,20 @@ class PlotCommissionV2Model extends MasterModel {
           STRING_AGG(DISTINCT ca.agent_name, ', ' ORDER BY ca.agent_name) AS all_agent_names,
           COUNT(DISTINCT ca.id) AS commission_count,
           -- Use fixed plot commission instead of summing per-agent commissions
-          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission), 0) AS total_commission,
+          CASE WHEN MAX(ca.booking_cancelled_at) IS NOT NULL THEN MAX(ca.effective_plot_commission) ELSE COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission), 0) END AS total_commission,
           SUM(ca.total_paid) AS total_paid,
           SUM(ca.lifetime_paid) AS lifetime_paid,
           SUM(ca.payment_count)::int AS payment_count,
           SUM(ca.cash_paid) AS cash_paid,
           SUM(ca.bank_paid) AS bank_paid,
-          COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission), 0) - SUM(ca.lifetime_paid) AS balance
+          CASE WHEN MAX(ca.booking_cancelled_at) IS NOT NULL OR BOOL_OR(ca.allocation_type IS NOT NULL)
+            THEN SUM(GREATEST(ca.effective_agent_commission-ca.lifetime_paid,0))
+              + GREATEST(MAX(ca.effective_plot_commission)-COALESCE(SUM(ca.effective_agent_commission),0),0)
+            ELSE GREATEST(COALESCE(NULLIF(MAX(ca.plot_commission),0),MAX(ca.total_commission),0)-SUM(ca.lifetime_paid),0) END AS amount_due,
+          SUM(CASE WHEN ca.booking_cancelled_at IS NOT NULL AND ca.settlement_approval_status='approved'
+            THEN LEAST(GREATEST(ca.lifetime_paid-ca.effective_agent_commission,0),GREATEST(ca.lifetime_received,0)) ELSE 0 END) AS recoverable_amount,
+
+          CASE WHEN MAX(ca.booking_cancelled_at) IS NOT NULL THEN MAX(ca.effective_plot_commission) ELSE COALESCE(NULLIF(MAX(ca.plot_commission), 0), MAX(ca.total_commission), 0) END - SUM(ca.lifetime_paid) AS balance
         FROM commission_agg ca
         GROUP BY ca.plot_id, ca.plot_no, ca.plot_size, ca.plot_rate, ca.buyer_name, ca.commission_rate, ca.plot_tag, ca.plot_status, ca.site_id
       )
@@ -170,8 +184,12 @@ class PlotCommissionV2Model extends MasterModel {
   async findAllCommissionsByPlotId(plotId, siteId, pool) {
     const query = `
       SELECT
-        pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission, pc.remarks, pc.status, pc.created_at,
+        pc.id, pc.site_id, pc.plot_id, pc.agent_id, pc.total_commission AS original_commission, CASE WHEN CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END AS total_commission, pc.remarks, pc.status, pc.created_at,
         COUNT(pcp.id)::int AS payment_history_count,
+        to_jsonb(pc)->>'settlement_commission' AS settlement_commission,to_jsonb(pc)->>'settled_at' AS settled_at,CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END AS settlement_approval_status,to_jsonb(pc)->>'settlement_reason' AS settlement_reason,
+        to_jsonb(p)->>'booking_cancelled_at' AS booking_cancelled_at,to_jsonb(p)->>'booking_settlement_commission' AS booking_settlement_commission,
+        COALESCE(SUM(pcp.amount) FILTER(WHERE ${PCP_POSTED}),0) AS received_amount,
+        COALESCE(SUM(COALESCE(pcp.tds_amount,0)) FILTER(WHERE ${PCP_POSTED}),0) AS tds_amount,
         to_jsonb(pc)->>'allocation_type' AS allocation_type, to_jsonb(pc)->>'allocation_value' AS allocation_value, to_jsonb(pc)->>'allocation_base' AS allocation_base,
         p.plot_no, p.plot_size, p.plot_rate, p.buyer_name, p.commission_rate, p.plot_tag,
         COALESCE(to_jsonb(p)->>'unit_type','plot') AS unit_type,
@@ -180,7 +198,7 @@ class PlotCommissionV2Model extends MasterModel {
         m.full_name AS agent_name, m.phone AS agent_phone,
         COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid,
         COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0) AS total_paid_all,
-        (pc.total_commission - COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
+        (CASE WHEN CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END - COALESCE(SUM(pcp.amount + pcp.tds_amount) FILTER (WHERE ${PCP_POSTED}), 0)) AS balance
       FROM plot_commissions_v2 pc
       JOIN plots p ON pc.plot_id = p.id
       JOIN members m ON pc.agent_id = m.id

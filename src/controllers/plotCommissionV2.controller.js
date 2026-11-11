@@ -1,3 +1,4 @@
+import { bookingHistoryRevision, commissionSettlementView } from '../services/plotBookingHistory.service.js';
 import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
@@ -13,6 +14,7 @@ import { reverseApprovedImprestDebit } from '../services/imprestPosting.service.
 import { transactionMovesMoney } from '../utils/transactionPosting.js';
 import { assertAllocationSite, positiveId, replaceCommissionAllocations, commissionAllocationRevision } from '../services/commissionAllocations.service.js';
 import permissionModel from '../models/Permission.model.js';
+import { listCommissionReceivers } from '../services/commissionReceivers.service.js';
 
 const commissionPaymentPostsSql = (alias = '') => {
   const p = alias ? `${alias}.` : '';
@@ -71,7 +73,7 @@ const autoUpdateCommissionStatus = async (commissionId, poolConn) => {
     await poolConn.query(
       `UPDATE plot_commissions_v2 pc
           SET status = CASE
-                WHEN agg.total_paid >= pc.total_commission THEN 'Completed'
+                WHEN agg.total_paid >= COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) THEN 'Completed'
                 WHEN agg.total_paid > 0 THEN 'Partial'
                 ELSE 'Pending'
               END,
@@ -98,24 +100,7 @@ export const getCommissionReceivers = asyncHandler(async (req, res) => {
   const cursor = req.query.cursor == null || req.query.cursor === '' ? 0 : positiveId(req.query.cursor);
   const limit = Math.max(1, Math.min(100, Number.parseInt(req.query.limit, 10) || 30));
   const query = String(req.query.q || '').trim().slice(0, 100);
-  const escaped = query.toLowerCase().replace(/[\\%_]/g, value => `\\${value}`);
-  const rawDigits = query.replace(/\D/g, '');
-  const digits = ((rawDigits.length===12 && rawDigits.startsWith('91'))
-    || (rawDigits.length===14 && rawDigits.startsWith('0091'))
-    || (rawDigits.length===11 && rawDigits.startsWith('0'))) ? rawDigits.slice(-10) : rawDigits;
-  const { rows } = await pool.query(`SELECT m.id,m.full_name,m.phone,m.member_type,
-      ('BROKER'=ANY(COALESCE(m.member_types,ARRAY[m.member_type]))
-       AND COALESCE(to_jsonb(m)->>'is_active','true')<>'false'
-       AND UPPER(TRIM(COALESCE(to_jsonb(m)->>'status','ACTIVE'))) NOT IN ('INACTIVE','BLOCKED','DISABLED','DEACTIVATED','DELETED','SUSPENDED')
-       AND length(COALESCE(m.phone,''))<=32 AND regexp_replace(COALESCE(m.phone,''),'[[:space:]()+-]','','g') ~ '^(0091|91|0)?[6-9][0-9]{9}$'
-       AND length(COALESCE(m.aadhar_no,''))<=32 AND regexp_replace(COALESCE(m.aadhar_no,''),'[[:space:]-]','','g') ~ '^[2-9][0-9]{11}$') AS partner_app_eligible
-    FROM members m JOIN sites s ON s.id=m.site_id
-    WHERE s.organization_id=$1 AND m.id>$2
-      AND ($3::text='' OR lower(m.full_name) LIKE $4 ESCAPE '\\'
-        OR ($5::text<>'' AND regexp_replace(COALESCE(m.phone,''),'[^0-9]','','g') LIKE $6))
-    ORDER BY m.id ASC LIMIT $7`, [req.user.organization_id, cursor, query, `%${escaped}%`, digits, `%${digits}%`, limit + 1]);
-  const members = rows.slice(0, limit);
-  res.json({ members, has_more: rows.length > limit, next_cursor: rows.length > limit ? String(members.at(-1).id) : null });
+  res.json(await listCommissionReceivers(pool, { organizationId: req.user.organization_id, siteId, cursor, limit, query }));
 });
 
 // The split editor needs only allocation metadata and immutable-history flags.
@@ -125,18 +110,31 @@ export const getCommissionAllocations = asyncHandler(async (req, res) => {
   await assertAllocationSite(pool,req.user,siteId);
   const [plotResult,agentsResult]=await Promise.all([
     pool.query(`SELECT p.id AS plot_id,p.site_id,p.plot_no,p.buyer_name,p.plot_size,p.plot_rate,p.plot_commission,
+      to_jsonb(p)->>'approval_status' AS approval_status,to_jsonb(p)->>'assigned_admin_id' AS assigned_admin_id,to_jsonb(p)->>'status' AS status,to_jsonb(p)->>'buyer_member_id' AS buyer_member_id,to_jsonb(p)->>'booking_date' AS booking_date,
+      to_jsonb(p)->>'updated_at' AS booking_revision_updated_at,to_jsonb(p)->>'booking_cancelled_at' AS booking_cancelled_at,
+      to_jsonb(p)->>'cancellation_reason' AS cancellation_reason,to_jsonb(p)->>'booking_settlement_commission' AS booking_settlement_commission,
+      to_jsonb(p)->>'previous_booking_plot_id' AS previous_booking_plot_id,
       COALESCE(to_jsonb(p)->>'unit_type','plot') AS unit_type FROM plots p WHERE p.id=$1 AND p.site_id=$2`,[plotId,siteId]),
     pool.query(`SELECT pc.id AS commission_id,pc.agent_id,m.full_name AS agent_name,m.phone AS agent_phone,
-      pc.total_commission,pc.remarks,to_jsonb(pc)->>'updated_at' AS revision_updated_at,to_jsonb(pc)->>'allocation_type' AS allocation_type,
+      pc.total_commission,pc.remarks,CASE WHEN to_jsonb(parent) ? 'approval_status' THEN COALESCE(to_jsonb(parent)->>'approval_status','pending') ELSE 'approved' END AS settlement_approval_status,to_jsonb(pc)->>'updated_at' AS revision_updated_at,to_jsonb(pc)->>'allocation_type' AS allocation_type,
       to_jsonb(pc)->>'allocation_value' AS allocation_value,to_jsonb(pc)->>'allocation_base' AS allocation_base,
+      to_jsonb(pc)->>'settlement_commission' AS settlement_commission,to_jsonb(pc)->>'settled_at' AS settled_at,to_jsonb(pc)->>'settlement_reason' AS settlement_reason,
+      COALESCE(SUM(p.amount) FILTER(WHERE financial_transaction_posts(CASE WHEN p.amount<0 THEN 'credit' ELSE 'debit' END,p.status,p.payment_mode,p.cheque_status)),0) AS received_amount,
+      COALESCE(SUM(COALESCE(p.tds_amount,0)) FILTER(WHERE financial_transaction_posts(CASE WHEN p.amount<0 THEN 'credit' ELSE 'debit' END,p.status,p.payment_mode,p.cheque_status)),0) AS tds_amount,
+      COALESCE(SUM(CASE WHEN p.amount>=0 OR financial_transaction_posts('credit',p.status,p.payment_mode,p.cheque_status) THEN p.amount+COALESCE(p.tds_amount,0) ELSE 0 END) FILTER(WHERE LOWER(COALESCE(p.status,'approved')) NOT IN ('rejected','cancelled','deleted','void','voided') AND UPPER(COALESCE(p.cheque_status,'')) NOT IN ('BOUNCED','RETURNED')),0) AS reserved_commission,
       COUNT(p.id)::int AS payment_history_count
-      FROM plot_commissions_v2 pc JOIN members m ON m.id=pc.agent_id
+      FROM plot_commissions_v2 pc JOIN members m ON m.id=pc.agent_id JOIN plots parent ON parent.id=pc.plot_id
       LEFT JOIN plot_commission_payments p ON p.plot_commission_id=pc.id
-      WHERE pc.plot_id=$1 AND pc.site_id=$2 GROUP BY pc.id,m.id ORDER BY pc.id`,[plotId,siteId]),
+      WHERE pc.plot_id=$1 AND pc.site_id=$2 GROUP BY pc.id,m.id,parent.id ORDER BY pc.id`,[plotId,siteId]),
   ]);
   if(!plotResult.rows[0]) return res.status(404).json({message:'Plot or shop not found'});
-  res.json({plot:plotResult.rows[0],revision:commissionAllocationRevision(plotResult.rows[0],agentsResult.rows),agents:agentsResult.rows.map(row=>({...row,total_commission:num(row.total_commission),
-    allocation_value:row.allocation_value==null?null:Number(row.allocation_value),allocation_base:row.allocation_base==null?null:num(row.allocation_base)}))});
+  const agents=agentsResult.rows.map(row=>{
+    const mapped={...row,...commissionSettlementView(row,row.received_amount,row.tds_amount),total_commission:num(row.total_commission),
+      allocation_value:row.allocation_value==null?null:Number(row.allocation_value),allocation_base:row.allocation_base==null?null:num(row.allocation_base)};
+    if(req.includeSettlementBalances!==true)for(const key of ['received_amount','tds_amount','total_paid','reserved_commission','recoverable_amount','tds_adjustment_due','balance','amount_due'])delete mapped[key];
+    return mapped;
+  });
+  res.json({plot:plotResult.rows[0],booking_revision:bookingHistoryRevision(plotResult.rows[0],agentsResult.rows),revision:commissionAllocationRevision(plotResult.rows[0],agentsResult.rows),agents});
 });
 
 export const saveCommissionAllocations = asyncHandler(async (req, res) => {
@@ -338,14 +336,15 @@ export const listAllSitesCommissions = asyncHandler(async (req, res) => {
                  WHEN pc.farmer_id IS NOT NULL THEN f.name
                  ELSE d.buyer_name END AS counterparty,
             p.plot_no, p.plot_size, p.status AS plot_status,
-            pc.total_commission,
+            pc.total_commission AS original_commission,
+            CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END AS total_commission,
             COALESCE(pr.lifetime_paid, 0) AS lifetime_paid,
             COALESCE(pr.total_paid, 0) AS total_paid,
             COALESCE(pr.cash_paid, 0) AS cash_paid,
             COALESCE(pr.bank_paid, 0) AS bank_paid,
-            pc.total_commission - COALESCE(pr.lifetime_paid, 0) AS balance,
-            CASE WHEN COALESCE(pr.lifetime_paid, 0) > pc.total_commission + 0.5 THEN 'Over Paid'
-                 WHEN pc.total_commission > 0 AND pc.total_commission - COALESCE(pr.lifetime_paid, 0) <= 0.5 THEN 'Completed'
+            (CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END) - COALESCE(pr.lifetime_paid, 0) AS balance,
+            CASE WHEN COALESCE(pr.lifetime_paid, 0) > (CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END) + 0.5 THEN 'Over Paid'
+                 WHEN (CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END) > 0 AND (CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END) - COALESCE(pr.lifetime_paid, 0) <= 0.5 THEN 'Completed'
                  WHEN COALESCE(pr.lifetime_paid, 0) > 0.5 THEN 'Partial'
                  ELSE 'Pending' END AS settlement_status,
             COALESCE(pr.payment_count, 0)::int AS payment_count,
@@ -414,7 +413,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     const metaRes = await pool.query(
       `SELECT p.id AS plot_id, p.plot_no, p.plot_size, p.plot_rate, p.buyer_name,
               p.commission_rate, p.plot_tag, COALESCE(to_jsonb(p)->>'unit_type','plot') AS unit_type, COALESCE(p.plot_commission, 0) AS plot_commission,
-              s.name AS site_name, p.site_id
+              s.name AS site_name, p.site_id, to_jsonb(p)->>'booking_cancelled_at' AS booking_cancelled_at,to_jsonb(p)->>'booking_settlement_commission' AS booking_settlement_commission
          FROM plots p JOIN sites s ON p.site_id = s.id
         WHERE p.id = $1 AND p.site_id = $2`,
       [numPlotId, numSiteId]
@@ -454,9 +453,10 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
   const timelinePromise = pool.query(
     `SELECT
        p.id AS plot_id, p.plot_no, p.buyer_name, p.plot_size, p.plot_rate, p.created_at AS plot_created_at,
+       to_jsonb(p)->>'booking_cancelled_at' AS booking_cancelled_at,to_jsonb(p)->>'status' AS booking_status,
        COALESCE(p.plot_commission, 0) AS plot_commission,
        STRING_AGG(DISTINCT m.full_name, ', ' ORDER BY m.full_name) AS agent_names,
-       COALESCE(NULLIF(COALESCE(p.plot_commission, 0), 0), MAX(pc.total_commission)) AS total_commission,
+       CASE WHEN to_jsonb(p)->>'booking_cancelled_at' IS NOT NULL AND CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END='approved' THEN COALESCE((to_jsonb(p)->>'booking_settlement_commission')::numeric,0) ELSE COALESCE(NULLIF(COALESCE(p.plot_commission, 0), 0), MAX(pc.total_commission)) END AS total_commission,
        COALESCE(SUM(paid_agg.total_paid), 0) AS total_paid,
        COALESCE(SUM(paid_agg.total_paid_all), 0) AS total_paid_all,
        COALESCE(SUM(paid_agg.payment_count), 0) AS payment_count,
@@ -470,7 +470,14 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
            'agent_id', pc.agent_id,
            'agent_name', m.full_name,
            'agent_phone', m.phone,
-           'total_commission', pc.total_commission,
+           'total_commission', CASE WHEN CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END,
+           'settlement_approval_status', CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END,
+           'original_commission', pc.total_commission,
+           'settlement_commission', to_jsonb(pc)->>'settlement_commission',
+           'settled_at', to_jsonb(pc)->>'settled_at',
+           'settlement_reason', to_jsonb(pc)->>'settlement_reason',
+           'received_amount', COALESCE(paid_agg.received_amount,0),
+           'tds_amount', COALESCE(paid_agg.tds_amount,0),
            'allocation_type', to_jsonb(pc)->>'allocation_type',
            'allocation_value', to_jsonb(pc)->>'allocation_value',
            'allocation_base', to_jsonb(pc)->>'allocation_base',
@@ -478,7 +485,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
            'remarks', pc.remarks,
            'total_paid', COALESCE(paid_agg.total_paid, 0),
            'total_paid_all', COALESCE(paid_agg.total_paid_all, 0),
-           'balance', pc.total_commission - COALESCE(paid_agg.total_paid_all, 0),
+           'balance', (CASE WHEN (CASE WHEN to_jsonb(p) ? 'approval_status' THEN COALESCE(to_jsonb(p)->>'approval_status','pending') ELSE 'approved' END)='approved' THEN COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) ELSE pc.total_commission END) - COALESCE(paid_agg.total_paid_all, 0),
            'payment_count', COALESCE(paid_agg.payment_count, 0)
          ) ORDER BY pc.created_at ASC) FILTER (WHERE pc.id IS NOT NULL),
          '[]'
@@ -490,6 +497,8 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
        SELECT plot_commission_id,
               SUM(amount + tds_amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid,
               SUM(amount + tds_amount) FILTER (WHERE ${commissionPaymentPostsSql()}) AS total_paid_all,
+              SUM(amount) FILTER(WHERE ${commissionPaymentPostsSql()}) AS received_amount,
+              SUM(COALESCE(tds_amount,0)) FILTER(WHERE ${commissionPaymentPostsSql()}) AS tds_amount,
               COUNT(*) AS payment_count
        FROM plot_commission_payments
        WHERE ($3::text IS NULL OR created_by = ANY(string_to_array($3::text, ',')::int[]))
@@ -524,6 +533,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     is_current: r.plot_id === numPlotId,
     agents_detail: (r.agents_detail || []).map(a => ({
       ...a,
+      ...commissionSettlementView({...a,total_commission:a.original_commission ?? a.total_commission},a.received_amount,a.tds_amount),
       total_commission: parseFloat(a.total_commission) || 0,
       total_paid: parseFloat(a.total_paid) || 0,
       total_paid_all: parseFloat(a.total_paid_all) || 0,
@@ -587,6 +597,9 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     plot_tag: plotMeta.plot_tag,
     unit_type: plotMeta.unit_type || 'plot',
     plot_commission: parseFloat(plotMeta.plot_commission) || 0,
+    booking_cancelled_at: plotMeta.booking_cancelled_at || null,
+    settlement_approval_status: plotMeta.settlement_approval_status || null,
+    booking_settlement_commission: plotMeta.booking_settlement_commission == null ? null : num(plotMeta.booking_settlement_commission),
     site_name: plotMeta.site_name,
     site_id: plotMeta.site_id,
   };
@@ -603,6 +616,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
     agent_id: c.agent_id,
     agent_name: c.agent_name,
     agent_phone: c.agent_phone,
+    ...commissionSettlementView({...c,total_commission:c.original_commission ?? c.total_commission},scopedPayments.filter(commissionPaymentMovesMoney).reduce((sum,p)=>sum+num(p.amount),0),scopedPayments.filter(commissionPaymentMovesMoney).reduce((sum,p)=>sum+num(p.tds_amount),0)),
     total_commission: c.total_commission,
     allocation_type: c.allocation_type || null,
     allocation_value: c.allocation_value == null ? null : Number(c.allocation_value),
@@ -623,7 +637,7 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
   // plot commission (NEVER summed across agents), including when no agent is
   // assigned. Fall back to the largest agent commission when it is unset.
   const fixedCommission = parseFloat(plotMeta.plot_commission) || 0;
-  const totalCommission = fixedCommission > 0
+  const totalCommission = plotMeta.booking_settlement_commission != null && (!plotMeta.settlement_approval_status || plotMeta.settlement_approval_status==='approved') ? num(plotMeta.booking_settlement_commission) : fixedCommission > 0
     ? fixedCommission
     : Math.max(0, ...agents.map(a => parseFloat(a.total_commission) || 0));
   const totalPaid = agents.reduce((s, a) => s + a.total_paid, 0);
@@ -636,9 +650,10 @@ export const plotDetail = async (numPlotId, numSiteId, entryVisibility) => {
   // booking of this plot_no. Money given/paid IS summed across every agent and
   // booking, so the headline answers "of the plot's decided commission, how
   // much has actually gone out across everyone?".
+  const lifecycleHistory = timeline.some(row=>row.booking_cancelled_at);
   const grand = timeline.reduce(
     (acc, t) => ({
-      total_commission: Math.max(acc.total_commission, t.total_commission),
+      total_commission: lifecycleHistory ? acc.total_commission + t.total_commission : Math.max(acc.total_commission, t.total_commission),
       total_paid: acc.total_paid + t.total_paid,
       total_paid_all: acc.total_paid_all + t.total_paid_all,
       booking_count: acc.booking_count + 1,
@@ -799,6 +814,11 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   const deductee = tds.tds_amount > 0 ? await resolvePaymentDeductee(req.body, master.site_id, null, { memberId: master.agent_id }) : await resolveTdsDeductee(req.body, master.site_id);
   const numericAmount = tds.amount;
   const grossAmount = numericAmount + tds.tds_amount;
+  if (master.settlement_commission != null && numericAmount < 0) {
+    const {rows:[paid]}=await pool.query(`SELECT COALESCE(SUM(amount),0) AS cash,COALESCE(SUM(COALESCE(tds_amount,0)),0) AS tax FROM plot_commission_payments WHERE plot_commission_id=$1 AND ${commissionPaymentPostsSql()}`,[masterIdInt]);
+    const recovery=commissionSettlementView(master,paid.cash,paid.tax);
+    if (Math.abs(numericAmount)>recovery.recoverable_amount+0.005) return res.status(400).json({code:'COMMISSION_RECOVERY_EXCEEDED',message:'Recovery cannot exceed the cash overpaid above this cancellation settlement. TDS needs a separate adjustment.',recoverable_amount:recovery.recoverable_amount});
+  }
   const mode = payment_mode || 'CASH';
   const chequeStatus = mode.toUpperCase() === 'CHEQUE' ? 'PENDING' : null;
   const paymentDate = date || new Date().toISOString().split('T')[0];
@@ -814,7 +834,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
   // rows count too — otherwise two quick entries could both pass the check.
   // Credits (negative amounts = money received back) are never capped.
   const capCheck = await pool.query(
-    `SELECT pc.total_commission,
+    `SELECT COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) AS total_commission,
             COALESCE(SUM(p.amount + p.tds_amount) FILTER (
               WHERE LOWER(COALESCE(p.status, 'approved')) <> 'rejected'
                 AND (p.cheque_status IS NULL OR p.cheque_status NOT IN ('BOUNCED', 'RETURNED'))
@@ -839,7 +859,7 @@ export const createPlotCommissionPayment = asyncHandler(async (req, res) => {
 
   const result = await pool.query(
     `WITH master AS (
-       SELECT id, site_id, total_commission,
+       SELECT id, site_id, COALESCE((to_jsonb(plot_commissions_v2)->>'settlement_commission')::numeric,total_commission) AS total_commission,
               COALESCE((
                 SELECT SUM(amount + tds_amount)
                 FROM plot_commission_payments
@@ -1041,7 +1061,7 @@ export const updatePlotCommissionPayment = asyncHandler(async (req, res) => {
   // Same cap as create: the edited amount plus every other live row must stay within the decided commission.
   if (tds.amount > 0) {
     const { rows: capRows } = await pool.query(
-      `SELECT pc.total_commission,
+      `SELECT COALESCE((to_jsonb(pc)->>'settlement_commission')::numeric,pc.total_commission) AS total_commission,
               COALESCE(SUM(p.amount + p.tds_amount) FILTER (
                 WHERE p.id <> $2
                   AND LOWER(COALESCE(p.status, 'approved')) <> 'rejected'

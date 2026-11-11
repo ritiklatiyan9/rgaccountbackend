@@ -692,6 +692,7 @@ export const createEditRequest = asyncHandler(async (req, res) => {
     if (!parsedProposed || typeof parsedProposed !== 'object' || Array.isArray(parsedProposed)) {
       return rejectCreateRequest(res, 400, 'proposed_data must be an object');
     }
+    if (Object.hasOwn(parsedProposed, 'booking_allocations')) return rejectCreateRequest(res, 400, 'Booking dealer commissions must be changed through an authorized direct property update.');
     if (req.transactionDocumentationDraft) parsedProposed.documentation = req.transactionDocumentationDraft;
     if (parsedProposed.documentation !== undefined) {
       const draft = validateDocumentationDraft(parsedProposed.documentation);

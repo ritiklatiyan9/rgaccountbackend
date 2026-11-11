@@ -78,8 +78,9 @@ export async function replaceCommissionAllocations(db, user, body, { canUpdate =
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout = '5s'");
     await assertAllocationSite(client, user, siteId);
-    const plot = (await client.query('SELECT id,plot_commission FROM plots WHERE id=$1 AND site_id=$2 FOR UPDATE', [plotId, siteId])).rows[0];
+    const plot = (await client.query(`SELECT id,plot_commission,to_jsonb(plots)->>'booking_cancelled_at' AS booking_cancelled_at FROM plots WHERE id=$1 AND site_id=$2 FOR UPDATE`, [plotId, siteId])).rows[0];
     if (!plot) fail('Plot or shop not found on this site', 404);
+    if (plot.booking_cancelled_at) fail('Cancelled booking allocations are preserved. Use their original ledger for payouts or recoveries.',409,'BOOKING_HISTORY_IMMUTABLE');
     const { rows: existing } = await client.query('SELECT * FROM plot_commissions_v2 WHERE plot_id=$1 AND site_id=$2 ORDER BY id FOR UPDATE', [plotId, siteId]);
     if (commissionAllocationRevision(plot,existing)!==body.revision) fail('The dealer breakdown changed while you were editing. Refresh it and apply your changes again.',409,'COMMISSION_ALLOCATION_CONFLICT');
     if (existing.length && !canUpdate) fail('Updating existing dealer commissions requires update permission', 403, 'COMMISSION_UPDATE_PERMISSION');

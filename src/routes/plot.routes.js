@@ -1,10 +1,11 @@
+import { getCommissionReceivers, getCommissionAllocations } from '../controllers/plotCommissionV2.controller.js';
 import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 import { createPoolMoneyRouter } from './poolMoney.routes.js';
 const router = express.Router();
 
 import {
-  createPlot, listPlots, searchPlots, getPlot, updatePlot, deletePlot, linkPlotBuyer,
+  createPlot, listPlots, searchPlots, getPlot, updatePlot, deletePlot, linkPlotBuyer, cancelBooking, rebookPlot,
   createPayment, listPayments, getPayment, updatePayment, deletePayment,
   getAutocomplete, getPlotNocRegistry, createPlotNocRegistry, listBookingClients, listPlotKycMembers,
 } from '../controllers/plot.controller.js';
@@ -50,6 +51,11 @@ const requireBookingPermission = (req, res, next) => req.body.booking_client_id 
   : next();
 
 // ── Plot endpoints ──
+router.get('/booking-receivers', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, getCommissionReceivers);
+router.get('/:id/booking-allocations', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByParamPlot, (req, res, next) => { res.set('Cache-Control', 'no-store'); req.query.plot_id = req.params.id; next(); }, getCommissionAllocations);
+router.get('/:id/cancellation-preview',requireRole('admin','sub_admin'),requirePermission('plot_payments','update'),accessByParamPlot,(req,res,next)=>{res.set('Cache-Control','no-store');req.query.plot_id=req.params.id;req.includeSettlementBalances=true;next();},getCommissionAllocations);
+router.post('/:id/cancel-booking', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, cancelBooking);
+router.post('/:id/rebook', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'), requirePermission('plot_payments', 'update'), accessByParamPlot, bustPlotCache, rebookPlot);
 router.get('/booking-clients', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, listBookingClients);
 router.get('/kyc-members', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, listPlotKycMembers);
 router.get('/', requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'), accessByQuerySite, plotReadCache, listPlots);                                        // ?site_id=X

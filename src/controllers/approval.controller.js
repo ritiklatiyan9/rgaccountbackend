@@ -1182,7 +1182,7 @@ export const approveEntry = asyncHandler(async (req, res) => {
     `UPDATE ${table} SET status = 'approved', approved_by = $2, approved_at = NOW(), updated_at = NOW() WHERE id = $1 AND ${chequeReadySql(table)} AND status = 'pending'${req.assignedApprovalsOnly ? ' AND assigned_admin_id = $2' : ''} RETURNING *`,
     [entryId, req.user.id]
   );
-  
+
   if (!result.rows[0]) return res.status(409).json({ message: 'This request has already been decided. Refresh the approval queue.' });
   const entry = result.rows[0];
 
@@ -1227,8 +1227,8 @@ export const approveEntry = asyncHandler(async (req, res) => {
       try {
           // get the total paid vs total commission
           const sumQuery = `
-             SELECT 
-                pcm.id, pcm.total_commission, 
+             SELECT
+                pcm.id, CASE WHEN EXISTS(SELECT 1 FROM plots history_plot WHERE history_plot.id=pcm.plot_id AND (CASE WHEN to_jsonb(history_plot) ? 'approval_status' THEN COALESCE(to_jsonb(history_plot)->>'approval_status','pending') ELSE 'approved' END)='approved') THEN COALESCE((to_jsonb(pcm)->>'settlement_commission')::numeric,pcm.total_commission) ELSE pcm.total_commission END AS total_commission,
                 COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) as total_paid
              FROM plot_commissions_v2 pcm
              LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
@@ -1239,10 +1239,7 @@ export const approveEntry = asyncHandler(async (req, res) => {
           const sumRes = await pool.query(sumQuery, [entry.plot_commission_id]);
           if (sumRes.rows.length > 0) {
               const { id, total_commission, total_paid } = sumRes.rows[0];
-              let newStatus = 'Pending';
-              if (Number(total_paid) > 0) {
-                  newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : 'Partial';
-              }
+              const newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : Number(total_paid) > 0 ? 'Partial' : 'Pending';
               await pool.query(`UPDATE plot_commissions_v2 SET status = $1 WHERE id = $2`, [newStatus, id]);
           }
       } catch (err) {
@@ -1343,8 +1340,8 @@ export const rejectEntry = asyncHandler(async (req, res) => {
     if (entry.plot_commission_id) {
       try {
         const sumQuery = `
-          SELECT 
-            pcm.id, pcm.total_commission, 
+          SELECT
+            pcm.id, CASE WHEN EXISTS(SELECT 1 FROM plots history_plot WHERE history_plot.id=pcm.plot_id AND (CASE WHEN to_jsonb(history_plot) ? 'approval_status' THEN COALESCE(to_jsonb(history_plot)->>'approval_status','pending') ELSE 'approved' END)='approved') THEN COALESCE((to_jsonb(pcm)->>'settlement_commission')::numeric,pcm.total_commission) ELSE pcm.total_commission END AS total_commission,
             COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
           LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
@@ -1355,10 +1352,7 @@ export const rejectEntry = asyncHandler(async (req, res) => {
         const sumRes = await pool.query(sumQuery, [entry.plot_commission_id]);
         if (sumRes.rows.length > 0) {
           const { id, total_commission, total_paid } = sumRes.rows[0];
-          let newStatus = 'Pending';
-          if (Number(total_paid) > 0) {
-            newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : 'Partial';
-          }
+          const newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : Number(total_paid) > 0 ? 'Partial' : 'Pending';
           await pool.query(`UPDATE plot_commissions_v2 SET status = $1 WHERE id = $2`, [newStatus, id]);
         }
       } catch (err) {
@@ -1534,8 +1528,8 @@ export const bulkApprove = asyncHandler(async (req, res) => {
     try {
       for (const commissionId of affectedCommissions) {
         const sumQuery = `
-          SELECT 
-            pcm.id, pcm.total_commission, 
+          SELECT
+            pcm.id, CASE WHEN EXISTS(SELECT 1 FROM plots history_plot WHERE history_plot.id=pcm.plot_id AND (CASE WHEN to_jsonb(history_plot) ? 'approval_status' THEN COALESCE(to_jsonb(history_plot)->>'approval_status','pending') ELSE 'approved' END)='approved') THEN COALESCE((to_jsonb(pcm)->>'settlement_commission')::numeric,pcm.total_commission) ELSE pcm.total_commission END AS total_commission,
             COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
           LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
@@ -1546,10 +1540,7 @@ export const bulkApprove = asyncHandler(async (req, res) => {
         const sumRes = await pool.query(sumQuery, [commissionId]);
         if (sumRes.rows.length > 0) {
           const { id, total_commission, total_paid } = sumRes.rows[0];
-          let newStatus = 'Pending';
-          if (Number(total_paid) > 0) {
-            newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : 'Partial';
-          }
+          const newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : Number(total_paid) > 0 ? 'Partial' : 'Pending';
           await pool.query(`UPDATE plot_commissions_v2 SET status = $1 WHERE id = $2`, [newStatus, id]);
         }
       }
@@ -1640,8 +1631,8 @@ export const bulkReject = asyncHandler(async (req, res) => {
     try {
       for (const commissionId of affectedCommissions) {
         const sumQuery = `
-          SELECT 
-            pcm.id, pcm.total_commission, 
+          SELECT
+            pcm.id, CASE WHEN EXISTS(SELECT 1 FROM plots history_plot WHERE history_plot.id=pcm.plot_id AND (CASE WHEN to_jsonb(history_plot) ? 'approval_status' THEN COALESCE(to_jsonb(history_plot)->>'approval_status','pending') ELSE 'approved' END)='approved') THEN COALESCE((to_jsonb(pcm)->>'settlement_commission')::numeric,pcm.total_commission) ELSE pcm.total_commission END AS total_commission,
             COALESCE(SUM(pcp.amount + pcp.tds_amount), 0) as total_paid
           FROM plot_commissions_v2 pcm
           LEFT JOIN plot_commission_payments pcp ON pcm.id = pcp.plot_commission_id
@@ -1652,10 +1643,7 @@ export const bulkReject = asyncHandler(async (req, res) => {
         const sumRes = await pool.query(sumQuery, [commissionId]);
         if (sumRes.rows.length > 0) {
           const { id, total_commission, total_paid } = sumRes.rows[0];
-          let newStatus = 'Pending';
-          if (Number(total_paid) > 0) {
-            newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : 'Partial';
-          }
+          const newStatus = Number(total_paid) >= Number(total_commission) ? 'Completed' : Number(total_paid) > 0 ? 'Partial' : 'Pending';
           await pool.query(`UPDATE plot_commissions_v2 SET status = $1 WHERE id = $2`, [newStatus, id]);
         }
       }

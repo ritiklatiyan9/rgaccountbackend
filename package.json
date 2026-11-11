@@ -271,7 +271,11 @@
     "dev:pool-money-preview": "node scripts/pool-money-preview.mjs",
     "test:bank-accounts": "node --test test/bank-account-running-balance.test.mjs",
     "migrate:plot-commission-allocations": "node src/migrations/241_plot_commission_allocations.js && node src/migrations/242_plot_commission_allocation_guards.js",
-    "test:plot-commission-allocations": "node --test test/commission-allocations*.test.mjs test/plot-commission-visibility.test.mjs"
+    "migrate:plot-booking-history": "node src/migrations/244_plot_booking_history.js",
+    "test:plot-booking-history": "node --test test/plot-booking-history.test.mjs test/plot-booking-allocations.test.mjs test/commission-allocations*.test.mjs test/plot-commission-visibility.test.mjs",
+    "migrate:plot-booking-allocations": "node src/migrations/243_plot_booking_dealer_names.js",
+    "test:plot-booking-allocations": "node --test test/plot-booking-allocations.test.mjs test/commission-allocations*.test.mjs test/commission-receiver-people.test.mjs test/pool-money-preview.test.mjs test/quick-plot-booking.test.mjs",
+    "test:plot-commission-allocations": "node --test test/commission-allocations*.test.mjs test/commission-receiver-people.test.mjs test/plot-commission-visibility.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

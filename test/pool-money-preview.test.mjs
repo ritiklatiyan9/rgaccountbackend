@@ -52,7 +52,7 @@ test('preview isolates routes, rejects foreign origins and requires session proo
   assert.equal(response.status, 200); assert.equal(moduleReads, 1); assert.equal(response.headers['cache-control'], 'no-store');
 });
 
-test('profile save and shop mutations retain org checks and reject unrelated changes', async () => {
+test('profile save and property mutations retain org checks and reject unrelated changes', async () => {
   const calls = [];
   let actor = { id: 1, organization_id: 1, role: 'admin' };
   const router = express.Router();
@@ -72,14 +72,14 @@ test('profile save and shop mutations retain org checks and reject unrelated cha
   assert.equal((await request(app, { path: '/sites/7x' })).status, 400);
   assert.equal((await request(app, { method: 'PUT', path: '/sites/7', body: { project_profile: {}, name: 'Different name' } })).status, 400);
   assert.equal((await request(app, { method: 'PUT', path: '/sites/7', body: { project_profile: { inventory_type: 'shops' } } })).status, 200);
-  assert.equal((await request(app, { method: 'POST', path: '/plots', body: { site_id: 7, unit_type: 'plot' } })).status, 400);
+  assert.equal((await request(app, { method: 'POST', path: '/plots', body: { site_id: 7, unit_type: 'plot' } })).status, 201);
   assert.equal((await request(app, { method: 'POST', path: '/plots', body: { site_id: 99, unit_type: 'shop' } })).status, 404);
   assert.equal((await request(app, { method: 'POST', path: '/plots', body: { site_id: 7, unit_type: 'shop' } })).status, 201);
   assert.equal((await request(app, { method: 'PUT', path: '/plots/1', body: { sale_price: 2500000 } })).status, 200);
   assert.equal((await request(app, { method: 'PUT', path: '/plots/1', body: { site_id: 8 } })).status, 400);
   actor = { ...actor, role: 'sub_admin' };
   assert.equal((await request(app, { method: 'PUT', path: '/sites/7', body: { project_profile: {} } })).status, 403);
-  assert.deepEqual(calls.map(([action]) => action), ['profile', 'create', 'update']);
+  assert.deepEqual(calls.map(([action]) => action), ['profile', 'create', 'create', 'update']);
 });
 
 test('preview listening ports and browser origins are constrained', () => {
