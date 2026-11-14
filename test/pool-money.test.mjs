@@ -137,6 +137,8 @@ test('read-only fallback shows receipts without accounting writes',async t=>{
 });
 test('allotment preserves one cash-flow identity, amount, date and collector; retries cannot duplicate',async t=>{
  const {db,pool}=await fixture(t);const before=(await db.query('SELECT * FROM cash_flow_entries')).rows[0];
+ await db.exec(`CREATE TABLE website_booking_requests(id integer,plot_id integer,status text,hold_expires_at timestamptz);
+ INSERT INTO website_booking_requests VALUES(1,1,'PAYMENT_REVIEW',now()+interval '15 minutes');`);
  await mutatePoolMoney(pool,admin,identity,'result',{result:'WINNER',note:'Physical draw sheet 1'});
  const result=await mutatePoolMoney(pool,admin,identity,'allot',{plot_id:1,expected_amount:100000});
  assert.equal(result.row.status,'ALLOTTED');assert.equal(result.row.pool_balance,0);assert.equal(result.row.allocated_amount,100000);
@@ -146,6 +148,7 @@ test('allotment preserves one cash-flow identity, amount, date and collector; re
  const plot=(await db.query('SELECT * FROM plots WHERE id=1')).rows[0];assert.equal(plot.status,'BOOKED');assert.equal(plot.buyer_member_id,1);
  await assert.rejects(mutatePoolMoney(pool,admin,identity,'allot',{plot_id:1,expected_amount:100000}),{statusCode:409});
  assert.equal((await db.query('SELECT count(*)::int AS n FROM plot_payments')).rows[0].n,1);
+ assert.equal((await db.query('SELECT status FROM website_booking_requests WHERE id=1')).rows[0].status,'PAYMENT_REVIEW');
 });
 test('existing BK is allotted without creating another booking',async t=>{
  const {db,pool}=await fixture(t,{source:'booking'});const input={kind:'booking',id:1,siteId:1};

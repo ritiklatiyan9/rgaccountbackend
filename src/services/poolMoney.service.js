@@ -1,4 +1,3 @@
-import { assertNoWebsitePlotHold } from './websitePlotHold.service.js';
 import { validatePlotBuyerMember } from './plotMemberLinks.service.js';
 import { validatePlotApprover } from './plotApproval.service.js';
 
@@ -176,7 +175,6 @@ export async function mutatePoolMoney(pool,user,input,action,body={}) {
    if(String(plot.plot_tag||'').toUpperCase()==='OLD') fail(409,'Select a current company unit.');
    const prior=(await db.query('SELECT EXISTS(SELECT 1 FROM plot_payments WHERE plot_id=$1) OR EXISTS(SELECT 1 FROM plot_installments WHERE plot_id=$1) AS present',[plot.id])).rows[0];
    if(prior.present) fail(409,'This unit has an existing payment or installment schedule. Review it before allotment.');
-   await assertNoWebsitePlotHold(db,plot.id);
    const clash=(await db.query(`SELECT EXISTS(SELECT 1 FROM bookings WHERE plot_id=$1 AND status<>'CANCELLED') OR
     EXISTS(SELECT 1 FROM draw_registrations WHERE allotted_plot_id=$1 AND status='ALLOTTED') AS taken`,[plot.id])).rows[0];
    if(clash.taken) fail(409,'This unit already has an active booking.');
