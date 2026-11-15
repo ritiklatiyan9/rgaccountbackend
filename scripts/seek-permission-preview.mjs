@@ -12,6 +12,7 @@ import errorMiddleware from '../src/middlewares/error.middleware.js';
 import { initSocket } from '../src/config/socket.js';
 import { up as migrateSeekComments } from '../src/migrations/230_seek_permission_comments.js';
 import { up as migrateSeekPriority } from '../src/migrations/231_seek_permission_priority.js';
+import { up as migrateSeekLinks } from '../src/migrations/248_seek_permission_links.js';
 
 export const SEEK_PREVIEW_ORIGINS = Object.freeze(['http://127.0.0.1:5173', 'http://localhost:5173']);
 export const isSeekPreviewOrigin = origin => !origin || SEEK_PREVIEW_ORIGINS.includes(origin);
@@ -71,7 +72,7 @@ export async function assertSeekPreviewBaseSchema(database = pool) {
     if (!schema?.access_columns?.includes(column)) missing.push(`seek_permission_access.${column}`);
   }
   if (missing.length) {
-    throw Object.assign(new Error(`Seek Permission preview cannot start: base migrations 222/223 are required (${missing.join(', ')} missing). Only comment and priority metadata migrations are applied by this command.`),
+    throw Object.assign(new Error(`Seek Permission preview cannot start: base migrations 222/223 are required (${missing.join(', ')} missing). Only comment, priority and entry-link metadata migrations are applied by this command.`),
       { code: 'SEEK_PREVIEW_BASE_SCHEMA_MISSING' });
   }
   return schema;
@@ -82,13 +83,15 @@ export function seekPreviewPort(value = process.env.SEEK_PERMISSION_PREVIEW_PORT
   return Number(value);
 }
 
-const migrateSeekFeatures = async database => { await migrateSeekComments(database); await migrateSeekPriority(database); };
+const migrateSeekFeatures = async database => {
+  await migrateSeekComments(database); await migrateSeekPriority(database); await migrateSeekLinks(database);
+};
 
 export async function startSeekPermissionPreview({ database = pool, port = seekPreviewPort(), migrate = migrateSeekFeatures,
   socketInitializer = initSocket } = {}) {
   const listenPort = seekPreviewPort(port);
   await assertSeekPreviewBaseSchema(database);
-  // Only this module's comment and priority metadata; no financial migrations.
+  // Only this module's comment, priority and entry-link metadata; no financial migrations.
   await migrate(database);
   const preview = createSeekPermissionPreviewServer({ socketInitializer });
   try {

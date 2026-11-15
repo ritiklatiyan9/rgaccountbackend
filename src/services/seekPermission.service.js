@@ -428,3 +428,144 @@ export async function seekRecipients(request, db = pool) {
         OR (a.scope = 'selected' AND sp.requested_by = ANY(a.visible_user_ids)))))`, [request.id]);
   return rows.map(row => row.id);
 }
+
+// Links: which request an approval/money entry was done under (bell card "+" →
+// "i"). A note, never money. Table/column SQL comes only from this registry,
+// never from input; the entry is always aliased t.
+const LINK_DEFAULTS = { join: '', site: 't.site_id', creator: 't.created_by', reviewer: 't.assigned_admin_id' };
+export const SEEK_LINK_TARGETS = Object.freeze(Object.fromEntries(Object.entries({
+  expense: { table: 'expenses' },
+  daybook: { table: 'day_book' },
+  farmer_payment: { table: 'farmer_payments', join: 'JOIN farmers parent ON parent.id = t.farmer_id', site: 'parent.site_id' },
+  land_deal_payment: { table: 'land_deal_payments' },
+  misc_income_entry: { table: 'misc_income_entries' },
+  plot_payment: { table: 'plot_payments' },
+  plot_installment_payment: { table: 'plot_installment_payments', join: 'JOIN plots parent ON parent.id = t.plot_id', site: 'parent.site_id' },
+  plot_status: { table: 'plot_status_approvals' },
+  plot_registry_payment: { table: 'plot_registry_payments' },
+  plot_commission: { table: 'plot_commissions' },
+  plot_commission_payment: { table: 'plot_commission_payments' },
+  cash_flow_entry: { table: 'cash_flow_entries' },
+  firm_transaction: { table: 'firm_transactions' },
+  vendor_payment: { table: 'vendor_payments' },
+  vendor_inventory_payment: { table: 'vendor_inventory_payments' },
+  transaction_transfer: { table: 'transaction_transfer_approval_requests', creator: 't.requested_by' },
+  imprest_request: { table: 'imprest_expense_requests', creator: 't.sub_admin_id' },
+  edit_request: { table: 'edit_requests', site: "COALESCE(t.site_id, (t.original_data->>'site_id')::int)",
+    creator: 't.requested_by', reviewer: 'NULL::int' },
+}).map(([target, spec]) => [target, Object.freeze({ ...LINK_DEFAULTS, ...spec })])));
+
+const linkSpec = target => {
+  if (!Object.hasOwn(SEEK_LINK_TARGETS, target)) throw fail('Unknown entry type');
+  return SEEK_LINK_TARGETS[target];
+};
+
+// One entry by id ($1) and whether the actor ($2) is on its site.
+const linkRecordSql = ({ table, join, site, creator, reviewer }) => `SELECT (${site})::int AS site_id,
+    (${creator})::int AS requested_by, (${reviewer})::int AS reviewer_id, lower(t.status::text) AS status,
+    s.organization_id, EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id = $2 AND us.site_id = (${site})) AS on_site
+  FROM ${table} t ${join} JOIN sites s ON s.id = (${site}) WHERE t.id = $1`;
+
+// Links on site $1 whose request the viewer may see (the page's rule, $1-$4);
+// $5/$6 are parallel target/id arrays.
+const LINKS_SQL = `SELECT v.*, l.target AS link_target, l.target_id AS link_target_id, l.linked_by,
+    lu.name AS linked_by_name, l.linked_at,
+    (SELECT count(*)::int FROM seek_permission_links c WHERE c.seek_permission_id = l.seek_permission_id) AS link_count
+  FROM unnest($5::text[], $6::int[]) AS w(target, target_id)
+  JOIN seek_permission_links l ON l.target = w.target AND l.target_id = w.target_id AND l.site_id = $1
+  JOIN (${visibleSiteSql}) v ON v.id = l.seek_permission_id
+  LEFT JOIN users lu ON lu.id = l.linked_by
+  ORDER BY l.target, l.target_id`;
+
+const linkView = ({ link_target, link_target_id, linked_by, linked_by_name, linked_at, link_count, ...request }) => ({
+  target: link_target, target_id: link_target_id, site_id: request.site_id, seek_permission_id: request.id,
+  linked_by, linked_by_name, linked_at, link_count, request: publicRow(request),
+});
+
+const readLinks = async (actor, siteId, pairs, db) => (await db.query(LINKS_SQL, [siteId, actor.id, orgOf(actor),
+  isSeekAdmin(actor), pairs.map(([target]) => target), pairs.map(([, id]) => id)])).rows.map(linkView);
+
+/** ?targets=expense:12,daybook:5 → the links on those entries the viewer may see. */
+export async function listSeekLinks(actor, { site_id, targets } = {}, db = pool) {
+  requireSeekActor(actor);
+  const siteId = positiveId(site_id, 'site_id');
+  const pairs = new Map();
+  for (const part of String(targets ?? '').split(',').map(text => text.trim()).filter(Boolean)) {
+    const [target, id, ...rest] = part.split(':');
+    if (rest.length) throw fail('targets must look like expense:12');
+    linkSpec(target);
+    const recordId = positiveId(id, 'entry id');
+    pairs.set(`${target}:${recordId}`, [target, recordId]);
+    if (pairs.size > 200) throw fail('Ask for 200 entries or fewer');
+  }
+  return pairs.size ? readLinks(actor, siteId, [...pairs.values()], db) : [];
+}
+
+// Why a guarded link write matched nothing: someone else's link is in place.
+async function explainLinkMiss(target, recordId, db) {
+  const { rows: [link] } = await db.query(`SELECT u.name FROM seek_permission_links l
+    LEFT JOIN users u ON u.id = l.linked_by WHERE l.target = $1 AND l.target_id = $2`, [target, recordId]);
+  if (link) throw fail(`Already attached by ${link.name || 'someone else'}. Only they or an admin can change it.`, 409);
+}
+
+/**
+ * Attach (body.seek_permission_id) or remove (null) the request an entry was
+ * done under. Its maker or reviewer may, while the entry is open; admins always.
+ */
+export async function setSeekLink(actor, target, targetId, body = {}, db = pool) {
+  requireSeekActor(actor);
+  const spec = linkSpec(target);
+  const recordId = positiveId(targetId, 'entry id');
+  const siteId = positiveId(body?.site_id, 'site_id');
+  const seekId = body?.seek_permission_id === null ? null : positiveId(body?.seek_permission_id, 'permission request');
+  const admin = isSeekAdmin(actor);
+  const actorId = Number(actor.id);
+  // A module whose table is not installed here simply has no such entry.
+  const record = await db.query(linkRecordSql(spec), [recordId, actorId])
+    .then(result => result.rows[0], error => { if (error.code === '42P01') return null; throw error; });
+  if (!record || Number(record.organization_id) !== Number(orgOf(actor)) || record.site_id !== siteId) {
+    throw fail('Entry not found on this site', 404);
+  }
+  if (!admin && !(record.on_site && [record.requested_by, record.reviewer_id].includes(actorId))) {
+    throw fail('Only the person who made this entry, its reviewer or an admin can attach a permission', 403);
+  }
+  if (!admin && !['pending', 'waiting'].includes(record.status)) {
+    throw fail('This entry is already decided — only an admin can change its permission', 409);
+  }
+  if (seekId !== null) {
+    const { rows: [request] } = await db.query(visibleById('sp.site_id, sp.status'), viewerParams(actor, seekId));
+    if (!request || request.site_id !== siteId) throw fail('Permission request not found', 404);
+    if (!['approved', 'pending'].includes(request.status)) throw fail("Rejected or withdrawn requests can't be attached", 409);
+  }
+  // Only whoever attached it, or an admin, may replace or remove a link. The
+  // guard is part of the write, so two people racing cannot both win.
+  let previous = null;
+  if (seekId === null) {
+    const { rows: [removed] } = await db.query(`DELETE FROM seek_permission_links
+      WHERE target = $1 AND target_id = $2 AND ($3::boolean OR linked_by = $4) RETURNING seek_permission_id`,
+    [target, recordId, admin, actorId]);
+    if (!removed) await explainLinkMiss(target, recordId, db); // nothing attached: removing again is a no-op
+    previous = removed?.seek_permission_id ?? null;
+  } else {
+    // ponytail: `previous` is read from the statement snapshot; a concurrent replace can
+    // make it stale, which only skips one socket nudge. RETURNING OLD (PG 18) if it matters.
+    const { rows: [saved] } = await db.query(`WITH previous AS (
+        SELECT seek_permission_id FROM seek_permission_links WHERE target = $1 AND target_id = $2
+      ), saved AS (
+        INSERT INTO seek_permission_links (target, target_id, site_id, seek_permission_id, linked_by)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (target, target_id) DO UPDATE SET site_id = EXCLUDED.site_id,
+          seek_permission_id = EXCLUDED.seek_permission_id, linked_by = EXCLUDED.linked_by, linked_at = now()
+        WHERE $6::boolean OR seek_permission_links.linked_by = $5
+        RETURNING seek_permission_id
+      ) SELECT (SELECT seek_permission_id FROM previous) AS previous_id FROM saved`,
+    [target, recordId, siteId, seekId, actorId, admin]);
+    if (!saved) {
+      await explainLinkMiss(target, recordId, db);
+      throw fail('This entry just changed. Please try again.', 409); // the blocking link vanished meanwhile
+    }
+    previous = saved.previous_id;
+  }
+  const [link = null] = seekId === null ? [] : await readLinks(actor, siteId, [[target, recordId]], db);
+  return { link, site_id: siteId, seek_permission_id: seekId, previous_seek_permission_id: previous };
+}

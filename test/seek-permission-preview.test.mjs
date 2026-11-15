@@ -15,6 +15,7 @@ const { migrationSql: requestsSql } = await import('../src/migrations/222_seek_p
 const { migrationSql: targetsSql } = await import('../src/migrations/223_seek_permission_targets.js');
 const { migrationSql: commentsSql } = await import('../src/migrations/230_seek_permission_comments.js');
 const { migrationSql: prioritySql } = await import('../src/migrations/231_seek_permission_priority.js');
+const { migrationSql: linksSql } = await import('../src/migrations/248_seek_permission_links.js');
 
 // Drive the actual Node HTTP request/response objects through Express without
 // opening a listening socket or contacting the configured production database.
@@ -63,8 +64,10 @@ test('preview mounts only Seek Permission, keeps real authentication, and enforc
       INSERT INTO users(id,name,role,organization_id,is_active) VALUES (1,'Admin','admin',1,true),
         (5,'Requester','sub_admin',1,true),(6,'Other site','sub_admin',1,true),(7,'Employee','employee',1,true);
       INSERT INTO user_sites VALUES (5,1),(6,2),(7,1);
-      ${requestsSql} ${targetsSql} ${commentsSql} ${prioritySql}
-      INSERT INTO seek_permissions(site_id,requested_by,asked_to,title) VALUES (1,5,1,'Advance approval');`);
+      ${requestsSql} ${targetsSql} ${commentsSql} ${prioritySql} ${linksSql}
+      INSERT INTO seek_permissions(site_id,requested_by,asked_to,title) VALUES (1,5,1,'Advance approval');
+      CREATE TABLE expenses(id int PRIMARY KEY, site_id int, created_by int, assigned_admin_id int, status text);
+      INSERT INTO expenses VALUES (1,1,5,1,'pending');`);
     pool.query = (...args) => db.query(...args);
     const app = createSeekPermissionPreviewApp({ authenticate: normalAuthentication });
     const origin = 'http://127.0.0.1:5173';
@@ -89,6 +92,14 @@ test('preview mounts only Seek Permission, keeps real authentication, and enforc
     const history = await request(app, { path: '/seek-permissions/1/comments?after_id=0', headers: requester });
     assert.equal(history.status, 200);
     assert.equal(history.body.comments[0].body, 'Please check this advance.');
+    // Link routes sit before /:id; reads are never cached; unlinking is a PUT (no DELETE in preview CORS).
+    const links = await request(app, { path: '/seek-permissions/links?site_id=1&targets=expense:1', headers: requester });
+    assert.equal(links.status, 200); assert.deepEqual(links.body, { links: [] }); assert.equal(links.headers['cache-control'], 'no-store');
+    const linkPath = '/seek-permissions/links/expense/1';
+    const attached = await request(app, { method: 'PUT', path: linkPath, headers: requester, body: { site_id: 1, seek_permission_id: 1 } });
+    assert.equal(attached.status, 200); assert.equal(attached.body.message, 'Seek permission attached'); assert.equal(attached.body.link.request.id, 1);
+    assert.deepEqual((await request(app, { method: 'PUT', path: linkPath, headers: requester, body: { site_id: 1, seek_permission_id: null } })).body,
+      { link: null, message: 'Seek permission removed' });
     assert.equal((await request(app, { path: '/seek-permissions/1/comments', headers: auth({ id: 6, role: 'sub_admin' }) })).status, 404);
     assert.equal((await request(app, { path: '/seek-permissions/1', headers: auth({ id: 7, role: 'employee' }) })).status, 403);
     await db.exec('UPDATE users SET token_version = 1 WHERE id = 5');

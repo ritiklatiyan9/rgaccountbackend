@@ -13,6 +13,8 @@ import {
   markSeekSeen,
   getSeekAccess,
   updateSeekAccess,
+  getSeekLinks,
+  updateSeekLink,
   getSeekPermission,
   getSeekComments,
   createSeekComment,
@@ -35,6 +37,9 @@ router.post('/', receiveUpload(upload.array('attachments', 5)), createSeekPermis
 router.post('/seen', markSeekSeen);
 router.get('/access', requireRole('admin'), getSeekAccess);
 router.put('/access/:userId', requireRole('admin'), updateSeekAccess);
+// Entry ↔ request links. Before /:id so "links" is never read as a request id.
+router.get('/links', getSeekLinks);
+router.put('/links/:target/:targetId', updateSeekLink);
 router.get('/:id', getSeekPermission);
 router.get('/:id/comments', getSeekComments);
 router.post('/:id/comments', createSeekComment);

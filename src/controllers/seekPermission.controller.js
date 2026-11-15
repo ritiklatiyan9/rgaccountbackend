@@ -88,6 +88,22 @@ export const markSeekSeen = asyncHandler(async (req, res) => {
   res.json({ seen: await seek.markSeekSeen(req.user, req.body) });
 });
 
+export const getSeekLinks = asyncHandler(async (req, res) => {
+  noStore(res).json({ links: await seek.listSeekLinks(req.user, req.query) });
+});
+
+export const updateSeekLink = asyncHandler(async (req, res) => {
+  const { link, site_id, seek_permission_id, previous_seek_permission_id } =
+    await seek.setSeekLink(req.user, req.params.target, req.params.targetId, req.body);
+  res.json({ link, message: link ? 'Seek permission attached' : 'Seek permission removed' });
+  // No request text: tabs that follow the new or the replaced request refetch
+  // links through current visibility.
+  const payload = { site_id, target: req.params.target, target_id: Number(req.params.targetId) };
+  Promise.all([...new Set([seek_permission_id, previous_seek_permission_id].filter(Boolean))].map(id => seek.seekRecipients({ id })))
+    .then(lists => new Set(lists.flat()).forEach(id => emitToUser(id, 'seek_permission:linked', payload)))
+    .catch(error => console.error('Seek permission link push failed:', error.message));
+});
+
 export const getSeekAccess = asyncHandler(async (req, res) => {
   noStore(res).json({ users: await seek.listSeekAccess(req.user, req.query) });
 });
