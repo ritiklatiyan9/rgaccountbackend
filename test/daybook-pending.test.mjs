@@ -31,12 +31,12 @@ async function fixture(t) {
         AND (CASE WHEN UPPER($3) IN ('CHEQUE','CHECK') OR NULLIF($4,'') IS NOT NULL
           THEN UPPER(COALESCE($4,''))='CLEARED' AND LOWER(COALESCE($2,''))='approved'
           ELSE $1='credit' OR LOWER(COALESCE($2,'approved'))='approved' END)$$;
-    INSERT INTO users VALUES(12,'Creator','admin');
+    INSERT INTO users VALUES(12,'Creator','admin'),(77,'Recorded Reviewer','admin');
     INSERT INTO cash_flow_months VALUES(1,'Site','site');
   `);
   for (const table of owners) await db.exec(`CREATE TABLE ${table}(id int PRIMARY KEY,created_at timestamptz,status text,cheque_status text,cheque_no text,
     payment_mode text,payment_type text,cash_amount numeric,bank_amount numeric,entry_type text,plot_id int,plot_commission_id int,
-    kind text,amount numeric,challan_no text,ca_name text,existing_entry_id int)`);
+    kind text,amount numeric,challan_no text,ca_name text,existing_entry_id int,approved_by int,approved_at timestamptz)`);
   const add = async (id, source, amount, { status='pending', mode='CASH', created='2026-11-15T10:00:00Z', mirror='2026-11-15T15:00:00Z', credit=0, cheque=null, chequeDate=null, site=8, cash=null, bank=null }={}) => {
     await db.query(`INSERT INTO ${source}(id,created_at,status,payment_mode,cheque_status,cash_amount,bank_amount) VALUES($1,$2,$3,$4,$5,$6,$7)`,[id,created,status,mode,cheque,cash,bank]);
     await db.query(`INSERT INTO cash_flow_entries(id,site_id,date,particular,debit,credit,source_module,source_id,status,cash_type,created_at,created_by,cash_flow_month_id,transaction_time,cheque_status,cheque_transaction_date)
@@ -144,9 +144,34 @@ test('daily response merges pending source rows without duplicates and uses owne
   assert.equal(result.summary.total_debit,300,'pending payments count, uncleared cheque remains visible without posting');
   assert.equal(result.balance.closing_balance,-300);
   mirrors[1].source_status='approved';
+  mirrors[1].source_approved_by=77;
+  mirrors[1].source_approved_by_name='Recorded Reviewer';
+  mirrors[1].source_approved_at='2026-11-15T12:00:00Z';
   mirrors[0].source_status='approved';
   nativeExpense.status='approved';
   result=await read();
   assert.deepEqual(result.entries.map(row=>row.order_key),['vendor_payments:2','expenses:1','farmer_payments:5']);
   assert.equal(result.summary.total_debit,300);
+  assert.equal(result.entries[0].approved_by_name,'Recorded Reviewer');
+});
+
+test('period rows retain the source approval decision, actual reviewer and decision time', async t => {
+  const {db,add}=await fixture(t);
+  await add(1,'expenses',100,{mode:'BANK'});
+  await add(2,'vendor_payments',200,{mode:'BANK',status:'approved'});
+  await db.exec(`UPDATE expenses SET status='approved',approved_by=77,approved_at='2026-11-15T12:00:00Z' WHERE id=1;
+    UPDATE cash_flow_entries SET status='pending' WHERE id=1;`);
+  const query=balanceSheetReportSql(true).transactions;
+  const params=[8,null,null,'bank','all','all','all','',12000,'day',null,null,true,true];
+  let rows=(await db.query(query,params)).rows;
+  const approved=rows.find(row=>row.source_id===1);
+  assert.equal(approved.status,'approved','the owner decision wins over a stale pending mirror');
+  assert.equal(approved.approved_by,77);
+  assert.equal(approved.approved_by_name,'Recorded Reviewer');
+  assert.equal(new Date(approved.approved_at).toISOString(),'2026-11-15T12:00:00.000Z');
+  assert.equal(rows.find(row=>row.source_id===2).approved_by_name,null,'historical missing reviewers must not be invented');
+  await db.exec(`UPDATE expenses SET status='pending',approved_by=NULL,approved_at=NULL WHERE id=1;`);
+  rows=(await db.query(query,params)).rows;
+  assert.equal(rows.find(row=>row.source_id===1).status,'pending');
+  assert.equal(rows.find(row=>row.source_id===1).approved_by_name,null);
 });

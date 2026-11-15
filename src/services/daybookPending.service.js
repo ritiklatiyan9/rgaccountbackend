@@ -47,6 +47,10 @@ export const DAYBOOK_LEDGER_SQL = `
       COALESCE(owner->>'status', status, 'approved') AS owner_status,
       COALESCE(owner->>'cheque_status', cheque_status) AS owner_cheque_status,
       COALESCE(owner->>'cheque_no', cheque_no) AS owner_cheque_no,
+      NULLIF(CASE WHEN owner ? 'approved_by' THEN owner->>'approved_by'
+        ELSE to_jsonb(source_rows)->>'approved_by' END, '')::int AS owner_approved_by,
+      NULLIF(CASE WHEN owner ? 'approved_at' THEN owner->>'approved_at'
+        ELSE to_jsonb(source_rows)->>'approved_at' END, '')::timestamptz AS owner_approved_at,
       COALESCE(NULLIF(owner->>'created_at', '')::timestamptz, created_at) AS source_created_at,
       COALESCE(owner->>'payment_type', owner->>'payment_mode', cash_type, 'CASH') AS raw_mode,
       source_module = 'farmer_payments' AND UPPER(owner->>'payment_mode') = 'SPLIT'
@@ -80,6 +84,8 @@ export const DAYBOOK_LEDGER_SQL = `
     ledger_bucket(mode) AS bucket, LOWER(mode) AS raw_mode,
     COALESCE(source_module, 'personal_ledger') AS source_key, source_id,
     owner_status AS status, owner_cheque_status AS cheque_status, owner_cheque_no AS cheque_no,
+    owner_approved_by AS approved_by, owner_approved_at AS approved_at,
+    (SELECT reviewer.name FROM users reviewer WHERE reviewer.id = owner_approved_by LIMIT 1) AS approved_by_name,
     COALESCE(voucher_url, owner->>'voucher_url') AS voucher_url,
     COALESCE(NULLIF(to_name, ''), NULLIF(owner->>'buyer_name', ''), NULLIF(ledger_name, ''), particular) AS entity_name,
     COALESCE(NULLIF(remarks, ''), NULLIF(ledger_name, '')) AS linked_detail,

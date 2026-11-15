@@ -656,6 +656,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     // rejected, keep pending.
     pool.query(
       includePending ? `SELECT DISTINCT ON (cfe.id) cfe.*, le.created_at AS source_created_at, le.status AS source_status, le.raw_mode AS source_mode, le.cheque_status AS source_cheque_status, le.cheque_no AS source_cheque_no,
+              le.approved_by AS source_approved_by, le.approved_at AS source_approved_at, le.approved_by_name AS source_approved_by_name,
               u.name AS assigned_admin_name, p.plot_no AS linked_plot_no
          FROM ${daybookLedgerSource(true)} le
          JOIN cash_flow_entries cfe ON cfe.id = SPLIT_PART(le.id, ':', 1)::int
@@ -1142,6 +1143,9 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         cheque_no: m.cheque_no,
         voucher_url: m.voucher_url,
         status: m.source_status || m.status,
+        approved_by: m.source_approved_by ?? m.approved_by,
+        approved_at: m.source_approved_at ?? m.approved_at,
+        approved_by_name: m.source_approved_by_name ?? m.approved_by_name,
         created_by: m.created_by,
         created_at: m.source_created_at || m.created_at,
         updated_at: m.updated_at,
@@ -1186,6 +1190,11 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       ...(includePending && sourceMetadata.has(dayBookOrderKey(entry)) ? {
         created_at: sourceMetadata.get(dayBookOrderKey(entry)).source_created_at || entry.created_at,
         status: sourceMetadata.get(dayBookOrderKey(entry)).source_status || entry.status,
+        ...(Object.hasOwn(sourceMetadata.get(dayBookOrderKey(entry)), 'source_approved_by') ? {
+          approved_by: sourceMetadata.get(dayBookOrderKey(entry)).source_approved_by,
+          approved_at: sourceMetadata.get(dayBookOrderKey(entry)).source_approved_at,
+          approved_by_name: sourceMetadata.get(dayBookOrderKey(entry)).source_approved_by_name,
+        } : {}),
         cheque_status: sourceMetadata.get(dayBookOrderKey(entry)).source_cheque_status ?? entry.cheque_status,
         cheque_no: sourceMetadata.get(dayBookOrderKey(entry)).source_cheque_no ?? entry.cheque_no,
       } : {}),
