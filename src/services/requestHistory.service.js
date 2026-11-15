@@ -70,6 +70,8 @@ export function requestHistoryOptions(query) {
   if (dates[0] && dates[1] && dates[0] > dates[1]) fail('Start date must be before end date.');
   const search = String(query.q || '').trim();
   if (search.length > 200) fail('Search must be 200 characters or fewer.');
+  const [requestedBy, assignedTo] = [query.requested_by, query.assigned_to].map(value => String(value || '').trim().replace(/\s+/g, ' '));
+  if (requestedBy.length > 120 || assignedTo.length > 120) fail('User filters must be 120 characters or fewer.');
   const source = query.source || null;
   if (source && !Object.hasOwn(HISTORY_TABLES, source) && !['daybook_farmer','daybook_commission','daybook_expense','daybook_general'].includes(source)) fail('Invalid history request type.');
   const recordId = query.record_id == null ? null : String(query.record_id);
@@ -79,7 +81,7 @@ export function requestHistoryOptions(query) {
   if (query.include_total != null && !['true','false',true,false].includes(query.include_total)) fail('Invalid history count setting.');
   const cursorMode = query.pagination === 'cursor';
   if (query.after && !cursorMode) fail('A history cursor requires cursor pagination.');
-  return { siteId, status, search, source, recordId, summary: query.view === 'summary', cursorMode,
+  return { siteId, status, search, requestedBy, assignedTo, source, recordId, summary: query.view === 'summary', cursorMode,
     includeTotal: query.include_total !== 'false' && query.include_total !== false, fresh:String(query.nocache).toLowerCase()==='true',
     cursor: query.after ? decodeHistoryCursor(query.after) : null,
     from: dates[0], to: dates[1], page: positive(query.page, 1, 100000), pageSize: positive(query.page_size, 10, 50) };
@@ -92,6 +94,7 @@ const SUMMARY_FIELDS = `id site_id status source _type module module_label entit
   to_name name firm_name transfer_to_firm_name from_entity to_entity source_label target_label record_id record_buyer_name record_booked_by agent_name vendor_name
   farmer_name activity_label`.split(/\s+/);
 const SEARCH_FIELDS = [...SUMMARY_FIELDS, 'notes', 'reference', 'reference_no', 'transaction_no', 'cheque_no', 'entity_phone'];
+const USER_FILTER_FIELDS = ['requested_by_name', 'created_by_name', 'from_holder_name', 'admin_name', 'sub_admin_name', 'assigned_admin_name', 'asked_to_name', 'to_holder_name', 'to_name'];
 const terminal = "lower(h.status::text) IN ('approved','accepted','received','returned','rejected','declined')";
 const order = (alias = '') => {
   const p = alias ? `${alias}.` : '';
@@ -120,7 +123,7 @@ export function createRequestHistoryReader(db, options) {
       if (!sources.length) return { rows: [], total: options.includeTotal === false ? null : 0, hasMore: false };
       const schema = await prepare();
       const fingerprint = historyFingerprint([options.authorizationScope, options.siteId, options.status, options.search,
-        options.source, options.recordId, options.from, options.to, options.pageSize, options.summary,
+        options.source, options.recordId, options.from, options.to, options.pageSize, options.summary, options.requestedBy, options.assignedTo,
         sources.map(source => [source.key, source.sql, source.params])]);
       assertHistoryCursorScope(options.cursor, fingerprint);
       const snapshot = options.cursorMode ? options.cursor?.snapshot || new Date().toISOString() : null;
@@ -128,6 +131,7 @@ export function createRequestHistoryReader(db, options) {
       const bind = value => `$${values.push(value)}`;
       const states = options.status === 'accepted' ? accepted : options.status === 'rejected' ? rejected : [...accepted, ...rejected];
       const stateParam = bind(states), searchParam = options.search && bind(options.search);
+      const requestedByParam = options.requestedBy && bind(options.requestedBy), assignedToParam = options.assignedTo && bind(options.assignedTo);
       const fromParam = options.from && bind(options.from), toParam = options.to && bind(options.to);
       const snapshotParam = snapshot && bind(snapshot);
       const cursor = options.cursor?.key;
@@ -141,6 +145,18 @@ export function createRequestHistoryReader(db, options) {
         const decider = deciderValues.length ? `(${historyCoalesce(deciderValues)})::int` : 'NULL::int';
         const where = [terminal, `lower(h.status::text)=ANY(${stateParam}::text[])`];
         const known = columns && historyProjectionFields(source.sql,columns);
+        // Filter each authorised source before counting and pagination. The
+        // request participants are independent of its financial payer/payee.
+        for (const [param, fields] of [
+          [requestedByParam, ['requested_by_name', 'created_by_name', 'from_holder_name', 'admin_name', 'sub_admin_name']],
+          [assignedToParam, ['assigned_admin_name', 'asked_to_name', 'to_holder_name', 'to_name']],
+        ]) {
+          if (!param) continue;
+          const values = fields.filter(field => !known || known.has(field)).map(field =>
+            `NULLIF(btrim(${known ? `h.${field}::text` : `to_jsonb(h)->>'${field}'`}),'')`);
+          const participant = values.length ? `COALESCE(${[...values, "''"].join(',')})` : "''";
+          where.push(`strpos(lower(regexp_replace(${participant},'\\s+',' ','g')),lower(${param}))>0`);
+        }
         if (searchParam) {
           if (options.summary && known) {
             const fields = SEARCH_FIELDS.filter(field => known.has(field)).map(field => `COALESCE(h.${field}::text,'')`);
@@ -169,6 +185,7 @@ export function createRequestHistoryReader(db, options) {
         const offset = values.length;
         values.push(...source.params);
         const required = options.summary ? new Set([...SUMMARY_FIELDS,...SEARCH_FIELDS,...historyDecisionFields,...historyDeciderFields,
+          ...(requestedByParam || assignedToParam ? USER_FILTER_FIELDS : []),
           'updated_at','created_at','date','payment_date','transfer_date',...(source.key==='edit_request'?['original_data']:[]),
           ...(source.key==='plot_status'?['approval_original_data','approval_proposed_data']:[])]) : null;
         const sql = historySourceSql(source.sql.trim().replace(/\s+ORDER BY\s+[^\n]+$/i,''),columns,required)

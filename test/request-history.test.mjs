@@ -128,3 +128,43 @@ test('operational history keeps selected staff visibility, personal wallet acces
     assert.equal(new Set(rows.map(row=>`${row.source}:${row.id}`)).size,rows.length);
   } finally {await db.close();}
 });
+
+test('user filters search authorised request participants before pagination and totals, independently of customer names', async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`CREATE TABLE users(id int,name text,email text);
+      CREATE TABLE records(id int,source text,status text,entity_name text,requested_by_name text,created_by_name text,assigned_admin_name text,approved_at timestamptz);
+      INSERT INTO records SELECT n,'plot_payment','approved','Tarun Kumar',CASE WHEN n%2=0 THEN 'Ravi Siwach' ELSE 'Other requester' END,
+        'Original creator','Kuldeep Tomar','2026-11-05'::timestamptz+n*interval '1 minute' FROM generate_series(1,30) n;`);
+    const load = async query => {
+      const reader = createRequestHistoryReader(db, requestHistoryOptions({ site_id: '1', page_size: '3', ...query }));
+      reader.add('SELECT * FROM records');
+      return reader.read();
+    };
+    const first = await load({ requested_by: 'ravi', assigned_to: 'TOMAR' });
+    const next = await load({ requested_by: 'ravi', assigned_to: 'TOMAR', page: '2' });
+    assert.equal(first.total, 15); assert.equal(first.rows.length, 3);
+    assert.equal(next.total, 15); assert.equal(next.rows.length, 3);
+    assert.ok([...first.rows, ...next.rows].every(row => row.requested_by_name === 'Ravi Siwach'));
+    assert.equal(new Set([...first.rows, ...next.rows].map(row => row.id)).size, 6);
+    assert.equal((await load({ requested_by: 'Tarun' })).total, 0, 'customer names never become requesters');
+    assert.equal((await load({ requested_by: 'Original creator' })).total, 0, 'explicit requester takes precedence');
+    assert.equal((await load({ assigned_to: "Tomar' OR true --" })).total, 0, 'names remain literal bound values');
+    assert.throws(() => requestHistoryOptions({ site_id: '1', requested_by: 'x'.repeat(121) }), error => error.statusCode === 400);
+  } finally { await db.close(); }
+});
+
+test('summary history retains participant filter columns while pruning other payload fields', async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`CREATE TABLE users(id int,name text,email text);
+      CREATE TABLE expenses(id int,status text,created_by_name text,assigned_admin_name text,admin_name text,approved_at timestamptz);
+      INSERT INTO expenses VALUES(1,'approved','Ravi','Kuldeep','Ravi','2026-11-15'),(2,'approved','Other user','Kuldeep','Other user','2026-11-14');`);
+    const reader = createRequestHistoryReader(db, requestHistoryOptions({site_id:'1',view:'summary',requested_by:'Ravi',assigned_to:'Kuldeep'}));
+    reader.add("SELECT e.*, 'expense'::text AS source FROM expenses e", [], row=>row, 'expense');
+    const result = await reader.read();
+    assert.equal(result.total,1); assert.equal(result.rows[0].id,1);
+    assert.equal(result.rows[0].created_by_name,'Ravi'); assert.equal(result.rows[0].assigned_admin_name,'Kuldeep');
+    assert.equal(result.rows[0].history_summary,true);
+  } finally {await db.close();}
+});
