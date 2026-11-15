@@ -1,3 +1,4 @@
+import { PLOT_CO_APPLICANTS_SOURCE } from '../services/plotCoApplicants.service.js';
 import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
@@ -94,6 +95,7 @@ const coerceCoord = (val, max) => {
 const sanitize = (body) => {
   const data = {};
   MEMBER_FIELDS.forEach(f => {
+    if (f === 'co_applicant_relation' && body.plot_role !== undefined && body.plot_relation === undefined) return;
     if (body[f] !== undefined) {
       let val = body[f];
       if (typeof val === 'string') val = val.trim();
@@ -212,7 +214,7 @@ export const getMemberPlotOptions = asyncHandler(async (req, res) => {
   const site = await assertMemberSiteAccess(pool, req.user, siteId);
   if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
   const { rows } = await pool.query(`SELECT p.id, p.plot_no, p.block, p.plot_tag, p.buyer_name,
-    (to_jsonb(p)->>'buyer_member_id')::integer AS buyer_member_id
+    (to_jsonb(p)->>'buyer_member_id')::integer AS buyer_member_id, ${PLOT_CO_APPLICANTS_SOURCE} AS co_applicants
     FROM plots p WHERE p.site_id = $1 ORDER BY p.plot_no, p.id`, [siteId]);
   res.json({ plots: rows });
 });
@@ -319,7 +321,7 @@ export const createMember = asyncHandler(async (req, res) => {
 
     const member = await memberModel.create(data, client);
     let reusedKycCaseId = null;
-    await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId: member.id, siteId });
+    await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId: member.id, siteId, plotRole: req.body.plot_role, relation: req.body.plot_relation ?? req.body.co_applicant_relation });
     if (reuseSource) {
       const {rows:cases}=await client.query(
         `INSERT INTO kyc_cases
@@ -749,7 +751,7 @@ export const updateMember = asyncHandler(async (req, res) => {
     }
   }
 
-  if (Object.keys(data).length === 0) return res.status(400).json({ message: 'Nothing to update' });
+  if (Object.keys(data).length === 0 && !req.body.plot_id) return res.status(400).json({ message: 'Nothing to update' });
 
   const site = await assertMemberSiteAccess(pool, req.user, existing.site_id);
   if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
@@ -776,10 +778,10 @@ export const updateMember = asyncHandler(async (req, res) => {
         LIMIT 1`,[existing.site_id,memberId,data.phone]);
       if(rows.length) throw Object.assign(new Error('This mobile number is already registered in this site.'),{statusCode:409});
     }
-    const updated = identityLink ? await memberModel.findById(memberId, client)
+    const updated = identityLink || Object.keys(data).length === 0 ? await memberModel.findById(memberId, client)
       : await memberModel.update(memberId, data, client);
     if (req.body.plot_id != null && req.body.plot_id !== '') {
-      await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId, siteId: existing.site_id });
+      await linkSelectedMemberPlot(client, { plotId: req.body.plot_id, memberId, siteId: existing.site_id, plotRole: req.body.plot_role, relation: req.body.plot_relation ?? req.body.co_applicant_relation });
     }
     const sharing=identityLink ? {updated_count:identityLink.registration_count-1,kyc_shared_count:identityLink.kyc_shared_count}
       : await syncSharedMemberProfile(client,{memberId,user:req.user,changedFields:Object.keys(data),previousProfile:existing});

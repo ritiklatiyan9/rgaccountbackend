@@ -1,3 +1,4 @@
+import { PLOT_CO_APPLICANTS_SOURCE } from './plotCoApplicants.service.js';
 import { PLOT_BUYER_MEMBER_JOIN } from './plotMemberLinks.service.js';
 
 /** Group the same client across multiple plot records and relationship roles. */
@@ -42,9 +43,11 @@ export async function findPeopleByPlot(siteId, plotNo, pool) {
       SELECT NULL::integer AS member_id, v.name, v.phone, v.role
       FROM matched_plots p CROSS JOIN LATERAL (VALUES
         (p.booking_by, NULL::text, 'Booked by'),
-        (p.co_applicant_name, p.co_applicant_phone, 'Co-applicant'),
         (p.nominee_name, p.nominee_phone, 'Plot nominee')
       ) v(name, phone, role)
+      UNION ALL
+      SELECT CASE WHEN co.value->>'member_id' ~ '^[0-9]{1,9}$' THEN (co.value->>'member_id')::int END, co.value->>'full_name', co.value->>'phone', 'Co-applicant'
+      FROM matched_plots p CROSS JOIN LATERAL jsonb_array_elements(${PLOT_CO_APPLICANTS_SOURCE}) co(value)
       UNION ALL
       SELECT b.client_member_id, NULL::text, NULL::text, 'Booking client'
       FROM bookings b JOIN matched_plots p ON p.id = b.plot_id

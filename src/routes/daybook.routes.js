@@ -46,7 +46,11 @@ const router = express.Router();
 // All routes require authentication
 router.use(authMiddleware);
 
-const daybookReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'daybook' });
+const cachedDaybookRead = cacheResponse({ ttlSeconds: 30, namespace: 'daybook' });
+const daybookReadCache = (req, res, next) => {
+  if (req.query.include_pending === 'true') { res.set('Cache-Control', 'no-store'); return next(); }
+  return cachedDaybookRead(req, res, next);
+};
 // Daybook mutations affect expenses, farmers, cashflow, plots, firms — bust all related caches
 const bustDaybookCache = invalidateCacheOnSuccess(['/daybook', '/expenses', '/farmers', '/cashflow', '/plots', '/firms', '/vendors', '/plot-commission']);
 const ownDayBook = requireEntryCreatorAccess({ module: 'daybook', table: 'day_book' });

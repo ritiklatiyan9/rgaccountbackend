@@ -1,5 +1,5 @@
 import express from 'express';
-const router = express.Router();
+
 
 import {
   getMemberPlotOptions, createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete, getMemberOptions,
@@ -15,6 +15,8 @@ import upload from '../middlewares/multer.middleware.js';
 import multer from 'multer';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 
+export function createMemberRouter({ authenticate = authMiddleware } = {}) {
+const router = express.Router();
 const memberReadCache = cacheResponse({ ttlSeconds: 30, namespace: 'members' });
 // Autocomplete values (cities/occupations/companies/references) rarely change,
 // so they get a longer TTL and a separate namespace so they're NOT busted
@@ -38,7 +40,7 @@ const acceptKycUpload = (req, res, next) => {
   });
 };
 
-router.use(authMiddleware);
+router.use(authenticate);
 
 // Multi-file upload config for member documents
 const memberUpload = upload.fields([
@@ -93,4 +95,7 @@ router.get('/:id/financial-info', requireRole('admin', 'sub_admin'), requirePerm
 // Dynamic param last
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMember);
 
-export default router;
+return router;
+}
+
+export default createMemberRouter();

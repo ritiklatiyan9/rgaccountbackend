@@ -1,3 +1,5 @@
+import { up as migratePlotCoApplicants } from './migrations/245_plot_co_applicants.js';
+import { up as migrateFarmerCashflowCreator } from './migrations/247_farmer_cashflow_creator.js';
 import { up as migratePlotBookingHistory } from './migrations/244_plot_booking_history.js';
 import { up as migratePlotBookingDealerNames } from './migrations/243_plot_booking_dealer_names.js';
 import { up as migrateCommissionAllocationGuards } from './migrations/242_plot_commission_allocation_guards.js';
@@ -94,6 +96,8 @@ connectDB().then(async () => {
   await migrateCommissionAllocationGuards(pool);
   await migratePlotBookingDealerNames(pool);
   await migratePlotBookingHistory(pool);
+  await migratePlotCoApplicants(pool);
+  await migrateFarmerCashflowCreator(pool);
   if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [cashflowTransferVersion])).rows.length) await migrateCashflowTransfers(pool);
   if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [quickTransferVersion])).rows.length) await migrateQuickTransfers(pool);
   const constructionStartup = await ensureConstructionStartup(pool);

@@ -1,3 +1,4 @@
+import { daybookAmountCounts, daybookLedgerSource } from '../services/daybookPending.service.js';
 import { daybookEntryDate, daybookLedgerDateSql, daybookMirrorDateSql } from '../services/daybookDate.service.js';
 import { vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
@@ -619,6 +620,7 @@ export const createDayBookEntry = asyncHandler(async (req, res) => {
  */
 export const listDayBookEntries = asyncHandler(async (req, res) => {
   const { site_id, date, created_by } = req.query;
+  const includePending = req.query.include_pending === 'true';
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
 
   const siteId = site_id;
@@ -653,7 +655,17 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     // three more raw tables. Mirrors mode-balance filters: skip bounced and
     // rejected, keep pending.
     pool.query(
-      `SELECT cfe.*, u.name AS assigned_admin_name,
+      includePending ? `SELECT DISTINCT ON (cfe.id) cfe.*, le.created_at AS source_created_at, le.status AS source_status, le.raw_mode AS source_mode, le.cheque_status AS source_cheque_status, le.cheque_no AS source_cheque_no,
+              u.name AS assigned_admin_name, p.plot_no AS linked_plot_no
+         FROM ${daybookLedgerSource(true)} le
+         JOIN cash_flow_entries cfe ON cfe.id = SPLIT_PART(le.id, ':', 1)::int
+         LEFT JOIN users u ON u.id = cfe.assigned_admin_id
+         LEFT JOIN plot_commission_payments pcp ON cfe.source_module = 'plot_commission_payments' AND cfe.source_id = pcp.id
+         LEFT JOIN plot_commissions_v2 pcm ON pcp.plot_commission_id = pcm.id
+         LEFT JOIN plots p ON pcm.plot_id = p.id
+        WHERE cfe.site_id = $1 AND ${daybookLedgerDateSql('le', 'cfe', true)} = $2::date
+          AND ($3::text IS NULL OR cfe.created_by = ANY(string_to_array($3::text, ',')::int[]))
+        ORDER BY cfe.id` : `SELECT cfe.*, u.name AS assigned_admin_name,
               CASE WHEN cfe.source_module = 'plot_commission_payments' THEN p.plot_no END AS linked_plot_no
          FROM cash_flow_entries cfe
          LEFT JOIN users u ON u.id = cfe.assigned_admin_id
@@ -782,6 +794,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           ...e,
           ...chequeMetadataFromOwner(fp),
           transaction_time: fp.transaction_time ?? null,
+          created_at: fp.created_at ?? e.created_at,
+          status: fp.status ?? e.status,
           farmer_id: fp.farmer_id,
           farmer_name: fp.farmer_name,
           by_note: fp.by_note,
@@ -803,6 +817,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           ...e,
           ...chequeMetadataFromOwner(pc),
           transaction_time: pc.transaction_time ?? null,
+          created_at: pc.created_at ?? e.created_at,
+          status: pc.status ?? e.status,
           plot_no: pc.plot_no,
           plot_size: pc.plot_size,
           plot_rate: pc.plot_rate,
@@ -820,6 +836,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           ...e,
           ...chequeMetadataFromOwner(cf),
           transaction_time: cf.transaction_time ?? null,
+          created_at: cf.created_at ?? e.created_at,
+          status: cf.status ?? e.status,
           ledger_name: cf.ledger_name,
           ledger_type: cf.ledger_type,
           cf_month: cf.cf_month,
@@ -836,6 +854,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           ...e,
           ...chequeMetadataFromOwner(ft),
           transaction_time: ft.transaction_time ?? null,
+          created_at: ft.created_at ?? e.created_at,
+          status: ft.status ?? e.status,
           firm_id: ft.firm_id,
           firm_name: ft.firm_name,
           firm_description: ft.description,
@@ -854,6 +874,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
           ...e,
           ...chequeMetadataFromOwner(pp),
           transaction_time: pp.transaction_time ?? null,
+          created_at: pp.created_at ?? e.created_at,
+          status: pp.status ?? e.status,
           pp_plot_id: pp.plot_id,
           pp_plot_no: pp.plot_no,
           pp_block: pp.block,
@@ -871,7 +893,11 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     }
     if (e.vendor_payment_id) {
       const vp = vendorPaymentById.get(e.vendor_payment_id);
-      if (vp) return { ...e, ...chequeMetadataFromOwner(vp) };
+      if (vp) return { ...e, ...chequeMetadataFromOwner(vp),
+        created_at: vp.source_created_at || vp.created_at || e.created_at,
+        status: vp.source_status || vp.status || e.status,
+        transaction_time: vp.transaction_time ?? e.transaction_time,
+      };
     }
     return e;
   });
@@ -1069,6 +1095,12 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // read_only: these are managed in their own module pages — Day Book only
   // displays them so its totals tie to the Remaining cards + Balance Sheet.
   const MODULE_LEDGER_META = {
+    day_book: { prefix: 'db', entry_type: 'GENERAL', source: 'daybook', category: 'GENERAL' },
+    expenses: { prefix: 'expense', entry_type: 'EXPENSE', source: 'expense', category: 'EXPENSE' },
+    farmer_payments: { prefix: 'fp', entry_type: 'FARMER PAYMENT', source: 'farmer_payment', category: 'FARMER PAYMENT' },
+    firm_transactions: { prefix: 'ft', entry_type: 'FIRM TRANSACTION', source: 'firm_transaction', category: 'FIRM' },
+    plot_payments: { prefix: 'pp', entry_type: 'PLOT PAYMENT', source: 'plot_payment', category: 'PLOT PAYMENT' },
+    personal_ledger: { prefix: 'cf', entry_type: 'CASH FLOW', source: 'cashflow', category: 'CASH FLOW' },
     pool_money_receipts: { prefix: 'pool', entry_type: 'POOL MONEY', source: 'pool_money_receipt', category: 'BOOKING TOKEN' },
     tds_settlements: { prefix: 'tds', entry_type: 'TDS SETTLEMENT', source: 'tds_settlement', category: 'TDS SETTLEMENT' },
     partner_profit_payments: { prefix: 'ppp', entry_type: 'PARTNER PROFIT PAYMENT', source: 'partner_profit_payment', category: 'PARTNER PROFIT' },
@@ -1087,9 +1119,10 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   const transformedModuleLedger = moduleLedgerEntries
     .filter(m => !(m.source_module === 'vendor_payments' && linkedVpIds.has(m.source_id)))
     .map(m => {
-      const meta = MODULE_LEDGER_META[m.source_module];
+      const meta = MODULE_LEDGER_META[m.source_module || 'personal_ledger'] || { prefix: m.source_module, entry_type: 'GENERAL', source: m.source_module, category: 'GENERAL' };
       return {
-        id: `${meta.prefix}_${m.source_id}`,
+        id: m.source_module === 'day_book' ? m.source_id : `${meta.prefix}_${m.source_id || m.id}`,
+        ...(m.source_module == null ? { cash_flow_entry_id: m.id } : {}),
         site_id: m.site_id,
         date: m.date,
         transaction_time: m.transaction_time,
@@ -1099,7 +1132,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         debit: m.debit,
         credit: m.credit,
         remarks: m.remarks,
-        payment_mode: (m.cash_type || 'BANK').toUpperCase(),
+        payment_mode: (m.source_mode || m.cash_type || 'BANK').toUpperCase(),
         category: meta.category,
         from_entity: null,
         to_entity: null,
@@ -1108,9 +1141,9 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
         cheque_status: m.cheque_status,
         cheque_no: m.cheque_no,
         voucher_url: m.voucher_url,
-        status: m.status,
+        status: m.source_status || m.status,
         created_by: m.created_by,
-        created_at: m.created_at,
+        created_at: m.source_created_at || m.created_at,
         updated_at: m.updated_at,
         assigned_admin_id: m.assigned_admin_id,
         assigned_admin_name: m.assigned_admin_name,
@@ -1132,12 +1165,16 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     }
     return x.id;
   };
-  const fallbackEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments, ...transformedModuleLedger]
+  const nativeKeys = new Set([...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments].map(dayBookOrderKey));
+  const fallbackEntries = [...enrichedDayBookEntries, ...transformedExpenses, ...transformedFarmerPayments, ...transformedCommissions, ...transformedCashFlow, ...transformedFirmTxns, ...transformedPlotPayments, ...transformedModuleLedger.filter(entry => !nativeKeys.has(dayBookOrderKey(entry)))]
     .filter((entry) => !visibility.creatorId || String(visibility.creatorId).split(',').includes(String(entry.created_by)))
     .sort((a, b) => sortId(a) - sortId(b));
 
-  // Saved positions take priority within the day. Remaining entries use their
-  // recorded time, then the legacy order. Dragging never changes stored times.
+  // Saved positions take priority within the day. Otherwise use the owner's
+  // creation timestamp, including when a linked display copy was made later.
+  const sourceMetadata = new Map(moduleLedgerEntries.map(entry => [
+    `${entry.source_module || 'personal_ledger'}:${entry.source_id || entry.id}`, entry,
+  ]));
   const positionByKey = new Map(
     savedOrderRows
       .filter((row) => row.entry_key)
@@ -1146,6 +1183,12 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   let allEntries = fallbackEntries
     .map((entry, fallbackIndex) => ({
       ...entry,
+      ...(includePending && sourceMetadata.has(dayBookOrderKey(entry)) ? {
+        created_at: sourceMetadata.get(dayBookOrderKey(entry)).source_created_at || entry.created_at,
+        status: sourceMetadata.get(dayBookOrderKey(entry)).source_status || entry.status,
+        cheque_status: sourceMetadata.get(dayBookOrderKey(entry)).source_cheque_status ?? entry.cheque_status,
+        cheque_no: sourceMetadata.get(dayBookOrderKey(entry)).source_cheque_no ?? entry.cheque_no,
+      } : {}),
       order_key: dayBookOrderKey(entry),
       transaction_time: Object.hasOwn(entryTimes || {}, dayBookOrderKey(entry))
         ? entryTimes[dayBookOrderKey(entry)] : entry.transaction_time ?? null,
@@ -1157,6 +1200,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       if (aPosition != null && bPosition != null) return aPosition - bPosition;
       if (aPosition != null) return -1;
       if (bPosition != null) return 1;
+      const creationComparison = new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+      if (creationComparison) return creationComparison;
       const timeComparison = String(b.transaction_time || '').localeCompare(String(a.transaction_time || ''));
       if (timeComparison) return timeComparison;
       return a._fallback_order - b._fallback_order;
@@ -1208,7 +1253,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     sourceId: entry.bank_source_id,
     siteId,
   }));
-  allEntries = allEntries.map(entry => ({ ...entry, date: daybookEntryDate(entry) }))
+  allEntries = allEntries.map(entry => ({ ...entry, date: daybookEntryDate(entry, includePending) }))
     .filter(entry => entry.date === queryDate);
 
   // Compute summary
@@ -1221,8 +1266,8 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
       paymentMode: e.payment_mode || e.payment_type || e.cash_type,
       chequeStatus: e.cheque_status,
     };
-    const dr = transactionMovesMoney({ ...posting, direction: 'debit' }) ? (parseFloat(e.debit) || 0) : 0;
-    const cr = transactionMovesMoney({ ...posting, direction: 'credit' }) ? (parseFloat(e.credit) || 0) : 0;
+    const dr = (includePending ? daybookAmountCounts : transactionMovesMoney)({ ...posting, direction: 'debit' }) ? (parseFloat(e.debit) || 0) : 0;
+    const cr = (includePending ? daybookAmountCounts : transactionMovesMoney)({ ...posting, direction: 'credit' }) ? (parseFloat(e.credit) || 0) : 0;
     if (dr === 0 && cr === 0) continue;
     total_debit += dr;
     total_credit += cr;
@@ -1243,10 +1288,10 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
   // Recompute dated balances from clearing dates, rather than reusing snapshots
   // previously seeded with cheque application dates. Source dates stay intact.
   const scopedBalances = visibility.creatorId
-    ? await loadDayBookModeBalanceData({siteId,date:queryDate,creatorId:visibility.creatorId},pool) : null;
+    ? await loadDayBookModeBalanceData({siteId,date:queryDate,creatorId:visibility.creatorId,includePending},pool) : null;
   const opening = scopedBalances
     ? scopedBalances.rows.filter(row => row.is_before).reduce((sum,row) => sum + Number(row.credit) - Number(row.debit),0)
-    : await siteBalanceAsOf(siteId, queryDate, pool);
+    : await loadSiteBalanceAsOf(siteId, queryDate, pool, includePending);
   const balance = {
     opening_balance: opening,
     closing_balance: opening + total_credit - total_debit,
@@ -1304,6 +1349,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
  */
 export const updateDayBookOrder = asyncHandler(async (req, res) => {
   const siteId = Number.parseInt(req.body.site_id, 10);
+  const includePending = [true, 'true'].includes(req.body.include_pending ?? req.query?.include_pending);
   const partial = req.body.partial === true;
   const requestId = req.body.request_id == null ? null : String(req.body.request_id).trim();
   const expectedRevisionValue = req.body.expected_revision;
@@ -1378,7 +1424,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
       // cross-date positions first, never-positioned entries slotted in by
       // date. Replacing only the submitted slots keeps every other row's
       // relative order and stores the placement readers already used.
-      const sequence = await loadGlobalSequence(client, siteId);
+      const sequence = await loadGlobalSequence(client, siteId, { includePending });
       const currentKeys = sequence.map((row) => row.entry_key);
       const dateByKey = new Map(sequence.map((row) => [row.entry_key, row.entry_date]));
       let entryKeys = normalizedKeys;
@@ -1567,11 +1613,11 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
                  MAX(cfe.transaction_time) AS transaction_time,
                  MAX(le.created_at) AS created_at,
                  MAX(le.id) AS ledger_id
-               FROM ledger_entries le
+               FROM ${daybookLedgerSource(includePending)} le
                LEFT JOIN cash_flow_entries cfe ON cfe.id = SPLIT_PART(le.id, ':', 1)::int
                LEFT JOIN daybook_entry_order dbo
                  ON dbo.site_id = le.site_id
-                AND dbo.entry_date = ${daybookLedgerDateSql('le', 'cfe')}
+                AND dbo.entry_date = ${daybookLedgerDateSql('le', 'cfe', includePending)}
                 AND dbo.entry_key = CONCAT(
                   le.source_key,
                   ':',
@@ -1580,13 +1626,12 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
                LEFT JOIN daybook_global_order dgo
                  ON dgo.site_id = le.site_id
                 AND dgo.entry_key = CONCAT(le.source_key, ':', COALESCE(le.source_id::text, SPLIT_PART(le.id, ':', 1)))
-              WHERE le.site_id = $1 AND ${daybookLedgerDateSql('le', 'cfe')} = $2::date
+              WHERE le.site_id = $1 AND ${daybookLedgerDateSql('le', 'cfe', includePending)} = $2::date
               GROUP BY 1
              ) ordered
             ORDER BY ordered.display_position ASC NULLS LAST,
                      ordered.global_position ASC NULLS LAST,
-                     ordered.transaction_time DESC NULLS LAST,
-                     ordered.created_at DESC,
+                     ${includePending ? 'ordered.created_at DESC,\n                     ordered.transaction_time DESC NULLS LAST,' : 'ordered.transaction_time DESC NULLS LAST,\n                     ordered.created_at DESC,'}
                      ordered.ledger_id DESC`,
           [siteId, date]
         )).rows.map((row) => row.entry_key);
@@ -1662,7 +1707,7 @@ export const updateDayBookOrder = asyncHandler(async (req, res) => {
       order.savedRevision = Number(finalized.revision);
       // Mirror the day's new relative order into the cross-date sequence the
       // period statements read, so both views agree.
-      await projectGlobalFromDate(client, { siteId, orderedKeys: entryKeys, userId: req.user.id });
+      await projectGlobalFromDate(client, { siteId, orderedKeys: entryKeys, userId: req.user.id, includePending });
     }
 
     await client.query('COMMIT');
@@ -1726,6 +1771,7 @@ export const getDailyBalance = asyncHandler(async (req, res) => {
  */
 export const getModeBalance = asyncHandler(async (req, res) => {
   const { site_id, date, created_by } = req.query;
+  const includePending = req.query.include_pending === 'true';
   if (!site_id) return res.status(400).json({ message: 'site_id is required' });
   const queryDate = date || new Date().toISOString().split('T')[0];
   const siteId = parseInt(site_id);
@@ -1763,6 +1809,7 @@ export const getModeBalance = asyncHandler(async (req, res) => {
       siteId,
       date: queryDate,
       creatorId: visibility.creatorId,
+      includePending,
     }, pool);
 
     imprestFloat = modeData.imprestFloat;

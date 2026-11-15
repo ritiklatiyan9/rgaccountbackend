@@ -116,6 +116,7 @@ export const getBalanceSheet = asyncHandler(async (req, res) => {
     plotId,
     creatorId: entryVisibility.creatorId,
     chequeTransactionDates: req.query.date_basis === 'cheque_transaction',
+    includePending: req.query.include_pending === 'true',
     includeUndatedCheques: !dateFrom && req.query.include_undated_cheques === 'true',
   };
   const reportKey = JSON.stringify([getCacheGeneration(), req.user.id, req.sessionId,

@@ -3,7 +3,7 @@ import pool from "../config/db.js";
 import { PLOT_BUYER_MEMBER_JOIN } from "./plotMemberLinks.service.js";
 import { registryDeedScopeSql } from "../utils/registryDocuments.js";
 import { allocateInstallmentPayments } from "./installmentAllocation.service.js";
-import { indiaDate, loadOverduePolicy, normalizeOverduePolicy, overdueNotice, overdueDedupeKey, overdueTemplateBody, OVERDUE_POLICY_KEY, PENDING_OVERDUE_TEMPLATE_KEY } from "./installmentOverduePolicy.service.js";
+import { indiaDate, loadOverduePolicy, normalizeOverduePolicy, overdueNotice, overdueDedupeKey, overdueTemplateBody, overdueTemplateBodyHi, OVERDUE_POLICY_KEY, PENDING_OVERDUE_TEMPLATE_KEY } from "./installmentOverduePolicy.service.js";
 import { classifyAccountWhatsAppPayment } from "./accountWhatsAppWorkflow.policy.js";
 import { getReceiptDesign } from "./receiptDesign.service.js";
 import {
@@ -26,6 +26,9 @@ import {
   ACCOUNT_WHATSAPP_POLICY as POLICY,
   accountWhatsAppError as fail,
   accountWhatsAppCategory,
+  accountWhatsAppLanguage,
+  accountWhatsAppLanguageGroup,
+  ACCOUNT_WHATSAPP_LANGUAGES,
   accountWhatsAppPhone,
   compileAccountWhatsAppBody,
   cleanAccountWhatsAppParameter,
@@ -33,6 +36,7 @@ import {
 } from "./accountWhatsApp.spec.js";
 export {
   ACCOUNT_WHATSAPP_EVENTS,
+  ACCOUNT_WHATSAPP_LANGUAGES,
   ACCOUNT_WHATSAPP_POLICY,
 } from "./accountWhatsApp.spec.js";
 
@@ -393,6 +397,42 @@ async function requireSchema(db) {
       503,
     );
 }
+// Hindi is an optional second message. Whether a project sends it lives in
+// application_settings; each module's Hindi template in stage_settings.template_name_hi.
+const HINDI_SETTING_KEY = "account_whatsapp_hindi_v1";
+const TEMPLATE_COLUMN = Object.freeze({ en: "template_name", hi: "template_name_hi" });
+const hindiSchemaSeen = new WeakSet();
+/**
+ * Migration 246 applied? English messaging never depends on it, so a server deployed ahead
+ * of the migration keeps sending exactly as before. Only a positive answer is remembered.
+ */
+export async function accountWhatsAppHindiReady(db = pool) {
+  if (hindiSchemaSeen.has(db)) return true;
+  if (inTest() && db === pool) return false;
+  const {
+    rows: [row],
+  } = await db.query(
+    "SELECT (SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='account_whatsapp_stage_settings' AND column_name='template_name_hi') OR (table_name='account_whatsapp_messages' AND column_name='language')))=2 AS ready",
+  );
+  if (row?.ready) hindiSchemaSeen.add(db);
+  return Boolean(row?.ready);
+}
+async function requireHindiSchema(db) {
+  if (!(await accountWhatsAppHindiReady(db)))
+    throw fail(
+      "Hindi messages need migration 246_account_whatsapp_hindi. No messages have been changed.",
+      503,
+    );
+}
+export async function accountWhatsAppHindiEnabled(siteId, db = pool) {
+  const row = (
+    await db.query(
+      "SELECT setting_value FROM application_settings WHERE site_id=$1 AND setting_key=$2 LIMIT 1",
+      [siteId, HINDI_SETTING_KEY],
+    )
+  ).rows[0];
+  return row?.setting_value?.enabled === true;
+}
 async function transaction(db, siteId, action) {
   const client = await db.connect();
   try {
@@ -424,16 +464,20 @@ async function stageSettings(siteId, event, db) {
       event,
       enabled: false,
       template_name: null,
+      template_name_hi: null,
       lead_days: 3,
       enabled_at: null,
     }
   );
 }
-async function activeTemplate(siteId, event, db) {
+/** The approved, unarchived template a module has applied for one language. */
+async function activeTemplate(siteId, event, db, lang = "en") {
+  const column = TEMPLATE_COLUMN[lang];
+  if (!column) throw fail("Unknown message language", 400);
   return (
     (
       await db.query(
-        `SELECT t.* FROM account_whatsapp_templates t JOIN account_whatsapp_stage_settings s ON s.site_id=t.site_id AND s.event=t.event AND s.template_name=t.name
+        `SELECT t.* FROM account_whatsapp_templates t JOIN account_whatsapp_stage_settings s ON s.site_id=t.site_id AND s.event=t.event AND s.${column}=t.name
     WHERE s.site_id=$1 AND s.event=$2 AND t.status='APPROVED' AND t.archived_at IS NULL`,
         [siteId, event],
       )
@@ -644,10 +688,12 @@ export async function accountWhatsAppStudio(
         )
       ).rows
     : [];
+  const hindiReady = ready && (await accountWhatsAppHindiReady(db));
+  const hindiEnabled = hindiReady && (await accountWhatsAppHindiEnabled(siteId, db));
   const recent = ready
     ? (
         await db.query(
-          "SELECT id,event,ref_id,status,phone,template,error,is_test,created_at,updated_at FROM account_whatsapp_messages WHERE site_id=$1 ORDER BY id DESC LIMIT 100",
+          `SELECT id,event,ref_id,status,phone,template,error,is_test,created_at,updated_at${hindiReady ? ",language" : ""} FROM account_whatsapp_messages WHERE site_id=$1 ORDER BY id DESC LIMIT 100`,
           [siteId],
         )
       ).rows
@@ -666,14 +712,24 @@ export async function accountWhatsAppStudio(
     },
     templates,
     overdue_policy: overduePolicy,
+    languages: {
+      available: Object.values(ACCOUNT_WHATSAPP_LANGUAGES),
+      hindi_ready: hindiReady,
+      hindi_enabled: hindiEnabled,
+    },
     stages: Object.entries(EVENTS).filter(([key]) => key !== 'INSTALLMENT_OVERDUE' || overduePolicy || templates.some((t) => t.event === key)).map(([key, spec]) => {
       const saved = settings.find((s) => s.event === key) || {
         event: key,
         enabled: false,
         template_name: null,
+        template_name_hi: null,
         lead_days: 3,
       };
       const own = templates.filter((t) => t.event === key);
+      const appliedIn = (name) =>
+        own.find(
+          (t) => t.name === name && t.status === "APPROVED" && !t.archived_at,
+        ) || null;
       return {
         key,
         label: spec.label,
@@ -682,6 +738,7 @@ export async function accountWhatsAppStudio(
         trigger: spec.trigger,
         description: key === 'INSTALLMENT_OVERDUE' && !overduePolicy ? 'Penalty notice template prepared. Confirm and configure the project penalty basis before enabling automatic notices.' : spec.description,
         default_body: key === 'INSTALLMENT_OVERDUE' && overduePolicy ? overdueTemplateBody(overduePolicy) : spec.body,
+        default_body_hi: key === 'INSTALLMENT_OVERDUE' && overduePolicy ? overdueTemplateBodyHi(overduePolicy) : spec.body_hi,
         fields: Object.entries(spec.fields).map(([name, f]) => ({
           name,
           label: f.label,
@@ -691,13 +748,8 @@ export async function accountWhatsAppStudio(
           ? [{ key: "PAYMENT_RECEIPT", label: "Payment receipt PDF" }]
           : [],
         settings: saved,
-        active_template:
-          own.find(
-            (t) =>
-              t.name === saved.template_name &&
-              t.status === "APPROVED" &&
-              !t.archived_at,
-          ) || null,
+        active_template: appliedIn(saved.template_name),
+        active_template_hi: hindiReady ? appliedIn(saved.template_name_hi) : null,
         templates: own,
       };
     }),
@@ -721,6 +773,13 @@ export async function saveAccountWhatsAppStage(
     (typeof input.template_name !== "string" || !input.template_name.trim())
   )
     throw fail("Choose a template or null to unapply it");
+  if (
+    input.template_name_hi !== undefined &&
+    input.template_name_hi !== null &&
+    (typeof input.template_name_hi !== "string" || !input.template_name_hi.trim())
+  )
+    throw fail("Choose a Hindi template or null to remove the Hindi message");
+  if (input.template_name_hi !== undefined) await requireHindiSchema(db);
   if (
     input.lead_days !== undefined &&
     (event !== "INSTALLMENT_DUE" ||
@@ -769,9 +828,50 @@ export async function saveAccountWhatsAppStage(
           "Apply an approved, unarchived template created for this module",
           409,
         );
+      if (
+        input.template_name !== undefined &&
+        accountWhatsAppLanguageGroup(template.language) === "hi"
+      )
+        throw fail(
+          "This is a Hindi template. Apply an English template here and choose the Hindi template under Hindi message.",
+          409,
+        );
       // An administrator can still switch off a legacy text-only assignment.
       if (nextEnabled || input.template_name !== undefined)
         assertPaymentReceiptTemplate(event, template);
+    }
+    const hindiSchema = await accountWhatsAppHindiReady(client);
+    const hindiName = !hindiSchema
+      ? null
+      : input.template_name_hi === undefined
+        ? (previous.template_name_hi ?? null)
+        : input.template_name_hi;
+    // Only a Hindi template being applied now is validated. One that was applied earlier and
+    // has since stopped being approved must never block pausing or editing the module; the
+    // worker re-checks it at delivery and just skips the Hindi message.
+    if (hindiSchema && input.template_name_hi) {
+      const hindiTemplate = (
+        await client.query(
+          "SELECT * FROM account_whatsapp_templates WHERE site_id=$1 AND name=$2 FOR UPDATE",
+          [siteId, input.template_name_hi],
+        )
+      ).rows[0];
+      if (
+        !hindiTemplate ||
+        hindiTemplate.event !== event ||
+        hindiTemplate.status !== "APPROVED" ||
+        hindiTemplate.archived_at
+      )
+        throw fail(
+          "Apply an approved, unarchived Hindi template created for this module",
+          409,
+        );
+      if (accountWhatsAppLanguageGroup(hindiTemplate.language) !== "hi")
+        throw fail(
+          "The Hindi message needs a template written in Hindi. Create one with the Hindi language, then apply it here.",
+          409,
+        );
+      assertPaymentReceiptTemplate(event, hindiTemplate);
     }
     if (nextEnabled && !name)
       throw fail(
@@ -784,7 +884,7 @@ export async function saveAccountWhatsAppStage(
     return (
       await client.query(
         `UPDATE account_whatsapp_stage_settings SET enabled=$3,template_name=$4,lead_days=$5,
-      enabled_at=CASE WHEN $3 AND NOT enabled THEN now() ELSE enabled_at END,updated_by=$6,updated_at=now()
+      enabled_at=CASE WHEN $3 AND NOT enabled THEN now() ELSE enabled_at END,updated_by=$6,updated_at=now()${hindiSchema ? ",template_name_hi=$7" : ""}
       WHERE site_id=$1 AND event=$2 RETURNING *`,
         [
           siteId,
@@ -793,9 +893,36 @@ export async function saveAccountWhatsAppStage(
           name,
           input.lead_days ?? previous.lead_days,
           user.id,
+          ...(hindiSchema ? [hindiName] : []),
         ],
       )
     ).rows[0];
+  });
+}
+/** Turn a project's Hindi messages on or off. Per-module Hindi templates are chosen in saveAccountWhatsAppStage. */
+export async function saveAccountWhatsAppLanguages(
+  user,
+  input,
+  { db = pool } = {},
+) {
+  const siteId = await assertAccountWhatsAppSite(user, input.site_id, db);
+  await requireSchema(db);
+  await requireHindiSchema(db);
+  if (typeof input.hindi !== "boolean")
+    throw fail("hindi must be true or false");
+  return transaction(db, siteId, async (client) => {
+    const value = JSON.stringify({ enabled: input.hindi });
+    // No unique-key assumption: the site transaction lock already serialises writers.
+    const updated = await client.query(
+      "UPDATE application_settings SET setting_value=$3::jsonb,updated_at=now() WHERE site_id=$1 AND setting_key=$2 RETURNING id",
+      [siteId, HINDI_SETTING_KEY, value],
+    );
+    if (!updated.rows.length)
+      await client.query(
+        "INSERT INTO application_settings(site_id,setting_key,setting_value) VALUES($1,$2,$3::jsonb)",
+        [siteId, HINDI_SETTING_KEY, value],
+      );
+    return { site_id: siteId, hindi_enabled: input.hindi };
   });
 }
 export async function createAccountWhatsAppTemplate(
@@ -810,7 +937,11 @@ export async function createAccountWhatsAppTemplate(
   const category = accountWhatsAppCategory(input.category);
   const hasDocument = requiresPaymentReceipt(input.event);
   const compiled = compileAccountWhatsAppBody(input.event, input.body);
-  const name = `dgg_acc_s${siteId}_${input.event.toLowerCase()}_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const chosenLanguage = accountWhatsAppLanguage(input.language);
+  if (chosenLanguage === "hi") await requireHindiSchema(db);
+  // English keeps the configured provider code (WHATSAPP_TEMPLATE_LANG); Hindi is always "hi".
+  const templateLanguage = chosenLanguage === "hi" ? "hi" : language();
+  const name = `dgg_acc_s${siteId}_${input.event.toLowerCase()}${chosenLanguage === "hi" ? "_hi" : ""}_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
   // Save a draft first: provider or connection failures never lose the edited text.
   let template = (
     await db.query(
@@ -823,7 +954,7 @@ export async function createAccountWhatsAppTemplate(
         title,
         compiled.body,
         compiled.fields,
-        language(),
+        templateLanguage,
         user.id,
         category,
         hasDocument,
@@ -916,10 +1047,11 @@ export async function createAccountWhatsAppTemplate(
   }
 }
 async function assertUnused(template, db) {
+  const hindiSchema = await accountWhatsAppHindiReady(db);
   if (
     (
       await db.query(
-        "SELECT 1 FROM account_whatsapp_stage_settings WHERE site_id=$1 AND template_name=$2",
+        `SELECT 1 FROM account_whatsapp_stage_settings WHERE site_id=$1 AND (template_name=$2${hindiSchema ? " OR template_name_hi=$2" : ""})`,
         [template.site_id, template.name],
       )
     ).rows.length
@@ -1049,6 +1181,8 @@ export async function testAccountWhatsAppTemplate(
   assertEvent(input.event);
   const siteId = await assertAccountWhatsAppSite(user, input.site_id, db);
   await requireSchema(db);
+  const sampleLanguage = accountWhatsAppLanguage(input.language);
+  if (sampleLanguage === "hi") await requireHindiSchema(db);
   const to = accountWhatsAppPhone(input.phone);
   if (!to) throw fail("Enter a valid 10-digit Indian mobile number");
   if (!enabled() && send === sendAccountWhatsAppTemplate)
@@ -1057,13 +1191,18 @@ export async function testAccountWhatsAppTemplate(
       409,
     );
   const { template, row } = await transaction(db, siteId, async (client) => {
-    const selected = await activeTemplate(siteId, input.event, client);
+    const selected = await activeTemplate(siteId, input.event, client, sampleLanguage);
     if (!selected)
-      throw fail("Apply an approved template before sending a sample", 409);
+      throw fail(
+        sampleLanguage === "hi"
+          ? "Apply an approved Hindi template before sending a Hindi sample"
+          : "Apply an approved template before sending a sample",
+        409,
+      );
     assertPaymentReceiptTemplate(input.event, selected);
     const claimed = (
       await client.query(
-        "INSERT INTO account_whatsapp_messages(site_id,event,ref_id,dedupe_key,is_test,status,phone,template) VALUES($1,$2,0,$3,true,'SENDING',$4,$5) RETURNING *",
+        `INSERT INTO account_whatsapp_messages(site_id,event,ref_id,dedupe_key,is_test,status,phone,template${sampleLanguage === "hi" ? ",language" : ""}) VALUES($1,$2,0,$3,true,'SENDING',$4,$5${sampleLanguage === "hi" ? ",'hi'" : ""}) RETURNING *`,
         [
           siteId,
           input.event,
@@ -1133,6 +1272,7 @@ export async function testAccountWhatsAppTemplate(
     to,
     template: accountWhatsAppProviderName(template),
     message_id: messageId,
+    language: sampleLanguage,
     sample_only: true,
   };
 }
@@ -1460,14 +1600,15 @@ export async function activateRequestedOverdueTemplates({ db = pool } = {}) {
   return applied;
 }
 
-export async function deliverAccountWhatsApp(
+/**
+ * One language of one message. `row` is the log row this attempt records on (the queued
+ * row for English, the companion row for Hindi); `baseKey` is the queued row's dedupe key,
+ * which the installment checks compare against. Resolves with the row's final status.
+ */
+async function deliverLanguage(
   row,
-  {
-    db = pool,
-    send = sendAccountWhatsAppTemplate,
-    upload = uploadAccountWhatsAppDocument,
-    transport = remoteTransport,
-  } = {},
+  { db, send, upload, transport },
+  { lang = "en", baseKey = row.dedupe_key } = {},
 ) {
   let template = null;
   let phone = null;
@@ -1484,27 +1625,36 @@ export async function deliverAccountWhatsApp(
         error && String(error).slice(0, 500),
       ],
     );
+  const end = async (status, error = null) => {
+    await finish(status, error);
+    return status;
+  };
   if (
     (!enabled() || !configured() || inTest()) &&
     send === sendAccountWhatsAppTemplate
   )
-    return finish("SKIPPED", "WhatsApp transport is disabled");
+    return end("SKIPPED", "WhatsApp transport is disabled");
   if (row.is_test)
-    return finish(
+    return end(
       "SKIPPED",
       "Sample tests are sent only from the administrator test action",
     );
   try {
     const spec = EVENTS[row.event];
-    if (!spec) return finish("SKIPPED", "Unknown event");
+    if (!spec) return end("SKIPPED", "Unknown event");
     const settings = await stageSettings(row.site_id, row.event, db);
     if (!settings.enabled)
-      return finish("SKIPPED", "Automation is switched off in WhatsApp Studio");
-    template = await activeTemplate(row.site_id, row.event, db);
+      return end("SKIPPED", "Automation is switched off in WhatsApp Studio");
+    template = await activeTemplate(row.site_id, row.event, db, lang);
     if (!template)
-      return finish("SKIPPED", "No approved, unarchived template is applied");
+      return end(
+        "SKIPPED",
+        lang === "hi"
+          ? "No approved, unarchived Hindi template is applied"
+          : "No approved, unarchived template is applied",
+      );
     if (requiresPaymentReceipt(row.event) && !template.has_document)
-      return finish("SKIPPED", "Payment receipt PDF requires an approved document-header template. Create or import a PDF template in WhatsApp Studio before enabling payment messages.");
+      return end("SKIPPED", "Payment receipt PDF requires an approved document-header template. Create or import a PDF template in WhatsApp Studio before enabling payment messages.");
     if (
       isImportedAccountWhatsAppTemplate(template) &&
       (send === sendAccountWhatsAppTemplate || transport !== remoteTransport)
@@ -1520,7 +1670,7 @@ export async function deliverAccountWhatsApp(
       db,
     );
     if (!data)
-      return finish(
+      return end(
         "SKIPPED",
         "Current record is missing or blocked by payment / completion policy",
       );
@@ -1529,7 +1679,7 @@ export async function deliverAccountWhatsApp(
       data.kyc_verified &&
       accountTemplateStatesPendingKyc(template.body)
     )
-      return finish(
+      return end(
         "SKIPPED",
         "Client KYC is already verified; this template states KYC Pending.",
       );
@@ -1552,11 +1702,11 @@ export async function deliverAccountWhatsApp(
       if (
         due < today ||
         due !==
-          String(row.dedupe_key || "")
+          String(baseKey || "")
             .split(":")
             .at(-1)
       )
-        return finish(
+        return end(
           "SKIPPED",
           "Installment due date changed or is now historical",
         );
@@ -1565,16 +1715,16 @@ export async function deliverAccountWhatsApp(
       const key = overdueDedupeKey(data.policy, data.installment_id, data.plot_id, data.due_date);
       const createdDay = Date.parse(indiaDate(new Date(row.created_at)));
       const firstOverdueDay = Date.parse(indiaDate(data.due_date)) + 86400000;
-      if (row.dedupe_key !== key || createdDay !== firstOverdueDay ||
+      if (baseKey !== key || createdDay !== firstOverdueDay ||
           !settings.enabled_at || indiaDate(data.due_date) < indiaDate(new Date(settings.enabled_at)))
-        return finish('SKIPPED', 'Overdue due date or project penalty policy changed, or installment predates activation');
+        return end('SKIPPED', 'Overdue due date or project penalty policy changed, or installment predates activation');
     }
     phone =
       accountWhatsAppPhone(data.whatsapp) || accountWhatsAppPhone(data.phone);
     if (!phone)
-      return finish("SKIPPED", "Client has no valid Indian mobile number");
+      return end("SKIPPED", "Client has no valid Indian mobile number");
     if (template.fields.some((key) => !spec.fields[key]))
-      return finish("SKIPPED", "Template contains an unsupported field");
+      return end("SKIPPED", "Template contains an unsupported field");
     let media;
     if (template.has_document) {
       media = await receiptMedia(row.event, data, upload, { db });
@@ -1587,7 +1737,7 @@ export async function deliverAccountWhatsApp(
       const snapshot = (value) => JSON.stringify(Object.keys(value || {}).sort()
         .map((key) => [key, value[key] ?? null]));
       if (!current || snapshot(current) !== snapshot(data))
-        return finish(
+        return end(
           "SKIPPED",
           "Payment changed while preparing the receipt; no message was sent.",
         );
@@ -1605,7 +1755,8 @@ export async function deliverAccountWhatsApp(
       },
     );
   } catch (error) {
-    return finish("FAILED", `${error.name}: ${error.message}`).catch(() => {});
+    await finish("FAILED", `${error.name}: ${error.message}`).catch(() => {});
+    return "FAILED";
   }
   // Never retry an accepted message just because recording its acceptance fails.
   await finish("SENT").catch((error) =>
@@ -1614,6 +1765,50 @@ export async function deliverAccountWhatsApp(
       error.message,
     ),
   );
+  return "SENT";
+}
+/**
+ * Deliver a queued message: English first, exactly as before. When the project has Hindi
+ * switched on and the module has an approved Hindi template, a Hindi row is then recorded
+ * (born SENDING, so no other worker can claim it) and sent right behind it. Hindi is only
+ * attempted once English reached the provider, so a record that is blocked by policy, or a
+ * client without a valid number, never produces a lone Hindi message.
+ */
+export async function deliverAccountWhatsApp(
+  row,
+  {
+    db = pool,
+    send = sendAccountWhatsAppTemplate,
+    upload = uploadAccountWhatsAppDocument,
+    transport = remoteTransport,
+  } = {},
+) {
+  const context = { db, send, upload, transport };
+  const outcome = await deliverLanguage(row, context);
+  if (!["SENT", "FAILED"].includes(outcome) || row.is_test) return;
+  try {
+    const settings = await stageSettings(row.site_id, row.event, db);
+    if (
+      !settings.enabled ||
+      !settings.template_name_hi ||
+      !(await accountWhatsAppHindiReady(db)) ||
+      !(await accountWhatsAppHindiEnabled(row.site_id, db))
+    )
+      return;
+    const companion = (
+      await db.query(
+        "INSERT INTO account_whatsapp_messages(site_id,event,ref_id,dedupe_key,language,status,created_at) VALUES($1,$2,$3,$4,'hi','SENDING',$5) ON CONFLICT(site_id,dedupe_key) DO NOTHING RETURNING *",
+        [row.site_id, row.event, row.ref_id, `${row.dedupe_key}#hi`, row.created_at],
+      )
+    ).rows[0];
+    if (companion)
+      await deliverLanguage(companion, context, {
+        lang: "hi",
+        baseKey: row.dedupe_key,
+      });
+  } catch (error) {
+    console.error("[account-whatsapp] Hindi message:", error.message);
+  }
 }
 export async function drainAccountWhatsApp({
   db = pool,

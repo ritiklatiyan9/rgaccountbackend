@@ -16,8 +16,19 @@ const nameOf = (value) => {
   return name;
 };
 const publicEntry = ({ storage_key, ...entry }) => entry;
+// Folders are shared. A file shows to its uploader, to everyone when public, or
+// to the people it was shared with. Admins do not bypass "Only me".
+// `viewer` is the placeholder holding the requesting user's id.
+const visibleTo = (viewer) => `(kind='folder' OR visibility='everyone' OR created_by=${viewer}
+  OR (visibility='selected' AND ${viewer}=ANY(shared_with)))`;
+// Who can be picked: the site's organisation admins plus sub-admins assigned to
+// the site (the only roles that reach Data Storage). $1 = site, $2 = actor.
+const PEOPLE_SQL = `SELECT u.id, u.name, u.role FROM users u JOIN sites s ON s.id=$1
+  WHERE u.organization_id=s.organization_id AND u.is_active AND u.id<>$2
+    AND (u.role IN ('admin', 'super_admin') OR (u.role='sub_admin'
+      AND EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id=u.id AND us.site_id=$1)))`;
 const mapDatabaseError = (error) => {
-  if (error.code === '23505') fail(409, 'A file or folder with this name already exists here.');
+  if (error.code === '23505') fail(409, 'A file or folder with this name already exists here (it may not be shared with you).');
   if (error.code === '23503') fail(409, 'This folder changed. Refresh and try again.');
   throw error;
 };
@@ -55,9 +66,23 @@ export function createDataStorageService(database, files) {
   async function entry(user, rawSiteId, rawEntryId) {
     const siteId = await accessibleSite(user, rawSiteId);
     const entryId = id(rawEntryId, 'entry');
-    const { rows } = await database.query('SELECT * FROM data_storage_entries WHERE id=$1 AND site_id=$2', [entryId, siteId]);
+    const { rows } = await database.query(`SELECT * FROM data_storage_entries
+      WHERE id=$1 AND site_id=$2 AND ${visibleTo('$3')}`, [entryId, siteId, user.id]);
     if (!rows[0]) fail(404, 'File or folder not found.');
     return rows[0];
+  }
+  // Validated before any bytes reach S3. shared_with is an array or "3,7".
+  async function accessOf(siteId, user, body = {}) {
+    const visibility = body.visibility || 'everyone';
+    if (!['private', 'selected', 'everyone'].includes(visibility)) fail(400, 'Choose Only me, Selected people or Everyone.');
+    if (visibility !== 'selected') return { visibility, sharedWith: [] };
+    const picked = String(body.shared_with ?? '').split(',').map((value) => value.trim()).filter(Boolean).map((value) => id(value, 'person'));
+    // Only people who can open the site are kept, so someone who has since left
+    // (or the uploader themselves) is dropped instead of blocking the save.
+    const { rows } = await database.query(`SELECT people.id FROM (${PEOPLE_SQL}) people
+      WHERE people.id=ANY($3::integer[]) ORDER BY people.id`, [siteId, user.id, picked]);
+    if (!rows.length) fail(400, 'Choose at least one person from this site to share with.');
+    return { visibility, sharedWith: rows.map((row) => row.id) };
   }
   return {
     async list(user, query) {
@@ -66,15 +91,16 @@ export function createDataStorageService(database, files) {
       await folder(database, siteId, currentFolderId);
       const search = String(query.q || '').trim().slice(0, 255).replace(/[\\%_]/g, '\\$&');
       const offset = Math.max(0, Math.min(Number.parseInt(query.offset, 10) || 0, 2147483647));
-      const filter = `site_id=$1 AND parent_id IS NOT DISTINCT FROM $2::integer AND name ILIKE $3`;
-      const values = [siteId, currentFolderId, `%${search}%`];
-      const { rows } = await database.query(`SELECT id, site_id, parent_id, kind, name, mime_type, file_size, created_at, updated_at
+      const filter = `site_id=$1 AND parent_id IS NOT DISTINCT FROM $2::integer AND name ILIKE $3 AND ${visibleTo('$4')}`;
+      const values = [siteId, currentFolderId, `%${search}%`, user.id];
+      const { rows } = await database.query(`SELECT id, site_id, parent_id, kind, name, mime_type, file_size,
+          created_by, visibility, shared_with, created_at, updated_at
         FROM data_storage_entries WHERE ${filter}
-        ORDER BY kind DESC, lower(name), id LIMIT ${STORAGE_PAGE_SIZE} OFFSET $4`, [...values, offset]);
+        ORDER BY kind DESC, lower(name), id LIMIT ${STORAGE_PAGE_SIZE} OFFSET $5`, [...values, offset]);
       const counts = await database.query(`SELECT count(*)::integer AS total FROM data_storage_entries WHERE ${filter}`, values);
       const stats = await database.query(`SELECT count(*) FILTER (WHERE kind='folder')::integer AS folders,
         count(*) FILTER (WHERE kind='file')::integer AS files,
-        COALESCE(sum(file_size), 0)::text AS bytes FROM data_storage_entries WHERE site_id=$1`, [siteId]);
+        COALESCE(sum(file_size), 0)::text AS bytes FROM data_storage_entries WHERE site_id=$1 AND ${visibleTo('$2')}`, [siteId, user.id]);
       const breadcrumbs = currentFolderId === null ? [] : (await database.query(`WITH RECURSIVE ancestors AS (
         SELECT id, parent_id, name, 0 AS depth FROM data_storage_entries WHERE id=$1 AND site_id=$2 AND kind='folder'
         UNION ALL SELECT p.id, p.parent_id, p.name, a.depth+1 FROM data_storage_entries p
@@ -99,15 +125,17 @@ export function createDataStorageService(database, files) {
       if (!file?.buffer) fail(400, 'Select a file to upload.');
       if (file.buffer.length > MAX_STORAGE_FILE_BYTES) fail(413, 'Files must be 50 MB or smaller.');
       const name = nameOf(file.originalname);
+      const access = await accessOf(siteId, user, body);
       await folder(database, siteId, destination);
       const storageKey = await files.upload(file.buffer, siteId);
       try {
         return await transaction(async (client) => {
           await folder(client, siteId, destination, true);
           const { rows } = await client.query(`INSERT INTO data_storage_entries
-            (site_id,parent_id,kind,name,storage_key,mime_type,file_size,created_by)
-            VALUES($1,$2,'file',$3,$4,$5,$6,$7) RETURNING *`,
-          [siteId, destination, name, storageKey, file.mimetype || 'application/octet-stream', file.buffer.length, user.id]);
+            (site_id,parent_id,kind,name,storage_key,mime_type,file_size,created_by,visibility,shared_with)
+            VALUES($1,$2,'file',$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+          [siteId, destination, name, storageKey, file.mimetype || 'application/octet-stream', file.buffer.length, user.id,
+            access.visibility, access.sharedWith]);
           return publicEntry(rows[0]);
         });
       } catch (error) {
@@ -130,15 +158,31 @@ export function createDataStorageService(database, files) {
         return publicEntry(rows[0]);
       } catch (error) { mapDatabaseError(error); }
     },
+    async share(user, siteId, entryId, body) {
+      const item = await entry(user, siteId, entryId);
+      if (item.kind !== 'file') fail(400, 'Visibility is set per file.');
+      if (Number(item.created_by) !== Number(user.id)) fail(403, 'Only the person who uploaded this file can change who sees it.');
+      const access = await accessOf(item.site_id, user, body);
+      const { rows } = await database.query(`UPDATE data_storage_entries SET visibility=$1, shared_with=$2, updated_at=now()
+        WHERE id=$3 AND site_id=$4 RETURNING *`, [access.visibility, access.sharedWith, item.id, item.site_id]);
+      if (!rows[0]) fail(404, 'File or folder not found.');
+      return publicEntry(rows[0]);
+    },
+    async people(user, query) {
+      const siteId = await accessibleSite(user, query.site_id);
+      return { people: (await database.query(`${PEOPLE_SQL} ORDER BY lower(u.name), u.id`, [siteId, user.id])).rows };
+    },
     async remove(user, rawSiteId, rawEntryId) {
       const siteId = await accessibleSite(user, rawSiteId);
       const entryId = id(rawEntryId, 'entry');
       const item = await transaction(async (client) => {
-        const { rows } = await client.query('SELECT * FROM data_storage_entries WHERE id=$1 AND site_id=$2 FOR UPDATE', [entryId, siteId]);
+        const { rows } = await client.query(`SELECT * FROM data_storage_entries
+          WHERE id=$1 AND site_id=$2 AND ${visibleTo('$3')} FOR UPDATE`, [entryId, siteId, user.id]);
         if (!rows[0]) fail(404, 'File or folder not found.');
         if (rows[0].kind === 'folder') {
+          // Counts hidden files too: the FK forbids orphaning someone's private file.
           const children = await client.query('SELECT 1 FROM data_storage_entries WHERE parent_id=$1 AND site_id=$2 LIMIT 1', [entryId, siteId]);
-          if (children.rows.length) fail(409, 'This folder contains files or folders. Empty it before deleting.');
+          if (children.rows.length) fail(409, 'This folder still has files or folders (some may not be shared with you). Empty it before deleting.');
         }
         await client.query('DELETE FROM data_storage_entries WHERE id=$1 AND site_id=$2', [entryId, siteId]);
         return rows[0];

@@ -140,7 +140,11 @@ export function assertAccountWhatsAppImportedDefinition(template, definition) {
     );
   return remote;
 }
-export const accountTemplateStatesPendingKyc = (body) =>
-  /\bKYC(?:\s+STATUS)?\s*:?\s+PENDING\b/i.test(
-    String(body || "").replace(/[*_~]/g, ""),
+export const accountTemplateStatesPendingKyc = (body) => {
+  const text = String(body || "").replace(/[*_~]/g, "");
+  return (
+    /\bKYC(?:\s+STATUS)?\s*:?\s+PENDING\b/i.test(text) ||
+    // Hindi templates: "KYC स्थिति: लंबित" / "KYC पेंडिंग".
+    /\bKYC\s*(?:स्थिति\s*)?:?\s*(?:लंबित|पेंडिंग)/u.test(text)
   );
+};

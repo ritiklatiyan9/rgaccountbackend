@@ -1,3 +1,4 @@
+import { coApplicantsForWrite, assertBuyerNotCoApplicant } from '../services/plotCoApplicants.service.js';
 import { cancelPlotBooking, withPlotRebooking } from '../services/plotBookingHistory.service.js';
 import { withPlotBookingAllocations } from '../services/plotBookingAllocations.service.js';
 import { chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
@@ -352,6 +353,8 @@ const createPlotRecord = async (req, res) => {
     data.buyer_member_id = await validatePlotBuyerMember(data.site_id, req.body.buyer_member_id, pool);
   }
 
+  Object.assign(data, await coApplicantsForWrite(req.body, data.site_id, pool, { buyerMemberId: data.buyer_member_id }));
+
   // Set plot_tag if this is a RESALE duplicate
   if (typeof newPlotTag !== 'undefined') {
     data.plot_tag = newPlotTag;
@@ -452,6 +455,8 @@ export const linkPlotBuyer = asyncHandler(async (req, res) => {
   const plot = await plotModel.findById(Number(req.params.id), pool);
   if (!plot) return res.status(404).json({ message: 'Plot not found' });
   const memberId = await validatePlotBuyerMember(plot.site_id, req.body.buyer_member_id, pool);
+  if (plot.booking_cancelled_at) return res.status(409).json({ message: 'This cancelled booking is preserved. Link the buyer on the current booking.' });
+  assertBuyerNotCoApplicant(plot, memberId);
   const { rows: [updated] } = await pool.query(`
     UPDATE plots p SET buyer_member_id = m.id, updated_at = NOW()
     FROM members m WHERE p.id = $1 AND m.id = $2 AND m.site_id = p.site_id
@@ -512,6 +517,7 @@ export const updatePlot = asyncHandler(withPlotBookingAllocations(async (req, re
     const v = req.body[f] === null ? '' : String(req.body[f]).trim();
     updateData[f] = v ? (f === 'co_applicant_name' || f === 'co_applicant_pan' ? v.toUpperCase() : v) : null;
   }
+  Object.assign(updateData, await coApplicantsForWrite(req.body, existing.site_id, pool, { existing, buyerMemberId: Object.hasOwn(updateData, 'buyer_member_id') ? updateData.buyer_member_id : existing.buyer_member_id }));
   if (plot_size !== undefined) updateData.plot_size = parseFloat(plot_size) || null;
   if (plot_size_mtr !== undefined) updateData.plot_size_mtr = parseFloat(plot_size_mtr) || null;
   if (plot_rate !== undefined) updateData.plot_rate = parseFloat(plot_rate) || null;

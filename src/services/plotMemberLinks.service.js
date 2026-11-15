@@ -1,3 +1,4 @@
+import { PLOT_CO_APPLICANTS_JOIN, PLOT_CO_APPLICANTS_SELECT } from './plotCoApplicants.service.js';
 // Prefer an explicitly selected member, then the recorded booking client. Older plots have only a buyer name;
 // resolve that only when it identifies exactly one member in the same site.
 export const PLOT_BUYER_MEMBER_JOIN = `
@@ -35,13 +36,13 @@ export const PLOT_BUYER_KYC_JOIN = `
 export const PLOT_BUYER_KYC_STATUS = `CASE
   WHEN plot_buyer.id IS NULL THEN NULL
   WHEN buyer_kyc.status IS NOT NULL THEN buyer_kyc.status
-  WHEN COALESCE(NULLIF(plot_buyer.phone, ''), NULLIF(plot_buyer.email, '')) IS NOT NULL
-    AND COALESCE(NULLIF(plot_buyer.address, ''), NULLIF(plot_buyer.city, '')) IS NOT NULL
-    AND COALESCE(NULLIF(plot_buyer.aadhar_no, ''), NULLIF(plot_buyer.pan_no, ''), NULLIF(plot_buyer.voter_id, ''),
-      NULLIF(plot_buyer.passport_no, ''), NULLIF(plot_buyer.driving_license_no, '')) IS NOT NULL
-    AND COALESCE(NULLIF(plot_buyer.aadhar_front_url, ''), NULLIF(plot_buyer.aadhar_back_url, ''), NULLIF(plot_buyer.pan_card_url, ''),
-      NULLIF(plot_buyer.voter_id_url, ''), NULLIF(plot_buyer.passport_url, ''), NULLIF(plot_buyer.driving_license_url, ''),
-      NULLIF(plot_buyer.cheque_url, ''), NULLIF(plot_buyer.other_kyc_url, '')) IS NOT NULL THEN 'COMPLETE'
+  WHEN COALESCE(NULLIF((to_jsonb(plot_buyer)->>'phone'), ''), NULLIF((to_jsonb(plot_buyer)->>'email'), '')) IS NOT NULL
+    AND COALESCE(NULLIF((to_jsonb(plot_buyer)->>'address'), ''), NULLIF((to_jsonb(plot_buyer)->>'city'), '')) IS NOT NULL
+    AND COALESCE(NULLIF((to_jsonb(plot_buyer)->>'aadhar_no'), ''), NULLIF((to_jsonb(plot_buyer)->>'pan_no'), ''), NULLIF((to_jsonb(plot_buyer)->>'voter_id'), ''),
+      NULLIF((to_jsonb(plot_buyer)->>'passport_no'), ''), NULLIF((to_jsonb(plot_buyer)->>'driving_license_no'), '')) IS NOT NULL
+    AND COALESCE(NULLIF((to_jsonb(plot_buyer)->>'aadhar_front_url'), ''), NULLIF((to_jsonb(plot_buyer)->>'aadhar_back_url'), ''), NULLIF((to_jsonb(plot_buyer)->>'pan_card_url'), ''),
+      NULLIF((to_jsonb(plot_buyer)->>'voter_id_url'), ''), NULLIF((to_jsonb(plot_buyer)->>'passport_url'), ''), NULLIF((to_jsonb(plot_buyer)->>'driving_license_url'), ''),
+      NULLIF((to_jsonb(plot_buyer)->>'cheque_url'), ''), NULLIF((to_jsonb(plot_buyer)->>'other_kyc_url'), '')) IS NOT NULL THEN 'COMPLETE'
   ELSE 'INCOMPLETE'
 END`;
 
@@ -50,7 +51,7 @@ export function groupMemberPlotNumbers(rows) {
   for (const row of rows) {
     const plotNo = String(row.plot_no || '').trim();
     if (!plotNo) continue;
-    for (const memberId of [row.buyer_member_id, ...(row.broker_member_ids || [])]) {
+    for (const memberId of [row.buyer_member_id, ...(row.broker_member_ids || []), ...(row.co_applicants || []).map(person => person.member_id)]) {
       if (memberId == null) continue;
       const key = String(memberId);
       if (!plotsByMember.has(key)) plotsByMember.set(key, new Set());
@@ -65,7 +66,7 @@ export function groupMemberPlotNumbers(rows) {
 /** Resolve all member plot numbers in one site query, including commission brokers. */
 export async function findMemberPlots(siteId, pool) {
   const { rows } = await pool.query(`
-    SELECT p.id, p.plot_no, p.plot_tag, plot_buyer.id AS buyer_member_id,
+    SELECT p.id, p.plot_no, p.plot_tag, p.buyer_name, plot_buyer.id AS buyer_member_id, ${PLOT_BUYER_KYC_STATUS} AS buyer_kyc_status, ${PLOT_CO_APPLICANTS_SELECT},
       ARRAY(
         SELECT m.id FROM members m
         WHERE m.site_id = p.site_id AND NULLIF(BTRIM(p.booking_by), '') IS NOT NULL
@@ -89,6 +90,8 @@ export async function findMemberPlots(siteId, pool) {
       ) AS broker_member_ids
     FROM plots p
     ${PLOT_BUYER_MEMBER_JOIN}
+    ${PLOT_BUYER_KYC_JOIN}
+    ${PLOT_CO_APPLICANTS_JOIN}
     WHERE p.site_id = $1
   `, [siteId]);
   return groupMemberPlots(rows);
@@ -99,11 +102,14 @@ export function groupMemberPlots(rows) {
   for (const row of rows) {
     const plotNo = String(row.plot_no || '').trim();
     if (row.id == null || !plotNo) continue;
-    for (const memberId of [row.buyer_member_id, ...(row.broker_member_ids || [])]) {
+    for (const memberId of [row.buyer_member_id, ...(row.broker_member_ids || []), ...(row.co_applicants || []).map(person => person.member_id)]) {
       if (memberId == null) continue;
       const key = String(memberId);
       if (!members.has(key)) members.set(key, new Map());
-      members.get(key).set(String(row.id), { id: row.id, plot_no: plotNo, plot_tag: row.plot_tag || null });
+      const coApplicant = (row.co_applicants || []).find(person => Number(person.member_id) === Number(memberId));
+      members.get(key).set(String(row.id), { id: row.id, plot_no: plotNo, plot_tag: row.plot_tag || null,
+        ...(row.buyer_name !== undefined ? { buyer_name: row.buyer_name, buyer_member_id: row.buyer_member_id, buyer_kyc_status: row.buyer_kyc_status, co_applicants: row.co_applicants || [], applicant_role: Number(row.buyer_member_id) === Number(memberId) ? 'buyer' : coApplicant ? 'co_applicant' : 'broker' } : coApplicant ? { applicant_role: 'co_applicant', co_applicants: row.co_applicants } : {}),
+      });
     }
   }
   return new Map([...members].map(([id, plots]) => [id, [...plots.values()].sort((a, b) =>

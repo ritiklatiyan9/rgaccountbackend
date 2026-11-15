@@ -130,3 +130,57 @@ test('retrying an already saved date leaves its positions unchanged', async (t) 
   assert.equal(response.data.already_applied, true);
   assert.ok(calls.every(sql => !sql.includes('INSERT INTO daybook_entry_order\n')));
 });
+
+test('pending-inclusive period reorder validates pending keys against their source creation sequence', async (t) => {
+  const calls = [];
+  t.mock.method(pool, 'connect', async () => ({
+    release() {},
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (sql.includes('INSERT INTO daybook_global_order_state')) return { rows: [{ revision: 2 }] };
+      if (sql.includes('SELECT ordered.entry_key')) {
+        assert.match(sql, /WITH source_rows AS NOT MATERIALIZED/);
+        assert.match(sql, /source_created_at AS created_at/);
+        assert.match(sql, /created_at DESC,\s+transaction_time DESC NULLS LAST/);
+        return { rows: ['expenses:pending', 'day_book:approved'].map(entry_key => ({ entry_key, entry_date: '2026-11-15' })) };
+      }
+      if (sql.includes('WITH deleted AS')) return { rows: [{ deleted_count: 0, revision: 3 }] };
+      return { rows: [], rowCount: 2 };
+    },
+  }));
+  const response = await save({ site_id: 9, include_pending: true, partial: true,
+    global_entry_keys: ['day_book:approved', 'expenses:pending'], expected_revision: 2 });
+  assert.equal(response.status, 200);
+  assert.equal(response.data.order_revision, 3);
+  const write = calls.find(({ sql }) => sql.includes('INSERT INTO daybook_global_order\n'));
+  assert.deepEqual(write.params[2], ['day_book:approved', 'expenses:pending']);
+  assert.equal(calls.at(-1).sql, 'COMMIT');
+});
+
+test('pending-inclusive date reorder preserves pending keys in both presentation layers', async (t) => {
+  const calls = [];
+  t.mock.method(pool, 'connect', async () => ({
+    release() {},
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (sql.includes('INSERT INTO daybook_order_state')) return { rows: [{ revision: 0 }] };
+      if (sql.includes('SELECT entry_key')) return { rows: [] };
+      if (sql.includes('SELECT ordered.entry_key')) {
+        assert.match(sql, /WITH source_rows AS NOT MATERIALIZED/);
+        assert.doesNotMatch(sql, /FROM ledger_entries le/);
+        assert.match(sql, /(?:ordered\.)?created_at DESC,\s+(?:ordered\.)?transaction_time DESC NULLS LAST/);
+        return { rows: ['expenses:pending', 'day_book:approved'].map(entry_key => ({ entry_key, entry_date: '2026-11-15' })) };
+      }
+      if (sql.includes('WITH deleted AS')) return { rows: [{ deleted_count: 0, revision: 1 }] };
+      return { rows: [], rowCount: 2 };
+    },
+  }));
+  const response = await save({ site_id: 9, include_pending: true, partial: true, date: '2026-11-15',
+    entry_keys: ['day_book:approved', 'expenses:pending'], expected_revision: 0 });
+  assert.equal(response.status, 200);
+  const dailyWrite = calls.find(({ sql }) => sql.includes('INSERT INTO daybook_entry_order\n'));
+  assert.deepEqual(dailyWrite.params[3], ['day_book:approved', 'expenses:pending']);
+  const periodWrite = calls.find(({ sql }) => sql.includes('INSERT INTO daybook_global_order ('));
+  assert.deepEqual(periodWrite.params[2], ['day_book:approved', 'expenses:pending']);
+  assert.equal(calls.at(-1).sql, 'COMMIT');
+});

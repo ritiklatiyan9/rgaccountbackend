@@ -20,7 +20,18 @@ function request(app, { method = 'GET', path = '/health', headers = {}, body } =
     res.assignSocket(socket); res.on('error', reject);
     res.on('finish', () => {
       clearTimeout(timer);
-      const raw = Buffer.concat(chunks).toString(), text = raw.slice(raw.indexOf('\r\n\r\n') + 4);
+      const raw = Buffer.concat(chunks).toString();
+      let text = raw.slice(raw.indexOf('\r\n\r\n') + 4);
+      if (res.getHeader('transfer-encoding') === 'chunked' || /^HTTP\/1\.1[^\r]+\r\n[\s\S]*?transfer-encoding: chunked/i.test(raw)) {
+        let remaining = text; text = '';
+        while (remaining.length) {
+          const end = remaining.indexOf('\r\n');
+          const size = Number.parseInt(remaining.slice(0, end), 16);
+          if (!size) break;
+          text += remaining.slice(end + 2, end + 2 + size);
+          remaining = remaining.slice(end + 2 + size + 2);
+        }
+      }
       resolve({ status: res.statusCode, headers: res.getHeaders(), body: text ? JSON.parse(text) : null });
       socket.destroy();
     });
@@ -87,4 +98,50 @@ test('preview listening ports and browser origins are constrained', () => {
   for (const port of [0, 65536, '8009oops', NaN]) assert.throws(() => poolPreviewPort(port));
   for (const origin of [undefined, 'http://localhost:5173', 'http://127.0.0.1:5173']) assert.equal(isPoolPreviewOrigin(origin), true);
   for (const origin of ['http://localhost:5174', 'https://example.com', 'http://127.0.0.1:5173.evil.example']) assert.equal(isPoolPreviewOrigin(origin), false);
+});
+
+test('booking preview retains session authentication for member links and exposes only plot GraphQL fields', async () => {
+  const router = express.Router(), members = express.Router();
+  members.get('/plot-options', (_req, res) => res.json({ plots: [] }));
+  const app = createPoolMoneyPreviewApp({
+    authenticate: (req, res, next) => {
+      if (req.header('Authorization') !== 'Bearer verified') return res.status(401).json({ message: 'Authentication required' });
+      req.user = { id: 1, organization_id: 1, role: 'admin' }; next();
+    },
+    poolMoneyRouter: router, memberRouter: members, plotGraphql: true,
+    database: { query: async () => { throw new Error('This schema check must not query live records'); } },
+    audit: (_req, _res, next) => next(),
+  });
+  assert.equal((await request(app, { path: '/members/plot-options' })).status, 401);
+  assert.equal((await request(app, { path: '/graphql', method: 'POST', body: { query: '{ __typename }' } })).status, 401);
+  const headers = { Authorization: 'Bearer verified' };
+  assert.equal((await request(app, { path: '/members/plot-options', headers })).status, 200);
+  const response = await request(app, { path: '/graphql', method: 'POST', headers, body: { query: '{ __schema { queryType { fields { name } } mutationType { fields { name } } } }' } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.data.__schema.queryType.fields.map(field => field.name).sort(), ['plotPageData', 'plotPaymentDetail']);
+  assert.deepEqual(response.body.data.__schema.mutationType.fields.map(field => field.name), ['invalidatePlotCache']);
+  assert.equal((await request(app)).body.plot_co_applicants, true);
+});
+
+test('optional NOC preview exposes only the five guarded certificate routes', async () => {
+  const calls=[];
+  const handler=name=>(req,res)=>{calls.push(name);res.json({route:name,id:req.params.id});};
+  const options={
+    authenticate:(req,res,next)=>{
+      if(req.header('Authorization')!=='Bearer verified')return res.status(401).json({message:'Authentication required'});
+      req.user={id:1,organization_id:1,role:'admin'};next();
+    },
+    poolMoneyRouter:express.Router(),registryNoc:true,
+    nocHandlers:Object.fromEntries(['getRegistryNoc','saveRegistryNoc','approveRegistryNoc','getPlotNocRegistry','createPlotNocRegistry'].map(name=>[name,handler(name)])),
+    audit:(_req,_res,next)=>next(),
+  };
+  const app=createPoolMoneyPreviewApp(options);
+  const paths=[['GET','/registries/1/noc'],['PUT','/registries/1/noc'],['PUT','/registries/1/noc/approve'],['GET','/plots/1/registry-noc'],['POST','/plots/1/noc-workspace']];
+  for(const [method,path] of paths)assert.equal((await request(app,{method,path})).status,401);
+  assert.deepEqual(calls,[]);
+  for(const [method,path] of paths)assert.equal((await request(app,{method,path,headers:{Authorization:'Bearer verified'},...(method==='GET'?{}:{body:{}})})).status,200);
+  assert.equal(calls.length,5);
+  for(const [method,path] of [['GET','/registries'],['GET','/registries/1'],['POST','/registries'],['PUT','/registries/1'],['DELETE','/registries/1']])assert.equal((await request(app,{method,path,headers:{Authorization:'Bearer verified'}})).status,404);
+  const disabled=createPoolMoneyPreviewApp({...options,registryNoc:false});
+  assert.equal((await request(disabled,{path:'/registries/1/noc'})).status,404);
 });

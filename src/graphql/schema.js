@@ -557,6 +557,11 @@ const ProjectUnitDetailsType = new GraphQLObjectType({
   },
 });
 
+const PlotCoApplicantType = new GraphQLObjectType({ name: 'PlotCoApplicant', fields: {
+  member_id: { type: GraphQLInt }, full_name: { type: GraphQLString }, relation: { type: GraphQLString },
+  phone: { type: GraphQLString }, aadhar_no: { type: GraphQLString }, pan_no: { type: GraphQLString }, kyc_status: { type: GraphQLString },
+} });
+
 const PlotType = new GraphQLObjectType({
   name: 'Plot',
   fields: {
@@ -583,6 +588,7 @@ const PlotType = new GraphQLObjectType({
     approval_status:     { type: GraphQLString },
     plot_tag:            { type: GraphQLString },
     // Co-applicant — one home on the plot row, shared by booking → plot → NOC → registry.
+    co_applicants:        { type: new GraphQLList(PlotCoApplicantType) },
     co_applicant_name:     { type: GraphQLString },
     co_applicant_relation: { type: GraphQLString },
     co_applicant_phone:    { type: GraphQLString },

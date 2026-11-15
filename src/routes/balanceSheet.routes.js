@@ -29,18 +29,22 @@ router.put('/year-end/checklist',...yearEndAccess,requireRole('admin'),saveYearE
 router.post('/year-end/attachments',...yearEndAccess,requireRole('admin'),(req,res,next) => {
   attachmentUpload(req,res,error => error ? res.status(400).json({message:error.code==='LIMIT_FILE_SIZE' ? 'Maximum file size is 25 MB.' : error.message}) : next());
 },optimizeEvidenceImages,uploadYearEndAttachment);
+const cachedReport = cacheResponse({
+  ttlSeconds: 30, namespace: 'balance-sheet',
+  shouldCache: (payload) => (payload?.transactions?.length || 0) <= 1000,
+});
+const readReport = (req, res, next) => requirePermission(req.query.include_pending === 'true' ? 'daybook' : 'balance_sheet', 'read')(req, res, next);
 router.get(
   '/',
   requireRole('admin', 'sub_admin'),
-  requirePermission('balance_sheet', 'read'),
+  readReport,
   requireRegistrySiteAccess({ entity: 'site', source: 'query', key: 'site_id' }),
   // Avoid retaining multi-megabyte full-history payloads in the in-process
   // cache. Small/date-filtered statements still benefit from the 30s cache.
-  cacheResponse({
-    ttlSeconds: 30,
-    namespace: 'balance-sheet',
-    shouldCache: (payload) => (payload?.transactions?.length || 0) <= 1000,
-  }),
+  (req, res, next) => {
+    if (req.query.include_pending === 'true') { res.set('Cache-Control', 'no-store'); return next(); }
+    return cachedReport(req, res, next);
+  },
   getBalanceSheet,
 );
 

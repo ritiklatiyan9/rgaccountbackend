@@ -3,6 +3,10 @@
 import 'dotenv/config';
 import { pathToFileURL } from 'node:url';
 import express from 'express';
+import { createHandler } from 'graphql-http/lib/use/express';
+import { GraphQLSchema, GraphQLObjectType } from 'graphql';
+import { schema as accountsSchema } from '../src/graphql/schema.js';
+import { createMemberRouter } from '../src/routes/member.routes.js';
 import cors from 'cors';
 import pool from '../src/config/db.js';
 import { createSeekPermissionPreviewAuth } from '../src/middlewares/seekPermissionPreviewAuth.middleware.js';
@@ -11,13 +15,17 @@ import auditRequestMiddleware from '../src/middlewares/audit.middleware.js';
 import errorMiddleware from '../src/middlewares/error.middleware.js';
 import { updateSite } from '../src/controllers/site.controller.js';
 import { getCommissionAllocations, getCommissionReceivers } from '../src/controllers/plotCommissionV2.controller.js';
-import { createPlot, updatePlot, cancelBooking, rebookPlot } from '../src/controllers/plot.controller.js';
-import requirePermission from '../src/middlewares/permission.middleware.js';
+import { createPlot, updatePlot, cancelBooking, rebookPlot, getPlot, listPlotKycMembers, linkPlotBuyer, getPlotNocRegistry, createPlotNocRegistry } from '../src/controllers/plot.controller.js';
+import requirePermission, { requireAnyPermission } from '../src/middlewares/permission.middleware.js';
+import requireRegistrySiteAccess from '../src/middlewares/registrySiteAccess.middleware.js';
+import { getRegistryNoc, saveRegistryNoc, approveRegistryNoc } from '../src/controllers/registry.controller.js';
 import requirePlotSiteAccess from '../src/middlewares/plotSiteAccess.middleware.js';
 import { invalidateCacheOnSuccess } from '../src/middlewares/cache.middleware.js';
 import { listPendingCheques, manuallyUpdateChequeStatus } from '../src/controllers/bankReconciliation.controller.js';
 import { updateChequeStatus } from '../src/controllers/approval.controller.js';
-import { listDayBookEntries, getModeBalance } from '../src/controllers/daybook.controller.js';
+import { requireAllEntryVisibility } from '../src/middlewares/entryCreatorAccess.middleware.js';
+import { getBalanceSheet } from '../src/controllers/balanceSheet.controller.js';
+import { listDayBookEntries, getModeBalance, updateDayBookOrder } from '../src/controllers/daybook.controller.js';
 import { assertPoolSiteAccess } from '../src/services/poolMoney.service.js';
 import { listBankAccounts, listBankEntries } from '../src/controllers/bank.controller.js';
 
@@ -32,7 +40,8 @@ export function poolPreviewPort(value = process.env.POOL_MONEY_PREVIEW_PORT || 8
 
 export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, database = pool,
   saveProjectProfile = updateSite, createShop = createPlot, updateShop = updatePlot,
-  audit = auditRequestMiddleware, commissionRouter } = {}) {
+  audit = auditRequestMiddleware, commissionRouter, memberRouter, plotGraphql = false, registryNoc = false,
+  nocHandlers = { getRegistryNoc, saveRegistryNoc, approveRegistryNoc, getPlotNocRegistry, createPlotNocRegistry } } = {}) {
   if (typeof authenticate !== 'function' || !poolMoneyRouter) throw new Error('Preview authentication and Pool Money router are required.');
   const app = express();
   app.disable('x-powered-by');
@@ -44,11 +53,31 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     allowedHeaders: ['Authorization', 'Content-Type', 'X-Session-ID', 'X-App-Context', 'X-Transaction-Date', 'X-Transaction-Time'],
   }));
   app.use(express.json({ limit: '128kb' }));
-  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true }));
+  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true, plot_co_applicants: Boolean(memberRouter && plotGraphql), registry_noc: registryNoc }));
   app.use(['/plots/pool-money', '/sites'], authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.use(audit);
   app.use('/plots', poolMoneyRouter);
   if (commissionRouter) app.use('/plot-commission', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, commissionRouter);
+
+  if (memberRouter) app.use('/members', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, memberRouter);
+  if (plotGraphql) {
+    // Reuse production field resolvers and authorization with a narrow schema.
+    const queryFields = accountsSchema.getQueryType().toConfig().fields;
+    const mutationFields = accountsSchema.getMutationType().toConfig().fields;
+    const schema = new GraphQLSchema({
+      query: new GraphQLObjectType({ name: 'Query', fields: Object.fromEntries(['plotPageData', 'plotPaymentDetail'].map(key => [key, queryFields[key]])) }),
+      mutation: new GraphQLObjectType({ name: 'Mutation', fields: { invalidatePlotCache: mutationFields.invalidatePlotCache } }),
+    });
+    app.all('/graphql', authenticate, createHandler({ schema, context: async (request) => {
+      const user = request.raw.user;
+      if (user.role !== 'sub_admin') return { user, permissions: new Map(), siteIds: new Set() };
+      const [permissions, sites] = await Promise.all([
+        database.query('SELECT module, can_read, can_write, can_update, can_delete, can_restore, can_view_all FROM user_permissions WHERE user_id=$1', [user.id]),
+        database.query('SELECT site_id FROM user_sites WHERE user_id=$1', [user.id]),
+      ]);
+      return { user, permissions: new Map(permissions.rows.map(row => [row.module, row])), siteIds: new Set(sites.rows.map(row => Number(row.site_id))) };
+    } }));
+  }
 
   const shopBody = (req, res, next) => (['plot','flat','shop'].includes(req.body?.unit_type)
     || req.body?.unit_type === undefined)
@@ -72,6 +101,28 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
   };
   const bustPlotCache = invalidateCacheOnSuccess(['approvals|', '/approvals', 'plots|', 'plots:pageData:', 'plot-commissions|',
     'plot-commissions-plots|', 'members|', '/daybook', 'registries|', 'registries-meta|']);
+  if (registryNoc) {
+    const accessByRegistry = requireRegistrySiteAccess({ entity: 'registry', source: 'params', key: 'id' });
+    const accessByPlot = requirePlotSiteAccess({ entity: 'plot', source: 'params', key: 'id' });
+    const noStore = (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+    const bustRegistryCache = invalidateCacheOnSuccess(['registries|', 'registries-meta|', 'plots|', 'plots:pageData:', 'approvals|']);
+    // Keep the production NOC permission/site guards on these five routes.
+    // Other registry operations stay on the configured primary API.
+    app.get('/registries/:id/noc', authenticate, requireRole('admin', 'sub_admin'),
+      requireAnyPermission(['plot_registry', 'plot_payments'], 'read'), accessByRegistry, noStore, nocHandlers.getRegistryNoc);
+    app.put('/registries/:id/noc', authenticate, requireRole('admin', 'sub_admin'),
+      requireAnyPermission(['plot_registry', 'plot_payments'], 'update'), accessByRegistry, bustRegistryCache, nocHandlers.saveRegistryNoc);
+    app.put('/registries/:id/noc/approve', authenticate, requireRole('admin'),
+      requireAnyPermission(['plot_registry', 'plot_payments'], 'update'), accessByRegistry, bustRegistryCache, nocHandlers.approveRegistryNoc);
+    app.get('/plots/:id/registry-noc', authenticate, requireRole('admin', 'sub_admin'),
+      requirePermission('plot_payments', 'read'), accessByPlot, noStore, nocHandlers.getPlotNocRegistry);
+    app.post('/plots/:id/noc-workspace', authenticate, requireRole('admin', 'sub_admin'),
+      requirePermission('plot_payments', 'write'), accessByPlot, bustPlotCache, nocHandlers.createPlotNocRegistry);
+  }
+  app.get('/plots/kyc-members', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
+    requirePlotSiteAccess({ entity: 'site', source: 'query', key: 'site_id' }), listPlotKycMembers);
+  app.put('/plots/:id/kyc-member', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'),
+    requirePlotSiteAccess({ entity: 'plot', source: 'params', key: 'id' }), bustPlotCache, linkPlotBuyer);
   app.get('/plots/booking-receivers', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
     (_req, res, next) => { res.set('Cache-Control','no-store'); next(); }, getCommissionReceivers);
   app.get('/plots/:id/booking-allocations', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
@@ -79,6 +130,8 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     (req, res, next) => { res.set('Cache-Control','no-store'); req.query.plot_id=req.params.id; next(); }, getCommissionAllocations);
   app.get('/plots/:id/cancellation-preview',authenticate,requireRole('admin','sub_admin'),requirePermission('plot_payments','update'),
     requirePlotSiteAccess({entity:'plot',source:'params',key:'id'}),(req,res,next)=>{res.set('Cache-Control','no-store');req.query.plot_id=req.params.id;req.includeSettlementBalances=true;next();},getCommissionAllocations);
+  app.get('/plots/:id', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
+    requirePlotSiteAccess({ entity: 'plot', source: 'params', key: 'id' }), getPlot);
   app.post('/plots/:id/cancel-booking', authenticate, requireRole('admin','sub_admin'), requirePermission('plot_payments','update'),
     requirePlotSiteAccess({entity:'plot',source:'params',key:'id'}),bustPlotCache,cancelBooking);
   app.post('/plots/:id/rebook', authenticate, requireRole('admin','sub_admin'), requirePermission('plot_payments','write'),requirePermission('plot_payments','update'),
@@ -115,8 +168,12 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     try { await assertPoolSiteAccess(database, req.user, req.query.site_id); next(); }
     catch (error) { next(error); }
   };
-  app.get('/daybook', authenticate, requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), readDaybookSite, listDayBookEntries);
-  app.get('/daybook/mode-balance', authenticate, requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), readDaybookSite, getModeBalance);
+  const noStoreDaybook = (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+  app.get('/balance-sheet', authenticate, requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), readDaybookSite, noStoreDaybook, getBalanceSheet);
+  app.put('/daybook/order', authenticate, requireRole('admin', 'sub_admin'), requirePermission('daybook', 'update'), requireAllEntryVisibility('daybook'),
+    (req, _res, next) => { req.query.site_id = req.body.site_id; next(); }, readDaybookSite, noStoreDaybook, updateDayBookOrder);
+  app.get('/daybook', authenticate, requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), readDaybookSite, noStoreDaybook, listDayBookEntries);
+  app.get('/daybook/mode-balance', authenticate, requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), readDaybookSite, noStoreDaybook, getModeBalance);
   app.get('/banks', authenticate, requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), listBankAccounts);
   app.get('/banks/:id/entries', authenticate, requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), listBankEntries);
 
@@ -164,7 +221,8 @@ export async function startPoolMoneyPreview({ port = poolPreviewPort(), database
   // router retains its own role, module and site guards unchanged.
   const app = createPoolMoneyPreviewApp({ database, authenticate,
     poolMoneyRouter: createPoolMoneyRouter({ authenticate: (_req, _res, next) => next() }),
-    commissionRouter: createPlotCommissionRouter({ authenticate: (_req, _res, next) => next() }) });
+    commissionRouter: createPlotCommissionRouter({ authenticate: (_req, _res, next) => next() }),
+    memberRouter: createMemberRouter({ authenticate: (_req, _res, next) => next() }), plotGraphql: true, registryNoc: true });
   const server = await new Promise((resolve, reject) => {
     const listener = app.listen(poolPreviewPort(port), '127.0.0.1', () => resolve(listener));
     listener.once('error', reject);

@@ -16,6 +16,22 @@ export const lockedCashCollectorSql = `
           USING ERRCODE='23514',CONSTRAINT='cash_wallet_collector_locked';
       END IF;
       IF v_row->>'created_by' IS DISTINCT FROM to_jsonb(OLD)->>'created_by' THEN
+        -- A derived farmer mirror historically lost its maker during sync.
+        -- Restore only a missing identity, proved by the unchanged source
+        -- and site. Actual payment makers and cash custody stay immutable.
+        IF TG_TABLE_NAME='cash_flow_entries'
+          AND to_jsonb(OLD)->>'created_by' IS NULL
+          AND v_row->>'source_module'='farmer_payments'
+          AND to_jsonb(OLD)->>'source_module'=v_row->>'source_module'
+          AND to_jsonb(OLD)->>'source_id'=v_row->>'source_id'
+          AND to_jsonb(OLD)->>'site_id'=v_row->>'site_id' THEN
+          IF EXISTS(SELECT 1 FROM farmer_payments fp JOIN farmers f ON f.id=fp.farmer_id
+            WHERE fp.id=NULLIF(v_row->>'source_id','')::integer
+              AND f.site_id=NULLIF(v_row->>'site_id','')::integer
+              AND fp.created_by=NULLIF(v_row->>'created_by','')::integer) THEN
+            RETURN NEW;
+          END IF;
+        END IF;
         RAISE EXCEPTION 'The original transaction maker cannot be changed.'
           USING ERRCODE='23514',CONSTRAINT='cash_wallet_collector_locked';
       END IF;

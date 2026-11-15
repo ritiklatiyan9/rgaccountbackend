@@ -1,4 +1,5 @@
 import { daybookLedgerDateSql } from './daybookDate.service.js';
+import { daybookLedgerSource } from './daybookPending.service.js';
 /**
  * One presentation sequence, two storage layers.
  *
@@ -53,7 +54,10 @@ export const replaceScopedOrder = (currentKeys, desiredKeys) => {
 const sameSequence = (a, b) => a.length === b.length && a.every((key, index) => key === b[index]);
 
 /** The site's full sequence as readers show it: [{ entry_key, entry_date }]. */
-export async function loadGlobalSequence(client, siteId) {
+export async function loadGlobalSequence(client, siteId, { includePending = false } = {}) {
+  const orderBy = includePending
+    ? SEQUENCE_ORDER_BY.replace('transaction_time DESC NULLS LAST,\n           created_at DESC,', 'created_at DESC,\n           transaction_time DESC NULLS LAST,')
+    : SEQUENCE_ORDER_BY;
   const { rows } = await client.query(
     `SELECT ordered.entry_key, TO_CHAR(ordered.entry_date, 'YYYY-MM-DD') AS entry_date
        FROM (
@@ -61,20 +65,20 @@ export async function loadGlobalSequence(client, siteId) {
            ${LEDGER_ENTRY_KEY_SQL} AS entry_key,
            MIN(dgo.position) AS global_display_position,
            MIN(dbo.position) AS display_position,
-           MAX(${daybookLedgerDateSql('le', 'cfe')}) AS entry_date,
+           MAX(${daybookLedgerDateSql('le', 'cfe', includePending)}) AS entry_date,
            MAX(cfe.transaction_time) AS transaction_time,
            MAX(le.created_at) AS created_at,
            MAX(le.id) AS id
-         FROM ledger_entries le
+         FROM ${daybookLedgerSource(includePending)} le
          LEFT JOIN cash_flow_entries cfe ON cfe.id = SPLIT_PART(le.id, ':', 1)::int
          LEFT JOIN daybook_global_order dgo
            ON dgo.site_id = le.site_id AND dgo.entry_key = ${LEDGER_ENTRY_KEY_SQL}
          LEFT JOIN daybook_entry_order dbo
-           ON dbo.site_id = le.site_id AND dbo.entry_date = ${daybookLedgerDateSql('le', 'cfe')} AND dbo.entry_key = ${LEDGER_ENTRY_KEY_SQL}
+           ON dbo.site_id = le.site_id AND dbo.entry_date = ${daybookLedgerDateSql('le', 'cfe', includePending)} AND dbo.entry_key = ${LEDGER_ENTRY_KEY_SQL}
         WHERE le.site_id = $1
         GROUP BY 1
        ) ordered
-       ${SEQUENCE_ORDER_BY}`,
+       ${orderBy}`,
     [siteId]
   );
   return rows;
@@ -153,8 +157,8 @@ export async function projectDatesFromGlobal(client, { siteId, sequence, dates, 
  * relative order, into the slots they hold in the cross-date sequence.
  * Returns the number of positions rewritten (0 when the order already agreed).
  */
-export async function projectGlobalFromDate(client, { siteId, orderedKeys, userId }) {
-  const sequence = await loadGlobalSequence(client, siteId);
+export async function projectGlobalFromDate(client, { siteId, orderedKeys, userId, includePending = false }) {
+  const sequence = await loadGlobalSequence(client, siteId, { includePending });
   const base = sequence.map((row) => row.entry_key);
   const baseSet = new Set(base);
   const desired = orderedKeys.filter((key) => baseSet.has(key));

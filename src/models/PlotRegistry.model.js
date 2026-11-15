@@ -1,3 +1,4 @@
+import { PLOT_CO_APPLICANTS_SOURCE } from '../services/plotCoApplicants.service.js';
 import { normalizeRegistrySize } from '../utils/registrySize.js';
 import MasterModel from './MasterModel.js';
 import { registryCoverageSql, registryCashAllocationSql } from '../utils/registryCashAllocation.js';
@@ -69,7 +70,8 @@ class PlotRegistryModel extends MasterModel {
         p.booking_by AS agent_name,
         p.plot_tag,
         p.status AS plot_status,
-        p.co_applicant_name, p.co_applicant_relation, p.co_applicant_phone, p.co_applicant_aadhar, p.co_applicant_pan
+        p.co_applicant_name, p.co_applicant_relation, p.co_applicant_phone, p.co_applicant_aadhar, p.co_applicant_pan,
+        ${PLOT_CO_APPLICANTS_SOURCE} AS co_applicants
       FROM plot_registries pr
       LEFT JOIN LATERAL (
         SELECT source.* FROM plots source
@@ -156,7 +158,8 @@ class PlotRegistryModel extends MasterModel {
         ${hasHandovers ? 'COALESCE(ho.handover_count, 0) AS handover_count, ho.last_handover_at,' : '0 AS handover_count, NULL::timestamp AS last_handover_at,'}
         p.plot_tag,
         p.status AS plot_status,
-        p.co_applicant_name, p.co_applicant_relation, p.co_applicant_phone, p.co_applicant_aadhar, p.co_applicant_pan
+        p.co_applicant_name, p.co_applicant_relation, p.co_applicant_phone, p.co_applicant_aadhar, p.co_applicant_pan,
+        ${PLOT_CO_APPLICANTS_SOURCE} AS co_applicants
       FROM plot_registries pr
       LEFT JOIN LATERAL (
         SELECT source.* FROM plots source

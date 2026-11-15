@@ -1,3 +1,6 @@
+import { coApplicantsForWrite } from '../services/plotCoApplicants.service.js';
+import { resolveNocCoApplicants, nocCoApplicantBlockers } from '../services/nocCoApplicants.service.js';
+import { PLOT_BUYER_MEMBER_JOIN } from '../services/plotMemberLinks.service.js';
 import { attachModuleChequeDates, chequeStatusForPaymentEdit } from '../services/chequeDates.service.js';
 import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { registrySizeFromPlot, registryFinanceFromPlot } from '../utils/registrySize.js';
@@ -488,15 +491,13 @@ export const updateRegistry = asyncHandler(async (req, res) => {
         [existing.plot_id]
       );
     }
+    if (Object.keys(coApplicantPatch).length && resolvedPlotId) await applyCoApplicantToPlot(client, resolvedPlotId, coApplicantPatch);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
-  }
-  if (Object.keys(coApplicantPatch).length && (updateData.plot_id || existing.plot_id)) {
-    await applyCoApplicantToPlot(pool, updateData.plot_id || existing.plot_id, coApplicantPatch);
   }
   res.json({ registry: updated, plot_status_updated: (plotBumpRes.rows?.length || 0) > 0 });
 });
@@ -791,25 +792,20 @@ export const getRegistryAutocomplete = asyncHandler(async (req, res) => {
  * Who signs the NOC and whether their KYC is done. The purchaser is resolved from the
  * plot's booking (client member) or, for legacy plots without a booking, by an exact
  * name match on the site's clients. KYC = a VERIFIED kyc_case (or the booking's own
- * VERIFIED flag). The co-applicant comes from the client's profile; when the NOC is
- * set to include them, their Aadhaar or PAN must be on record.
+ * VERIFIED flag). Every included co-applicant has a separate client profile and verified KYC.
  */
 const CO_APPLICANT_FIELDS = ['co_applicant_name', 'co_applicant_relation', 'co_applicant_phone', 'co_applicant_aadhar', 'co_applicant_pan'];
-const cleanCoApplicant = (body) => {
-  const out = {};
-  for (const f of CO_APPLICANT_FIELDS) {
-    if (body[f] === undefined) continue;
-    const v = body[f] === null ? '' : String(body[f]).trim();
-    out[f] = v ? (f === 'co_applicant_name' || f === 'co_applicant_pan' ? v.toUpperCase() : v).slice(0, f === 'co_applicant_name' ? 255 : f === 'co_applicant_relation' ? 100 : 20) : null;
-  }
-  return out;
-};
-/** The plot row is the one home of the co-applicant; both edit modals write here. */
+const cleanCoApplicant = (body) => Object.fromEntries([...CO_APPLICANT_FIELDS, 'co_applicants']
+  .filter(field => Object.hasOwn(body, field)).map(field => [field, body[field]]));
+/** Registry edits write the same canonical plot draft within their transaction. */
 const applyCoApplicantToPlot = async (db, plotId, body) => {
-  const data = cleanCoApplicant(body);
+  if (!plotId || !Object.keys(body).length) return;
+  const { rows: [plot] } = await db.query('SELECT * FROM plots WHERE id=$1 FOR UPDATE', [plotId]);
+  if (!plot) return;
+  if (plot.booking_cancelled_at) throw Object.assign(new Error('Cancelled booking applicants are preserved.'), { statusCode: 409 });
+  const data = await coApplicantsForWrite(body, plot.site_id, db, { existing: plot });
   const keys = Object.keys(data);
-  if (!plotId || !keys.length) return;
-  await db.query(`UPDATE plots SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, updated_at = NOW() WHERE id = $1`, [plotId, ...keys.map((k) => data[k])]);
+  await db.query(`UPDATE plots SET ${keys.map((key, i) => `${key}=$${i + 2}`).join(',')},updated_at=NOW() WHERE id=$1`, [plotId, ...Object.values(data)]);
 };
 
 // Client types that may sign a NOC on the company's behalf.
@@ -817,19 +813,32 @@ const COMPANY_MEMBER_TYPES = ['PARTNER', 'EMPLOYEE', 'MEMBER'];
 
 const resolveNocPeople = async (db, registry, plot) => {
   const siteId = registry.site_id;
-  const plotId = plot?.id || registry.plot_id || null;
+  let plotId = plot?.id || registry.plot_id || null;
+  if (!plotId && registry.plot_no) {
+    plotId = (await db.query(`SELECT id FROM plots WHERE site_id=$1 AND UPPER(plot_no)=UPPER($2)
+      ORDER BY (UPPER(COALESCE(plot_tag,''))='OLD'),id DESC LIMIT 1`, [siteId, registry.plot_no])).rows[0]?.id || null;
+  }
   const buyerName = String(registry.customer_name || plot?.buyer_name || '').trim().toUpperCase();
   const memberCols = `m.id, m.full_name, m.phone, m.co_applicant_name, m.co_applicant_relation, m.co_applicant_phone,
               NULLIF(BTRIM(COALESCE(m.co_applicant_aadhar, '')), '') AS co_aadhar,
               NULLIF(BTRIM(COALESCE(m.co_applicant_pan, '')), '') AS co_pan`;
   let row = null;
   if (plotId) {
+    const explicit = await db.query(`SELECT ${memberCols}, buyer_booking.id AS booking_id, buyer_booking.booking_no,
+      buyer_booking.kyc_status AS booking_kyc_status, 'plot'::text AS source FROM plots p ${PLOT_BUYER_MEMBER_JOIN}
+      JOIN members m ON m.id=plot_buyer.id AND m.site_id=p.site_id
+      LEFT JOIN LATERAL (SELECT b.id,b.booking_no,b.kyc_status FROM bookings b WHERE b.plot_id=p.id AND b.site_id=p.site_id
+        AND b.client_member_id=m.id AND COALESCE(b.status,'') NOT ILIKE 'cancel%' ORDER BY b.id DESC LIMIT 1) buyer_booking ON true
+      WHERE p.id=$1 AND p.site_id=$2`, [plotId, siteId]);
+    row = explicit.rows[0] || null;
+  }
+  if (plotId && !row) {
     const r = await db.query(
       `SELECT ${memberCols}, b.id AS booking_id, b.booking_no, b.kyc_status AS booking_kyc_status, 'booking'::text AS source
          FROM bookings b JOIN members m ON m.id = b.client_member_id
-        WHERE b.plot_id = $1 AND COALESCE(b.status, '') NOT ILIKE 'cancel%'
+        WHERE b.plot_id = $1 AND b.site_id=$2 AND m.site_id=$2 AND COALESCE(b.status, '') NOT ILIKE 'cancel%'
         ORDER BY b.created_at DESC NULLS LAST, b.id DESC LIMIT 1`,
-      [plotId]
+      [plotId, siteId]
     );
     row = r.rows[0] || null;
   }
@@ -838,6 +847,7 @@ const resolveNocPeople = async (db, registry, plot) => {
       `SELECT ${memberCols}, NULL::int AS booking_id, NULL::text AS booking_no, NULL::text AS booking_kyc_status, 'name_match'::text AS source
          FROM members m
         WHERE m.site_id = $1 AND UPPER(BTRIM(COALESCE(m.full_name, ''))) = $2
+          AND (SELECT COUNT(*) FROM members duplicate WHERE duplicate.site_id=$1 AND UPPER(BTRIM(COALESCE(duplicate.full_name,'')))=$2)=1
         ORDER BY m.id DESC LIMIT 1`,
       [siteId, buyerName]
     );
@@ -846,25 +856,16 @@ const resolveNocPeople = async (db, registry, plot) => {
   let kyc = { status: 'NONE', verified: false, case_id: null, verified_at: null };
   if (row) {
     const k = await db.query(
-      `SELECT id, status, verified_at FROM kyc_cases WHERE client_member_id = $1
+      `SELECT id, status, verified_at FROM kyc_cases WHERE client_member_id = $1 AND site_id=$2
         ORDER BY CASE WHEN status = 'VERIFIED' THEN 0 ELSE 1 END, updated_at DESC NULLS LAST, id DESC LIMIT 1`,
-      [row.id]
+      [row.id, siteId]
     );
     const c = k.rows[0];
     const verified = c?.status === 'VERIFIED' || String(row.booking_kyc_status || '').toUpperCase() === 'VERIFIED';
     kyc = { status: verified ? 'VERIFIED' : (c?.status || row.booking_kyc_status || 'NOT_STARTED'), verified, case_id: c?.id || null, verified_at: c?.verified_at || null };
   }
-  // Co-applicant: the plot record first (unified across booking → plot → NOC → registry), the client profile as fallback.
-  let plotCo = null;
-  if (plotId) {
-    const pr = await db.query('SELECT co_applicant_name, co_applicant_relation, co_applicant_phone, co_applicant_aadhar, co_applicant_pan FROM plots WHERE id = $1', [plotId]);
-    plotCo = pr.rows[0] || null;
-  }
-  const coApplicant = plotCo?.co_applicant_name
-    ? { name: plotCo.co_applicant_name, relation: plotCo.co_applicant_relation || null, phone: plotCo.co_applicant_phone || null, id_ready: Boolean((plotCo.co_applicant_aadhar || '').trim() || (plotCo.co_applicant_pan || '').trim()), source: 'plot' }
-    : row?.co_applicant_name
-      ? { name: row.co_applicant_name, relation: row.co_applicant_relation || null, phone: row.co_applicant_phone || null, id_ready: Boolean(row.co_aadhar || row.co_pan), source: 'client' }
-      : null;
+  const coApplicants = await resolveNocCoApplicants(db, siteId, plotId, row);
+  const coApplicant = coApplicants[0] || null;
   // Tri-state toggle: NULL = include automatically whenever a co-applicant exists.
   const includeCo = registry.noc_include_co_applicant === null || registry.noc_include_co_applicant === undefined
     ? Boolean(coApplicant)
@@ -872,8 +873,7 @@ const resolveNocPeople = async (db, registry, plot) => {
   const blockers = [];
   if (!row) blockers.push(`No client record found for "${buyerName || 'the purchaser'}" — link the buyer to a client whose KYC is complete`);
   else if (!kyc.verified) blockers.push(`${row.full_name}: KYC not verified (${kyc.status})`);
-  if (includeCo && !coApplicant) blockers.push('Co-applicant is switched on, but there is no co-applicant on the plot or client record');
-  if (includeCo && coApplicant && !coApplicant.id_ready) blockers.push(`${coApplicant.name}: add the co-applicant's Aadhaar or PAN in the client profile`);
+  blockers.push(...nocCoApplicantBlockers(coApplicants, includeCo));
   return {
     member: row ? {
       id: row.id, full_name: row.full_name, phone: row.phone, source: row.source,
@@ -881,6 +881,7 @@ const resolveNocPeople = async (db, registry, plot) => {
       kyc_status: kyc.status, kyc_verified: kyc.verified, kyc_case_id: kyc.case_id, kyc_verified_at: kyc.verified_at,
     } : null,
     co_applicant: coApplicant,
+    co_applicants: coApplicants,
     include_co_applicant: includeCo,
     kyc_ready: blockers.length === 0,
     blockers,
@@ -1617,7 +1618,10 @@ export const saveRegistryNoc = asyncHandler(async (req, res) => {
       const row = namedRes.rows.find((r) => r.id === memberId);
       return { id: memberId, name: row?.full_name || null };
     };
+    const issuedPeople = typeof resolveNocPeople === 'function'
+      ? await resolveNocPeople(client, { ...registry, noc_include_co_applicant: includeCo }, null) : null;
     const snapshot = {
+      people: issuedPeople,
       noc: {
         ref_no: refNo,
         ack_no: ackNo,

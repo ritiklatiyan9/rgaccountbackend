@@ -24,6 +24,11 @@ export const statements = [
     ON data_storage_entries(site_id, COALESCE(parent_id, 0), lower(name))`,
   `CREATE INDEX IF NOT EXISTS data_storage_parent
     ON data_storage_entries(site_id, parent_id, kind, name)`,
+  // Per-file visibility: private = uploader only, selected = uploader + shared_with
+  // user ids, everyone = anyone who can open the site (the original behaviour).
+  `ALTER TABLE data_storage_entries ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'everyone'
+    CHECK (visibility IN ('private', 'selected', 'everyone'))`,
+  `ALTER TABLE data_storage_entries ADD COLUMN IF NOT EXISTS shared_with INTEGER[] NOT NULL DEFAULT '{}'`,
 ];
 
 export async function up(database) {

@@ -22,11 +22,12 @@ async function fixture(t) {
   const sql = new PGlite();
   t.after(() => sql.close());
   await sql.exec(`CREATE TABLE sites(id INTEGER PRIMARY KEY, organization_id INTEGER NOT NULL);
-    CREATE TABLE users(id INTEGER PRIMARY KEY);
+    CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT, role TEXT, organization_id INTEGER, is_active BOOLEAN DEFAULT true);
     CREATE TABLE user_sites(user_id INTEGER, site_id INTEGER);
     INSERT INTO sites VALUES(1,1),(2,1),(3,2);
-    INSERT INTO users VALUES(1),(2);
-    INSERT INTO user_sites VALUES(2,1);`);
+    INSERT INTO users(id,name,role,organization_id) VALUES(1,'Admin','admin',1),(2,'Sub','sub_admin',1),
+      (3,'Colleague','sub_admin',1),(4,'Other org','sub_admin',2),(5,'Other site','sub_admin',1);
+    INSERT INTO user_sites VALUES(2,1),(3,1),(5,2);`);
   const query = async (text, values) => { const result = await sql.query(text, values); return { ...result, rowCount: result.affectedRows }; };
   const database = { query, connect: async () => ({ query, release() {} }) };
   await up(database);
@@ -85,6 +86,47 @@ test('site and organisation isolation apply to every operation and breadcrumbs',
   }
   assert.equal(stored.size, 1);
   await service.list({ ...admin, role: 'super_admin' }, { site_id: 3 });
+});
+
+test('Only me, Selected people and Everyone are enforced on every read path; only the uploader changes them', async (t) => {
+  const { service, stored } = await fixture(t);
+  const colleague = { id: 3, role: 'sub_admin', organization_id: 1 };
+  // Admins of the organisation plus sub-admins of this site, never the viewer.
+  assert.deepEqual((await service.people(subAdmin, { site_id: 1 })).people.map((person) => person.id), [1, 3]);
+  const mine = await service.upload(subAdmin, { site_id: 1, visibility: 'private' }, sampleFile('mine.txt'));
+  const shared = await service.upload(subAdmin, { site_id: 1, visibility: 'selected', shared_with: '3,2,3' }, sampleFile('shared.txt'));
+  await service.upload(subAdmin, { site_id: 1 }, sampleFile('public.txt'));
+  assert.deepEqual([mine.visibility, shared.shared_with], ['private', [3]]);
+  const names = async (user) => (await service.list(user, { site_id: 1 })).entries.map((entry) => entry.name);
+  assert.deepEqual(await names(subAdmin), ['mine.txt', 'public.txt', 'shared.txt']);
+  assert.deepEqual(await names(colleague), ['public.txt', 'shared.txt']);
+  assert.deepEqual(await names(admin), ['public.txt']);
+  assert.equal((await service.list(admin, { site_id: 1 })).stats.files, 1);
+  assert.equal((await service.list(admin, { site_id: 1, q: 'mine' })).total, 0);
+  for (const operation of [service.download(admin, 1, mine.id), service.download(colleague, 1, mine.id),
+    service.rename(admin, 1, shared.id, { name: 'taken.txt' }), service.remove(colleague, 1, mine.id)]) {
+    await assert.rejects(operation, { statusCode: 404 });
+  }
+  await service.download(colleague, 1, shared.id);
+  // Refused shares are rejected before anything is stored.
+  for (const body of [{ visibility: 'secret' }, { visibility: 'selected' }, { visibility: 'selected', shared_with: '2' },
+    { visibility: 'selected', shared_with: '4' }, { visibility: 'selected', shared_with: '5' }, { visibility: 'selected', shared_with: 'x' }]) {
+    await assert.rejects(service.upload(subAdmin, { site_id: 1, ...body }, sampleFile('refused.txt')), { statusCode: 400 });
+  }
+  assert.equal(stored.size, 3);
+  await assert.rejects(service.share(colleague, 1, shared.id, { visibility: 'everyone' }), { statusCode: 403 });
+  const opened = await service.share(subAdmin, 1, mine.id, { visibility: 'selected', shared_with: [3, 1, 5, 2] });
+  assert.deepEqual(opened.shared_with, [1, 3]);
+  assert.deepEqual(await names(admin), ['mine.txt', 'public.txt']);
+  await service.share(subAdmin, 1, mine.id, { visibility: 'everyone', shared_with: [1] });
+  assert.deepEqual((await service.list(colleague, { site_id: 1 })).entries.find((entry) => entry.id === mine.id).shared_with, []);
+  // A folder that looks empty but holds someone's private file cannot be deleted.
+  const folder = await service.createFolder(admin, { site_id: 1, name: 'Team' });
+  await assert.rejects(service.share(admin, 1, folder.id, { visibility: 'private' }), { statusCode: 400 });
+  await service.upload(subAdmin, { site_id: 1, parent_id: folder.id, visibility: 'private' }, sampleFile('hidden.txt'));
+  assert.equal((await service.list(admin, { site_id: 1, parent_id: folder.id })).total, 0);
+  await assert.rejects(service.remove(admin, 1, folder.id), { statusCode: 409 });
+  await assert.rejects(service.upload(admin, { site_id: 1, parent_id: folder.id }, sampleFile('hidden.txt')), { statusCode: 409 });
 });
 
 test('sub-admin storage access is enabled once and later permission changes are respected', async (t) => {
@@ -294,6 +336,25 @@ test('HTTP API enforces authentication and each action permission, accepts multi
   const unicodeUpload = await request('/files', { method: 'POST', body: unicodeBody }, 'editor');
   assert.equal(unicodeUpload.status, 201);
   assert.equal((await unicodeUpload.json()).entry.name, 'खाता.txt');
+  // All four multipart fields fit the upload limits; visibility changes need update access.
+  const sharedBody = new FormData();
+  sharedBody.set('site_id', '1');
+  sharedBody.set('parent_id', String(folder.id));
+  sharedBody.set('visibility', 'selected');
+  sharedBody.set('shared_with', '1');
+  sharedBody.set('file', new Blob(['shared']), 'shared.txt');
+  const sharedUpload = await request('/files', { method: 'POST', body: sharedBody }, 'editor');
+  assert.equal(sharedUpload.status, 201);
+  const sharedEntry = (await sharedUpload.json()).entry;
+  assert.deepEqual([sharedEntry.visibility, sharedEntry.shared_with], ['selected', [1]]);
+  assert.equal((await request(`/${sharedEntry.id}/download?site_id=1`)).status, 200);
+  const makePrivate = jsonBody({ visibility: 'private' });
+  assert.equal((await request(`/${sharedEntry.id}/visibility?site_id=1`, { method: 'PATCH', ...makePrivate }, 'viewer')).status, 403);
+  const madePrivate = await request(`/${sharedEntry.id}/visibility?site_id=1`, { method: 'PATCH', ...makePrivate }, 'editor');
+  assert.equal((await madePrivate.json()).entry.visibility, 'private');
+  assert.equal((await request(`/${sharedEntry.id}/download?site_id=1`)).status, 404);
+  const people = await request('/people?site_id=1', {}, 'viewer');
+  assert.deepEqual((await people.json()).people.map((person) => person.name), ['Admin', 'Colleague']);
   for (const [url, method, payload] of [
     ['/folders', 'POST', { site_id: 1, name: 'Forbidden' }],
     [`/${file.id}?site_id=1`, 'PATCH', { name: 'Forbidden' }],

@@ -1,3 +1,4 @@
+import { daybookLedgerSource } from '../services/daybookPending.service.js';
 import pool from '../config/db.js';
 import { SEQUENCE_ORDER_BY } from '../services/daybookOrderSync.service.js';
 import { attachTransactionParticulars } from '../services/transactionParticulars.service.js';
@@ -20,7 +21,7 @@ import { daybookLedgerDateSql } from '../services/daybookDate.service.js';
 const SCOPED = `
   WITH scoped_entries AS (
     SELECT
-      le.*,
+      le.*, le.debit AS display_debit, le.credit AS display_credit,
       CASE WHEN $13::boolean THEN ${daybookLedgerDateSql()} ELSE le.entry_date END AS report_date,
       creator_cfe.transaction_time,
       creator_cfe.id AS cheque_ledger_id,
@@ -234,7 +235,7 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
     id,
     TO_CHAR(report_date, 'YYYY-MM-DD') AS entry_date,
     TO_CHAR(entry_date, 'YYYY-MM-DD') AS cheque_apply_date,
-    particular, remarks, debit, credit,
+    particular, remarks, display_debit AS debit, display_credit AS credit,
     raw_mode AS payment_mode,
     bucket,
     CASE WHEN tds_settlement_id IS NOT NULL THEN 'tds_settlements' ELSE source_key END AS source_key,
@@ -259,6 +260,16 @@ const REPORT_TRANSACTIONS_QUERY = `${SCOPED}
   LIMIT $9::int
 `;
 
+export function balanceSheetReportSql(includePending = false) {
+  const queryForBook = (sql) => includePending ? sql
+      .replace('le.*, le.debit AS display_debit, le.credit AS display_credit,', 'le.*,')
+      .replaceAll('FROM ledger_entries le', () => `FROM ${daybookLedgerSource(true)} le`)
+      .replaceAll(daybookLedgerDateSql(), daybookLedgerDateSql('le', 'creator_cfe', true))
+      .replace('transaction_time DESC NULLS LAST,\n           created_at DESC,', 'created_at DESC,\n           transaction_time DESC NULLS LAST,') : sql;
+
+  return { metadata: queryForBook(REPORT_META_QUERY), transactions: queryForBook(REPORT_TRANSACTIONS_QUERY) };
+}
+
 class BalanceSheetModel {
   async getReport({
     siteId,
@@ -275,19 +286,22 @@ class BalanceSheetModel {
     creatorId = null,
     chequeTransactionDates = false,
     includeUndatedCheques = false,
+    includePending = false,
   }) {
     const params = [
       siteId, dateFrom, dateTo, scope, source, paymentMode, direction, search, limit, grain, plotId, creatorId, chequeTransactionDates, includeUndatedCheques,
     ];
 
+    const queries = balanceSheetReportSql(includePending);
+
     // Run sequentially so one API call cannot reserve two large ledger working
     // sets on the database at the same time. Metadata stays exact for all
     // matching entries; only the returned transaction list observes `limit`.
-    const metaResult = await pool.query(REPORT_META_QUERY, params);
+    const metaResult = await pool.query(queries.metadata, params);
     const report = metaResult.rows[0]?.report || null;
     if (!report) return null;
 
-    const transactionResult = await pool.query(REPORT_TRANSACTIONS_QUERY, params);
+    const transactionResult = await pool.query(queries.transactions, params);
     await attachModuleChequeDates(transactionResult.rows, pool, 'cash_flow_entries', siteId);
     await attachDayBookTds(transactionResult.rows, pool);
     await attachTransactionParticulars(transactionResult.rows, pool);

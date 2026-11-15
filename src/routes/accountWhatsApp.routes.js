@@ -5,6 +5,7 @@ import asyncHandler from "../utils/asyncHandler.js";
 import {
   accountWhatsAppStudio,
   saveAccountWhatsAppStage,
+  saveAccountWhatsAppLanguages,
   createAccountWhatsAppTemplate,
   updateAccountWhatsAppTemplate,
   deleteAccountWhatsAppTemplate,
@@ -80,6 +81,13 @@ router.put(
         req.body || {},
       ),
     ),
+  ),
+);
+// Per-project switch for the optional Hindi message (the Hindi template of each module is set per stage).
+router.put(
+  "/languages",
+  asyncHandler(async (req, res) =>
+    res.json(await saveAccountWhatsAppLanguages(req.user, req.body || {})),
   ),
 );
 router.post(

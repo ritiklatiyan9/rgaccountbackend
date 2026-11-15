@@ -1,9 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import vm from 'node:vm';
 import { daybookEntryDate, daybookLedgerDateSql, daybookMirrorDateSql, daybookSourceDatePredicate } from '../src/services/daybookDate.service.js';
-import { SEQUENCE_ORDER_BY } from '../src/services/daybookOrderSync.service.js';
+import { balanceSheetReportSql } from '../src/models/BalanceSheet.model.js';
 import { loadDayBookAuxiliaryData, loadDayBookModeBalanceData, loadSiteBalanceAsOf } from '../src/services/daybookRead.service.js';
 
 test('Day Book cheque dates never fall back to application dates', () => {
@@ -52,14 +50,11 @@ test('embedded PostgreSQL: daily, period, opening and mode balances all recogniz
       INSERT INTO ledger_entries(id,site_id,entry_date,particular,debit,credit,raw_mode,bucket,source_key,source_id,status,cheque_status,created_at)
         SELECT id::text,site_id,date,'Fixture',debit,credit,cash_type,CASE WHEN cash_type='CASH' THEN 'cash' ELSE 'bank' END,source_module,source_id,status,cheque_status,'2026-10-01'::timestamptz FROM cash_flow_entries WHERE id<>7;
     `);
-    const model = readFileSync(new URL('../src/models/BalanceSheet.model.js', import.meta.url),'utf8').replace(/^import[\s\S]*?;\n/gm,'').replace(/export default[^;]+;/,'');
-    const context = { daybookLedgerDateSql, SEQUENCE_ORDER_BY };
-    vm.createContext(context);
-    vm.runInContext(`${model}\nthis.queries={meta:REPORT_META_QUERY,transactions:REPORT_TRANSACTIONS_QUERY};`,context);
+    const queries = balanceSheetReportSql();
     const report = async (from=null,to=null,clearing=true,includeUndated=false) => {
       const params=[8,from,to,'all','all','all','all','',12000,'day',null,null,clearing,includeUndated];
-      const meta=(await db.query(context.queries.meta,params)).rows[0].report;
-      const rows=(await db.query(context.queries.transactions,params)).rows;
+      const meta=(await db.query(queries.metadata,params)).rows[0].report;
+      const rows=(await db.query(queries.transactions,params)).rows;
       return {...meta,rows};
     };
     const applied = await report('2026-09-30','2026-09-30');

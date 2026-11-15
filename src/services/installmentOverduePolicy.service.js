@@ -52,3 +52,12 @@ export function overdueTemplateBody(policy) {
     : `Overdue interest at ${Number(policy?.annual_rate || 18)}% per year is calculated daily only on the unpaid installment amount that has become due. Future installments are excluded.`;
   return `*Overdue installment penalty notice*\n\nDear {customer_name},\n\nYour {installment_name} for ${fixed ? 'Shop' : 'Plot'} {plot_no} at {project}, due on {due_date}, remains unpaid.\n*Unpaid installment amount:* {amount_due}\n\n${rule}\n\nPlease settle the overdue amount. If you have already paid, contact our office to reconcile your account.\n\nDefence Garden Group`;
 }
+
+/** Hindi counterpart of overdueTemplateBody: same facts, same fields, same project rule. */
+export function overdueTemplateBodyHi(policy) {
+  const fixed = policy?.kind === 'shop_price_increase';
+  const rule = fixed
+    ? `बकाया किस्त पर दुकान की कीमत में ₹${Number(policy.amount).toLocaleString('en-IN')} की वृद्धि लागू होती है${policy.frequency === 'once_per_shop' ? ', प्रति दुकान केवल एक बार' : ' प्रत्येक चूकी हुई किस्त पर'}।`
+    : `बकाया राशि पर ${Number(policy?.annual_rate || 18)}% वार्षिक की दर से ब्याज प्रतिदिन केवल उसी अदत्त किस्त राशि पर गिना जाता है जो देय हो चुकी है। भविष्य की किस्तें इसमें शामिल नहीं हैं।`;
+  return `*बकाया किस्त पर पेनल्टी की सूचना*\n\nप्रिय {customer_name},\n\n{project} में ${fixed ? 'दुकान' : 'प्लॉट'} {plot_no} की आपकी {installment_name}, जो {due_date} को देय थी, अभी तक अदा नहीं की गई है।\n*अदत्त किस्त राशि:* {amount_due}\n\n${rule}\n\nकृपया बकाया राशि का भुगतान करें। यदि आप भुगतान कर चुके हैं, तो कृपया अपना खाता मिलान कराने के लिए हमारे कार्यालय से संपर्क करें।\n\nडिफेंस गार्डन ग्रुप`;
+}

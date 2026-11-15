@@ -1,3 +1,4 @@
+import { PLOT_CO_APPLICANTS_JOIN, PLOT_CO_APPLICANTS_SELECT } from '../../services/plotCoApplicants.service.js';
 import { attachModuleChequeDates } from '../../services/chequeDates.service.js';
 /**
  * Plot Payments GraphQL Service
@@ -28,6 +29,7 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
       COALESCE(registry_bank.amount, 0) AS registry_bank_received,
       plot_buyer.id AS buyer_member_id,
       ${PLOT_BUYER_KYC_STATUS} AS buyer_kyc_status,
+        ${PLOT_CO_APPLICANTS_SELECT},
       -- booking_date is a DATE column → pg hands it back as a JS Date, which the
       -- GraphQLString field then serializes as epoch-millis (unparseable on the
       -- client). Emit a stable 'YYYY-MM-DD' string instead. The duplicate column
@@ -92,6 +94,7 @@ export async function getPlotsWithTotals(siteId, creatorId = null) {
     ) ip_agg ON true
     ${PLOT_BUYER_MEMBER_JOIN}
     ${PLOT_BUYER_KYC_JOIN}
+      ${PLOT_CO_APPLICANTS_JOIN}
     WHERE p.site_id = $1
     ORDER BY p.plot_no ASC
   `;

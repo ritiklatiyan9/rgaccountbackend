@@ -14,6 +14,23 @@ export function accountWhatsAppCategory(value) {
     );
   return category;
 }
+/** Message languages. English is always sent; Hindi is an optional second message per module. */
+export const ACCOUNT_WHATSAPP_LANGUAGES = Object.freeze({
+  en: { code: "en", label: "English", native: "English" },
+  hi: { code: "hi", label: "Hindi", native: "हिन्दी" },
+});
+/** 'en_US' and 'en' are both English. Anything unrecognised is returned as-is. */
+export const accountWhatsAppLanguageGroup = (value) =>
+  String(value || "en")
+    .split(/[_-]/)[0]
+    .toLowerCase();
+export function accountWhatsAppLanguage(value) {
+  if (value === undefined || value === null || value === "") return "en";
+  const code = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!ACCOUNT_WHATSAPP_LANGUAGES[code])
+    throw accountWhatsAppError("Choose English or Hindi as the message language");
+  return code;
+}
 const field = (label, sample, value) => ({ label, sample, value });
 const clean = (value) =>
   String(value ?? "")
@@ -68,6 +85,12 @@ const branded = (...paragraphs) =>
     ...paragraphs,
     "For assistance, please contact our office.\n*Team Defence Garden Group*",
   ].join("\n\n");
+const brandedHi = (...paragraphs) =>
+  [
+    "*डिफेंस गार्डन ग्रुप*",
+    ...paragraphs,
+    "सहायता के लिए कृपया हमारे कार्यालय से संपर्क करें।\n*टीम डिफेंस गार्डन ग्रुप*",
+  ].join("\n\n");
 const event = (
   label,
   module,
@@ -76,7 +99,8 @@ const event = (
   description,
   fields,
   body,
-) => ({ label, module, submodule, trigger, description, fields, body });
+  body_hi,
+) => ({ label, module, submodule, trigger, description, fields, body, body_hi });
 export const ACCOUNT_WHATSAPP_EVENTS = {
   CLIENT_ONBOARDED: event(
     "Client onboarded",
@@ -86,6 +110,7 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
     "Confirm a completed client registration with its Member ID.",
     CUSTOMER,
     "*Client registration confirmation*\n\nDear {customer_name},\n\nYour client registration for {project} is complete.\n*Member ID:* {member_id}\n\nUse this ID when contacting our office about your account.\n\nDefence Garden Group",
+    "*क्लाइंट पंजीकरण की पुष्टि*\n\nप्रिय {customer_name},\n\n{project} के लिए आपका क्लाइंट पंजीकरण पूर्ण हो गया है।\n*मेंबर आईडी:* {member_id}\n\nअपने खाते के संबंध में हमारे कार्यालय से संपर्क करते समय इस आईडी का उपयोग करें।\n\nडिफेंस गार्डन ग्रुप",
   ),
   KYC_VERIFIED: event(
     "KYC verified",
@@ -95,6 +120,7 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
     "Confirm that client verification has been completed.",
     CUSTOMER,
     "*KYC verification confirmation*\n\nDear {customer_name},\n\nYour KYC verification for {project} is complete.\n*Member ID:* {member_id}\n\nDefence Garden Group",
+    "*KYC सत्यापन की पुष्टि*\n\nप्रिय {customer_name},\n\n{project} के लिए आपका KYC सत्यापन पूर्ण हो गया है।\n*मेंबर आईडी:* {member_id}\n\nडिफेंस गार्डन ग्रुप",
   ),
   PLOT_BOOKED: event(
     "Plot booking confirmed",
@@ -107,6 +133,11 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "Dear {customer_name},",
       "Your plot booking at {project} is confirmed.\n*Plot:* {plot_no}\n*Member ID:* {member_id}",
       "Please keep these details for future communication.",
+    ),
+    brandedHi(
+      "प्रिय {customer_name},",
+      "{project} में आपकी प्लॉट बुकिंग की पुष्टि हो गई है।\n*प्लॉट:* {plot_no}\n*मेंबर आईडी:* {member_id}",
+      "कृपया भविष्य के संपर्क के लिए ये विवरण सुरक्षित रखें।",
     ),
   ),
   PAYMENT_RECEIVED: event(
@@ -121,6 +152,11 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "We have received your payment for Plot {plot_no} at {project}.\n*Amount:* {amount}\n*Mode:* {payment_mode}\n*Date:* {payment_date}\n*Reference:* {receipt_no}",
       "Thank you for your payment.",
     ),
+    brandedHi(
+      "प्रिय {customer_name},",
+      "{project} में प्लॉट {plot_no} के लिए आपका भुगतान हमें प्राप्त हो गया है।\n*राशि:* {amount}\n*माध्यम:* {payment_mode}\n*दिनांक:* {payment_date}\n*संदर्भ:* {receipt_no}",
+      "आपके भुगतान के लिए धन्यवाद।",
+    ),
   ),
   PAYMENT_SENT: event(
     "Payment sent / refund",
@@ -133,6 +169,11 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "Dear {customer_name},",
       "Your payment / refund for Plot {plot_no} at {project} has been processed.\n*Amount:* {amount}\n*Mode:* {payment_mode}\n*Date:* {payment_date}\n*Reference:* {receipt_no}",
       "Please retain this reference for your records.",
+    ),
+    brandedHi(
+      "प्रिय {customer_name},",
+      "{project} में प्लॉट {plot_no} के लिए आपका भुगतान / रिफंड प्रोसेस कर दिया गया है।\n*राशि:* {amount}\n*माध्यम:* {payment_mode}\n*दिनांक:* {payment_date}\n*संदर्भ:* {receipt_no}",
+      "कृपया अपने रिकॉर्ड के लिए यह संदर्भ संख्या सुरक्षित रखें।",
     ),
   ),
   INSTALLMENT_RECEIVED: event(
@@ -151,6 +192,11 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "Dear {customer_name},",
       "Your payment towards {installment_name} for Plot {plot_no} at {project} has been received.\n*Amount:* {amount}\n*Mode:* {payment_mode}\n*Date:* {payment_date}\n*Reference:* {receipt_no}",
       "Thank you for keeping your installment plan up to date.",
+    ),
+    brandedHi(
+      "प्रिय {customer_name},",
+      "{project} में प्लॉट {plot_no} के लिए {installment_name} के अंतर्गत आपका भुगतान प्राप्त हो गया है।\n*राशि:* {amount}\n*माध्यम:* {payment_mode}\n*दिनांक:* {payment_date}\n*संदर्भ:* {receipt_no}",
+      "अपनी किस्त योजना को अद्यतन रखने के लिए धन्यवाद।",
     ),
   ),
   INSTALLMENT_DUE: event(
@@ -174,6 +220,11 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "This is a reminder for {installment_name} on Plot {plot_no} at {project}.\n*Amount due:* {amount_due}\n*Due date:* {due_date}",
       "If you have already paid, please contact our office to reconcile your account.",
     ),
+    brandedHi(
+      "प्रिय {customer_name},",
+      "यह {project} में प्लॉट {plot_no} की {installment_name} के लिए एक अनुस्मारक है।\n*देय राशि:* {amount_due}\n*देय तिथि:* {due_date}",
+      "यदि आप भुगतान कर चुके हैं, तो कृपया अपना खाता मिलान कराने के लिए हमारे कार्यालय से संपर्क करें।",
+    ),
   ),
   INSTALLMENT_OVERDUE: event(
     "Overdue installment penalty",
@@ -191,6 +242,7 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       as_of_date: field("Notice calculation date", "10 Nov 2026", (d) => date(d.as_of_date)),
     },
     "*Overdue installment notice*\n\nDear {customer_name},\n\nYour {installment_name} for unit {plot_no} at {project} was due on {due_date}.\n*Unpaid amount:* {amount_due}\n\nPlease contact our office to settle the overdue installment and review the applicable project penalty.\n\nDefence Garden Group",
+    "*बकाया किस्त की सूचना*\n\nप्रिय {customer_name},\n\n{project} में यूनिट {plot_no} की आपकी {installment_name} की देय तिथि {due_date} थी।\n*अदत्त राशि:* {amount_due}\n\nबकाया किस्त का भुगतान करने और लागू परियोजना पेनल्टी की जानकारी के लिए कृपया हमारे कार्यालय से संपर्क करें।\n\nडिफेंस गार्डन ग्रुप",
   ),
   REGISTRY_COMPLETED: event(
     "Registry congratulations",
@@ -208,6 +260,11 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "Dear {customer_name},",
       "Congratulations! The registered deed for Plot {plot_no} at {project} has been handed over.\n*Registry date:* {registry_date}",
       "Thank you for placing your trust in Defence Garden Group. We wish you a wonderful journey ahead.",
+    ),
+    brandedHi(
+      "प्रिय {customer_name},",
+      "बधाई हो! {project} में प्लॉट {plot_no} की रजिस्ट्री (रजिस्टर्ड डीड) आपको सौंप दी गई है।\n*रजिस्ट्री दिनांक:* {registry_date}",
+      "डिफेंस गार्डन ग्रुप में अपना विश्वास रखने के लिए धन्यवाद। हम आपके सुखद भविष्य की कामना करते हैं।",
     ),
   ),
 };

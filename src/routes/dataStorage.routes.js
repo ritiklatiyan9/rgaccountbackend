@@ -13,7 +13,7 @@ import { createDataStorageService, MAX_STORAGE_FILE_BYTES } from '../services/da
 export function createDataStorageRouter({ database = pool, files = dataStorageFiles, authenticate = authMiddleware, permission = requirePermission } = {}) {
   const router = express.Router();
   const service = createDataStorageService(database, files);
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_STORAGE_FILE_BYTES, files: 1, fields: 2, fieldSize: 1024 } });
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_STORAGE_FILE_BYTES, files: 1, fields: 4, fieldSize: 1024 } });
   const receiveFile = (req, res, next) => upload.single('file')(req, res, (error) => {
     if (!error) {
       // Multipart filename headers from browsers use UTF-8 bytes; Busboy's
@@ -31,6 +31,7 @@ export function createDataStorageRouter({ database = pool, files = dataStorageFi
   });
   router.use(authenticate);
   router.get('/', permission('data_storage', 'read'), asyncHandler(async (req, res) => res.json(await service.list(req.user, req.query))));
+  router.get('/people', permission('data_storage', 'read'), asyncHandler(async (req, res) => res.json(await service.people(req.user, req.query))));
   router.post('/folders', permission('data_storage', 'write'), asyncHandler(async (req, res) => res.status(201).json({ entry: await service.createFolder(req.user, req.body) })));
   router.post('/files', permission('data_storage', 'write'), receiveFile, optimizeEvidenceImages, asyncHandler(async (req, res) => res.status(201).json({ entry: await service.upload(req.user, req.body, req.file) })));
   const sendFile = (inline) => asyncHandler(async (req, res) => {
@@ -45,6 +46,7 @@ export function createDataStorageRouter({ database = pool, files = dataStorageFi
   // never served as active content from the authenticated application's origin.
   router.get('/:id/preview', permission('data_storage', 'read'), sendFile(true));
   router.get('/:id/download', permission('data_storage', 'read'), sendFile(false));
+  router.patch('/:id/visibility', permission('data_storage', 'update'), asyncHandler(async (req, res) => res.json({ entry: await service.share(req.user, req.query.site_id, req.params.id, req.body) })));
   router.patch('/:id', permission('data_storage', 'update'), asyncHandler(async (req, res) => res.json({ entry: await service.rename(req.user, req.query.site_id, req.params.id, req.body) })));
   router.delete('/:id', permission('data_storage', 'delete'), asyncHandler(async (req, res) => res.json(await service.remove(req.user, req.query.site_id, req.params.id))));
   return router;

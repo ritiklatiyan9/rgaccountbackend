@@ -1,3 +1,4 @@
+import { PLOT_CO_APPLICANTS_JOIN, PLOT_CO_APPLICANTS_SELECT } from '../services/plotCoApplicants.service.js';
 import { daybookSourceDatePredicate } from '../services/daybookDate.service.js';
 import { withLoyaltyVault } from '../services/loyaltyVaultContext.service.js';
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
@@ -54,6 +55,7 @@ class PlotModel extends MasterModel {
       SELECT p.*,
         plot_buyer.id AS buyer_member_id,
         ${PLOT_BUYER_KYC_STATUS} AS buyer_kyc_status,
+        ${PLOT_CO_APPLICANTS_SELECT},
         COALESCE(agg.total_received,    0) AS total_received,
         COALESCE(agg.received_bank,     0) AS received_bank,
         COALESCE(agg.received_cash,     0) AS received_cash,
@@ -63,6 +65,7 @@ class PlotModel extends MasterModel {
       FROM plots p
       ${PLOT_BUYER_MEMBER_JOIN}
       ${PLOT_BUYER_KYC_JOIN}
+      ${PLOT_CO_APPLICANTS_JOIN}
       LEFT JOIN LATERAL (
         -- Same three guards ledger_entries applies (migration 079): approved
         -- only, no bounced/returned cheques, sane date. Without them this
@@ -255,6 +258,7 @@ class PlotModel extends MasterModel {
       SELECT p.*,
         plot_buyer.id AS buyer_member_id,
         ${PLOT_BUYER_KYC_STATUS} AS buyer_kyc_status,
+        ${PLOT_CO_APPLICANTS_SELECT},
         COALESCE(agg.total_received, 0) AS total_received,
         COALESCE(agg.received_bank,  0) AS received_bank,
         COALESCE(agg.received_cash,  0) AS received_cash,
@@ -275,6 +279,7 @@ class PlotModel extends MasterModel {
       ) agg ON TRUE
       ${PLOT_BUYER_MEMBER_JOIN}
       ${PLOT_BUYER_KYC_JOIN}
+      ${PLOT_CO_APPLICANTS_JOIN}
       WHERE p.id = $1
     `;
     const result = await pool.query(query, [id]);
