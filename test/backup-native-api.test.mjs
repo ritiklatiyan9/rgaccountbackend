@@ -5,6 +5,34 @@ import { PGlite } from '@electric-sql/pglite';
 import { migrationSql } from '../src/migrations/249_native_backups.js';
 import { createNativeBackupJobs } from '../src/services/nativeBackupJobs.js';
 import { createNativeBackupRouter } from '../src/routes/nativeBackup.routes.js';
+import { up as installBackups } from '../src/migrations/249_native_backups.js';
+
+test('backup page reports incomplete setup safely and recovers after its metadata migration', { skip: process.env.BACKUP_NATIVE_HTTP_TEST !== 'true' }, async t => {
+  const engine = new PGlite(); t.after(() => engine.close());
+  await engine.exec("CREATE TABLE users(id INTEGER PRIMARY KEY,role TEXT,is_active BOOLEAN); INSERT INTO users VALUES(1,'admin',true)");
+  const query = async (sql, values) => values ? engine.query(sql, values) : (await engine.exec(sql)).at(-1) || { rows: [] };
+  const db = { query, connect: async () => ({ query, release() {} }) };
+  const config = { enabled: true, retentionDays: 30 };
+  const app = express(); app.use(express.json());
+  app.use('/backups', createNativeBackupRouter({ db, config, authenticate: (req, _res, next) => { req.user = { id: 1, role: 'admin' }; next(); } }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const url = `http://127.0.0.1:${server.address().port}/backups/jobs`;
+  const before = await fetch(url);
+  assert.equal(before.status, 200); assert.equal(before.headers.get('cache-control'), 'no-store');
+  const setup = await before.json();
+  assert.equal(setup.readiness.code, 'BACKUP_SCHEMA_REQUIRED');
+  assert.equal(setup.capabilities.enabled, false); assert.equal(setup.historyAvailable, false);
+  const create = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"scope":"database"}' });
+  assert.equal(create.status, 503); assert.equal((await create.json()).code, 'BACKUP_SCHEMA_REQUIRED');
+  await installBackups(db);
+  const installed = await (await fetch(url)).json();
+  assert.equal(installed.readiness.status, 'ready'); assert.equal(installed.historyAvailable, true);
+  config.enabled = false;
+  const disabled = await (await fetch(url)).json();
+  assert.equal(disabled.readiness.code, 'BACKUP_NOT_CONFIGURED'); assert.equal(disabled.capabilities.enabled, false);
+});
 
 test('native backup HTTP routes preserve live authorization, validate scopes, audit downloads and protect isolated restore', { skip: process.env.BACKUP_NATIVE_HTTP_TEST !== 'true' }, async t => {
   const engine = new PGlite();

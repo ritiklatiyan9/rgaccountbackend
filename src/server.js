@@ -14,6 +14,7 @@ import { up as migrateSeekPriority } from './migrations/231_seek_permission_prio
 import { up as migrateSeekLinks } from './migrations/248_seek_permission_links.js';
 import { up as migrateImprestVisibility } from './migrations/229_imprest_management_visibility.js';
 import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
+import { up as migrateNativeBackups } from './migrations/249_native_backups.js';
 import { ensureWalletStartup } from './services/walletStartup.service.js';
 import { ensureConstructionStartup } from './services/constructionStartup.service.js';
 import { up as migrateCashflowTransfers, VERSION as cashflowTransferVersion } from './migrations/237_cashflow_money_transfers.js';
@@ -107,6 +108,10 @@ connectDB().then(async () => {
     ? '[startup] Construction schema current; installed migrations skipped'
     : `[startup] Construction migrations applied: ${constructionStartup.applied.join(', ')}`);
   await warmRequestHistory(pool);
+  // Direct Render starts also need backup metadata. A setup failure is exposed
+  // on the backup dashboard without taking unrelated business APIs offline.
+  try { await migrateNativeBackups(pool); }
+  catch (error) { console.error('[startup] Native backup metadata unavailable', { code: error.code || error.name }); }
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

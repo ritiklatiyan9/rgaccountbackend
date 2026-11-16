@@ -76,15 +76,24 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA backup_control FROM PUBLIC;
 
 export async function up(database) {
   const client = await database.connect();
+  let transaction = false;
   try {
+    const { rows: [registry] } = await client.query("SELECT to_regclass('app_schema_migrations') IS NOT NULL AS present");
+    if (registry.present && (await client.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [VERSION])).rows.length) return false;
     await client.query('BEGIN');
+    transaction = true;
     await client.query("SET LOCAL lock_timeout='5s'");
     await client.query("SELECT pg_advisory_xact_lock(hashtext('249_native_backups'))");
-    await client.query(migrationSql);
     await client.query('CREATE TABLE IF NOT EXISTS public.app_schema_migrations(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())');
+    if ((await client.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [VERSION])).rows.length) {
+      await client.query('COMMIT'); transaction = false; return false;
+    }
+    await client.query(migrationSql);
     await client.query('INSERT INTO public.app_schema_migrations(version) VALUES($1) ON CONFLICT DO NOTHING', [VERSION]);
     await client.query('COMMIT');
-  } catch (error) { await client.query('ROLLBACK'); throw error; }
+    transaction = false;
+    return true;
+  } catch (error) { if (transaction) await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
 }
 

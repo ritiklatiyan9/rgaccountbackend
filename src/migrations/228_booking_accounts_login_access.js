@@ -1,6 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import pool from '../config/db.js';
 
+export const VERSION = '228_booking_accounts_login_access';
+
 // Additive and safe whichever shared-database backend is deployed first. Never
 // reset existing choices when this migration is run again.
 export const migrationSql = `
@@ -29,16 +31,28 @@ ALTER TABLE login_otps ADD COLUMN IF NOT EXISTS app_context TEXT;
 
 export async function up(database = pool) {
   const client = await database.connect();
+  let transaction = false;
   try {
+    // Even ADD COLUMN IF NOT EXISTS requests ACCESS EXCLUSIVE on users. An
+    // installed migration must stay read-only while the live API holds reads.
+    const { rows: [registry] } = await client.query("SELECT to_regclass('app_schema_migrations') IS NOT NULL AS present");
+    if (registry.present && (await client.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [VERSION])).rows.length) return false;
     await client.query('BEGIN');
+    transaction = true;
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SELECT pg_advisory_xact_lock(hashtext('shared_booking_accounts_login_access'))");
     await client.query('CREATE TABLE IF NOT EXISTS app_schema_migrations(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())');
+    // Another instance can have installed it while this instance waited.
+    if ((await client.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [VERSION])).rows.length) {
+      await client.query('COMMIT'); transaction = false; return false;
+    }
     await client.query(migrationSql);
     await client.query("INSERT INTO app_schema_migrations(version) VALUES ('228_booking_accounts_login_access') ON CONFLICT DO NOTHING");
     await client.query('COMMIT');
+    transaction = false;
+    return true;
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (transaction) await client.query('ROLLBACK');
     throw error;
   } finally { client.release(); }
 }

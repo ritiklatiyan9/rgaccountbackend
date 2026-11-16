@@ -7,7 +7,8 @@ import { getNativeBackupConfig } from '../services/nativeBackupConfig.js';
 import { createNativeBackupStorage } from '../services/nativeBackupStorage.js';
 import { createNativeBackupJobs, publicNativeBackupJob } from '../services/nativeBackupJobs.js';
 
-const invalid = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
+const invalid = (message, statusCode = 400, code) => Object.assign(new Error(message), { statusCode, code });
+const schemaMissing = error => ['42P01', '3F000'].includes(error.code);
 
 export function createNativeBackupRouter({ db = pool, config = getNativeBackupConfig(), storage, authenticate = authMiddleware } = {}) {
   const router = express.Router();
@@ -19,16 +20,17 @@ export function createNativeBackupRouter({ db = pool, config = getNativeBackupCo
   const action = handler => async (req, res) => {
     try { await handler(req, res); }
     catch (error) {
-      const status = error.code === '42P01' || error.code === '3F000' ? 503 : error.statusCode || 500;
+      const status = schemaMissing(error) ? 503 : error.statusCode || 500;
       if (status >= 500) console.error('[native-backup-api]', { code: error.code || error.name, action: req.method });
       if (!res.headersSent) res.status(status).json({
-        message: status === 503 ? 'Backup service is not installed or temporarily unavailable. Ask an administrator to check the worker and migration.'
+        message: schemaMissing(error) ? 'Backup history is not installed yet. An administrator must complete backup setup.'
+          : error.code === 'BACKUP_NOT_CONFIGURED' ? error.message
           : status < 500 ? error.message : 'Backup operation failed. Retry shortly or ask an administrator to check the job diagnostics.',
-        code: /^[A-Z0-9_]{1,64}$/.test(error.code || '') ? error.code : 'BACKUP_OPERATION_FAILED',
+        code: schemaMissing(error) ? 'BACKUP_SCHEMA_REQUIRED' : /^[A-Z0-9_]{1,64}$/.test(error.code || '') ? error.code : 'BACKUP_OPERATION_FAILED',
       });
     }
   };
-  const enabled = () => { if (!config.enabled) throw invalid('Configure private backup storage and start the backup worker before creating jobs.', 503); };
+  const enabled = () => { if (!config.enabled) throw invalid('Configure private backup storage and start the backup worker before creating jobs.', 503, 'BACKUP_NOT_CONFIGURED'); };
   const rateLimit = req => {
     const limit = incrementRateLimit(`native-backups:${req.user.id}`, 10 * 60 * 1000);
     if (limit.count > 30) throw invalid('Too many backup operations. Wait before trying again.', 429);
@@ -40,11 +42,18 @@ export function createNativeBackupRouter({ db = pool, config = getNativeBackupCo
   };
 
   router.get('/jobs', action(async (_req, res) => {
-    const history = await jobs.list();
+    let history = []; let installed = true;
+    try { history = await jobs.list(); }
+    catch (error) { if (!schemaMissing(error)) throw error; installed = false; }
+    const ready = installed && config.enabled === true;
     res.json({ jobs: history.map(publicNativeBackupJob), retentionDays: config.retentionDays,
       storage: config.storageDestination || 'Private S3',
+      historyAvailable: installed,
+      readiness: { status: ready ? 'ready' : 'setup-required',
+        ...(!installed ? { code: 'BACKUP_SCHEMA_REQUIRED', message: 'Backup history is not installed yet. An administrator must complete backup setup.' }
+          : !config.enabled ? { code: 'BACKUP_NOT_CONFIGURED', message: 'Configure private backup storage and start the backup worker to enable backups.' } : {}) },
       restore: { enabled: Boolean(config.restoreDatabaseUrl), targetLabel: config.restoreTargetLabel || 'Isolated verification database' },
-      capabilities: { enabled: config.enabled === true, files: config.filesEnabled === true, legacyRestore: process.env.BACKUP_LEGACY_RESTORE_ENABLED === 'true' },
+      capabilities: { enabled: ready, files: config.filesEnabled === true, legacyRestore: process.env.BACKUP_LEGACY_RESTORE_ENABLED === 'true' },
     });
   }));
   router.post('/jobs', action(async (req, res) => {
