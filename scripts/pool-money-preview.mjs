@@ -1,4 +1,4 @@
-// Local Pool Money and project-profile API. No startup migrations, backfills,
+// Local Pool Money, project-profile and receipt-settings API. No startup migrations, backfills,
 // scheduled workers or unrelated financial routes run from this entry point.
 import 'dotenv/config';
 import { pathToFileURL } from 'node:url';
@@ -28,6 +28,8 @@ import { getBalanceSheet } from '../src/controllers/balanceSheet.controller.js';
 import { listDayBookEntries, getModeBalance, updateDayBookOrder } from '../src/controllers/daybook.controller.js';
 import { assertPoolSiteAccess } from '../src/services/poolMoney.service.js';
 import { listBankAccounts, listBankEntries } from '../src/controllers/bank.controller.js';
+import { createReceiptSignatureRouter } from '../src/routes/receiptSignature.routes.js';
+import { getReceiptDesign, updateReceiptDesign, deleteSiteReceiptDesign } from '../src/controllers/applicationSetting.controller.js';
 
 export const POOL_PREVIEW_ORIGINS = Object.freeze(['http://127.0.0.1:5173', 'http://localhost:5173']);
 export const isPoolPreviewOrigin = origin => !origin || POOL_PREVIEW_ORIGINS.includes(origin);
@@ -40,7 +42,7 @@ export function poolPreviewPort(value = process.env.POOL_MONEY_PREVIEW_PORT || 8
 
 export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, database = pool,
   saveProjectProfile = updateSite, createShop = createPlot, updateShop = updatePlot,
-  audit = auditRequestMiddleware, commissionRouter, memberRouter, plotGraphql = false, registryNoc = false,
+  audit = auditRequestMiddleware, commissionRouter, memberRouter, plotGraphql = false, registryNoc = false, receiptSettings = false,
   nocHandlers = { getRegistryNoc, saveRegistryNoc, approveRegistryNoc, getPlotNocRegistry, createPlotNocRegistry } } = {}) {
   if (typeof authenticate !== 'function' || !poolMoneyRouter) throw new Error('Preview authentication and Pool Money router are required.');
   const app = express();
@@ -53,9 +55,16 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     allowedHeaders: ['Authorization', 'Content-Type', 'X-Session-ID', 'X-App-Context', 'X-Transaction-Date', 'X-Transaction-Time'],
   }));
   app.use(express.json({ limit: '128kb' }));
-  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true, plot_co_applicants: Boolean(memberRouter && plotGraphql), registry_noc: registryNoc }));
+  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true, plot_co_applicants: Boolean(memberRouter && plotGraphql), registry_noc: registryNoc, receipt_signatures: receiptSettings }));
   app.use(['/plots/pool-money', '/sites'], authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.use(audit);
+  if (receiptSettings) {
+    app.use('/settings/receipt-signature', createReceiptSignatureRouter({ authenticate, database }));
+    const noStore = (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+    app.get('/settings/receipt-design', authenticate, noStore, getReceiptDesign);
+    app.put('/settings/receipt-design', authenticate, requireRole('admin'), noStore, updateReceiptDesign);
+    app.delete('/settings/receipt-design', authenticate, requireRole('admin'), noStore, deleteSiteReceiptDesign);
+  }
   app.use('/plots', poolMoneyRouter);
   if (commissionRouter) app.use('/plot-commission', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, commissionRouter);
 
@@ -208,7 +217,7 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     }
     return saveProjectProfile(req, res, next);
   });
-  app.use((_req, res) => res.status(404).json({ message: 'This preview only serves Pool Money and project profiles.' }));
+  app.use((_req, res) => res.status(404).json({ message: 'This preview serves Pool Money, project profiles and receipt settings.' }));
   app.use(errorMiddleware);
   return app;
 }
@@ -222,7 +231,7 @@ export async function startPoolMoneyPreview({ port = poolPreviewPort(), database
   const app = createPoolMoneyPreviewApp({ database, authenticate,
     poolMoneyRouter: createPoolMoneyRouter({ authenticate: (_req, _res, next) => next() }),
     commissionRouter: createPlotCommissionRouter({ authenticate: (_req, _res, next) => next() }),
-    memberRouter: createMemberRouter({ authenticate: (_req, _res, next) => next() }), plotGraphql: true, registryNoc: true });
+    memberRouter: createMemberRouter({ authenticate: (_req, _res, next) => next() }), plotGraphql: true, registryNoc: true, receiptSettings: true });
   const server = await new Promise((resolve, reject) => {
     const listener = app.listen(poolPreviewPort(port), '127.0.0.1', () => resolve(listener));
     listener.once('error', reject);

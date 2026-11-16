@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { configuredPaymentReceipt, receiptAmountInWords } from '../src/services/receiptPdf.js';
 import { renderAccountWhatsAppReceipt } from '../src/services/accountWhatsAppDocuments.js';
 import { getReceiptDesignWithScope, normalizeReceiptDesign, RECEIPT_DESIGN_KEY, RECEIPT_SITE_DESIGN_KEY } from '../src/services/receiptDesign.service.js';
+import { RECEIPT_SIGNATURE_KEY } from '../src/services/receiptSignature.service.js';
 
 const payment = {
   full_name: 'Fictional Preview Buyer', site_name: 'OM ASSOCIATES', site_address: 'Preview office address',
@@ -156,12 +157,13 @@ test('receipt design read is injectable and retains per-site precedence without 
     calls.push({ sql, params });
     assert.match(sql, /^SELECT/);
     if (params.includes(RECEIPT_SITE_DESIGN_KEY)) return { rows: [{ setting_value: { non_cash: { content: { title: 'Site override' } } } }] };
+    if (params.includes(RECEIPT_SIGNATURE_KEY)) return { rows: [] };
     throw Error('A site override must not load shared settings');
   } };
   const result = await getReceiptDesignWithScope(5, db);
   assert.equal(result.scope, 'site');
   assert.equal(result.design.non_cash.content.title, 'Site override');
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   const shared = await getReceiptDesignWithScope(5, { async query(sql, params) {
     assert.match(sql, /^SELECT/);
     return { rows: params[0] === RECEIPT_DESIGN_KEY ? [{ setting_value: omDesign }] : [] };

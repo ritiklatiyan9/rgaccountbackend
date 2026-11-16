@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import PDFDocument from 'pdfkit';
 import { loadReceiptImage } from '../utils/receiptImages.js';
 import { normalizeReceiptDesign } from './receiptDesign.service.js';
+import { receiptSignatureSizePercent } from './receiptSignature.service.js';
 
 const mm = (value) => value * 72 / 25.4;
 const px = (value) => value * 0.75;
@@ -94,6 +95,10 @@ export function configuredPaymentReceipt(event, data, inputDesign) {
   };
   return {
     mode, module, design: selected, content, fields, organization, address, amount, rows, values, broker, nameConfig,
+    siteSignature: inputDesign?.site_signature?.enabled === true
+      && (!data.site_id || Number(inputDesign.site_signature.site_id) === Number(data.site_id))
+      ? inputDesign.site_signature.image_data_url : '',
+    siteSignatureSizePercent: receiptSignatureSizePercent(inputDesign?.site_signature?.size_percent),
     direction: event === 'PAYMENT_SENT' ? 'out' : 'in', paymentMode, party: text(data.full_name),
     receiptNo: text(data.receipt_no), date: date(data.payment_date), amountWords: receiptAmountInWords(amount),
     amountText: `${content.currency_prefix}${money(amount)}${content.currency_suffix}`,
@@ -152,8 +157,14 @@ function pagePlan(doc, receipt) {
     operations, text: addText,
     line: (x, y, width, color = d.colors.primary, weight = 0.6) => operations.push({ type: 'line', x, y, width, color, weight }),
     box: (x, y, width, height, color, border = '', weight = 0.6) => operations.push({ type: 'box', x, y, width, height, color, border, weight }),
-    image: (bytes, x, y, width, height) => bytes && operations.push({ type: 'image', bytes, x, y, width, height }),
+    image: (bytes, x, y, width, height, options = {}) => bytes && operations.push({ type: 'image', bytes, x, y, width, height, ...options }),
   };
+}
+
+function uploadedSignatureSize(receipt) {
+  const A5 = receipt.design.page_size === 'A5';
+  const factor = receiptSignatureSizePercent(receipt.siteSignatureSizePercent) / 100;
+  return { width: mm((A5 ? 30 : 40) * factor), height: receipt.siteSignature ? mm((A5 ? 9 : 12) * factor) : 0 };
 }
 
 function presetFront(doc, receipt, assets, { sample, qrDataUrl }) {
@@ -271,7 +282,9 @@ function presetFront(doc, receipt, assets, { sample, qrDataUrl }) {
     paragraph(c.declaration, plain ? base : base * 0.76, { color: plain ? color.text : color.muted, lineHeight: 1.55 }, 0);
   }
   const signatureWidth = plain ? mm(70) : (width - mm(A5 ? 36 : 50)) / 2;
-  const imageHeight = mm(A5 ? 9 : 12), signHeight = mm(plain ? 20 : A5 ? 26 : 33);
+  const uploadedSize = uploadedSignatureSize(receipt), baseImageHeight = mm(A5 ? 9 : 12);
+  const imageHeight = Math.max(baseImageHeight, uploadedSize.height);
+  const signHeight = mm(plain ? 20 : A5 ? 26 : 33) + imageHeight - baseImageHeight;
   if (plain) {
     if (f.qr) {
       y += gap(5);
@@ -285,8 +298,11 @@ function presetFront(doc, receipt, assets, { sample, qrDataUrl }) {
     for (const key of ['customer', 'authority']) {
       if (!f[`${key}_signature`]) continue;
       const x = d.template_id === 'cash-plain-slip' ? W - left - signatureWidth : left;
-      p.image(assets[key], x, y, signatureWidth, imageHeight);
-      y += mm(14);
+      const uploaded = key === 'authority' && receipt.siteSignature;
+      const imageWidth = uploaded ? Math.min(signatureWidth, uploadedSize.width) : signatureWidth;
+      const actualHeight = uploaded ? uploadedSize.height : baseImageHeight;
+      p.image(assets[key], x, y + imageHeight - actualHeight, imageWidth, actualHeight, uploaded ? { valign: 'bottom' } : {});
+      y += Math.max(mm(14), imageHeight);
       y += p.text(key === 'customer' ? c.customer_signature_label : c.authority_signature_label, x, y, signatureWidth, base) + gap(6);
     }
   } else {
@@ -295,7 +311,10 @@ function presetFront(doc, receipt, assets, { sample, qrDataUrl }) {
     for (const key of ['customer', 'authority']) {
       if (!f[`${key}_signature`]) continue;
       const x = key === 'customer' ? left : W - left - signatureWidth;
-      p.image(assets[key], x, signY, signatureWidth, imageHeight);
+      const uploaded = key === 'authority' && receipt.siteSignature;
+      const imageWidth = uploaded ? Math.min(signatureWidth, uploadedSize.width) : signatureWidth;
+      const actualHeight = uploaded ? uploadedSize.height : baseImageHeight;
+      p.image(assets[key], x + (signatureWidth - imageWidth) / 2, signY + imageHeight - actualHeight, imageWidth, actualHeight, uploaded ? { valign: 'bottom' } : {});
       p.line(x, signY + imageHeight + mm(1), signatureWidth);
       p.text((key === 'customer' ? c.customer_signature_label : c.authority_signature_label).toUpperCase(), x, signY + imageHeight + mm(2.5), signatureWidth, base * 0.65, { bold: true, color: color.muted, align: 'center' });
     }
@@ -487,14 +506,18 @@ function officialFront(doc, receipt, assets, { sample, qrDataUrl }) {
     }
   }
   if (f.customer_signature || f.authority_signature) {
-    y += gap(A5 ? 8 : 12); const top = y, signatureWidth = mm(A5 ? 42 : 56), imageHeight = mm(A5 ? 9 : 12);
+    y += gap(A5 ? 8 : 12); const top = y, signatureWidth = mm(A5 ? 42 : 56), baseImageHeight = mm(A5 ? 9 : 12);
+    const uploadedSize = uploadedSignatureSize(receipt), imageHeight = Math.max(baseImageHeight, uploadedSize.height);
     const forHeight = f.authority_signature && f.organization && receipt.organization
       ? p.text(`${c.for_text} ${receipt.organization}`, W - left - signatureWidth, top, signatureWidth, base * 0.8, { align: 'center' }) + mm(1) : 0;
     for (const key of ['customer', 'authority']) {
       if (!f[`${key}_signature`]) continue;
       const x = key === 'authority' || !f.authority_signature ? W - left - signatureWidth : left;
       let signY = top + forHeight;
-      p.image(assets[key], x, signY, signatureWidth, imageHeight); signY += imageHeight + mm(1);
+      const uploaded = key === 'authority' && receipt.siteSignature;
+      const imageWidth = uploaded ? Math.min(signatureWidth, uploadedSize.width) : signatureWidth;
+      const actualHeight = uploaded ? uploadedSize.height : baseImageHeight;
+      p.image(assets[key], x + (signatureWidth - imageWidth) / 2, signY + imageHeight - actualHeight, imageWidth, actualHeight, uploaded ? { valign: 'bottom' } : {}); signY += imageHeight + mm(1);
       p.line(x, signY, signatureWidth, '#6b7280', 0.5); signY += mm(2);
       signY += p.text(key === 'customer' ? c.customer_signature_label : c.authority_signature_label, x, signY, signatureWidth, base * 0.8, { align: 'center' });
       if (key === 'authority' && f.seal) signY += mm(1) + p.text(c.seal_label, x, signY + mm(1), signatureWidth, base * 0.7, { align: 'center', color: d.colors.muted });
@@ -550,7 +573,13 @@ async function canvasPage(doc, receipt, assets, { sample, qrDataUrl }) {
     if (item.type === 'line') { p.line(x, y, w, item.border_color, mm(item.border_width)); continue; }
     if (item.type === 'box') continue;
     if (item.type === 'image') { p.image(item.field === 'evidence' ? assets.evidence : await imageBytes(item.src), x, y, w, h); continue; }
-    if (item.type === 'customer_signature' || item.type === 'authority_signature') { p.image(assets[item.type.split('_')[0]], x, y, w, h); continue; }
+    if (item.type === 'customer_signature' || item.type === 'authority_signature') {
+      const uploaded = item.type === 'authority_signature' && receipt.siteSignature;
+      const size = uploadedSignatureSize(receipt);
+      const imageWidth = uploaded ? Math.min(w, size.width) : w, imageHeight = uploaded ? Math.min(h, size.height) : h;
+      p.image(assets[item.type.split('_')[0]], x + (w - imageWidth) / 2, y + h - imageHeight, imageWidth, imageHeight, uploaded ? { valign: 'bottom' } : {});
+      continue;
+    }
     if (item.type === 'qr') {
       if (qrDataUrl) p.image(Buffer.from(qrDataUrl.slice(qrDataUrl.indexOf(',') + 1), 'base64'), x, y, w, Math.min(w, h));
       else p.text(receipt.content.qr_unavailable, x, y, w, px(item.font_size));
@@ -570,7 +599,7 @@ export async function renderConfiguredPaymentReceiptPdf(receipt, data, options =
   const d = receipt.design;
   const assets = {
     customer: d.fields.customer_signature ? await imageBytes(data.customer_signature_url) : null,
-    authority: d.fields.authority_signature ? await imageBytes(data.authority_signature_url) : null,
+    authority: d.fields.authority_signature ? await imageBytes(receipt.siteSignature || data.authority_signature_url) : null,
     evidence: d.fields.evidence ? await imageBytes(first(data.evidence_photo_url, data.voucher_url), { evidence: true }) : null,
   };
   return new Promise(async (resolve, reject) => {
@@ -602,7 +631,7 @@ export async function renderConfiguredPaymentReceiptPdf(receipt, data, options =
             else if (operation.color) doc.fill(operation.color);
             else if (operation.border) doc.stroke(operation.border);
           }
-          if (type === 'image') doc.image(operation.bytes, x, y, { fit: [width, height], align: 'center', valign: 'center' });
+          if (type === 'image') doc.image(operation.bytes, x, y, { fit: [width, height], align: 'center', valign: operation.valign || 'center' });
         }
         doc.restore();
       }

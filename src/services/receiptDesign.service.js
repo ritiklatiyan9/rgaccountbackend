@@ -1,6 +1,7 @@
 import { normalizeCanvasElements } from './receiptCanvas.schema.js';
 import pool from '../config/db.js';
 import applicationSettingModel from '../models/ApplicationSetting.model.js';
+import { getReceiptSignature } from './receiptSignature.service.js';
 
 export const RECEIPT_DESIGN_KEY = 'receipt_design_v1';
 // A site's own design. Separate key: legacy per-site rows of RECEIPT_DESIGN_KEY
@@ -336,7 +337,10 @@ export const getReceiptDesignWithScope = async (siteId, db = pool) => {
   const own = siteId ? db === pool
     ? await applicationSettingModel.getJson(siteId, RECEIPT_SITE_DESIGN_KEY, null)
     : (await db.query('SELECT setting_value FROM application_settings WHERE site_id = $1 AND setting_key = $2 LIMIT 1', [siteId, RECEIPT_SITE_DESIGN_KEY])).rows[0]?.setting_value : null;
-  return own ? { design: normalizeReceiptDesign(own), scope: 'site' } : { design: await getSharedReceiptDesign(db), scope: 'global' };
+  const result = own ? { design: normalizeReceiptDesign(own), scope: 'site' } : { design: await getSharedReceiptDesign(db), scope: 'global' };
+  const signature = await getReceiptSignature(siteId, db);
+  if (signature.enabled) result.design.site_signature = { ...signature, site_id: Number(siteId) };
+  return result;
 };
 
 export const getReceiptDesign = async (siteId, db = pool) => (await getReceiptDesignWithScope(siteId, db)).design;

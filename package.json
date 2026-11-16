@@ -153,7 +153,7 @@
     "migrate:approval-change-snapshots": "node src/migrations/172_approval_change_snapshots.js",
     "test:approval-change-snapshots": "node --test test/approval-change-snapshots.test.mjs",
     "test:cheque-approval-flow": "node --test test/cheque-approval-flow.test.mjs test/cheque-approval-flow-db.test.mjs",
-    "test:receipts": "node --test test/receipt-studio.test.mjs test/receipt-design-cash.test.mjs test/receipt-design-cheque.test.mjs test/receipt-images.test.mjs test/receipt-token.test.mjs",
+    "test:receipts": "node --test test/receipt-signature.test.mjs test/receipt-studio.test.mjs test/receipt-design-cash.test.mjs test/receipt-design-cheque.test.mjs test/receipt-images.test.mjs test/receipt-token.test.mjs",
     "dev:api": "node scripts/dev-api.mjs",
     "migrate:registered-plot-workspace": "node src/migrations/174_registered_plot_workspace.js",
     "migrate:year-end-requirements": "node src/migrations/175_balance_sheet_requirements.js",

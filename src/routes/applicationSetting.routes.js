@@ -23,9 +23,12 @@ import { invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import { getWalletManagement, updateWalletManagement } from '../controllers/walletManagement.controller.js';
 import { getExpenseManagement, updateExpenseManagement } from '../controllers/expenseManagement.controller.js';
 import { getCaWorkflow, updateCaWorkflow, getExcelUploadAccess, getExcelImportCatalog } from '../controllers/caWorkflow.controller.js';
+import receiptSignatureRouter from './receiptSignature.routes.js';
 
 const router = express.Router();
 const bustRegistryCache = invalidateCacheOnSuccess(['registries|']);
+
+router.use('/receipt-signature', receiptSignatureRouter);
 
 router.get('/ca-workflow/access', authMiddleware, getExcelUploadAccess);
 router.get('/ca-workflow/imports', authMiddleware, getExcelImportCatalog);

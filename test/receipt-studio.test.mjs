@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { normalizeReceiptDesign, getReceiptDesign, getReceiptDesignWithScope, saveReceiptDesign, RECEIPT_DESIGN_KEY, RECEIPT_SITE_DESIGN_KEY } from '../src/services/receiptDesign.service.js';
 import settings from '../src/models/ApplicationSetting.model.js';
 import pool from '../src/config/db.js';
+import { RECEIPT_SIGNATURE_KEY } from '../src/services/receiptSignature.service.js';
 
 const canvas = { layout_mode: 'canvas', elements: [{ id: 'letter', type: 'text', text: ' . \nA & B', x: 10, y: 20, width: 30, height: 6 }] };
 test('TDS receipt rows and canvas tokens survive save and reload for shared and commission-specific designs', () => {
@@ -64,7 +65,7 @@ test('unconfigured sites inherit OM ASSOCIATES without mutating its legacy desig
 test('a site design overrides the shared design only for that site and saves under its own key', async () => {
   const get = settings.getGlobalJson, own = settings.getJson, setOwn = settings.setJson, setGlobal = settings.setGlobalJson;
   settings.getGlobalJson = async () => ({ cash: { content: { title: 'Shared' } } });
-  settings.getJson = async (siteId, key) => { assert.equal(key, RECEIPT_SITE_DESIGN_KEY); return siteId === 3 ? { cash: { content: { title: 'Site 3' } } } : null; };
+  settings.getJson = async (siteId, key) => { if (key === RECEIPT_SIGNATURE_KEY) return null; assert.equal(key, RECEIPT_SITE_DESIGN_KEY); return siteId === 3 ? { cash: { content: { title: 'Site 3' } } } : null; };
   let stored;
   settings.setJson = async (siteId, key, value) => { stored = { siteId, key }; return value; };
   settings.setGlobalJson = async () => { throw new Error('a site save must not touch the shared design'); };
@@ -74,4 +75,15 @@ test('a site design overrides the shared design only for that site and saves und
     await saveReceiptDesign(3, {}, 7, 'site');
     assert.deepEqual(stored, { siteId: 3, key: RECEIPT_SITE_DESIGN_KEY });
   } finally { settings.getGlobalJson = get; settings.getJson = own; settings.setJson = setOwn; settings.setGlobalJson = setGlobal; }
+});
+
+test('uploaded signatures remain site-specific even with a shared receipt design', async t => {
+  const signature = { enabled: true, image_data_url: 'data:image/png;base64,c2lnbg==', file_name: 'sign.png', size_percent: 150 };
+  t.mock.method(settings, 'getGlobalJson', async () => ({ cash: { content: { title: 'Shared' } } }));
+  t.mock.method(settings, 'getJson', async (siteId, key) => key === RECEIPT_SIGNATURE_KEY && siteId === 3 ? signature : null);
+  const own = await getReceiptDesign(3), other = await getReceiptDesign(4);
+  assert.equal(own.cash.content.title, other.cash.content.title);
+  assert.deepEqual(own.site_signature, { ...signature, site_id: 3 });
+  assert.equal(other.site_signature, undefined);
+  assert.equal(normalizeReceiptDesign(own).site_signature, undefined, 'saving a design cannot copy a site signature into shared settings');
 });

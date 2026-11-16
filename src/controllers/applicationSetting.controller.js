@@ -26,7 +26,7 @@ const getAccessibleSiteId = async (req, res, rawSiteId) => {
     return null;
   }
 
-  const { rows } = await pool.query('SELECT id FROM sites WHERE id = $1 LIMIT 1', [siteId]);
+  const { rows } = await pool.query('SELECT id FROM sites WHERE id = $1 AND organization_id = $2 LIMIT 1', [siteId, req.user.organization_id]);
   if (!rows[0]) {
     res.status(404).json({ message: 'Site not found' });
     return null;
@@ -288,7 +288,8 @@ export const updateReceiptDesign = asyncHandler(async (req, res) => {
   }
 
   const scope = req.body.scope === 'site' ? 'site' : 'all';
-  const design = await saveReceiptDesign(siteId, req.body.design, req.user.id, scope);
+  await saveReceiptDesign(siteId, req.body.design, req.user.id, scope);
+  const { design } = await getReceiptDesignWithScope(siteId);
   res.json({
     site_id: siteId, scope: scope === 'site' ? 'site' : 'global', site_designs: await countSiteReceiptDesigns(), design,
     message: scope === 'site' ? 'Receipt design saved for this site' : 'Receipt designs saved for all sites',
