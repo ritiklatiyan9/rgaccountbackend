@@ -10,9 +10,8 @@ import { createBackupAdminGuard } from '../middlewares/backupAdmin.middleware.js
 import { backupMaintenanceEnabled,beginBackupRestore,endBackupRestore } from '../middlewares/backupMaintenance.middleware.js';
 import { clearCacheByPrefixes, incrementRateLimit } from '../config/cache.js';
 import { getBackupLimits } from '../services/backupArchive.js';
-import { exportBackup, getBackupCatalog, previewBackup, restoreBackup } from '../services/backup.service.js';
-import { createBackupExportJobs } from '../services/backupExportJobs.js';
-import { exportBackupSet } from '../services/backupSet.service.js';
+import { getBackupCatalog, previewBackup, restoreBackup } from '../services/backup.service.js';
+import { createNativeBackupRouter } from './nativeBackup.routes.js';
 import { ATTACHMENT_PART_FORMAT, attachmentPartPreview, createAttachmentPartRestores, decodeBackupPart } from '../services/backupAttachmentParts.js';
 
 const router = express.Router();
@@ -22,12 +21,9 @@ const upload = multer({
   limits: { fileSize:getBackupLimits().maxUploadBytes, files:1, fields:5, fieldSize:256, parts:7 },
 }).single('backup');
 
+router.use(createNativeBackupRouter());
 router.use(authMiddleware,createBackupAdminGuard(pool));
 
-const exports = createBackupExportJobs({
-  generate:(input,onProgress,publish)=>input.includeFiles===false ? exportBackup(pool,input,{onProgress}) : exportBackupSet(pool,input,{onProgress,publish}),
-  onError:(error,job)=>console.error('[backup] Export failed:',{id:job.id,stage:job.progress?.stage,code:error.code || error.name,status:error.statusCode || 500}),
-});
 const attachmentRestores=createAttachmentPartRestores();
 
 function startOperation(req,res,file=false) {
@@ -73,36 +69,15 @@ function operation(handler, { file = false, restore = false } = {}) {
   };
 }
 
-router.get('/catalog',operation(async (_req,res) => res.json({...await getBackupCatalog(pool),exportJobs:true,attachmentParts:true})));
-router.post('/exports',async (req,res,next) => {
-  if (!startOperation(req,res)) return;
-  try {
-    const job=await exports.start(req.user.id,req.body,()=>{running=false;});
-    res.status(202).json(job);
-  } catch (error) { running=false; next(error); }
+// The former generator retained the database in the API heap. It is deliberately
+// unreachable even for older clients. Native jobs are the only export path.
+router.post(['/export','/exports'], (_req,res) => res.status(410).json({message:'Use the backup dashboard to create a durable native backup job.'}));
+router.get(['/exports/:id','/exports/:id/file'], (_req,res) => res.status(410).json({message:'Temporary exports are retired. Use Backup History for native archives.'}));
+router.use((req,res,next) => {
+  if (process.env.BACKUP_LEGACY_RESTORE_ENABLED !== 'true') return res.status(409).json({message:'Legacy JSON imports are disabled. Use isolated native restore verification or the recovery runbook.'});
+  next();
 });
-router.get('/exports/:id',async (req,res) => {
-  try { res.json(exports.status(req.params.id,req.user.id)); } catch (error) { res.status(error.statusCode || 500).json({message:error.message}); }
-});
-router.get('/exports/:id/file',async (req,res,next) => {
-  try {
-    const index=req.query.part===undefined ? 1 : Number(req.query.part);
-    if(!Number.isSafeInteger(index) || index<1) return res.status(400).json({message:'Choose a valid backup part.'});
-    const result=exports.file(req.params.id,req.user.id,index);
-    res.setHeader('Content-Type','application/gzip');
-    res.setHeader('X-Backup-Checksum',result.checksum);
-    res.setHeader('Access-Control-Expose-Headers','Content-Disposition, X-Backup-Checksum');
-    res.download(result.path,result.filename,error=>{if(error && !res.headersSent) next(error);});
-  } catch (error) { res.status(error.statusCode || 500).json({message:error.message}); }
-});
-router.post('/export',operation(async (req,res) => {
-  const result = await exportBackup(pool,req.body);
-  res.setHeader('Content-Type','application/gzip');
-  res.setHeader('Content-Disposition',`attachment; filename="${result.filename}"`);
-  res.setHeader('X-Backup-Checksum',result.checksum);
-  res.setHeader('Access-Control-Expose-Headers','Content-Disposition, X-Backup-Checksum');
-  res.send(result.buffer);
-}));
+router.get('/catalog',operation(async (_req,res) => res.json({...await getBackupCatalog(pool),exportJobs:false,attachmentParts:true})));
 router.post('/preview',operation(async (_req,res,buffer) => {
   const decoded=await decodeBackupPart(buffer);
   res.json(decoded.format===ATTACHMENT_PART_FORMAT ? attachmentPartPreview(decoded) : await previewBackup(pool,buffer,{decodedArchive:decoded}));

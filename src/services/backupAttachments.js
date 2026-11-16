@@ -167,7 +167,8 @@ export function objectSender(options) {
       region: source.region,
       ...(profile.accessKeyId && profile.secretAccessKey ? { credentials: { accessKeyId: profile.accessKeyId, secretAccessKey: profile.secretAccessKey } } : {}),
     }));
-    return clients.get(id).send(command, { abortSignal: AbortSignal.timeout(options.timeoutMs || 30000) });
+    const timeout = AbortSignal.timeout(options.timeoutMs || 30000);
+    return clients.get(id).send(command, { abortSignal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout });
   };
 }
 

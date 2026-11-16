@@ -1,0 +1,157 @@
+{
+  "recorded_at": "2026-11-16T13:32:00.571Z",
+  "scope": "Synthetic isolated PostgreSQL 18.4 on loopback; identical repeated-MD5 text fixtures. Legacy returns buffered archive; native includes filesystem streaming upload, archive parsing and full checksum readback. This is not production API/S3 throughput.",
+  "node": "v24.16.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "fixture": "4096-byte repeated per-row MD5 strings; very compressible and not representative of encrypted files/media.",
+  "limits": "PostgreSQL 64 MiB shared_buffers, max_connections 12, fsync off for disposable fixture. Node heap cap 1024 MiB. One backup process at a time.",
+  "results": [
+    {
+      "mode": "legacy",
+      "fixture_mib": 16,
+      "logical_payload_bytes": 16777216,
+      "archive_bytes": 153417,
+      "duration_ms": 100.05,
+      "logical_mib_per_second": 159.92,
+      "node_rss_before_bytes": 84099072,
+      "node_peak_sampled_rss_bytes": 167198720,
+      "node_peak_lifetime_rss_bytes": 167198720,
+      "node_heap_before_bytes": 11875504,
+      "node_peak_sampled_heap_bytes": 53269664,
+      "node_cpu_user_ms": 117.71,
+      "node_cpu_system_ms": 10.83,
+      "event_loop_p95_ms": 31.62,
+      "event_loop_max_ms": 31.62,
+      "concurrent_indexed_read": {
+        "samples": 8,
+        "p95_ms": 3.25,
+        "p99_ms": 3.25
+      },
+      "temporary_artifact_bytes": 0
+    },
+    {
+      "mode": "native-1",
+      "fixture_mib": 16,
+      "logical_payload_bytes": 16777216,
+      "archive_bytes": 222264,
+      "duration_ms": 87.45,
+      "logical_mib_per_second": 182.96,
+      "node_rss_before_bytes": 84344832,
+      "node_peak_sampled_rss_bytes": 86048768,
+      "node_peak_lifetime_rss_bytes": 86048768,
+      "node_heap_before_bytes": 11875568,
+      "node_peak_sampled_heap_bytes": 13326792,
+      "node_cpu_user_ms": 9.55,
+      "node_cpu_system_ms": 2.46,
+      "event_loop_p95_ms": 11.3,
+      "event_loop_max_ms": 11.3,
+      "concurrent_indexed_read": {
+        "samples": 8,
+        "p95_ms": 4.7,
+        "p99_ms": 4.7
+      },
+      "temporary_artifact_bytes": 222264
+    },
+    {
+      "mode": "legacy",
+      "fixture_mib": 64,
+      "logical_payload_bytes": 67108864,
+      "archive_bytes": 609823,
+      "duration_ms": 348.81,
+      "logical_mib_per_second": 183.48,
+      "node_rss_before_bytes": 83558400,
+      "node_peak_sampled_rss_bytes": 318619648,
+      "node_peak_lifetime_rss_bytes": 318619648,
+      "node_heap_before_bytes": 11875408,
+      "node_peak_sampled_heap_bytes": 139523696,
+      "node_cpu_user_ms": 402.77,
+      "node_cpu_system_ms": 36.07,
+      "event_loop_p95_ms": 16.89,
+      "event_loop_max_ms": 78.05,
+      "concurrent_indexed_read": {
+        "samples": 25,
+        "p95_ms": 12.57,
+        "p99_ms": 14.43
+      },
+      "temporary_artifact_bytes": 0
+    },
+    {
+      "mode": "native-1",
+      "fixture_mib": 64,
+      "logical_payload_bytes": 67108864,
+      "archive_bytes": 881233,
+      "duration_ms": 134.07,
+      "logical_mib_per_second": 477.36,
+      "node_rss_before_bytes": 83574784,
+      "node_peak_sampled_rss_bytes": 86589440,
+      "node_peak_lifetime_rss_bytes": 86589440,
+      "node_heap_before_bytes": 11875696,
+      "node_peak_sampled_heap_bytes": 13583104,
+      "node_cpu_user_ms": 11.95,
+      "node_cpu_system_ms": 3.06,
+      "event_loop_p95_ms": 10.54,
+      "event_loop_max_ms": 10.67,
+      "concurrent_indexed_read": {
+        "samples": 13,
+        "p95_ms": 2.15,
+        "p99_ms": 2.15
+      },
+      "temporary_artifact_bytes": 881233
+    },
+    {
+      "mode": "native-3",
+      "fixture_mib": 64,
+      "logical_payload_bytes": 67108864,
+      "archive_bytes": 881248,
+      "duration_ms": 136.88,
+      "logical_mib_per_second": 467.56,
+      "node_rss_before_bytes": 84312064,
+      "node_peak_sampled_rss_bytes": 87359488,
+      "node_peak_lifetime_rss_bytes": 87375872,
+      "node_heap_before_bytes": 11876168,
+      "node_peak_sampled_heap_bytes": 13582096,
+      "node_cpu_user_ms": 12,
+      "node_cpu_system_ms": 3.13,
+      "event_loop_p95_ms": 10.87,
+      "event_loop_max_ms": 11.58,
+      "concurrent_indexed_read": {
+        "samples": 13,
+        "p95_ms": 2.15,
+        "p99_ms": 2.15
+      },
+      "temporary_artifact_bytes": 881248
+    },
+    {
+      "mode": "native-1",
+      "fixture_mib": 1024,
+      "logical_payload_bytes": 1073741824,
+      "archive_bytes": 14061511,
+      "duration_ms": 1256.4,
+      "logical_mib_per_second": 815.03,
+      "node_rss_before_bytes": 83984384,
+      "node_peak_sampled_rss_bytes": 96960512,
+      "node_peak_lifetime_rss_bytes": 96960512,
+      "node_heap_before_bytes": 11876144,
+      "node_peak_sampled_heap_bytes": 14226544,
+      "node_cpu_user_ms": 66.28,
+      "node_cpu_system_ms": 17.5,
+      "event_loop_p95_ms": 10.72,
+      "event_loop_max_ms": 11.17,
+      "concurrent_indexed_read": {
+        "samples": 123,
+        "p95_ms": 0.19,
+        "p99_ms": 0.36
+      },
+      "temporary_artifact_bytes": 14061511
+    }
+  ],
+  "unmeasured": [
+    "production HTTP API p95/p99",
+    "S3 network/multipart performance",
+    "pg_dump and server CPU/RSS",
+    "hosted quotas and storage costs",
+    "5/10 GiB fixtures",
+    "production restore duration"
+  ]
+}

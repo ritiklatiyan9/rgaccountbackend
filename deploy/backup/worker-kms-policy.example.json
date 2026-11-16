@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UseDedicatedBackupKeyThroughS3",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+      "Resource": "arn:aws:kms:us-east-1:REPLACE_ACCOUNT_ID:key/REPLACE_KEY_ID",
+      "Condition": {
+        "StringEquals": { "kms:ViaService": "s3.us-east-1.amazonaws.com" },
+        "StringLike": {
+          "kms:EncryptionContext:aws:s3:arn": [
+            "arn:aws:s3:::REPLACE_BACKUP_BUCKET",
+            "arn:aws:s3:::REPLACE_BACKUP_BUCKET/accounts-native-backups/*"
+          ]
+        }
+      }
+    }
+  ]
+}

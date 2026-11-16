@@ -108,6 +108,9 @@ export default function auditRequestMiddleware(req, res, next) {
   if (!METHOD_ACTION[method] || segments[0] === 'audit-logs' || segments[0] === 'receipt-history') return next();
   // Spreadsheet autosave batches and export pings would create one HTTP row
   // per debounce tick; the controller writes the meaningful business events.
+  // Native backup actions persist their own transactional audit events. In particular,
+  // never copy short-lived signed download capabilities into generic HTTP audit logs.
+  if (segments[0] === 'backups' && segments[1] === 'jobs') return next();
   if (segments[0] === 'spreadsheets' && ['changes', 'export'].includes(segments[2])) return next();
   // A requester's read receipt is not a business event.
   if (segments[0] === 'seek-permissions' && segments[1] === 'seen') return next();

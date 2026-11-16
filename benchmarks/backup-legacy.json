@@ -1,0 +1,61 @@
+{
+  "recorded_at": "2026-11-16T13:27:40.162Z",
+  "scope": "Synthetic PGlite fixture, real legacy exportBackup; no production database/API/storage. PGlite database memory is in the same process and affects absolute RSS. The fixture repeats a per-row MD5 string, so compression is not representative of attachments.",
+  "engine_sha256": "77789341d2b3d2ae112f683ceb06d395540c164c0d2cc33870143ad7139fe12b",
+  "node": "v24.16.0",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpus": 10,
+    "memory_bytes": 17179869184
+  },
+  "results": [
+    {
+      "fixture_mib": 16,
+      "rows": 4096,
+      "payload_text_bytes": 16777216,
+      "archive_bytes": 153346,
+      "duration_ms": 227.1,
+      "rss_before_bytes": 1111851008,
+      "peak_sampled_rss_bytes": 1114013696,
+      "rss_growth_bytes": 2162688,
+      "heap_before_bytes": 19768936,
+      "peak_sampled_heap_bytes": 99316080,
+      "heap_growth_bytes": 79547144,
+      "process_lifetime_max_rss_bytes": 1240023040,
+      "cpu_user_ms": 304.53,
+      "cpu_system_ms": 37.62,
+      "event_loop_p95_ms": 11.35,
+      "event_loop_max_ms": 11.35,
+      "logical_throughput_mib_s": 70.45,
+      "held_rows_after_export": 4096
+    },
+    {
+      "fixture_mib": 64,
+      "rows": 16384,
+      "payload_text_bytes": 67108864,
+      "archive_bytes": 609754,
+      "duration_ms": 734.3,
+      "rss_before_bytes": 1126481920,
+      "peak_sampled_rss_bytes": 1126924288,
+      "rss_growth_bytes": 442368,
+      "heap_before_bytes": 19773544,
+      "peak_sampled_heap_bytes": 145401376,
+      "heap_growth_bytes": 125627832,
+      "process_lifetime_max_rss_bytes": 1275068416,
+      "cpu_user_ms": 914.72,
+      "cpu_system_ms": 58.38,
+      "event_loop_p95_ms": 10.23,
+      "event_loop_max_ms": 11.24,
+      "logical_throughput_mib_s": 87.16,
+      "held_rows_after_export": 16384
+    }
+  ],
+  "unmeasured": [
+    "production API p95/p99",
+    "native database CPU/I/O",
+    "S3 throughput",
+    "production OOM trace",
+    "1/5/10 GB legacy exports exceed the supported 100 MiB default and were not attempted"
+  ]
+}

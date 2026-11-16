@@ -1,0 +1,22 @@
+{
+  "Rules": [
+    {
+      "ID": "AbortAbandonedBackupMultipartUploads",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "accounts-native-backups/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    },
+    {
+      "ID": "OptionalNoncurrentVersionRetentionNeedsOperatorApproval",
+      "Status": "Disabled",
+      "Filter": { "Prefix": "accounts-native-backups/" },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 90 }
+    },
+    {
+      "ID": "RemoveDeleteMarkersOnlyAfterOldVersionsAreGone",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "accounts-native-backups/" },
+      "Expiration": { "ExpiredObjectDeleteMarker": true }
+    }
+  ]
+}

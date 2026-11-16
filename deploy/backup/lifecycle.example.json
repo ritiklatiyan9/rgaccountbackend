@@ -1,0 +1,10 @@
+{
+  "Rules": [
+    {
+      "ID": "AbortAbandonedBackupMultipartUploads",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "accounts-native-backups/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}

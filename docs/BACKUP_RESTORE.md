@@ -1,4 +1,12 @@
-# Account backup and restore
+# Legacy Accounts JSON backup format (historical reference)
+
+**Superseded:** use [Native backup system](BACKUP_SYSTEM.md) for current backups,
+deployment and recovery. JSON generation and module-export endpoints are retired.
+The procedures below describe the previous system and saved legacy archives.
+Legacy imports are disabled unless `BACKUP_LEGACY_RESTORE_ENABLED=true` and
+maintenance controls are configured. The current UI exposes legacy merge only;
+stop the native worker before any legacy restoration. Native `.dump` archives
+must use the new recovery workflow, not these JSON upload instructions.
 
 Administrators and users granted backup access can open **Settings → Backup & restore** to download a full backup or a module backup, upload a saved file, validate it and restore records to their original tables and modules.
 

@@ -1,0 +1,64 @@
+{
+  "recorded_at": "2026-11-16T13:39:21.171Z",
+  "scope": "Synthetic isolated PostgreSQL 18.4 on loopback; identical repeated-MD5 text fixtures. Legacy returns buffered archive; native includes filesystem streaming upload, archive parsing and full checksum readback. This is not production API/S3 throughput.",
+  "node": "v24.16.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "fixture": "4096-byte repeated per-row MD5 strings; very compressible and not representative of encrypted files/media.",
+  "limits": "PostgreSQL 64 MiB shared_buffers, max_connections 12, fsync off for disposable fixture. Node heap cap 192 MiB native / 1024 MiB legacy. One backup process at a time.",
+  "results": [
+    {
+      "mode": "native-1",
+      "fixture_mib": 5120,
+      "logical_payload_bytes": 5368709120,
+      "archive_bytes": 70302997,
+      "duration_ms": 6264.76,
+      "logical_mib_per_second": 817.27,
+      "node_rss_before_bytes": 84131840,
+      "node_peak_sampled_rss_bytes": 97845248,
+      "node_peak_lifetime_rss_bytes": 97878016,
+      "node_heap_before_bytes": 11879264,
+      "node_peak_sampled_heap_bytes": 14345960,
+      "node_cpu_user_ms": 286.95,
+      "node_cpu_system_ms": 70.56,
+      "event_loop_p95_ms": 10.73,
+      "event_loop_max_ms": 11.16,
+      "concurrent_indexed_read": {
+        "samples": 612,
+        "p95_ms": 0.18,
+        "p99_ms": 0.39
+      },
+      "temporary_artifact_bytes": 70302997
+    },
+    {
+      "mode": "native-1",
+      "fixture_mib": 10240,
+      "logical_payload_bytes": 10737418240,
+      "archive_bytes": 140609751,
+      "duration_ms": 12500.05,
+      "logical_mib_per_second": 819.2,
+      "node_rss_before_bytes": 83738624,
+      "node_peak_sampled_rss_bytes": 97304576,
+      "node_peak_lifetime_rss_bytes": 97320960,
+      "node_heap_before_bytes": 11880120,
+      "node_peak_sampled_heap_bytes": 14266936,
+      "node_cpu_user_ms": 525.84,
+      "node_cpu_system_ms": 135.55,
+      "event_loop_p95_ms": 10.9,
+      "event_loop_max_ms": 13.66,
+      "concurrent_indexed_read": {
+        "samples": 1221,
+        "p95_ms": 0.18,
+        "p99_ms": 0.29
+      },
+      "temporary_artifact_bytes": 140609751
+    }
+  ],
+  "unmeasured": [
+    "production HTTP API p95/p99",
+    "S3 network/multipart performance",
+    "pg_dump and server CPU/RSS",
+    "hosted quotas and storage costs",
+    "production restore duration"
+  ]
+}

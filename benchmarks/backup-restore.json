@@ -1,0 +1,34 @@
+{
+  "recorded_at": "2026-11-16T13:41:15.614Z",
+  "scope": "Disposable local PostgreSQL 18.4 fixture; actual native pg_dump and pg_restore, filesystem streaming storage adapter, unprivileged fresh verification database.",
+  "backup_duration_ms": 84.34,
+  "restore_duration_ms": 29.33,
+  "archive_bytes": 10860,
+  "files": 1,
+  "verified": [
+    "archive readback SHA-256",
+    "manifest SHA-256",
+    "file index SHA-256",
+    "attachment bytes SHA-256",
+    "file recovery into a fresh private staging directory",
+    "numeric precision",
+    "enum",
+    "foreign key",
+    "trigger/function",
+    "sequence",
+    "index",
+    "view",
+    "control-schema exclusion"
+  ],
+  "rejected": [
+    "production-style restore target",
+    "nonempty restore target",
+    "tampered archive before restore",
+    "compressed row above expanded size bound"
+  ],
+  "limitations": [
+    "Does not measure production recovery time",
+    "Does not exercise S3 network or AWS IAM",
+    "File recovery to private staging verified; automatic production publication is intentionally excluded"
+  ]
+}

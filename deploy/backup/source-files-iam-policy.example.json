@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadApprovedImmutableOriginalsOnly",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::REPLACE_SOURCE_BUCKET/REPLACE_SOURCE_PREFIX/*"
+    }
+  ]
+}

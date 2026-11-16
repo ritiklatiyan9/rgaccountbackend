@@ -280,7 +280,13 @@
     "test:plot-booking-allocations": "node --test test/plot-booking-allocations.test.mjs test/commission-allocations*.test.mjs test/commission-receiver-people.test.mjs test/pool-money-preview.test.mjs test/quick-plot-booking.test.mjs",
     "test:plot-commission-allocations": "node --test test/commission-allocations*.test.mjs test/commission-receiver-people.test.mjs test/plot-commission-visibility.test.mjs",
     "migrate:plot-co-applicants": "node src/migrations/245_plot_co_applicants.js",
-    "test:plot-co-applicants": "node --test test/plot-co-applicants.test.mjs test/member-plot-selection.test.mjs test/plot-member-links.test.mjs test/plot-list-kyc.test.mjs"
+    "test:plot-co-applicants": "node --test test/plot-co-applicants.test.mjs test/member-plot-selection.test.mjs test/plot-member-links.test.mjs test/plot-list-kyc.test.mjs",
+    "worker:backup": "node --max-old-space-size=192 src/workers/backupWorker.js",
+    "migrate:native-backups": "node src/migrations/249_native_backups.js",
+    "test:native-backup": "node --test --test-concurrency=1 test/native-backup*.test.mjs test/backup-native*.test.mjs",
+    "benchmark:backup:legacy": "node scripts/bench/backup-legacy.bench.mjs",
+    "benchmark:backup:native": "node scripts/benchmark-native-backup.mjs",
+    "benchmark:backup:multipart": "node scripts/benchmark-backup-multipart.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",
