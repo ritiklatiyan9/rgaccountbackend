@@ -6,11 +6,13 @@ import { incrementRateLimit } from '../config/cache.js';
 import { getNativeBackupConfig } from '../services/nativeBackupConfig.js';
 import { createNativeBackupStorage } from '../services/nativeBackupStorage.js';
 import { createNativeBackupJobs, publicNativeBackupJob } from '../services/nativeBackupJobs.js';
+import { backupWorkerAvailable } from '../services/backupWorkerAvailability.js';
 
 const invalid = (message, statusCode = 400, code) => Object.assign(new Error(message), { statusCode, code });
 const schemaMissing = error => ['42P01', '3F000'].includes(error.code);
 
-export function createNativeBackupRouter({ db = pool, config = getNativeBackupConfig(), storage, authenticate = authMiddleware } = {}) {
+export function createNativeBackupRouter({ db = pool, config = getNativeBackupConfig(), storage, authenticate = authMiddleware,
+  workerReady = () => backupWorkerAvailable(db) } = {}) {
   const router = express.Router();
   const jobs = createNativeBackupJobs(db, config);
   let objectStorage = storage;
@@ -45,13 +47,16 @@ export function createNativeBackupRouter({ db = pool, config = getNativeBackupCo
     let history = []; let installed = true;
     try { history = await jobs.list(); }
     catch (error) { if (!schemaMissing(error)) throw error; installed = false; }
-    const ready = installed && config.enabled === true;
+    const online = installed && config.enabled === true ? await workerReady() : false;
+    const ready = installed && config.enabled === true && online;
     res.json({ jobs: history.map(publicNativeBackupJob), retentionDays: config.retentionDays,
       storage: config.storageDestination || 'Private S3',
       historyAvailable: installed,
-      readiness: { status: ready ? 'ready' : 'setup-required',
+      worker: { online, mode: config.shared ? 'shared-process' : 'separate-service' },
+      readiness: { status: ready ? 'ready' : installed && config.enabled ? 'worker-unavailable' : 'setup-required',
         ...(!installed ? { code: 'BACKUP_SCHEMA_REQUIRED', message: 'Backup history is not installed yet. An administrator must complete backup setup.' }
-          : !config.enabled ? { code: 'BACKUP_NOT_CONFIGURED', message: 'Configure private backup storage and start the backup worker to enable backups.' } : {}) },
+          : !config.enabled ? { code: 'BACKUP_NOT_CONFIGURED', message: 'Configure private backup storage and start the backup worker to enable backups.' }
+            : !online ? { code: 'BACKUP_WORKER_OFFLINE', message: 'The backup worker is starting or reconnecting. This page will update automatically.' } : {}) },
       restore: { enabled: Boolean(config.restoreDatabaseUrl), targetLabel: config.restoreTargetLabel || 'Isolated verification database' },
       capabilities: { enabled: ready, files: config.filesEnabled === true, legacyRestore: process.env.BACKUP_LEGACY_RESTORE_ENABLED === 'true' },
     });

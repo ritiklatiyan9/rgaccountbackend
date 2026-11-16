@@ -1,6 +1,6 @@
 # Native backup system: audit, implementation and operations
 
-Date: 16 November 2026. Scope: `Accounts/rgaccountbackend` and `Accounts/rgaccount` (`/settings/backups`). No production database, cloud bucket, deployed service or existing backup was changed during implementation or testing.
+Date: 16 November 2026. Scope: `Accounts/rgaccountbackend` and `Accounts/rgaccount` (`/settings/backups`). Initial implementation and benchmarks used isolated fixtures. Subsequent rollout installed production backup metadata and created a dedicated private S3 bucket, scoped storage identities and a backup database login. Operational backup verification is tracked separately from the fixture benchmarks below. Existing backups are preserved.
 
 ## Evidence and diagnosis
 
@@ -61,6 +61,8 @@ PostgreSQL documents that `pg_dump` creates consistent database exports and that
 | S3 multipart, checksum, download, cleanup | `src/services/nativeBackupStorage.js` |
 | Managed attachment capture / file index / recovery | `src/services/nativeBackupFiles.js`, `src/services/nativeBackupRecovery.js`, `scripts/recover-native-files.mjs` |
 | Independent worker | `src/workers/backupWorker.js` |
+| Existing-compute supervision and memory admission | `src/services/backupWorkerSupervisor.js`, `src/services/backupResourceBudget.js`, `src/services/backupWorkerAvailability.js` |
+| Checksum-pinned native client installer | `scripts/install-native-backup-tools.mjs` |
 | Frontend | `../rgaccount/src/components/settings/BackupSettings.jsx` and associated backup client/tests |
 | Reproducible evidence | `scripts/bench/backup-legacy.bench.mjs`, `scripts/benchmark-native-backup.mjs`, `test/native-backup*.test.mjs`, `benchmarks/backup-*.json` |
 

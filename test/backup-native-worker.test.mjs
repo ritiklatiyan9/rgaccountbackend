@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { migrationSql } from '../src/migrations/249_native_backups.js';
 import { createNativeBackupJobs } from '../src/services/nativeBackupJobs.js';
 import { runBackupWorker } from '../src/workers/backupWorker.js';
+import { backupWorkerAvailable } from '../src/services/backupWorkerAvailability.js';
 
 const result = job => ({bytes:12,checksum:'d'.repeat(64),verificationStatus:'verified',artifactKey:`${job.artifactPrefix}database.dump`,manifestKey:`${job.artifactPrefix}manifest.json`});
 const deferred = () => { let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject}; };
@@ -59,6 +60,28 @@ test('isolated native worker failure injection and lifecycle on real PostgreSQL'
       assert.equal((await jobs.get(queued.id)).status,'queued');
       assert.ok(logs.some(log=>log.event==='backup-worker-standby'));
     }finally{await legacy.query('ROLLBACK');legacy.release();}
+  });
+  await t.test('API sees a worker only while its dedicated session lock is held', async () => {
+    const holder = await pool.connect();
+    try {
+      assert.equal(await backupWorkerAvailable(pool), false);
+      await holder.query("SET application_name='accounts-backup-metadata'");
+      await holder.query('SELECT pg_advisory_lock(734921,1)');
+      assert.equal(await backupWorkerAvailable(pool), true);
+      await holder.query('SELECT pg_advisory_unlock(734921,1)');
+      assert.equal(await backupWorkerAvailable(pool), false);
+    } finally { holder.release(true); }
+  });
+  await t.test('shared host load defers queued work and memory pressure aborts an attempt safely', async () => {
+    await reset(); const queued = await jobs.enqueue(1);
+    await worker({ config: { ...config, shared: true }, memory: async () => ({ usedBytes: 400, limitBytes: 512, rss: 80 * 1024 ** 2 }), backup: async () => assert.fail('busy host must defer work') });
+    assert.equal((await jobs.get(queued.id)).attempt, 0);
+    let samples = 0;
+    await worker({ config: { ...config, shared: true }, memory: async () => ({ usedBytes: ++samples === 1 ? 100 : 450, limitBytes: 512, rss: 80 * 1024 ** 2 }),
+      backup: async ({ signal }) => untilAbort(signal) });
+    const interrupted = await jobs.get(queued.id);
+    assert.equal(interrupted.status, 'queued'); assert.match(interrupted.error, /BACKUP_RESOURCE_PRESSURE/);
+    assert.equal(interrupted.artifactKey, null);
   });
   await t.test('interrupted upload fails, schedules a fresh attempt, and cleans abandoned objects',async()=>{
     await reset();const created=await jobs.enqueue(1);

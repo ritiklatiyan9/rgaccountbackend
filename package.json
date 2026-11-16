@@ -283,10 +283,11 @@
     "test:plot-co-applicants": "node --test test/plot-co-applicants.test.mjs test/member-plot-selection.test.mjs test/plot-member-links.test.mjs test/plot-list-kyc.test.mjs",
     "worker:backup": "node --max-old-space-size=192 src/workers/backupWorker.js",
     "migrate:native-backups": "node src/migrations/249_native_backups.js",
-    "test:native-backup": "node --test --test-concurrency=1 test/native-backup*.test.mjs test/backup-native*.test.mjs",
+    "test:native-backup": "node --test --test-concurrency=1 test/native-backup*.test.mjs test/backup-native*.test.mjs test/backup-shared-worker.test.mjs",
     "benchmark:backup:legacy": "node scripts/bench/backup-legacy.bench.mjs",
     "benchmark:backup:native": "node scripts/benchmark-native-backup.mjs",
-    "benchmark:backup:multipart": "node scripts/benchmark-backup-multipart.mjs"
+    "benchmark:backup:multipart": "node scripts/benchmark-backup-multipart.mjs",
+    "postinstall": "node scripts/install-native-backup-tools.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-pinpoint-sms-voice-v2": "^3.1126.0",

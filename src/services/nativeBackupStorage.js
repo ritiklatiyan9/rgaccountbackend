@@ -17,6 +17,7 @@ export function byteMeter({ maxBytes = Infinity, onBytes = () => {} } = {}) {
 }
 
 export function createNativeBackupStorage(config, { client = new S3Client({ region: config.region, maxAttempts: 3,
+  ...(config.credentials ? { credentials: config.credentials } : {}),
   requestHandler: { connectionTimeout: 10000, requestTimeout: 60000 } }), UploadClass = Upload } = {}) {
   function validKey(key) {
     if (typeof key !== 'string' || !key.startsWith(`${config.prefix}/`) || /(^|\/)\.\.?($|\/)|[\x00-\x1f\\]/.test(key)) throw new Error('Invalid backup artifact key.');

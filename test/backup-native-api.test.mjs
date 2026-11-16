@@ -12,9 +12,9 @@ test('backup page reports incomplete setup safely and recovers after its metadat
   await engine.exec("CREATE TABLE users(id INTEGER PRIMARY KEY,role TEXT,is_active BOOLEAN); INSERT INTO users VALUES(1,'admin',true)");
   const query = async (sql, values) => values ? engine.query(sql, values) : (await engine.exec(sql)).at(-1) || { rows: [] };
   const db = { query, connect: async () => ({ query, release() {} }) };
-  const config = { enabled: true, retentionDays: 30 };
+  const config = { enabled: true, retentionDays: 30 }; let online = true;
   const app = express(); app.use(express.json());
-  app.use('/backups', createNativeBackupRouter({ db, config, authenticate: (req, _res, next) => { req.user = { id: 1, role: 'admin' }; next(); } }));
+  app.use('/backups', createNativeBackupRouter({ db, config, workerReady: async () => online, authenticate: (req, _res, next) => { req.user = { id: 1, role: 'admin' }; next(); } }));
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
@@ -29,6 +29,10 @@ test('backup page reports incomplete setup safely and recovers after its metadat
   await installBackups(db);
   const installed = await (await fetch(url)).json();
   assert.equal(installed.readiness.status, 'ready'); assert.equal(installed.historyAvailable, true);
+  online = false;
+  const restarting = await (await fetch(url)).json();
+  assert.equal(restarting.readiness.status, 'worker-unavailable'); assert.equal(restarting.capabilities.enabled, false);
+  assert.equal(restarting.worker.online, false);
   config.enabled = false;
   const disabled = await (await fetch(url)).json();
   assert.equal(disabled.readiness.code, 'BACKUP_NOT_CONFIGURED'); assert.equal(disabled.capabilities.enabled, false);
@@ -51,7 +55,7 @@ test('native backup HTTP routes preserve live authorization, validate scopes, au
   const storage = { presign: async job => { signedKeys.push(job.artifactKey); return { url:'https://private.example/fixture?signature=DO_NOT_AUDIT',filename:'backup.dump',expiresAt:new Date(Date.now()+60000).toISOString() }; } };
   const app = express();
   app.use(express.json());
-  app.use('/backups',createNativeBackupRouter({ db, config, storage, authenticate: (req,_res,next) => {
+  app.use('/backups',createNativeBackupRouter({ db, config, storage, workerReady: async () => true, authenticate: (req,_res,next) => {
     const id = Number(req.headers['x-test-user']);
     if (id) req.user = { id,role: req.headers['x-test-role'] || ({1:'admin',2:'sub_admin',3:'member'})[id] };
     next();

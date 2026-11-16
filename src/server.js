@@ -15,6 +15,7 @@ import { up as migrateSeekLinks } from './migrations/248_seek_permission_links.j
 import { up as migrateImprestVisibility } from './migrations/229_imprest_management_visibility.js';
 import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
 import { up as migrateNativeBackups } from './migrations/249_native_backups.js';
+import { startBackupWorkerSupervisor } from './services/backupWorkerSupervisor.js';
 import { ensureWalletStartup } from './services/walletStartup.service.js';
 import { ensureConstructionStartup } from './services/constructionStartup.service.js';
 import { up as migrateCashflowTransfers, VERSION as cashflowTransferVersion } from './migrations/237_cashflow_money_transfers.js';
@@ -55,6 +56,7 @@ import { startWalletImprestNotificationRunner, stopWalletImprestNotificationRunn
 const PORT = process.env.PORT || 3000;
 
 const server = http.createServer(app);
+let backupWorkerSupervisor;
 
 // Initialize Socket.io attached to the native HTTP server
 if (!backupMaintenanceEnabled()) initSocket(server);
@@ -114,6 +116,7 @@ connectDB().then(async () => {
   catch (error) { console.error('[startup] Native backup metadata unavailable', { code: error.code || error.name }); }
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    backupWorkerSupervisor = startBackupWorkerSupervisor();
   });
   if (!backupMaintenanceEnabled()) {
     startSmsReminderScheduler();
@@ -135,7 +138,8 @@ const shutdown = (signal) => {
   stopDriveShareRunner();
   stopAccountWhatsAppWorker();
   void stopWalletImprestNotificationRunner();
-  server.close(() => process.exit(0));
+  const backupStopped = backupWorkerSupervisor?.stop();
+  server.close(async () => { await backupStopped; process.exit(0); });
   // Fallback if open sockets keep the server from closing promptly.
   setTimeout(() => process.exit(0), 5000).unref();
 };

@@ -7,6 +7,8 @@ import { getNativeBackupConfig } from '../services/nativeBackupConfig.js';
 import { createNativeBackupJobs } from '../services/nativeBackupJobs.js';
 import { createNativeBackupStorage } from '../services/nativeBackupStorage.js';
 import { executeNativeBackup, executeRestoreVerification } from '../services/nativeBackupEngine.js';
+import { sharedBackupMemory, backupBudgetAllowsStart, backupBudgetRequiresAbort } from '../services/backupResourceBudget.js';
+import { nativeVersion } from '../services/nativeBackupProcess.js';
 
 // Share the legacy restore lock: maintenance must stop this worker before import.
 const LOCK = [734921, 1];
@@ -16,7 +18,7 @@ const safeCode = error => /^[A-Z0-9_]{1,64}$/.test(error?.code || '') ? error.co
  * Leases fence publication if the lock connection or metadata connection is lost.
  */
 export async function runBackupWorker({ config = getNativeBackupConfig(), pool, storage, signal, log = value => console.log(JSON.stringify(value)), once = false,
-  backup = executeNativeBackup, restore = executeRestoreVerification } = {}) {
+  backup = executeNativeBackup, restore = executeRestoreVerification, memory = sharedBackupMemory } = {}) {
   if (!config.enabled) throw new Error('Enable and configure private backup storage before starting the worker.');
   const ownedPool = !pool;
   pool ||= new pg.Pool({ ...config.database, max: 3, connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000, application_name: 'accounts-backup-metadata' });
@@ -36,6 +38,15 @@ export async function runBackupWorker({ config = getNativeBackupConfig(), pool, 
     log({ event: 'backup-worker-ready', workerId });
     do {
       if (signal?.aborted || stopped) break;
+      if (config.shared) {
+        const budget = await memory();
+        if (!backupBudgetAllowsStart(budget)) {
+          // Recycle retained allocator pages between attempts. The supervisor
+          // restarts a clean process while durable jobs remain queued.
+          if (once || budget.rss >= 128 * 1024 ** 2 || backupBudgetRequiresAbort(budget)) break;
+          await delay(5000, null, { signal }).catch(() => {}); continue;
+        }
+      }
       await store.recover();
       for (const attempt of await store.cleanupCandidates()) {
         if (stopped) break;
@@ -60,6 +71,16 @@ export async function runBackupWorker({ config = getNativeBackupConfig(), pool, 
       let userCancelled = false; let leaseLost = false;
       const heartbeatStop = new AbortController();
       const timeout = setTimeout(() => active?.abort(Object.assign(new Error('Backup attempt timed out.'), { code: 'BACKUP_TIMEOUT' })), config.timeoutMs);
+      const resourceStop = new AbortController();
+      const resourceMonitor = (async () => {
+        if (!config.shared) return;
+        while (!resourceStop.signal.aborted && !active.signal.aborted) {
+          if (backupBudgetRequiresAbort(await memory())) {
+            active.abort(Object.assign(new Error('Backup stopped to protect shared server memory.'), { code: 'BACKUP_RESOURCE_PRESSURE' })); break;
+          }
+          await delay(250, null, { signal: resourceStop.signal }).catch(() => {});
+        }
+      })();
       const heartbeat = (async () => {
         while (!heartbeatStop.signal.aborted) {
           try {
@@ -96,14 +117,16 @@ export async function runBackupWorker({ config = getNativeBackupConfig(), pool, 
           } catch (error) { log({ event: 'backup-retention-failed', jobId: job.id, code: safeCode(error) }); }
         }
       } catch (error) {
+        const failure = active.signal.reason?.code === 'BACKUP_RESOURCE_PRESSURE' ? active.signal.reason : error;
+        if (failure.code === 'BACKUP_RESOURCE_PRESSURE') stopped = true;
         // With a lost lease, recovery owns metadata/cleanup. Never touch a new attempt.
         if (!leaseLost) {
-          try { await store.fail(job.id, job.leaseToken, error, { cancelled: userCancelled, retryable: job.kind !== 'restore-test' }); }
+          try { await store.fail(job.id, job.leaseToken, failure, { cancelled: userCancelled, retryable: job.kind !== 'restore-test' }); }
           catch (failure) { log({ event: 'backup-failure-transition-failed', jobId: job.id, code: safeCode(failure) }); }
         }
-        log({ event: 'backup-attempt-failed', jobId: job.id, attempt: job.attempt, stage: progress.stage, code: safeCode(error), rss: process.memoryUsage().rss });
+        log({ event: 'backup-attempt-failed', jobId: job.id, attempt: job.attempt, stage: progress.stage, code: safeCode(failure), rss: process.memoryUsage().rss });
       } finally {
-        clearTimeout(timeout); heartbeatStop.abort(); await heartbeat;
+        clearTimeout(timeout); heartbeatStop.abort(); resourceStop.abort(); await heartbeat; await resourceMonitor;
         active = null;
       }
     } while (!once && !stopped);
@@ -123,6 +146,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const shutdown = new AbortController();
   process.once('SIGTERM', () => shutdown.abort());
   process.once('SIGINT', () => shutdown.abort());
-  try { await runBackupWorker({ signal: shutdown.signal }); }
+  try {
+    const config = getNativeBackupConfig();
+    await nativeVersion(config.pgDumpPath, undefined, shutdown.signal);
+    await nativeVersion(config.pgRestorePath, undefined, shutdown.signal);
+    await runBackupWorker({ config, signal: shutdown.signal });
+  }
   catch (error) { console.error(JSON.stringify({ event: 'backup-worker-stopped', code: safeCode(error) })); process.exitCode = 1; }
 }
