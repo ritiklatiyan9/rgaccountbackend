@@ -53,3 +53,82 @@ Archive requires removing a template's assignment; restore does not reapply it. 
 ## Verification
 
 Run `npm run test:account-whatsapp` for isolated policy, controller-hook and PGlite database checks. These tests inject transport and never send customer messages or modify the configured database. The frontend tests are in `src/lib/accountWhatsAppStudio.test.mjs` and `src/pages/WhatsAppStudio.render.test.mjs` in `Accounts/rgaccount`.
+
+## Marketing campaigns and customer inbox
+
+Studio now has **Campaigns** and **Inbox** tabs. Direct links use
+`/whatsapp-studio?tab=campaigns` and `/whatsapp-studio?tab=inbox`. Both are
+administrator-only and scoped to the authenticated organization. Campaigns are
+independent from the accounting-event automations above.
+
+Install the additive campaign/inbox schema with
+`npm run migrate:account-whatsapp-outreach`. Production startup also checks these
+two migrations. Installation creates no campaigns, recipients, subscriptions or
+messages.
+
+The campaign workflow is **Save draft → Attach PDF → Submit to Meta → Check
+approval → Review audience → Send campaign**. Footer text is optional and is
+omitted from the Meta definition when blank. The document is privately stored
+and is delivered as `INVITATION.pdf`; normal campaign responses contain its
+metadata only. PDF bytes are downloaded or uploaded to the provider separately.
+The all-sites audience includes active, inactive and test sites in the same
+organization. Each registration contributes one valid destination, preferring
+WhatsApp, then primary mobile, then alternate mobile as a fallback. Normalized
+phone numbers are deduplicated across sites, and blocked profiles and existing
+marketing opt-outs are excluded. Preview counts describe number format, not a
+promise that each number is registered with WhatsApp.
+
+Only the explicit manual **Send campaign** action freezes and queues the
+reviewed audience. It requires the current revision, permission confirmation,
+typed `SEND` and an idempotency key. Meta approval never starts a campaign and
+there is no date scheduler. The worker checks the live approved Marketing
+DOCUMENT definition, rechecks opt-outs, uploads the static PDF once per cached
+media period, and claims bounded batches. Pause stops unclaimed work. Ambiguous
+sends require review and are never resent automatically; retrying an inbox
+projection cannot send another message.
+
+Inbox conversation lists and history use bounded cursor pagination. Reads have
+message watermarks so newly arriving messages remain unread. Manual replies are
+idempotent and require a customer-originated message within the actual 24-hour
+reply window. AWS and Meta IDs are correlated using opaque callback IDs, and
+out-of-order delivery/read receipts cannot downgrade a message. Received media
+currently appears as a private filename/caption card; inbound media downloading
+is not yet supported. Outgoing campaign PDFs use an authenticated download.
+
+Incoming events can use either the signed SNS HTTPS route
+`POST /account-whatsapp/webhook` or a private SNS-to-SQS subscription. Both paths
+verify the SNS signature, topic allowlist and configured sender/account/region
+before committing data. Sender/organization binding is explicit. STOP/START
+updates both this inbox and the shared Booking marketing exclusions without
+removing operator-created opt-outs.
+
+For a local dashboard, the private queue avoids exposing localhost publicly:
+
+```bash
+npm run setup:account-whatsapp-inbox -- --organization-id 1 --sender-config ../../Bookings/sales-backend/.env --apply
+```
+
+This explicit setup preserves an existing SNS event destination, adds a private
+encrypted queue with 14-day retention and a dead-letter queue, and writes only
+routing settings to ignored `.env.whatsapp.local`. It sends no customer message.
+The WABA supports one event destination, so an incompatible existing destination
+is left untouched for review. No infrastructure is created on server startup.
+
+`scripts/account-whatsapp-preview.mjs` serves only campaigns and inbox at
+`127.0.0.1:8010`. It verifies the existing hosted Accounts session using the
+same fixed-upstream session bridge as other local previews. The Vite plugin
+starts this service when `VITE_ACCOUNT_WHATSAPP_API_URL` is configured to a
+loopback HTTP origin. Existing event-automation requests keep their original API
+destination. Sender credentials remain server-side in the existing sender
+environment; `.env.whatsapp.local` holds queue/topic routing, not copied keys.
+The preview starts the campaign worker only with
+`ACCOUNT_WHATSAPP_CAMPAIGN_WORKER=true` and starts the inbound worker when a
+private queue is configured. It starts no accounting reminders. While the local
+service is closed, the private queue retains incoming events until it resumes.
+
+New API families are `/account-whatsapp/campaigns` (drafts, documents, audience,
+submission, status, manual send and pause) and `/account-whatsapp/inbox`
+(conversations, history, read watermark, readiness and manual replies). Polling
+does not submit templates or contact Meta; approval checks are explicit. New UI
+chunks lazy-load and stop polling when hidden. Worker commands are
+`worker:account-whatsapp-campaigns` and `worker:account-whatsapp-inbound`.

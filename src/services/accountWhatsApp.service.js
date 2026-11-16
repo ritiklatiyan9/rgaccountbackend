@@ -66,8 +66,14 @@ const awsError = async (promise) => {
   try {
     return await promise;
   } catch (error) {
-    if (error.$metadata)
-      throw fail(`WhatsApp (AWS) ${error.name}: ${error.message}`, 422);
+    if (error.$metadata) {
+      const failure = fail(`WhatsApp (AWS) ${error.name}: ${error.message}`, 422);
+      failure.name = error.name;
+      // Preserve only the HTTP outcome used to distinguish a definite rejection
+      // from an uncertain delivery; SDK internals and credentials stay private.
+      failure.$metadata = { httpStatusCode: error.$metadata.httpStatusCode };
+      throw failure;
+    }
     throw error;
   }
 };
@@ -81,6 +87,9 @@ async function aws() {
   if (!awsContext) {
     const sdk = await import("@aws-sdk/client-socialmessaging");
     const client = new sdk.SocialMessagingClient({
+      // An uncertain send must be reviewed rather than retried by the SDK.
+      maxAttempts: 1,
+      requestHandler: { connectionTimeout: 5000, requestTimeout: 20000, throwOnRequestTimeout: true },
       region:
         process.env.WHATSAPP_AWS_REGION ||
         process.env.AWS_REGION ||
@@ -90,6 +99,7 @@ async function aws() {
             credentials: {
               accessKeyId: process.env.WHATSAPP_AWS_ACCESS_KEY_ID,
               secretAccessKey: process.env.WHATSAPP_AWS_SECRET_ACCESS_KEY,
+              ...(process.env.WHATSAPP_AWS_SESSION_TOKEN ? { sessionToken: process.env.WHATSAPP_AWS_SESSION_TOKEN } : {}),
             },
           }
         : {}),
@@ -178,6 +188,37 @@ export async function sendAccountWhatsAppTemplate(
   );
   return out.messageId;
 }
+
+/** Replies are invoked only by the inbox after its 24-hour window and scope checks. */
+export async function sendAccountWhatsAppText(
+  to,
+  text,
+  { contextMessageId, ref } = {},
+) {
+  const rawDestination = String(to ?? "").trim();
+  const destination = accountWhatsAppPhone(rawDestination)
+    || (/^\+[1-9]\d{7,14}$/.test(rawDestination) ? rawDestination : null);
+  const body = typeof text === "string" ? text.trim() : "";
+  if (!destination || !body || body.length > 4096)
+    throw fail("Choose a valid WhatsApp number and a reply of up to 4096 characters");
+  const { sdk, client } = await aws();
+  const message = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: destination,
+    type: "text",
+    text: { body, preview_url: false },
+    ...(contextMessageId ? { context: { message_id: contextMessageId } } : {}),
+    ...(ref ? { biz_opaque_callback_data: ref } : {}),
+  };
+  const out = await awsError(client.send(new sdk.SendWhatsAppMessageCommand({
+    originationPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID,
+    metaApiVersion: process.env.WHATSAPP_META_API_VERSION || "v23.0",
+    message: Buffer.from(JSON.stringify(message)),
+  })));
+  if (!out.messageId) throw fail("WhatsApp did not return a reply message ID", 502);
+  return out.messageId;
+}
 let mediaStorage;
 async function storeAccountWhatsAppDocument(buffer, filename) {
   const bucketName = process.env.WHATSAPP_MEDIA_BUCKET;
@@ -199,6 +240,7 @@ async function storeAccountWhatsAppDocument(buffer, filename) {
             credentials: {
               accessKeyId: process.env.WHATSAPP_AWS_ACCESS_KEY_ID,
               secretAccessKey: process.env.WHATSAPP_AWS_SECRET_ACCESS_KEY,
+              ...(process.env.WHATSAPP_AWS_SESSION_TOKEN ? { sessionToken: process.env.WHATSAPP_AWS_SESSION_TOKEN } : {}),
             },
           }
         : {}),
@@ -366,6 +408,9 @@ const remoteTransport = {
     }
   },
 };
+
+// Shared by manually started marketing campaigns; imports perform no provider calls.
+export const accountWhatsAppRemoteTransport = remoteTransport;
 
 export async function assertAccountWhatsAppSite(user, siteId, db = pool) {
   if (!["admin", "super_admin"].includes(user?.role))

@@ -70,7 +70,11 @@ import loyaltyVaultRoutes from './loyaltyVault.routes.js';
 import backupRoutes from './backup.routes.js';
 import transactionDocumentationRoutes from './transactionDocumentation.routes.js';
 import seekPermissionRoutes from './seekPermission.routes.js';
+import complaintRoutes from './complaint.routes.js';
 import accountWhatsAppRoutes from './accountWhatsApp.routes.js';
+import accountWhatsAppCampaignsRoutes from './accountWhatsAppCampaigns.routes.js';
+import accountWhatsAppInboxRoutes from './accountWhatsAppInbox.routes.js';
+import accountWhatsAppWebhookRoutes from './accountWhatsAppWebhook.routes.js';
 import mobilePortalRoutes from './mobilePortal.routes.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import { routeExcelImport } from '../controllers/caWorkflow.controller.js';
@@ -154,5 +158,11 @@ router.use('/loyalty-vault', loyaltyVaultRoutes);
 router.use('/backups', backupRoutes);
 router.use('/transaction-documentation', transactionDocumentationRoutes);
 router.use('/seek-permissions', seekPermissionRoutes);
+router.use('/complaints', complaintRoutes);
+// Signed AWS events have their own authentication boundary; admin APIs retain
+// normal Accounts authentication in each router.
+router.use('/account-whatsapp/webhook', accountWhatsAppWebhookRoutes);
+router.use('/account-whatsapp/campaigns', accountWhatsAppCampaignsRoutes);
+router.use('/account-whatsapp/inbox', accountWhatsAppInboxRoutes);
 router.use('/account-whatsapp', accountWhatsAppRoutes);
 export default router;

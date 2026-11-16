@@ -12,6 +12,12 @@ import { up as migrateSeekTargets } from './migrations/223_seek_permission_targe
 import { up as migrateSeekComments } from './migrations/230_seek_permission_comments.js';
 import { up as migrateSeekPriority } from './migrations/231_seek_permission_priority.js';
 import { up as migrateSeekLinks } from './migrations/248_seek_permission_links.js';
+import { up as migrateComplaints } from './migrations/250_complaints.js';
+import { up as migrateComplaintConversations } from './migrations/251_complaint_conversations.js';
+import { up as migrateWhatsAppCampaigns } from './migrations/251_account_whatsapp_campaigns.js';
+import { up as migrateWhatsAppInbox } from './migrations/252_account_whatsapp_inbox.js';
+import { startAccountWhatsAppCampaignWorker, stopAccountWhatsAppCampaignWorker } from './workers/accountWhatsAppCampaignWorker.js';
+import { startAccountWhatsAppInboundWorker, stopAccountWhatsAppInboundWorker } from './workers/accountWhatsAppInboundWorker.js';
 import { up as migrateImprestVisibility } from './migrations/229_imprest_management_visibility.js';
 import { up as migrateBookingAccountsLogin } from './migrations/228_booking_accounts_login_access.js';
 import { up as migrateNativeBackups } from './migrations/249_native_backups.js';
@@ -71,6 +77,10 @@ connectDB().then(async () => {
   await migrateSeekComments(pool);
   await migrateSeekPriority(pool);
   await migrateSeekLinks(pool);
+  await migrateComplaints(pool);
+  await migrateComplaintConversations(pool);
+  await migrateWhatsAppCampaigns(pool);
+  await migrateWhatsAppInbox(pool);
   await migratePlotAreaChanges(pool);
   await migratePlotBankRounding(pool);
   await migratePlotFixedDiscount(pool);
@@ -124,6 +134,8 @@ connectDB().then(async () => {
     startEventReminderScheduler();
     startDriveShareRunner();
     startAccountWhatsAppWorker();
+    startAccountWhatsAppCampaignWorker();
+    startAccountWhatsAppInboundWorker();
     startWalletImprestNotificationRunner();
   } else console.log('Backup maintenance mode: business APIs, sockets and reminder schedulers are paused.');
 }).catch(err => {
@@ -137,6 +149,8 @@ const shutdown = (signal) => {
   stopEventReminderScheduler();
   stopDriveShareRunner();
   stopAccountWhatsAppWorker();
+  stopAccountWhatsAppCampaignWorker();
+  stopAccountWhatsAppInboundWorker();
   void stopWalletImprestNotificationRunner();
   const backupStopped = backupWorkerSupervisor?.stop();
   server.close(async () => { await backupStopped; process.exit(0); });

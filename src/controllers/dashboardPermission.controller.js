@@ -34,6 +34,7 @@ export const ALL_COMPONENTS = [
   'compliance_calendar',
   'compliance_watch',
   'verify_panel',
+  'complaints_summary',
 ];
 
 // GET /dashboard-permissions/:userId

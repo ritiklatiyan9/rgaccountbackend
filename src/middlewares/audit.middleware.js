@@ -114,6 +114,7 @@ export default function auditRequestMiddleware(req, res, next) {
   if (segments[0] === 'spreadsheets' && ['changes', 'export'].includes(segments[2])) return next();
   // A requester's read receipt is not a business event.
   if (segments[0] === 'seek-permissions' && segments[1] === 'seen') return next();
+  if (segments[0] === 'complaints' && segments[2] === 'comments' && segments[3] === 'seen') return next();
   if (segments[0] === 'graphql' && !/^\s*mutation\b/i.test(String(req.body?.query || ''))) return next();
 
   const startedAt = Date.now();
