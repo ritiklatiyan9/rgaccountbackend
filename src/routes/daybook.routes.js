@@ -1,5 +1,6 @@
 import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
+import { requireDashboardComponent } from '../middlewares/dashboardComponent.middleware.js';
 import {
   createDayBookEntry,
   listDayBookEntries,
@@ -62,7 +63,7 @@ const ownFirmTransaction = requireEntryCreatorAccess({ module: 'daybook', table:
 const ownPlotPayment = requireEntryCreatorAccess({ module: 'daybook', table: 'plot_payments' });
 const ownModuleEntry = requireEntryCreatorAccess({ module: 'daybook', sourceParam: 'source' });
 // Recent transactions (Dashboard) — must be before /:id route
-router.get('/recent', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), listRecentTransactions);
+router.get('/recent', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), requireDashboardComponent('recent_transactions'), listRecentTransactions);
 
 // Profit summary (Dashboard)
 router.get('/profit-summary', requireRole('admin', 'sub_admin'), daybookReadCache, getProfitSummary);

@@ -1,3 +1,4 @@
+import { dashboardComponentAllowed } from '../services/dashboardPermissions.service.js';
 import pool from '../config/db.js';
 import { cacheEnabled, cacheGet, cacheSet } from '../config/cache.js';
 import { getAllKpis } from '../graphql/services/kpi.service.js';
@@ -466,7 +467,8 @@ const getDashboardVisibility = async (user) => {
   return new Map(rows.map((row) => [row.component, row.allowed]));
 };
 
-const componentVisible = (visibility, key) => visibility === null || visibility.get(key) !== false;
+const componentVisible = (visibility, key) => visibility === null
+  || dashboardComponentAllowed({ role: 'sub_admin' }, Object.fromEntries(visibility), key);
 
 const getLiveDashboardSnapshot = async (siteId, request, user) => {
   const range = resolveDateRange(request.dateRange);
@@ -506,7 +508,7 @@ const getLiveDashboardSnapshot = async (siteId, request, user) => {
       plotRemaining: componentVisible(visibility, 'kpi_plotPayments') ? finiteNumber(kpis.plotIncoming?.remaining) : null,
       landProfit: componentVisible(visibility, 'kpi_landProfit') ? finiteNumber(kpis.landProfitDetail?.saleProfit) : null,
       landReceived: componentVisible(visibility, 'kpi_landProfit') ? finiteNumber(kpis.landProfitDetail?.received) : null,
-      totalIncoming: componentVisible(visibility, 'kpi_plotPayments') ? finiteNumber(kpis.plotIncoming?.received) + finiteNumber(kpis.landProfitDetail?.received) : null,
+      totalIncoming: componentVisible(visibility, 'kpi_plotPayments') && componentVisible(visibility, 'kpi_landProfit') ? finiteNumber(kpis.plotIncoming?.received) + finiteNumber(kpis.landProfitDetail?.received) : null,
       totalExpense: componentVisible(visibility, 'kpi_totalExpense') ? finiteNumber(kpis.totalExpense) : null,
       runningExpense: componentVisible(visibility, 'kpi_totalExpense') ? finiteNumber(kpis.runningExpense) : null,
       netProfit: componentVisible(visibility, 'kpi_profit') ? finiteNumber(kpis.currentProfit) : null,
@@ -514,7 +516,7 @@ const getLiveDashboardSnapshot = async (siteId, request, user) => {
       outstanding: componentVisible(visibility, 'kpi_personalLedger') ? finiteNumber(kpis.outstanding) : null,
       cashflow: componentVisible(visibility, 'site_cashflow') ? finiteNumber(kpis.cashflow) : null,
       personalLedgerCredit: componentVisible(visibility, 'kpi_personalLedger') ? finiteNumber(kpis.personalLedgerCredit) : null,
-      imprestGiven: componentVisible(visibility, 'financial_overview') ? finiteNumber(kpis.imprestGiven) : null,
+      imprestGiven: componentVisible(visibility, 'kpi_siteBalance') ? finiteNumber(kpis.imprestGiven) : null,
       registryPayments: componentVisible(visibility, 'kpi_registryPayments') ? finiteNumber(kpis.registryPayments) : null,
     },
     breakdown,

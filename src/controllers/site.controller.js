@@ -133,6 +133,15 @@ export const deleteSite = asyncHandler(async (req, res) => {
   const site = await siteModel.findById(parseInt(id), pool);
   if (!site) return res.status(404).json({ message: 'Site not found' });
 
-  await siteModel.delete(parseInt(id), pool);
+  try {
+    await siteModel.delete(parseInt(id), pool);
+  } catch (err) {
+    // FK RESTRICT (draw registrations, bank accounts, seek permissions…) — say which table blocks it instead of a bare 500.
+    if (err.code === '23503') {
+      const what = String(err.table || 'linked records').replace(/_/g, ' ');
+      return res.status(409).json({ message: `Cannot delete "${site.name}": it still has ${what}. Remove or move those first.` });
+    }
+    throw err;
+  }
   res.json({ message: 'Site deleted' });
 });

@@ -176,6 +176,10 @@ test('the recent route requires Day Book read permission before reaching the han
       return (req, res, next) => req.allowed ? next() : res.status(403).json({ message: 'Permission denied' });
     },
     listRecentTransactions: () => { handlerRuns += 1; },
+    requireDashboardComponent: key => {
+      assert.equal(key, 'recent_transactions');
+      return (_req, _res, next) => next();
+    },
   });
   vm.runInContext(registration, context);
   const execute = allowed => {

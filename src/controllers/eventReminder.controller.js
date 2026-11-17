@@ -67,6 +67,25 @@ export const getEventReminderState = asyncHandler(async (req, res) => {
   });
 });
 
+// Calendar tick: marks an event done/verified without moving its workflow status.
+export const updateEventDone = asyncHandler(async (req, res) => {
+  const event = await scopedEvent(req, 'update');
+  if (!event) return res.status(404).json({ message: 'Calendar event not found or unavailable' });
+  const done = req.body?.done === true;
+  const key = [event.organization_id, event.event_type, event.id];
+  if (done) {
+    // Re-ticking keeps the first verifier.
+    await pool.query(
+      `INSERT INTO calendar_event_done (organization_id,event_type,source_id,done_by) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (organization_id,event_type,source_id) DO NOTHING`,
+      [...key, req.user.id],
+    );
+  } else {
+    await pool.query('DELETE FROM calendar_event_done WHERE organization_id=$1 AND event_type=$2 AND source_id=$3', key);
+  }
+  res.json({ done });
+});
+
 export const updateEventReminderState = asyncHandler(async (req, res) => {
   const event = await scopedEvent(req, 'update');
   if (!event) return res.status(404).json({ message: 'Calendar event not found or unavailable' });

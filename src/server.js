@@ -16,6 +16,7 @@ import { up as migrateComplaints } from './migrations/250_complaints.js';
 import { up as migrateComplaintConversations } from './migrations/251_complaint_conversations.js';
 import { up as migrateWhatsAppCampaigns } from './migrations/251_account_whatsapp_campaigns.js';
 import { up as migrateWhatsAppInbox } from './migrations/252_account_whatsapp_inbox.js';
+import { up as migrateCalendarEventDone } from './migrations/253_calendar_event_done.js';
 import { startAccountWhatsAppCampaignWorker, stopAccountWhatsAppCampaignWorker } from './workers/accountWhatsAppCampaignWorker.js';
 import { startAccountWhatsAppInboundWorker, stopAccountWhatsAppInboundWorker } from './workers/accountWhatsAppInboundWorker.js';
 import { up as migrateImprestVisibility } from './migrations/229_imprest_management_visibility.js';
@@ -81,6 +82,7 @@ connectDB().then(async () => {
   await migrateComplaintConversations(pool);
   await migrateWhatsAppCampaigns(pool);
   await migrateWhatsAppInbox(pool);
+  await migrateCalendarEventDone(pool);
   await migratePlotAreaChanges(pool);
   await migratePlotBankRounding(pool);
   await migratePlotFixedDiscount(pool);

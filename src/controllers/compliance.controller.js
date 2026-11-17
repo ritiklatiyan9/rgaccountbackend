@@ -978,8 +978,23 @@ export const complianceCalendar = asyncHandler(async (req, res) => {
       ${calendarSyncStatusSql('l', 'LICENCE_EXPIRY')} AS calendar_sync_status
       FROM compliance_licences l LEFT JOIN sites s ON s.id=l.site_id WHERE l.organization_id=$1 AND l.deleted_at IS NULL AND l.expiry_date BETWEEN $2 AND $3 ${licenceScope} ${selectedSite('l')}`, params),
   ]);
-  res.json({ events: [...items.rows, ...cases.rows, ...notices.rows, ...inspections.rows, ...licences.rows].sort((a, b) => String(a.event_date).localeCompare(String(b.event_date))) });
+  const events = [...items.rows, ...cases.rows, ...notices.rows, ...inspections.rows, ...licences.rows].sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)));
+  const { rows: ticks } = events.length ? await pool.query(
+    `SELECT d.event_type,d.source_id,d.done_at,u.name AS done_by_name
+       FROM calendar_event_done d LEFT JOIN users u ON u.id=d.done_by
+      WHERE d.organization_id=$1 AND d.source_id=ANY($2::bigint[])`,
+    [req.user.organization_id, [...new Set(events.map((event) => event.id))]],
+  ) : { rows: [] };
+  res.json({ events: withDoneTicks(events, ticks) });
 });
+
+export const withDoneTicks = (events, ticks) => {
+  const byKey = new Map(ticks.map((tick) => [`${tick.event_type}:${tick.source_id}`, tick]));
+  return events.map((event) => {
+    const tick = byKey.get(`${event.event_type}:${event.id}`);
+    return { ...event, done: Boolean(tick), done_at: tick?.done_at ?? null, done_by_name: tick?.done_by_name ?? null };
+  });
+};
 
 // ── Authorities ─────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import express from 'express';
-const router = express.Router();
+
 import {
   getDashboardPermissions,
   getMyDashboardPermissions,
@@ -16,14 +16,15 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 const dashPermsMeCache = cacheResponse({ ttlSeconds: 300, namespace: 'dash-perms-me' });
 const bustDashPermsCache = invalidateCacheOnSuccess(['dash-perms-me|']);
 
-// Any logged-in user can fetch their own dashboard permissions
-router.get('/me', authMiddleware, dashPermsMeCache, getMyDashboardPermissions);
+export function createDashboardPermissionRouter({ authenticate = authMiddleware } = {}) {
+  const router = express.Router();
+  router.use(authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  router.get('/me', dashPermsMeCache, getMyDashboardPermissions);
+  router.use(requireRole('admin'));
+  router.get('/users', listUsersWithDashboardPermissions);
+  router.get('/:userId', getDashboardPermissions);
+  router.put('/:userId', bustDashPermsCache, updateDashboardPermissions);
+  return router;
+}
 
-// Admin-only: manage other users' dashboard component access
-router.use(authMiddleware, requireRole('admin'));
-
-router.get('/users', listUsersWithDashboardPermissions);
-router.get('/:userId', getDashboardPermissions);
-router.put('/:userId', bustDashPermsCache, updateDashboardPermissions);
-
-export default router;
+export default createDashboardPermissionRouter();

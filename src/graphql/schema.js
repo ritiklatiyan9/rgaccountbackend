@@ -13,6 +13,7 @@ import { getAllKpis } from './services/kpi.service.js';
 import { verifyFinancialIntegrity } from './services/consistency.service.js';
 import { getRevenueVsExpense, getExpenseByCategory } from './services/charts.service.js';
 import { readDashboardCache } from './services/dashboardCache.js';
+import { dashboardComponentAllowed, loadDashboardPermissions, dashboardKpiFieldAllowed } from '../services/dashboardPermissions.service.js';
 import { selectedFields } from './selectedFields.js';
 import { getExpensesPageData, getExpensesBreakdown } from './services/expenses.service.js';
 import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
@@ -318,30 +319,30 @@ const KpiCardsType = new GraphQLObjectType({
     // Authoritative Site Balance — ledger net minus imprest float. Same value
     // the Day Book and Balance Sheet show; the dashboard renders this instead
     // of re-deriving it from revenue/expense/outstanding components.
-    siteBalance:           { type: new GraphQLNonNull(GraphQLFloat) },
-    siteBalanceDetail:     { type: new GraphQLNonNull(SiteBalanceDetailType) },
+    siteBalance:           { type: GraphQLFloat },
+    siteBalanceDetail:     { type: SiteBalanceDetailType },
     tds:                   { type: TdsSummaryType },
-    plotIncoming:          { type: new GraphQLNonNull(PlotIncomingType) },
-    landProfitDetail:      { type: new GraphQLNonNull(LandProfitDetailType) },
-    registryPaymentDetail: { type: new GraphQLNonNull(RegistryPaymentDetailType) },
-    runningExpense:        { type: new GraphQLNonNull(GraphQLFloat) },
-    partnerProfitPaid:     { type: new GraphQLNonNull(GraphQLFloat) },
-    expectedProfit:        { type: new GraphQLNonNull(GraphQLFloat) },
-    currentProfit:         { type: new GraphQLNonNull(GraphQLFloat) },
-    totalRevenue:          { type: new GraphQLNonNull(GraphQLFloat) },
-    totalExpense:          { type: new GraphQLNonNull(GraphQLFloat) },
-    netProfit:             { type: new GraphQLNonNull(GraphQLFloat) },
-    profitMargin:          { type: new GraphQLNonNull(GraphQLFloat) },
-    currentProfitMargin:   { type: new GraphQLNonNull(GraphQLFloat) },
-    outstanding:           { type: new GraphQLNonNull(GraphQLFloat) },
-    cashflow:              { type: new GraphQLNonNull(GraphQLFloat) },
-    personalLedgerCredit:  { type: new GraphQLNonNull(GraphQLFloat) },
+    plotIncoming:          { type: PlotIncomingType },
+    landProfitDetail:      { type: LandProfitDetailType },
+    registryPaymentDetail: { type: RegistryPaymentDetailType },
+    runningExpense:        { type: GraphQLFloat },
+    partnerProfitPaid:     { type: GraphQLFloat },
+    expectedProfit:        { type: GraphQLFloat },
+    currentProfit:         { type: GraphQLFloat },
+    totalRevenue:          { type: GraphQLFloat },
+    totalExpense:          { type: GraphQLFloat },
+    netProfit:             { type: GraphQLFloat },
+    profitMargin:          { type: GraphQLFloat },
+    currentProfitMargin:   { type: GraphQLFloat },
+    outstanding:           { type: GraphQLFloat },
+    cashflow:              { type: GraphQLFloat },
+    personalLedgerCredit:  { type: GraphQLFloat },
     // Nullable on purpose: KPI payloads cached before this field existed must not error.
     miscIncome:            { type: GraphQLFloat },
     miscIncomeDetail:      { type: MiscIncomeDetailType },
-    imprestGiven:          { type: new GraphQLNonNull(GraphQLFloat) },
-    registryPayments:      { type: new GraphQLNonNull(GraphQLFloat) },
-    registryPaymentsCount: { type: new GraphQLNonNull(GraphQLInt) },
+    imprestGiven:          { type: GraphQLFloat },
+    registryPayments:      { type: GraphQLFloat },
+    registryPaymentsCount: { type: GraphQLInt },
     registryPaymentsNew:      { type: GraphQLFloat },
     registryPaymentsOld:      { type: GraphQLFloat },
     registryPaymentsNewCount: { type: GraphQLInt },
@@ -1142,17 +1143,26 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, range, excludeOldPlots = false }, ctx, info) {
         const id = requireModuleRead(ctx, 'dashboard', siteId);
-        const fields = selectedFields(info);
+        const visibility = await loadDashboardPermissions(ctx);
+        if (!dashboardComponentAllowed(ctx.user, visibility, 'financial_overview')) return null;
+        const fields = new Set([...selectedFields(info)].filter(field => dashboardKpiFieldAllowed(ctx.user, visibility, field)));
+        if (!fields.size) return {};
         // Partial reports must not share a key with a different selection.
         const selection = [...fields].sort().join(',');
         const key = cacheKey(`kpi-cards-v9${excludeOldPlots ? '-new' : ''}:${selection}`, id, range.start, range.end);
-        return readDashboardCache(key, async () => {
+        const report = await readDashboardCache(key, async () => {
           const result = await getAllKpis(id, range.start, range.end, excludeOldPlots, fields);
           const toArray = breakdown => Object.entries(breakdown).map(([module, value]) => ({
             module, debit: value.debit || 0, credit: value.credit || 0, count: value.count || 0,
           }));
           return { ...result, breakdown: toArray(result.breakdown) };
         });
+        const filtered = Object.fromEntries(Object.entries(report).map(([field, value]) =>
+          [field, dashboardKpiFieldAllowed(ctx.user, visibility, field) ? value : null]));
+        if (filtered.siteBalanceDetail && !dashboardComponentAllowed(ctx.user, visibility, 'tds_summary')) {
+          filtered.siteBalanceDetail = { ...filtered.siteBalanceDetail, tdsPayable: null, tdsWithCa: null, tdsReserve: null, availableBalance: null };
+        }
+        return filtered;
       },
     },
 
@@ -1164,6 +1174,10 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, range }, ctx) {
         const id = requireModuleRead(ctx, 'dashboard', siteId);
+        const visibility = await loadDashboardPermissions(ctx);
+        // Verification includes raw ledger and KPI totals across all financial cards.
+        if (!dashboardComponentAllowed(ctx.user, visibility, 'verify_panel')
+          || !['kpi_siteBalance', 'kpi_plotPayments', 'kpi_totalExpense', 'kpi_profit'].every(key => dashboardComponentAllowed(ctx.user, visibility, key))) return null;
         const result = await verifyFinancialIntegrity(id, range.start, range.end);
         return {
           ...result,
@@ -1182,7 +1196,12 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, range, resolution = 'MONTH', excludeOldPlots = false }, ctx) {
         const id = requireModuleRead(ctx, 'dashboard', siteId);
-        return readChart(id, range, resolution, excludeOldPlots);
+        const visibility = await loadDashboardPermissions(ctx);
+        const revenue = dashboardComponentAllowed(ctx.user, visibility, 'peak_revenue');
+        const expense = dashboardComponentAllowed(ctx.user, visibility, 'peak_expenses');
+        if (!revenue && !expense) return null;
+        const data = await readChart(id, range, resolution, excludeOldPlots);
+        return data.map(row => ({ ...row, value: null, revenue: revenue ? row.revenue : null, expense: expense ? row.expense : null }));
       },
     },
 
@@ -1196,6 +1215,8 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, range, resolution = 'MONTH', excludeOldPlots = false }, ctx) {
         const id = requireModuleRead(ctx, 'dashboard', siteId);
+        const visibility = await loadDashboardPermissions(ctx);
+        if (!dashboardComponentAllowed(ctx.user, visibility, 'profit_trend')) return null;
         const data = await readChart(id, range, resolution, excludeOldPlots);
         return data.map(row => ({ date: row.date, label: row.label, value: row.revenue - row.expense }));
       },
@@ -1210,6 +1231,9 @@ const QueryType = new GraphQLObjectType({
       },
       async resolve(_, { siteId, range, top = 8 }, ctx) {
         const id = requireModuleRead(ctx, 'dashboard', siteId);
+        const visibility = await loadDashboardPermissions(ctx);
+        if (!dashboardComponentAllowed(ctx.user, visibility, 'module_breakdown')
+          || !dashboardComponentAllowed(ctx.user, visibility, 'kpi_totalExpense')) return null;
         const data = await getExpenseByCategory(id, range.start, range.end, top);
         return data;
       },

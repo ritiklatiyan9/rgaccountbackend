@@ -20,7 +20,7 @@ import {
 } from '../controllers/compliance.controller.js';
 import {
   getEventReminderState, getReminderEngineHealth, registerPushToken, removePushToken,
-  retryEventCalendarSync, retryEventReminders, updateEventReminderState,
+  retryEventCalendarSync, retryEventReminders, updateEventDone, updateEventReminderState,
 } from '../controllers/eventReminder.controller.js';
 
 const router = express.Router();
@@ -36,6 +36,7 @@ router.get('/calendar/events/:eventType/:sourceId/reminders', getEventReminderSt
 router.put('/calendar/events/:eventType/:sourceId/reminders', bust, updateEventReminderState);
 router.post('/calendar/events/:eventType/:sourceId/reminders/retry', retryEventReminders);
 router.post('/calendar/events/:eventType/:sourceId/google-calendar/retry', retryEventCalendarSync);
+router.put('/calendar/events/:eventType/:sourceId/done', bust, updateEventDone);
 router.post('/push-tokens', registerPushToken);
 router.delete('/push-tokens', removePushToken);
 router.get('/reminder-engine/health', getReminderEngineHealth);
