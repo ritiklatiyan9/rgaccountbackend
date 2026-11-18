@@ -1,5 +1,12 @@
 import MasterModel from './MasterModel.js';
 
+// Support the directory during rollout of the shared members migration.
+const codeIdSql = `COALESCE((to_jsonb(m)->>'code_id')::int,
+  (SELECT MIN(code_member.id) FROM members code_member
+    WHERE LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(m.phone, ''), '[^0-9]', '', 'g'), 10)) = 10
+      AND RIGHT(REGEXP_REPLACE(COALESCE(code_member.phone, ''), '[^0-9]', '', 'g'), 10)
+        = RIGHT(REGEXP_REPLACE(m.phone, '[^0-9]', '', 'g'), 10)), m.id)`;
+
 class MemberModel extends MasterModel {
   constructor() {
     super('members');
@@ -21,11 +28,7 @@ class MemberModel extends MasterModel {
 
   /** Lightweight list – only columns needed for the table view */
   async findBySiteIdList(siteId, pool, memberType = null) {
-    let query = `SELECT m.id,
-      COALESCE((SELECT MIN(code_member.id)::int FROM members code_member
-        WHERE LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(m.phone, ''), '[^0-9]', '', 'g'), 10)) = 10
-          AND RIGHT(REGEXP_REPLACE(COALESCE(code_member.phone, ''), '[^0-9]', '', 'g'), 10)
-            = RIGHT(REGEXP_REPLACE(m.phone, '[^0-9]', '', 'g'), 10)), m.id) AS code_id,
+    let query = `SELECT m.id, ${codeIdSql} AS code_id,
       m.member_type, COALESCE(m.member_types, ARRAY[m.member_type]) AS member_types, m.full_name, m.father_name, m.phone, m.email,
       m.city, m.state, m.status, m.photo, m.alt_phone, m.whatsapp, m.address, m.pincode,
       m.aadhar_no, m.pan_no, m.voter_id, m.passport_no, m.driving_license_no,
@@ -59,7 +62,7 @@ class MemberModel extends MasterModel {
   /** Full profile plus its strongest KYC state for the profile header. */
   async findByIdWithKyc(id, pool) {
     const result = await pool.query(
-      `SELECT m.*,
+      `SELECT m.*, ${codeIdSql} AS code_id,
               shared_kyc.id AS shared_kyc_case_id,
               shared_kyc.status AS shared_kyc_status,
               shared_kyc.reused_from_case_id AS shared_kyc_reused_from_case_id

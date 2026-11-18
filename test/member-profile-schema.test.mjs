@@ -13,7 +13,7 @@ test('member profiles tolerate pending and completed KYC reuse migrations', {
     await client.query('BEGIN READ ONLY');
     const fixture = ({ migrated = false, empty = false } = {}) => ({
       query: (sql, params) => client.query(`
-        WITH members AS (SELECT 67 AS id, 'Test profile'::text AS full_name),
+        WITH members AS (SELECT 67 AS id, 'Test profile'::text AS full_name, NULL::text AS phone),
         kyc_cases AS (
           SELECT id, client_member_id, status, updated_at
                  ${migrated ? ', 100::integer AS reused_from_case_id' : ''}

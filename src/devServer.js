@@ -26,6 +26,7 @@ import { up as migrateDataStorage } from './migrations/193_data_storage.js';
 import { up as migrateDataStorageSubAdminAccess } from './migrations/227_data_storage_sub_admin_access.js';
 import { up as migrateMemberSiteSharing } from './migrations/187_member_site_sharing.js';
 import { up as migrateMemberIdentityLinking } from './migrations/192_member_identity_linking.js';
+import { up as migrateMemberCodeIds } from './migrations/254_member_code_ids.js';
 import { up as migrateTdsFinancialSettlements } from './migrations/198_tds_financial_settlements.js';
 import { up as migrateImprestApprovalIndexes } from './migrations/197_imprest_approval_activity_indexes.js';
 import { up as migrateImprestCashGuard } from './migrations/195_imprest_cash_funding_guard.js';
@@ -59,6 +60,7 @@ connectDB().then(async () => {
   await migratePlotBankRounding(pool);
   await migrateMemberSiteSharing(pool);
   await migrateMemberIdentityLinking(pool);
+  await migrateMemberCodeIds(pool);
   await migrateTdsDeducteeMapping(pool);
   await migrateTdsFinancialSettlements(pool);
   await migrateDataStorage(pool);

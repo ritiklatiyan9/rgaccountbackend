@@ -9,6 +9,7 @@ import { assertMemberSiteAccess } from '../src/services/memberPhoneReuse.service
 import { up } from '../src/migrations/187_member_site_sharing.js';
 import { up as linkMigration } from '../src/migrations/192_member_identity_linking.js';
 import { up as consolidationMigration } from '../src/migrations/194_member_identity_consolidation.js';
+import { up as migrateMemberCodeIds } from '../src/migrations/254_member_code_ids.js';
 import { reviewMemberIdentity } from '../src/services/memberIdentityLink.service.js';
 import { createMember,updateMember,registerMemberInSites,previewMemberSiteRegistrations } from '../src/controllers/member.controller.js';
 import { createCase,verifyCase } from '../src/controllers/memberKyc.controller.js';
@@ -87,6 +88,36 @@ test('startup migration repairs the missing sharing column before client registr
   assert.equal(result.status,201);assert.equal(result.data.registration.site_count,3);
   assert.deepEqual((await query('SELECT site_id FROM members WHERE shared_profile_id=$1 ORDER BY site_id',[result.data.registration.shared_profile_id])).rows.map(row=>row.site_id),[1,2,3]);
   assert.equal((await query("SELECT count(*)::int AS n FROM app_schema_migrations WHERE version='187_member_site_sharing'")).rows[0].n,1);
+});
+
+test('correcting a legacy broker phone preserves its issued code in every site', async t => {
+  const { db, query, fixturePool } = await fixture(t);
+  const broker = data({ full_name: 'TEST BROKER', member_type: 'BROKER', member_types: ['BROKER'] });
+  const original = await memberModel.create(broker, db);
+  const otherSite = await memberModel.create({ ...broker, site_id: 2, phone: '+91 98765 43210' }, db);
+  const withoutPhone = await memberModel.create({ ...broker, site_id: 3, phone: null }, db);
+  assert.equal((await memberModel.findByIdWithKyc(otherSite.id, db)).code_id, original.id);
+
+  assert.equal(await migrateMemberCodeIds(fixturePool), true);
+  assert.equal((await memberModel.findByIdWithKyc(withoutPhone.id, db)).code_id, withoutPhone.id);
+  const saved = await invoke(updateMember, { phone: '+91 90000 00001', code_id: 999 }, { id: otherSite.id });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.member.phone, '9000000001');
+  assert.equal(saved.data.member.code_id, original.id);
+  assert.equal(await migrateMemberCodeIds(fixturePool), false);
+  assert.equal((await memberModel.findByIdWithKyc(otherSite.id, db)).code_id, original.id);
+  assert.equal((await memberModel.findBySiteIdList(2, db, 'BROKER'))[0].code_id, original.id);
+  assert.equal((await memberModel.findBySiteIdList(1, db, 'BROKER'))[0].code_id, original.id);
+
+  const matching = await memberModel.create({ ...broker, site_id: 3, phone: saved.data.member.phone }, db);
+  assert.equal(matching.code_id, original.id);
+  const newOwner = await memberModel.create({ ...broker, full_name: 'OTHER BROKER', site_id: 3 }, db);
+  assert.equal(newOwner.code_id, newOwner.id);
+
+  const created = await invoke(createMember, { site_id: 1, full_name: 'ANOTHER BROKER', member_types: 'BROKER' });
+  assert.equal(created.status, 201);
+  const { rows: added } = await query('SELECT code_id FROM members WHERE shared_profile_id = $1', [created.data.registration.shared_profile_id]);
+  assert.deepEqual(added.map(row => row.code_id), Array(3).fill(created.data.member.id));
 });
 
 test('adding from Clients automatically registers all organisation sites, preserves roles and links only the selected plot',async t=>{

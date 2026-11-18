@@ -5,7 +5,7 @@ import { assertMemberSiteAccess, normalizeMemberName, normalizeMemberPhone, REUS
 import { copyIncorporatedKycDocuments } from './memberKycDocuments.service.js';
 
 const SHARED_FIELDS=[...new Set([...REUSABLE_KYC_PROFILE_FIELDS,...DOC_FIELDS])];
-const copyFields=[...new Set([...MEMBER_FIELDS,...DOC_FIELDS,'member_types','geocode_source','geocode_precision','geocoded_at'])];
+const copyFields=[...new Set([...MEMBER_FIELDS,...DOC_FIELDS,'member_types','code_id','geocode_source','geocode_precision','geocoded_at'])];
 const fail=(message,statusCode=409)=>{throw Object.assign(new Error(message),{statusCode});};
 const identity=value=>String(value || '').toUpperCase().replace(/[^A-Z0-9]/g,'');
 
