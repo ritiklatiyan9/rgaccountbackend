@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { emitToUser } from '../config/socket.js';
 import { cleanupFile } from '../middlewares/multer.middleware.js';
+import { sendRequestAttachment } from '../utils/requestAttachmentContent.js';
 import * as seek from '../services/seekPermission.service.js';
 
 // Live bell: push the change to every open tab that shows this request. Runs
@@ -69,7 +70,10 @@ export const createSeekPermission = asyncHandler(async (req, res) => {
 });
 
 export const getSeekAttachment = asyncHandler(async (req, res) => {
-  noStore(res).json(await seek.seekAttachmentUrl(req.user, req.params.id, req.params.index));
+  noStore(res);
+  const { id, index } = req.params;
+  if (req.query.content === 'preview') return sendRequestAttachment(res, await seek.seekAttachmentFile(req.user, id, index));
+  res.json(await seek.seekAttachmentUrl(req.user, id, index));
 });
 
 export const decideSeekPermission = decision => asyncHandler(async (req, res) => {

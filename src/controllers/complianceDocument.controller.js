@@ -1,4 +1,5 @@
 import path from 'path';
+import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'crypto';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
@@ -420,7 +421,7 @@ export const getComplianceDocument = asyncHandler(async (req, res) => {
   res.json({ document: await toPublic(document) });
 });
 
-/** Authenticated byte stream used by private local regulatory evidence. */
+/** Serve regulatory evidence through the current user's document permissions. */
 export const streamComplianceDocument = asyncHandler(async (req, res) => {
   const documentId = parsePositiveId(req.params.documentId);
   if (!documentId) return res.status(400).json({ message: 'Invalid document id' });
@@ -441,7 +442,17 @@ export const streamComplianceDocument = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: 'Restricted document access denied' });
   }
 
-  const bytes = await getPlotDocBytes(document.storage_key);
+  const storageKey = String(document.storage_key || '');
+  let bytes;
+  if (storageKey.startsWith('local-private::')) {
+    const fileName = storageKey.slice('local-private::'.length);
+    if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+    bytes = await readFile(path.join('uploads', 'compliance_documents', fileName));
+  } else {
+    bytes = await getPlotDocBytes(storageKey);
+  }
   await writeComplianceAudit(pool, req, {
     action: 'DOCUMENT_DOWNLOAD', entityType: document.entity_type, entityId: document.entity_id,
     siteId: document.site_id, newValue: { document_id: document.id, title: document.title },

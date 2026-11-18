@@ -36,17 +36,27 @@ export function memberDocumentStorage(value, env = process.env) {
   return null;
 }
 
-// Call only after the caller has checked the member's site and read permission.
-export async function signMemberDocumentUrl(value) {
-  const storage = memberDocumentStorage(value);
-  if (!storage) return value;
+function storageClient(storage) {
   const { Bucket, Key, region, profile, credentials } = storage;
   const clientKey = `${profile}:${Bucket}:${region}`;
   if (!clients.has(clientKey)) {
     clients.set(clientKey, new S3Client({ region, ...(credentials ? { credentials } : {}) }));
   }
+  return { client: clients.get(clientKey), command: new GetObjectCommand({ Bucket, Key }) };
+}
+
+// Call only after the caller has checked the record's site and read permission.
+export function readMemberDocumentObject(storage, signal) {
+  const { client, command } = storageClient(storage);
+  return client.send(command, { abortSignal: signal });
+}
+
+export async function signMemberDocumentUrl(value) {
+  const storage = memberDocumentStorage(value);
+  if (!storage) return value;
   try {
-    return await getSignedUrl(clients.get(clientKey), new GetObjectCommand({ Bucket, Key }), { expiresIn: 3600 });
+    const { client, command } = storageClient(storage);
+    return await getSignedUrl(client, command, { expiresIn: 3600 });
   } catch {
     // Keep the member profile available if storage credentials are incomplete.
     return value;

@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import { uploadToS3 } from '../utils/aws.js';
-import { memberDocumentStorage, signMemberDocumentUrl } from '../utils/memberDocumentUrls.js';
+import { signMemberDocumentUrl } from '../utils/memberDocumentUrls.js';
+import { requestAttachmentStorage } from '../utils/requestAttachmentContent.js';
 
 // Seek Permission: a sub-admin asks one person — an admin, or a sub-admin of the
 // same site — who approves or rejects; admins can decide any request. Everything
@@ -38,10 +39,7 @@ const requireSeekActor = actor => {
 // accepts the earlier prefix so existing requests remain recoverable. A file
 // is selected only from the already-authorized request's stored attachments.
 const ATTACHMENT_FOLDER = 'vouchers';
-export const isOwnSeekAttachment = (url, env = process.env) => {
-  const key = memberDocumentStorage(url, env)?.Key;
-  return Boolean(key && [ATTACHMENT_FOLDER, 'seek-permissions'].some(folder => key.startsWith(`${folder}/`)));
-};
+export const isOwnSeekAttachment = (url, env = process.env) => Boolean(requestAttachmentStorage(url, env));
 
 // ponytail: an INSERT that fails after upload leaves an orphan object (input is
 // validated first, so only a DB failure can); add an S3 lifecycle rule if it matters.
@@ -360,13 +358,20 @@ export async function cancelSeekPermission(actor, rawId, db = pool) {
   return getSeekPermission(actor, id, db);
 }
 
-/** A fresh signed link to one attachment, for anyone who can see the request. */
-export async function seekAttachmentUrl(actor, rawId, rawIndex, db = pool, sign = signSeekFile) {
+export async function seekAttachmentFile(actor, rawId, rawIndex, db = pool) {
   const id = positiveId(rawId, 'request id');
+  if (!/^\d+$/.test(String(rawIndex))) throw fail('Attachment not found', 404);
   const index = Number(rawIndex);
   const { rows: [row] } = await db.query(visibleById('sp.attachments'), viewerParams(actor, id));
-  const file = Number.isInteger(index) ? row?.attachments?.[index] : null;
-  const url = file && await sign(file.url);
+  const file = row?.attachments?.[index];
+  if (!file?.url) throw fail('Attachment not found', 404);
+  return file;
+}
+
+/** A fresh signed link to one attachment, for anyone who can see the request. */
+export async function seekAttachmentUrl(actor, rawId, rawIndex, db = pool, sign = signSeekFile) {
+  const file = await seekAttachmentFile(actor, rawId, rawIndex, db);
+  const url = await sign(file.url);
   if (!url) throw fail('Attachment not found', 404);
   return { url, name: file.name, type: file.type };
 }

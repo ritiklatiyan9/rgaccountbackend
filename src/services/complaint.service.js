@@ -356,14 +356,20 @@ export async function complaintInbox(actor, { site_id } = {}, db = pool) {
   return { ...inbox, received: inbox.received.map(row => publicRow(row, actor)), sent: inbox.sent.map(row => publicRow(row, actor)) };
 }
 
-/** A fresh signed link to one attachment, for anyone who can see the complaint. */
-export async function complaintAttachmentUrl(actor, rawId, rawIndex, db = pool, sign = signFile) {
+export async function complaintAttachmentFile(actor, rawId, rawIndex, db = pool) {
+  if (!/^\d+$/.test(String(rawIndex))) throw fail('Attachment not found', 404);
   const { rows: [row] } = await db.query(`SELECT c.attachments FROM complaints c JOIN sites s ON s.id = c.site_id
     LEFT JOIN complaint_access a ON a.site_id = c.site_id AND a.user_id = $2 ${visibleWhere('c.id')}`,
   params(actor, positiveId(rawId, 'complaint id')));
-  const index = Number(rawIndex);
-  const file = Number.isInteger(index) ? row?.attachments?.[index] : null;
-  const url = file && await sign(file.url);
+  const file = row?.attachments?.[Number(rawIndex)];
+  if (!file?.url) throw fail('Attachment not found', 404);
+  return file;
+}
+
+/** A fresh signed link to one attachment, for anyone who can see the complaint. */
+export async function complaintAttachmentUrl(actor, rawId, rawIndex, db = pool, sign = signFile) {
+  const file = await complaintAttachmentFile(actor, rawId, rawIndex, db);
+  const url = await sign(file.url);
   if (!url) throw fail('Attachment not found', 404);
   return { url, name: file.name, type: file.type };
 }

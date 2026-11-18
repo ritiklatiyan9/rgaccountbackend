@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { emitToUser } from '../config/socket.js';
 import { cleanupFile } from '../middlewares/multer.middleware.js';
+import { sendRequestAttachment } from '../utils/requestAttachmentContent.js';
 import * as complaints from '../services/complaint.service.js';
 
 // Live push to every open tab that may see this complaint. Runs after the
@@ -89,7 +90,10 @@ export const markComplaintCommentsSeen = asyncHandler(async (req, res) => {
 });
 
 export const getComplaintAttachment = asyncHandler(async (req, res) => {
-  noStore(res).json(await complaints.complaintAttachmentUrl(req.user, req.params.id, req.params.index));
+  noStore(res);
+  const { id, index } = req.params;
+  if (req.query.content === 'preview') return sendRequestAttachment(res, await complaints.complaintAttachmentFile(req.user, id, index));
+  res.json(await complaints.complaintAttachmentUrl(req.user, id, index));
 });
 
 export const getComplaintAccess = asyncHandler(async (req, res) => {

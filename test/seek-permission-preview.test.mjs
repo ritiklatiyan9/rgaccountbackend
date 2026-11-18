@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { IncomingMessage, ServerResponse } from 'node:http';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 
 process.env.JWT_ACCESS_SECRET = 'seek-preview-test-secret';
 const { createSeekPermissionPreviewApp, createSeekPermissionPreviewServer, assertSeekPreviewBaseSchema,
@@ -38,9 +39,11 @@ function request(app, { method = 'GET', path = '/health', headers = {}, body } =
     res.on('error', reject);
     res.on('finish', () => {
       clearTimeout(deadline);
-      const raw = Buffer.concat(chunks).toString();
-      const text = raw.slice(raw.indexOf('\r\n\r\n') + 4);
-      resolve({ status: res.statusCode, headers: res.getHeaders(), body: text ? JSON.parse(text) : null });
+      const raw = Buffer.concat(chunks);
+      const bytes = raw.subarray(raw.indexOf('\r\n\r\n') + 4);
+      const headers = res.getHeaders();
+      const body = headers['content-type']?.startsWith('application/json') ? JSON.parse(bytes.toString()) : (bytes.length ? bytes : null);
+      resolve({ status: res.statusCode, headers, body });
       socket.destroy();
     });
     app.handle(req, res);
@@ -79,6 +82,30 @@ test('preview mounts only Seek Permission, keeps real authentication, and enforc
       headers: { Origin: origin, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization,x-session-id,x-app-context' } })).status, 204);
     const auth = actor => ({ Origin: origin, Authorization: `Bearer ${signAccessToken({ id: actor.id, role: actor.role, version: 0, app: 'accounts' })}` });
     const requester = auth({ id: 5, role: 'sub_admin' });
+    t.mock.method(S3Client.prototype, 'send', async command => {
+      assert.ok(command instanceof GetObjectCommand);
+      assert.equal(command.input.Key, 'seek-permissions/test.pdf');
+      const bytes = Buffer.from('%PDF-attachment-test');
+      return { Body: Readable.from([bytes]), ContentLength: bytes.length };
+    });
+    const priorBucket = process.env.AWS_S3_BUCKET_NAME;
+    process.env.AWS_S3_BUCKET_NAME = 'seek-preview-test-storage';
+    t.after(() => {
+      if (priorBucket === undefined) delete process.env.AWS_S3_BUCKET_NAME;
+      else process.env.AWS_S3_BUCKET_NAME = priorBucket;
+    });
+    const region = process.env.AWS_REGION || 'ap-south-1';
+    await db.query('UPDATE seek_permissions SET attachments = $1 WHERE id = 1', [JSON.stringify([{
+      url: `https://seek-preview-test-storage.s3.${region}.amazonaws.com/seek-permissions/test.pdf`, name: 'Approval evidence',
+    }])]);
+    const attachment = '/seek-permissions/1/attachments/0?content=preview';
+    const response = await request(app, { path: attachment, headers: requester });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers['access-control-allow-origin'], origin);
+    assert.equal(response.headers['content-type'], 'application/pdf');
+    assert.equal(response.body.toString(), '%PDF-attachment-test');
+    assert.equal((await request(app, { path: attachment, headers: auth({ id: 6, role: 'sub_admin' }) })).status, 404);
+    assert.equal((await request(app, { path: attachment })).status, 401);
     const created = await request(app, { method:'POST',path:'/seek-permissions',headers:requester,
       body:{site_id:1,asked_to:1,title:'Critical approval',priority:'critical'} });
     assert.equal(created.status,201); assert.equal(created.body.request.priority,'critical');
