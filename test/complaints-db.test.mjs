@@ -114,6 +114,8 @@ test('Complaints: raise about a person/module, assign, work it through, Studio c
     await rejects(createComplaintComment(ravi, c1.id, { body: 'x', client_id: 'nope' }, db), 400);
     await rejects(createComplaintComment(meena, c1.id, { body: 'hi', client_id: uuid(3) }, db), 404);
     const reply = await createComplaintComment(admin, c1.id, { body: 'Checking', client_id: uuid(4) }, db);
+    const inboxAfterReply = await complaintInbox(ravi, { site_id: 1 }, db);
+    assert.equal(Number(inboxAfterReply.sent.find(row => row.id === c1.id).latest_unread_comment_id), Number(reply.comment.id));
     let page = await listComplaintComments(ravi, c1.id, {}, db);
     assert.deepEqual(page.comments.map(c => c.body), ['Bank slip attached', 'Checking']);
     assert.deepEqual([page.comment_count, page.unread_comments], [2, 1], 'only the other person\'s reply is unread');

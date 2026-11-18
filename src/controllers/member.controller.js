@@ -1,7 +1,7 @@
 import { PLOT_CO_APPLICANTS_SOURCE } from '../services/plotCoApplicants.service.js';
 import { attachModuleChequeDates } from '../services/chequeDates.service.js';
 import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
-import { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
+import { MEMBER_FIELDS, DOC_FIELDS, applyMemberTypes } from '../services/memberProfileFields.js';
 import { linkMemberSiteRegistration, lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
 import { reviewMemberIdentity, linkMemberIdentity } from '../services/memberIdentityLink.service.js';
 import { resolveMemberIdentityId } from '../services/memberIdentityConsolidation.service.js';
@@ -9,7 +9,7 @@ import { findSiteRegistrationMatches, getSiteRegistrationStatus } from '../servi
 import { getMemberLinks, MEMBER_LINK_MODULES } from '../services/memberLinks.service.js';
 import permissionModel from '../models/Permission.model.js';
 import { copyIncorporatedKycDocuments } from '../services/memberKycDocuments.service.js';
-export { MEMBER_FIELDS, DOC_FIELDS } from '../services/memberProfileFields.js';
+export { MEMBER_FIELDS, DOC_FIELDS, MEMBER_TYPE_VALUES, applyMemberTypes } from '../services/memberProfileFields.js';
 import { linkSelectedMemberPlot } from '../services/memberPlotSelection.service.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { memberModel } from '../models/Member.model.js';
@@ -39,45 +39,6 @@ export const searchMembersByPlot = asyncHandler(async (req, res) => {
   }
   res.json(await findPeopleByPlot(siteId, plotNo, pool));
 });
-
-// ── MEMBER FIELDS (whitelist) ──
-
-
-// A member can hold several roles at once (CLIENT + FARMER, an EMPLOYEE who is
-// also a PARTNER, …). `member_types` is the full set; `member_type` stays the
-// primary role — the first of the set — so every existing query keeps working.
-export const MEMBER_TYPE_VALUES = ['CLIENT', 'FARMER', 'MEMBER', 'BROKER', 'PARTNER', 'VENDOR', 'EMPLOYEE', 'OTHER'];
-
-const cleanTypeList = (raw) => {
-  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : null;
-  if (!list) return null;
-  const seen = list
-    .map((t) => String(t).trim().toUpperCase())
-    .filter((t) => MEMBER_TYPE_VALUES.includes(t));
-  return [...new Set(seen)];
-};
-
-/** Reconcile `member_types` + `member_type` from a request body onto `data`.
- *  `current` is the member's stored row on update, `{}` on create. */
-export const applyMemberTypes = (data, body, current = {}) => {
-  const requested = cleanTypeList(body.member_types);
-  const primary = data.member_type || null;
-  if (requested) {
-    // An explicit set wins. The primary named alongside it leads the list.
-    const types = requested.length ? requested : [primary || current.member_type || 'CLIENT'];
-    data.member_types = primary && types.includes(primary)
-      ? [primary, ...types.filter((t) => t !== primary)]
-      : types;
-    data.member_type = data.member_types[0];
-    return data;
-  }
-  if (!primary) return data;
-  // Only a primary type came in (the older single-type forms): keep the other
-  // roles the member already holds instead of silently dropping them.
-  const existing = current.member_types?.length ? current.member_types : [current.member_type].filter(Boolean);
-  data.member_types = [primary, ...existing.filter((t) => t !== primary)];
-  return data;
-};
 
 // Country code, leading zero, spaces and punctuation do not create a second identity.
 export const samePhone = (a, b) => {
@@ -198,10 +159,26 @@ export const lookupMemberByPhone = asyncHandler(async (req, res) => {
     } : null,
   } : null;
 
+  const currentSummary = toSummary(currentSiteMember);
+  if (currentSummary) {
+    const isAdmin = ['admin', 'super_admin'].includes(req.user.role);
+    const permission = isAdmin ? null : req.user.permissionsByModule?.get('clients') ?? await permissionModel.getPermission(req.user.id, 'clients');
+    const canUpdate = isAdmin || permission?.can_update === true;
+    const canWrite = permission?.can_write === true;
+    currentSummary.open_kyc_case_id = null;
+    if (canUpdate || canWrite) {
+      const { rows } = await pool.query(`SELECT id FROM kyc_cases
+        WHERE client_member_id = $1 AND site_id = $2 AND booking_id IS NULL
+          AND status IN ('OPEN', 'OCR_PENDING', 'OCR_DONE') AND ($3 OR created_by = $4)
+        ORDER BY id DESC LIMIT 1`, [currentSiteMember.id, siteId, canUpdate, req.user.id]);
+      if (rows[0]) currentSummary.open_kyc_case_id = Number(rows[0].id);
+    }
+  }
+
   return res.json({
     phone,
     found: matches.length > 0,
-    current_site_member: toSummary(currentSiteMember),
+    current_site_member: currentSummary,
     source: toSummary(source),
     sites,
   });

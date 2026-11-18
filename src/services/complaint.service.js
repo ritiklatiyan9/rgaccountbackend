@@ -62,14 +62,16 @@ const ROW_SQL = `SELECT c.id, c.site_id, s.name AS site_name, c.kind, c.raised_b
     c.created_at, c.updated_at, c.comment_count, c.last_comment_at, c.shared_with,
     (SELECT COALESCE(json_agg(json_build_object('id', su.id, 'name', su.name) ORDER BY lower(su.name)), '[]'::json)
       FROM users su WHERE su.id = ANY(c.shared_with)) AS shared_with_people,
-    (SELECT count(*)::int FROM complaint_comments cc WHERE cc.complaint_id = c.id
-      AND cc.id > COALESCE(cr.last_comment_id, 0) AND cc.author_id <> $2) AS unread_comments
+    unread.unread_comments, unread.latest_unread_comment_id
   FROM complaints c
   JOIN sites s ON s.id = c.site_id
   JOIN users ru ON ru.id = c.raised_by
   JOIN users au ON au.id = c.assigned_to
   LEFT JOIN users bu ON bu.id = c.about_user_id
   LEFT JOIN complaint_comment_reads cr ON cr.complaint_id = c.id AND cr.user_id = $2
+  LEFT JOIN LATERAL (SELECT count(*)::int AS unread_comments, max(cc.id) AS latest_unread_comment_id
+    FROM complaint_comments cc WHERE cc.complaint_id = c.id AND cc.id > COALESCE(cr.last_comment_id, 0)
+      AND cc.author_id <> $2) unread ON true
   LEFT JOIN complaint_access a ON a.site_id = c.site_id AND a.user_id = $2`;
 const visibleWhere = key => `WHERE ${key} = $1 AND s.organization_id = $3 AND ${VIEWER_ACTIVE} AND ${VISIBLE}`;
 const params = (actor, first) => [first, actor.id, orgOf(actor), isComplaintAdmin(actor)];

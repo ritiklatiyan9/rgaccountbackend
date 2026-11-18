@@ -134,6 +134,8 @@ test('read watermarks are bounded, monotonic and leave concurrent/new replies un
     let details = await getSeekPermission(admin, request.id, db);
     assert.equal(details.unread_comments, 1);
     const newest = (await listSeekComments(admin, request.id, {}, db)).comments.at(-1);
+    const polled = await seekInbox(admin, { site_id: 1 }, db);
+    assert.equal(Number(polled.received[0].latest_unread_comment_id), Number(newest.id));
     await markSeekCommentsSeen(admin, request.id, { last_comment_id: newest.id }, db);
     await markSeekCommentsSeen(admin, request.id, { last_comment_id: old.comment.id }, db);
     details = await getSeekPermission(admin, request.id, db);

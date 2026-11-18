@@ -11,7 +11,7 @@ const broadcast = (request) => {
     id: request.id, site_id: request.site_id, site_name: request.site_name, status: request.status,
     title: request.title, amount: request.amount, priority: request.priority, requested_by: request.requested_by,
     requested_by_name: request.requested_by_name, asked_to: request.asked_to,
-    asked_to_name: request.asked_to_name, decided_by_name: request.decided_by_name,
+    asked_to_name: request.asked_to_name, decided_by: request.decided_by, decided_by_name: request.decided_by_name,
   };
   seek.seekRecipients(request)
     .then(ids => ids.forEach(id => emitToUser(id, 'seek_permission:changed', payload)))
@@ -36,6 +36,7 @@ export const createSeekComment = asyncHandler(async (req, res) => {
     seek.seekRecipients(request)
       .then(ids => ids.forEach(id => emitToUser(id, 'seek_permission:comment', {
         id: request.id, request_id: request.id, site_id: request.site_id, comment_id: comment.id, author_id: comment.author_id,
+        requested_by: request.requested_by, asked_to: request.asked_to, decided_by: request.decided_by,
         comment_count: metadata.comment_count, last_comment_at: metadata.last_comment_at, priority: request.priority,
       })))
       .catch(error => console.error('Seek permission comment push failed:', error.message));

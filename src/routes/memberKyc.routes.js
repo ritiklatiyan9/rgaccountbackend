@@ -13,8 +13,6 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 import permissionModel from '../models/Permission.model.js';
 import pool from '../config/db.js';
 
-const router = express.Router();
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 1 },
@@ -39,7 +37,6 @@ const acceptUpload = (req, res, next) => {
   });
 };
 
-router.use(authMiddleware, requireRole('admin', 'sub_admin'));
 const pendingKycReadCache = cacheResponse({ ttlSeconds: 20, namespace: 'member-kyc-pending' });
 const bustMemberCache = invalidateCacheOnSuccess(['members|', 'plots|', 'plots:pageData:', 'member-kyc-pending|']);
 const bustPendingKycCache = invalidateCacheOnSuccess(['member-kyc-pending|', 'plots|', 'plots:pageData:']);
@@ -105,19 +102,24 @@ const requireKycMutationPermission = (caseSource) => async (req, res, next) => {
   }
 };
 
-router.use(loadClientKycPermissions);
+export function createMemberKycRouter({ authenticate = authMiddleware } = {}) {
+  const router = express.Router();
+  router.use(authenticate, requireRole('admin', 'sub_admin'), loadClientKycPermissions);
 
-router.get('/pending', requirePermission('clients', 'read'), pendingKycReadCache, listPendingCases);
-router.post('/cases', requireKycStartPermission, bustMemberCache, createCase);
-router.get('/case/:id', requirePermission('clients', 'read'), getCase);
-router.patch('/case/:id/customer', requireKycMutationPermission('params'), bustMemberCache, updateCaseCustomer);
-// Multer must parse the multipart body before the ownership middleware can read
-// kyc_case_id. Authentication/role checks have already run at router level.
-router.post('/upload', acceptUpload, requireKycMutationPermission('body'), optimizeEvidenceImages, bustPendingKycCache, uploadDocument);
-router.get('/document/:id', requirePermission('clients', 'read'), getDocument);
-router.post('/document/:id/retry', requireKycMutationPermission('document'), bustPendingKycCache, retryDocument);
-router.post('/case/:id/extract-preview', requirePermission('clients', 'read'), extractPreview);
-router.post('/case/:id/verify', requireKycMutationPermission('params'), bustMemberCache, verifyCase);
-router.post('/case/:id/reject', requireKycMutationPermission('params'), bustMemberCache, rejectCase);
+  router.get('/pending', requirePermission('clients', 'read'), pendingKycReadCache, listPendingCases);
+  router.post('/cases', requireKycStartPermission, bustMemberCache, createCase);
+  router.get('/case/:id', requirePermission('clients', 'read'), getCase);
+  router.patch('/case/:id/customer', requireKycMutationPermission('params'), bustMemberCache, updateCaseCustomer);
+  // Multer must parse the multipart body before the ownership middleware can read
+  // kyc_case_id. Authentication and role checks have already run at router level.
+  router.post('/upload', acceptUpload, requireKycMutationPermission('body'), optimizeEvidenceImages, bustPendingKycCache, uploadDocument);
+  router.get('/document/:id', requirePermission('clients', 'read'), getDocument);
+  router.post('/document/:id/retry', requireKycMutationPermission('document'), bustPendingKycCache, retryDocument);
+  router.post('/case/:id/extract-preview', requirePermission('clients', 'read'), extractPreview);
+  router.post('/case/:id/verify', requireKycMutationPermission('params'), bustMemberCache, verifyCase);
+  router.post('/case/:id/reject', requireKycMutationPermission('params'), bustMemberCache, rejectCase);
 
-export default router;
+  return router;
+}
+
+export default createMemberKycRouter();

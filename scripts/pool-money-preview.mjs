@@ -7,6 +7,7 @@ import { createHandler } from 'graphql-http/lib/use/express';
 import { GraphQLSchema, GraphQLObjectType } from 'graphql';
 import { schema as accountsSchema } from '../src/graphql/schema.js';
 import { createMemberRouter } from '../src/routes/member.routes.js';
+import { createMemberKycRouter } from '../src/routes/memberKyc.routes.js';
 import cors from 'cors';
 import pool from '../src/config/db.js';
 import { createSeekPermissionPreviewAuth } from '../src/middlewares/seekPermissionPreviewAuth.middleware.js';
@@ -42,7 +43,7 @@ export function poolPreviewPort(value = process.env.POOL_MONEY_PREVIEW_PORT || 8
 
 export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, database = pool,
   saveProjectProfile = updateSite, createShop = createPlot, updateShop = updatePlot,
-  audit = auditRequestMiddleware, commissionRouter, memberRouter, plotGraphql = false, registryNoc = false, receiptSettings = false,
+  audit = auditRequestMiddleware, commissionRouter, memberRouter, memberKycRouter, plotGraphql = false, registryNoc = false, receiptSettings = false,
   nocHandlers = { getRegistryNoc, saveRegistryNoc, approveRegistryNoc, getPlotNocRegistry, createPlotNocRegistry } } = {}) {
   if (typeof authenticate !== 'function' || !poolMoneyRouter) throw new Error('Preview authentication and Pool Money router are required.');
   const app = express();
@@ -69,6 +70,7 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
   if (commissionRouter) app.use('/plot-commission', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, commissionRouter);
 
   if (memberRouter) app.use('/members', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, memberRouter);
+  if (memberKycRouter) app.use('/member-kyc', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, memberKycRouter);
   if (plotGraphql) {
     // Reuse production field resolvers and authorization with a narrow schema.
     const queryFields = accountsSchema.getQueryType().toConfig().fields;
@@ -228,10 +230,13 @@ export async function startPoolMoneyPreview({ port = poolPreviewPort(), database
   const { authenticate } = createSeekPermissionPreviewAuth({ database });
   // Authentication is applied to the narrow mounts by the app. The production
   // router retains its own role, module and site guards unchanged.
+  const authenticatedMount = (_req, _res, next) => next();
   const app = createPoolMoneyPreviewApp({ database, authenticate,
-    poolMoneyRouter: createPoolMoneyRouter({ authenticate: (_req, _res, next) => next() }),
-    commissionRouter: createPlotCommissionRouter({ authenticate: (_req, _res, next) => next() }),
-    memberRouter: createMemberRouter({ authenticate: (_req, _res, next) => next() }), plotGraphql: true, registryNoc: true, receiptSettings: true });
+    poolMoneyRouter: createPoolMoneyRouter({ authenticate: authenticatedMount }),
+    commissionRouter: createPlotCommissionRouter({ authenticate: authenticatedMount }),
+    memberRouter: createMemberRouter({ authenticate: authenticatedMount }),
+    memberKycRouter: createMemberKycRouter({ authenticate: authenticatedMount }),
+    plotGraphql: true, registryNoc: true, receiptSettings: true });
   const server = await new Promise((resolve, reject) => {
     const listener = app.listen(poolPreviewPort(port), '127.0.0.1', () => resolve(listener));
     listener.once('error', reject);

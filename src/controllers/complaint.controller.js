@@ -8,7 +8,7 @@ import * as complaints from '../services/complaint.service.js';
 // response; the page also refetches when it regains focus.
 const broadcast = (complaint, req, kind) => {
   const payload = {
-    id: complaint.id, site_id: complaint.site_id, site_name: complaint.site_name, title: complaint.title, kind: complaint.kind,
+    id: complaint.id, site_id: complaint.site_id, site_name: complaint.site_name, title: complaint.title, complaint_kind: complaint.kind, updated_at: complaint.updated_at,
     status: complaint.status, priority: complaint.priority, raised_by: complaint.raised_by,
     assigned_to: complaint.assigned_to, shared_with: complaint.shared_with || [], actor_id: req.user.id, actor_name: req.authenticatedUser?.name || req.user.name || '', kind,
   };
@@ -77,7 +77,7 @@ export const createComplaintComment = asyncHandler(async (req, res) => {
     complaints.complaintRecipients(complaint.id)
       .then(ids => ids.forEach(id => emitToUser(id, 'complaint:comment', {
         id: complaint.id, request_id: complaint.id, site_id: complaint.site_id, comment_id: comment.id, author_id: comment.author_id,
-        raised_by: complaint.raised_by, assigned_to: complaint.assigned_to, kind: complaint.kind,
+        raised_by: complaint.raised_by, assigned_to: complaint.assigned_to, shared_with: complaint.shared_with || [], kind: complaint.kind,
         comment_count: metadata.comment_count, last_comment_at: metadata.last_comment_at, priority: complaint.priority,
       })))
       .catch(error => console.error('Complaint comment push failed:', error.message));

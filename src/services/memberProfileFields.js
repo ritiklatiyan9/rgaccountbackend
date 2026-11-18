@@ -39,3 +39,28 @@ export const DOC_FIELDS = [
   'degree_certificate_url', 'experience_certificate_url',
   'offer_letter_url', 'other_certificate_url',
 ];
+
+export const MEMBER_TYPE_VALUES = ['CLIENT', 'FARMER', 'MEMBER', 'BROKER', 'PARTNER', 'VENDOR', 'EMPLOYEE', 'OTHER'];
+
+const cleanTypeList = (raw) => {
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : null;
+  if (!list) return null;
+  const types = list.map(type => String(type).trim().toUpperCase()).filter(type => MEMBER_TYPE_VALUES.includes(type));
+  return [...new Set(types)];
+};
+
+// Keep the primary role first while allowing a member to hold other roles.
+export const applyMemberTypes = (data, body, current = {}) => {
+  const requested = cleanTypeList(body.member_types);
+  const primary = data.member_type || null;
+  if (requested) {
+    const types = requested.length ? requested : [primary || current.member_type || 'CLIENT'];
+    data.member_types = primary && types.includes(primary) ? [primary, ...types.filter(type => type !== primary)] : types;
+    data.member_type = data.member_types[0];
+    return data;
+  }
+  if (!primary) return data;
+  const existing = current.member_types?.length ? current.member_types : [current.member_type].filter(Boolean);
+  data.member_types = [primary, ...existing.filter(type => type !== primary)];
+  return data;
+};

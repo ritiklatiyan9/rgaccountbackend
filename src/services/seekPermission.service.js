@@ -93,10 +93,10 @@ const SCOPE = {
 // Aggregate unread messages in SQL for the visible set. The indexed thread/id
 // range and per-user watermark avoid fetching message bodies or a query per row.
 const WITH_UNREAD = `, unread AS (
-    SELECT c.request_id, count(*)::int AS unread_comments
+    SELECT c.request_id, count(*)::int AS unread_comments, max(c.id) AS latest_unread_comment_id
       FROM seek_permission_comments c JOIN visible v ON v.id = c.request_id
      WHERE c.id > v.last_read_comment_id AND c.author_id <> $2 GROUP BY c.request_id
-  ), entries AS (SELECT v.*, COALESCE(unread.unread_comments, 0) AS unread_comments
+  ), entries AS (SELECT v.*, COALESCE(unread.unread_comments, 0) AS unread_comments, unread.latest_unread_comment_id
       FROM visible v LEFT JOIN unread ON unread.request_id = v.id)`;
 const visibleSiteSql = `${ROW_SQL}
     LEFT JOIN seek_permission_access a ON a.site_id = sp.site_id AND a.user_id = $2

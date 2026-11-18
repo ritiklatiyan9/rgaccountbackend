@@ -11,7 +11,7 @@ import { up as linkMigration } from '../src/migrations/192_member_identity_linki
 import { up as consolidationMigration } from '../src/migrations/194_member_identity_consolidation.js';
 import { up as migrateMemberCodeIds } from '../src/migrations/254_member_code_ids.js';
 import { reviewMemberIdentity } from '../src/services/memberIdentityLink.service.js';
-import { createMember,updateMember,registerMemberInSites,previewMemberSiteRegistrations } from '../src/controllers/member.controller.js';
+import { createMember,lookupMemberByPhone,updateMember,registerMemberInSites,previewMemberSiteRegistrations } from '../src/controllers/member.controller.js';
 import { createCase,verifyCase } from '../src/controllers/memberKyc.controller.js';
 
 // All operations use an isolated PostgreSQL engine. The configured application
@@ -21,8 +21,8 @@ async function fixture(t,{migrate=true}={}) {
   const sql=new PGlite();t.after(()=>sql.close());
   const fields=[...new Set([...MEMBER_FIELDS,...DOC_FIELDS,'geocode_source','geocode_precision','geocoded_at'])];
   const fieldSql=fields.map(field=>`${field} ${['latitude','longitude'].includes(field) ? 'NUMERIC' : field==='geocoded_at' ? 'TIMESTAMPTZ' : 'TEXT'}`).join(',');
-  await sql.exec(`CREATE TABLE sites(id INTEGER PRIMARY KEY,name TEXT,organization_id INTEGER NOT NULL);
-    INSERT INTO sites VALUES(1,'SOURCE',1),(2,'SECOND',1),(3,'THIRD',1),(4,'OTHER ORGANISATION',2);
+  await sql.exec(`CREATE TABLE sites(id INTEGER PRIMARY KEY,name TEXT,organization_id INTEGER NOT NULL,code TEXT);
+    INSERT INTO sites(id,name,organization_id) VALUES(1,'SOURCE',1),(2,'SECOND',1),(3,'THIRD',1),(4,'OTHER ORGANISATION',2);
     CREATE TABLE user_sites(user_id INTEGER,site_id INTEGER);
     INSERT INTO user_sites VALUES(8,1);
     CREATE TABLE app_schema_migrations(version TEXT PRIMARY KEY);
@@ -50,10 +50,10 @@ async function fixture(t,{migrate=true}={}) {
   t.after(()=>{pool.query=oldQuery;pool.connect=oldConnect;});
   return {sql,db,query,fixturePool};
 }
-function invoke(handler,body={},params={},actor=user) {
+function invoke(handler,body={},params={},actor=user,query={}) {
   return new Promise((resolve,reject)=>{
     const res={statusCode:200,status(code){this.statusCode=code;return this;},json(data){resolve({status:this.statusCode,data});}};
-    handler({body,params,user:actor,clientKycPermissions:{canUpdate:true}},res,reject);
+    handler({body,params,query,user:actor,clientKycPermissions:{canUpdate:true}},res,reject);
   });
 }
 async function transaction(db,fn,actor=user) {
@@ -346,6 +346,47 @@ test('direct KYC entry creates all registrations and later verification shares r
   assert.equal(cases.length,3);assert.ok(cases.slice(1).every(row=>row.reused_from_case_id===ready.id));
   assert.equal((await query('SELECT count(*)::int AS n FROM documents')).rows[0].n,6);
   assert.equal((await query('SELECT count(*)::int AS n FROM ocr_results')).rows[0].n,6);
+});
+
+test('fresh phone-first KYC normalizes the mobile, preserves selected roles, and rejects duplicate starts', async t => {
+  const { query } = await fixture(t);
+  const request = { site_id: 1, full_name: 'Test Client', phone: '+91 98765-43210', require_new_member: true,
+    member_types: ['BROKER', 'FARMER', 'BROKER', 'INVALID'] };
+  const invalidPhone = await invoke(createCase, { ...request, phone: '987654' });
+  assert.equal(invalidPhone.status, 400);
+  assert.match(invalidPhone.data.message, /10-digit mobile number/);
+  const started = await invoke(createCase, request);
+  assert.equal(started.status, 201);
+  assert.equal(started.data.client_phone, '9876543210');
+  const { rows } = await query('SELECT member_type, member_types FROM members ORDER BY site_id');
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every(row => row.member_type === 'BROKER' && row.member_types.join(',') === 'BROKER,FARMER'));
+  const duplicate = await invoke(createCase, { ...request, full_name: 'Other Name', phone: '09876543210' });
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.data.code, 'MEMBER_ALREADY_REGISTERED');
+  assert.equal(duplicate.data.member_id, started.data.client_member_id);
+  assert.equal((await query('SELECT count(*)::int AS n FROM kyc_cases')).rows[0].n, 1);
+  const legacyStart = await invoke(createCase, { site_id: 1, full_name: 'Test Client', phone: '9876543210' });
+  assert.equal(legacyStart.status, 201);
+  assert.equal(legacyStart.data.id, started.data.id);
+});
+
+test('phone lookup offers only standalone open cases the requester can update', async t => {
+  const { db, query } = await fixture(t);
+  const member = await memberModel.create(data(), db);
+  const addCase = async (owner, status, bookingId = null) => (await query(`INSERT INTO kyc_cases
+    (client_member_id, site_id, created_by, status, booking_id) VALUES ($1, 1, $2, $3, $4) RETURNING id`,
+  [member.id, owner, status, bookingId])).rows[0].id;
+  const ownCase = await addCase(8, 'OPEN');
+  const latestCase = await addCase(7, 'OCR_DONE');
+  await addCase(8, 'OPEN', 36);
+  await addCase(8, 'VERIFIED');
+  const lookup = actor => invoke(lookupMemberByPhone, {}, {}, actor, { site_id: '1', phone: '9876543210' });
+  const subAdmin = permission => ({ ...user, id: 8, role: 'sub_admin', permissionsByModule: new Map([['clients', permission]]) });
+  assert.equal((await lookup(user)).data.current_site_member.open_kyc_case_id, latestCase);
+  assert.equal((await lookup(subAdmin({ can_read: true, can_write: true }))).data.current_site_member.open_kyc_case_id, ownCase);
+  assert.equal((await lookup(subAdmin({ can_read: true, can_update: true }))).data.current_site_member.open_kyc_case_id, latestCase);
+  assert.equal((await lookup(subAdmin({ can_read: true }))).data.current_site_member.open_kyc_case_id, null);
 });
 
 test('subsequent identity and document edits follow the explicit profile link; site categories stay local',async t=>{

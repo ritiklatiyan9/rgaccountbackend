@@ -1,8 +1,10 @@
 import { readPendingMemberKycCases } from '../services/pendingMemberKyc.service.js';
 import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.js';
 import { DOCUMENT_FIELDS_BY_TYPE, selectActiveDocuments } from '../services/memberKycDocumentSelection.js';
-import { assertMemberSiteAccess } from '../services/memberPhoneReuse.service.js';
+import { assertMemberSiteAccess, normalizeMemberPhone } from '../services/memberPhoneReuse.service.js';
 import { lockMemberDirectory, registerMemberAcrossSites, syncSharedMemberProfile } from '../services/memberSiteSharing.service.js';
+import { applyMemberTypes } from '../services/memberProfileFields.js';
+import { memberModel } from '../models/Member.model.js';
 import crypto from 'crypto';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
@@ -248,6 +250,10 @@ export const createCase = asyncHandler(async (req, res) => {
   const siteId = Number.parseInt(req.body.site_id, 10);
   if (!Number.isInteger(siteId)) return res.status(400).json({ message: 'A valid site is required' });
   if (!(await canAccessSite(req.user, siteId))) return res.status(403).json({ message: 'This site is unavailable to your account' });
+  const requireNewMember = req.body.require_new_member === true;
+  if (requireNewMember && req.body.client_member_id != null) {
+    return res.status(400).json({ message: 'A new member KYC cannot reference an existing member.' });
+  }
 
   const client = await pool.connect();
   try {
@@ -273,14 +279,14 @@ export const createCase = asyncHandler(async (req, res) => {
       }
     } else {
       const fullName = String(req.body.full_name || '').trim().toUpperCase();
-      const phone = normalisePhone(req.body.phone);
+      const phone = requireNewMember ? normalizeMemberPhone(req.body.phone) : normalisePhone(req.body.phone);
       if (!fullName) {
         await client.query('ROLLBACK');
         return res.status(400).json({ message: 'Customer name is required' });
       }
       if (phone.length < 6) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ message: 'A valid mobile number is required' });
+        return res.status(400).json({ message: requireNewMember ? 'Enter a complete 10-digit mobile number' : 'A valid mobile number is required' });
       }
       await client.query(
         'SELECT pg_advisory_xact_lock(hashtext($1))',
@@ -289,21 +295,26 @@ export const createCase = asyncHandler(async (req, res) => {
       const { rows: matches } = await client.query(
         `SELECT id, site_id, full_name, phone, created_by FROM members
           WHERE site_id = $1
-            AND RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g'), 10) = RIGHT($2, 10)
+            AND RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = RIGHT($2, 10)
           ORDER BY id DESC LIMIT 1 FOR SHARE`,
         [siteId, phone]
       );
       member = matches[0];
+      if (member && requireNewMember) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'MEMBER_ALREADY_REGISTERED',
+          message: 'This mobile number is already registered in the selected site.',
+          member_id: member.id,
+        });
+      }
       matchedExistingMember = Boolean(member);
       if (!member) {
-        const { rows } = await client.query(
-          `INSERT INTO members
-             (site_id, member_type, full_name, phone, status, created_by, created_at, updated_at)
-           VALUES ($1, 'CLIENT', $2, $3, 'ACTIVE', $4, now(), now())
-           RETURNING id, site_id, full_name, phone`,
-          [siteId, fullName, phone, req.user.id]
-        );
-        member = rows[0];
+        const roles = requireNewMember ? applyMemberTypes({}, req.body) : {};
+        member = await memberModel.create({
+          member_type: 'CLIENT', ...roles, site_id: siteId,
+          full_name: fullName, phone, status: 'ACTIVE', created_by: req.user.id,
+        }, client);
         createdMember=true;
       }
     }

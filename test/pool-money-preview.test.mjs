@@ -4,6 +4,7 @@ import express from 'express';
 import { IncomingMessage, ServerResponse } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { createPoolMoneyPreviewApp, isPoolPreviewOrigin, poolPreviewPort } from '../scripts/pool-money-preview.mjs';
+import { createMemberKycRouter } from '../src/routes/memberKyc.routes.js';
 
 function request(app, { method = 'GET', path = '/health', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -50,6 +51,7 @@ test('preview isolates routes, rejects foreign origins and requires session proo
       req.user = { id: 1, organization_id: 1, role: 'admin' }; next();
     },
     poolMoneyRouter: router,
+    memberKycRouter: createMemberKycRouter({ authenticate: (_req, _res, next) => next() }),
     database: { query: async sql => { assert.match(sql, /^SELECT/); dbReads++; return { rows: [] }; } },
     audit: (_req, _res, next) => next(),
   });
@@ -61,6 +63,11 @@ test('preview isolates routes, rejects foreign origins and requires session proo
   assert.equal((await request(app, { headers: { Origin: 'https://foreign.example' } })).status, 403);
   const response = await request(app, { path: '/plots/pool-money', headers: { Authorization: 'Bearer verified' } });
   assert.equal(response.status, 200); assert.equal(moduleReads, 1); assert.equal(response.headers['cache-control'], 'no-store');
+  const startKyc = { method: 'POST', path: '/member-kyc/cases', body: { require_new_member: true } };
+  assert.equal((await request(app, startKyc)).status, 401);
+  const invalidKyc = await request(app, { ...startKyc, headers: { Authorization: 'Bearer verified' } });
+  assert.equal(invalidKyc.status, 400);
+  assert.equal(invalidKyc.headers['cache-control'], 'no-store');
 });
 
 test('profile save and property mutations retain org checks and reject unrelated changes', async () => {
