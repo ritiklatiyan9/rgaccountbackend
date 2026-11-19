@@ -43,7 +43,7 @@ async function detail(db,actor,transferId) {
   FROM cash_flow_entries WHERE quick_transfer_id=$1 ORDER BY quick_transfer_leg`,[transferId])).rows;
  return result;
 }
-export async function createQuickPersonalLedgerTransfer(user,data={},database=pool) {
+export async function createQuickPersonalLedgerTransfer(user,data={},database=pool,{siteReceipt=false}={}) {
  const sourceId=id(data.source_ledger_id),destinationId=id(data.destination_ledger_id),key=requestKey(data.idempotency_key);
  if(sourceId===destinationId)fail('SAME_LEDGER','Choose a different destination ledger.');
  const minor=moneyMinor(data.amount);if(minor<=0n)fail('INVALID_AMOUNT','Transfer amount must be greater than zero.');
@@ -53,7 +53,8 @@ export async function createQuickPersonalLedgerTransfer(user,data={},database=po
  const entryDate=data.date||null,time=data.transaction_time||null;
  if(entryDate&&(typeof entryDate!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(entryDate)||!Number.isFinite(Date.parse(entryDate))||new Date(entryDate).toISOString().slice(0,10)!==entryDate))fail('INVALID_DATE','Use a valid YYYY-MM-DD date.');
  if(time&&(typeof time!=='string'||!/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(time)))fail('INVALID_TIME','Use a valid transaction time.');
- const hash=createHash('sha256').update(JSON.stringify([sourceId,destinationId,amount,remarks,particular,voucher,entryDate,time,data.authorize_above_limit===true])).digest('hex');
+ const hash=createHash('sha256').update(JSON.stringify([sourceId,destinationId,amount,remarks,particular,voucher,entryDate,time,data.authorize_above_limit===true,
+  ...(siteReceipt ? ['site-receipt'] : [])])).digest('hex');
  return transaction(database,async db=>{
   let actor=await actorFor(user,db);
   await db.query("SELECT pg_advisory_xact_lock(hashtext('cashflow-quick-transfer-request'),hashtext($1))",[`${actor.organization_id}:${actor.id}:${key}`]);
@@ -75,6 +76,11 @@ export async function createQuickPersonalLedgerTransfer(user,data={},database=po
   ledgers=await ledgerRows(db,actor,[sourceId,destinationId]);
   if(ledgers.length!==2||JSON.stringify(ledgers.map(lineage).sort())!==JSON.stringify(lineages))fail('LEDGER_UNAVAILABLE','Ledger access or identity changed. Refresh the transfer.',409);
   const source=ledgers.find(row=>row.id===sourceId),destination=ledgers.find(row=>row.id===destinationId);
+  if(siteReceipt) {
+   const {rows}=await db.query('SELECT cash_receipt_source_site_id FROM cash_flow_months WHERE id=$1',[destination.id]);
+   if(rows[0]?.cash_receipt_source_site_id!==source.site_id)
+    fail('RECEIPT_SOURCE_CHANGED','The sending site for this receipt has changed. Reopen the receipt.',409);
+  }
   if(source.ledger_type!=='person')fail('INVALID_SOURCE_LEDGER','Choose a personal ledger.');
   for(const ledger of ledgers)if(ledgerReason(ledger))fail('LEDGER_UNAVAILABLE',ledgerReason(ledger),409);
   const clock=(await db.query("SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::text AS today")).rows[0];

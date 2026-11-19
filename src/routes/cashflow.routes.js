@@ -7,19 +7,22 @@ import {
   createEntry, listEntries, getAutocomplete, getEntry, updateEntry, deleteEntry, bulkDeleteEntries, listFirmsForCashFlow,
 } from '../controllers/cashflow.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
+import siteCashReceiptRoutes from './siteCashReceipt.routes.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.middleware.js';
 import { requireOverallSiteScope } from '../middlewares/overallSiteScope.middleware.js';
-import { createTransfer,eligibility,destinations,listTransfers,getTransfer,getSettings,putSettings,quickContext,createQuickTransfer } from '../controllers/cashflowTransfer.controller.js';
+import { createTransfer,eligibility,destinations,sources,listTransfers,getTransfer,getSettings,putSettings,quickContext,createQuickTransfer } from '../controllers/cashflowTransfer.controller.js';
 
 // All cashflow routes require auth
 router.use(authMiddleware);
+router.use('/site-receipts', siteCashReceiptRoutes);
 
 // Financial writes revalidate the current role, grants and both site scopes
 // inside their transaction. Live reads intentionally bypass response caching.
 router.get('/transfer-eligibility', requireRole('admin','sub_admin'), eligibility);
 router.get('/transfer-destinations', requireRole('admin','sub_admin'), destinations);
+router.get('/transfer-sources', requireRole('admin','sub_admin'), sources);
 router.get('/transfer-settings', requireRole('admin','sub_admin'), getSettings);
 router.put('/transfer-settings', requireRole('admin'), putSettings);
 router.get('/transfers', requireRole('admin','sub_admin'), listTransfers);

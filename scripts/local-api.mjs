@@ -14,6 +14,7 @@ import { up as migratePermanentWalletGuard } from '../src/migrations/212_wallet_
 import pool from '../src/config/db.js';
 import { up as migrateCashflowTransfers, VERSION as cashflowTransferVersion } from '../src/migrations/237_cashflow_money_transfers.js';
 import { up as migrateQuickTransfers, VERSION as quickTransferVersion } from '../src/migrations/240_quick_personal_ledger_transfers.js';
+import { up as migrateSiteCashReceipts } from '../src/migrations/255_site_cash_receipts.js';
 import { initSocket } from '../src/config/socket.js';
 import { initCache } from '../src/config/cache.js';
 import { backupMaintenanceEnabled } from '../src/middlewares/backupMaintenance.middleware.js';
@@ -29,6 +30,7 @@ await migratePermanentWalletGuard(pool);
 await migrateTransactionDocumentation(pool);
 if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [cashflowTransferVersion])).rows.length) await migrateCashflowTransfers(pool);
 if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [quickTransferVersion])).rows.length) await migrateQuickTransfers(pool);
+await migrateSiteCashReceipts(pool);
 const server = http.createServer(app);
 if (!backupMaintenanceEnabled()) initSocket(server);
 initCache();

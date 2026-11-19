@@ -10,6 +10,78 @@ import {cashWalletReconciliationSql} from '../src/migrations/203_unified_cash_wa
 import {up as reinstallReceiptTransfers} from '../src/migrations/237_cashflow_money_transfers.js';
 import {createQuickPersonalLedgerTransfer as create,quickTransferContext} from '../src/services/quickPersonalLedgerTransfer.service.js';
 import {transferEligibility,moneyMinor} from '../src/services/cashflowTransfer.service.js';
+import {up as installSiteCashReceipts} from '../src/migrations/255_site_cash_receipts.js';
+import {siteCashReceiptContext,unreadSiteDebits,readSiteDebit} from '../src/services/siteCashReceipt.service.js';
+
+test('a linked cash receipt posts a matching debit and a durable notice only in the sending site', async () => {
+  const { db, close } = await pgliteFixture();
+  try {
+    await installFunding(db);
+    await installSiteCashReceipts(db);
+    await installSiteCashReceipts(db);
+    const source = await fixtureLedger(db, { name: 'Sending ledger', month: 1, year: 2025 });
+    const destination = await fixtureLedger(db, { site: 11, name: 'Sending site', month: 1, year: 2025 });
+    const priorCredit = await fixtureEntry(db, destination, { status: 'pending' });
+    await fixtureEntry(db, source, { credit: '1500000.00' });
+    await db.query("SELECT loyalty_vault_apply_delta('user:1',1,1500000,'credit','Opening cash',NULL,NULL,NULL,10,1)");
+    await db.query('UPDATE cash_flow_months SET cash_receipt_source_site_id=10 WHERE id=$1', [destination.id]);
+    await db.query("UPDATE cash_flow_entries SET status='approved' WHERE id=$1", [priorCredit.id]);
+
+    await assert.rejects(fixtureEntry(db, destination, { credit: '1000000.00' }),
+      error => error.constraint === 'site_cash_receipt_requires_transfer');
+    const nextPeriod = await fixtureLedger(db, { site: 11, name: 'Sending site', month: 2, year: 2025 });
+    assert.equal(nextPeriod.cash_receipt_source_site_id, 10);
+    const context = await siteCashReceiptContext({ id: 1 }, nextPeriod.id, db);
+    assert.equal(context.source_site.id, 10);
+    assert.deepEqual(context.source_ledgers.map(row => row.id), [source.id]);
+    await assert.rejects(siteCashReceiptContext({ id: 3 }, nextPeriod.id, db), errorCode('LEDGER_NOT_FOUND'));
+
+    const request = { source_ledger_id: source.id, destination_ledger_id: nextPeriod.id, amount: '1000000.00',
+      idempotency_key: randomUUID(), authorize_above_limit: true };
+    const wrongSource = await fixtureLedger(db, { site: 11, month: 1, year: 2025 });
+    await assert.rejects(create({ id: 1 }, { ...request, source_ledger_id: wrongSource.id }, db, { siteReceipt: true }),
+      errorCode('RECEIPT_SOURCE_CHANGED'));
+    assert.equal((await unreadSiteDebits({ id: 1 }, 10, db)).unread_count, 0);
+    const before = await organizationFunds(db);
+    const { transfer } = await create({ id: 1 }, request, db, { siteReceipt: true });
+    assert.deepEqual(transfer.entries.map(entry => [entry.site_id, entry.debit, entry.credit]), [
+      [11, '0.00', '1000000.00'], [10, '1000000.00', '0.00'],
+    ]);
+    assert.equal(await siteFunds(db, 10), '500000.00');
+    assert.equal(await siteFunds(db, 11), '1000100.00');
+    assert.equal(await organizationFunds(db), before);
+    assert.equal((await create({ id: 1 }, request, db, { siteReceipt: true })).replayed, true);
+    const inbox = await unreadSiteDebits({ id: 1 }, 10, db);
+    assert.equal(inbox.unread_count, 1);
+    assert.equal(inbox.notices[0].transfer_id, transfer.id);
+    assert.equal(inbox.notices[0].amount, '1000000.00');
+    assert.equal((await unreadSiteDebits({ id: 1 }, 11, db)).unread_count, 0);
+    assert.equal((await unreadSiteDebits({ id: 4 }, 10, db)).unread_count, 0);
+    assert.equal((await unreadSiteDebits({ id: 7 }, 10, db)).unread_count, 0);
+    assert.equal((await unreadSiteDebits({ id: 3 }, 10, db)).unread_count, 1);
+    await readSiteDebit({ id: 1 }, 11, transfer.id, db);
+    assert.equal((await unreadSiteDebits({ id: 1 }, 10, db)).unread_count, 1);
+    await readSiteDebit({ id: 1 }, 10, transfer.id, db);
+    assert.equal((await unreadSiteDebits({ id: 1 }, 10, db)).unread_count, 0);
+    assert.equal((await unreadSiteDebits({ id: 3 }, 10, db)).unread_count, 1);
+
+    await db.query("SELECT loyalty_vault_apply_delta('user:1',1,100,'credit','Cash at the sending site',NULL,NULL,NULL,11,1)");
+    const { transfer: reverse } = await create({ id: 1 }, {
+      source_ledger_id: nextPeriod.id,
+      destination_ledger_id: source.id,
+      amount: '80.00',
+      idempotency_key: randomUUID(),
+      authorize_above_limit: true,
+    }, db);
+    assert.equal(await siteFunds(db, 11), '1000020.00');
+    assert.equal(await siteFunds(db, 10), '500080.00');
+    assert.equal(await organizationFunds(db), before);
+    assert.equal((await unreadSiteDebits({ id: 1 }, 11, db)).notices[0].transfer_id, reverse.id);
+    assert.equal((await unreadSiteDebits({ id: 1 }, 10, db)).unread_count, 0);
+  } finally {
+    await close();
+  }
+});
 
 const errorCode=code=>error=>error.code===code;
 async function installFunding(db) {

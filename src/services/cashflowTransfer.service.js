@@ -131,21 +131,48 @@ export async function updateTransferSettings(user,data={},database=pool) {
  });
 }
 export async function transferDestinations(user,query={},db=pool) {
- const actor=await actorFor(user,db),source=await sourceLedger(db,actor,positiveId(query.source_ledger_id));
- const siteId=query.site_id?positiveId(query.site_id):source.site_id;
- const cursor=query.cursor?positiveId(query.cursor):0,limit=Math.min(50,query.limit?positiveId(query.limit):30);
- if(query.q!=null&&typeof query.q!=='string') fail('INVALID_SEARCH','Search must be text.');
- const search=(query.q||'').trim();
- if(search.length>100) fail('INVALID_SEARCH','Keep ledger search within 100 characters.');
- const sites=(await db.query(`SELECT s.id,s.name FROM sites s WHERE ${accessSql()} AND $1::int IS NOT NULL ORDER BY s.name,s.id`,[source.id,actor.organization_id,actor.is_admin,actor.id])).rows;
- if(!sites.some(s=>s.id===siteId)) fail('TRANSFER_FORBIDDEN','Choose a destination site you can access.',403);
- const rows=(await db.query(`SELECT m.id FROM cash_flow_months m WHERE m.site_id=$1 AND m.id<>$2 AND m.id>$3
-  AND NOT COALESCE(m.is_locked,false) AND ${latestSql}
-  AND (m.year,m.month)<=(EXTRACT(YEAR FROM CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'),EXTRACT(MONTH FROM CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'))
-  AND ($4='' OR m.ledger_name ILIKE '%'||$4||'%') ORDER BY m.id LIMIT $5`,
- [siteId,source.id,cursor,search,limit+1])).rows;
- const ids=rows.slice(0,limit).map(row=>row.id);
- return {sites,ledgers:ids.length?await ledgerRows(db,actor,ids):[],next_cursor:rows.length>limit?ids.at(-1):null};
+  return transferLedgerOptions(user, query, db, false);
+}
+
+export async function transferSources(user, query = {}, db = pool) {
+  return transferLedgerOptions(user, query, db, true);
+}
+
+async function transferLedgerOptions(user, query, db, receiving) {
+  const actor = await actorFor(user, db);
+  const anchorId = positiveId(receiving ? query.destination_ledger_id : query.source_ledger_id);
+  const anchor = await sourceLedger(db, actor, anchorId);
+  const reason = receiving && ledgerReason(anchor);
+  if (reason) fail('LEDGER_UNAVAILABLE', reason, 409);
+
+  const siteId = query.site_id ? positiveId(query.site_id) : anchor.site_id;
+  const cursor = query.cursor ? positiveId(query.cursor) : 0;
+  const limit = Math.min(50, query.limit ? positiveId(query.limit) : 30);
+  if (query.q != null && typeof query.q !== 'string') fail('INVALID_SEARCH', 'Search must be text.');
+  const search = (query.q || '').trim();
+  if (search.length > 100) fail('INVALID_SEARCH', 'Keep ledger search within 100 characters.');
+
+  const { rows: sites } = await db.query(
+    `SELECT s.id,s.name FROM sites s WHERE ${accessSql()} AND $1::int IS NOT NULL ORDER BY s.name,s.id`,
+    [anchor.id, actor.organization_id, actor.is_admin, actor.id],
+  );
+  if (!sites.some(site => site.id === siteId)) {
+    fail('TRANSFER_FORBIDDEN', receiving ? 'Choose a sending site you can access.' : 'Choose a destination site you can access.', 403);
+  }
+
+  const { rows } = await db.query(`SELECT m.id FROM cash_flow_months m WHERE m.site_id=$1 AND m.id<>$2 AND m.id>$3
+    AND NOT COALESCE(m.is_locked,false) AND ${latestSql}
+    AND (m.year,m.month)<=(EXTRACT(YEAR FROM CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'),EXTRACT(MONTH FROM CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'))
+    AND ($4='' OR m.ledger_name ILIKE '%'||$4||'%')
+    AND (NOT $6::boolean OR m.ledger_type='person') ORDER BY m.id LIMIT $5`,
+  [siteId, anchor.id, cursor, search, limit + 1, receiving]);
+  const ids = rows.slice(0, limit).map(row => row.id);
+  return {
+    sites,
+    ledgers: ids.length ? await ledgerRows(db, actor, ids) : [],
+    next_cursor: rows.length > limit ? ids.at(-1) : null,
+    ...(receiving && { destination: anchor }),
+  };
 }
 
 const detailSql=`SELECT t.*,t.created_at::text AS cursor_created_at,sm.ledger_name AS source_ledger_name,ss.name AS source_site_name,

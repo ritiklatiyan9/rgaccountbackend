@@ -9,11 +9,16 @@ import { GraphQLSchema, GraphQLObjectType } from 'graphql';
 import pool from '../src/config/db.js';
 import { schema as accountsSchema } from '../src/graphql/schema.js';
 import { createDashboardPermissionRouter } from '../src/routes/dashboardPermission.routes.js';
+import siteCashReceiptRoutes from '../src/routes/siteCashReceipt.routes.js';
+import { sources } from '../src/controllers/cashflowTransfer.controller.js';
 import { createSeekPermissionPreviewAuth } from '../src/middlewares/seekPermissionPreviewAuth.middleware.js';
 import requireRole from '../src/middlewares/role.middleware.js';
 import requirePermission from '../src/middlewares/permission.middleware.js';
 import { requireDashboardComponent } from '../src/middlewares/dashboardComponent.middleware.js';
 import { listRecentTransactions } from '../src/controllers/daybook.controller.js';
+import { getSiteBalance } from '../src/controllers/imprest.controller.js';
+import { requireImprestReadAccess } from '../src/middlewares/imprestPermission.middleware.js';
+import requireImprestSiteAccess from '../src/middlewares/imprestSiteAccess.middleware.js';
 import auditRequestMiddleware from '../src/middlewares/audit.middleware.js';
 import errorMiddleware from '../src/middlewares/error.middleware.js';
 
@@ -27,8 +32,14 @@ export function createDashboardPreviewApp({ authenticate, database = pool, audit
     methods: ['GET', 'POST', 'PUT', 'OPTIONS'], allowedHeaders: ['Authorization', 'Content-Type', 'X-Session-ID', 'X-App-Context'],
   }));
   app.use(express.json({ limit: '32kb' }));
-  app.get('/health', (_req, res) => res.json({ service: 'dashboard-preview', version: 1 }));
+  app.get('/health', (_req, res) => res.json({ service: 'dashboard-preview', version: 3 }));
   app.use(authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, audit);
+  app.use('/cashflow/site-receipts', siteCashReceiptRoutes);
+  app.get('/cashflow/transfer-sources', requireRole('admin', 'sub_admin'), sources);
+  // The hosted API cache is process-local. Use a live balance read after
+  // transfers committed by this preview so both site balances refresh together.
+  app.get('/imprest/site-balance', requireImprestReadAccess,
+    requireImprestSiteAccess({ entity: 'site', source: 'query', key: 'site_id', required: true }), getSiteBalance);
   app.use('/dashboard-permissions', createDashboardPermissionRouter({ authenticate: (_req, _res, next) => next() }));
   app.get('/daybook/recent', requireRole('admin', 'sub_admin'), requirePermission('daybook', 'read'), requireDashboardComponent('recent_transactions'), listRecentTransactions);
   const fields = accountsSchema.getQueryType().toConfig().fields;

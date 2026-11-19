@@ -9,6 +9,8 @@ const EXCLUDED_TABLES = [
   'agent_activity_log',
   'app_schema_migrations',
   'audit_logs',
+  'cashflow_site_debit_notices',
+  'cashflow_site_debit_notice_reads',
   'compliance_audit_log',
   'compliance_notification_log',
   'draw_events',

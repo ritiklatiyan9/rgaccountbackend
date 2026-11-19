@@ -92,7 +92,7 @@ const SUMMARY_FIELDS = `id site_id status source _type module module_label entit
   party_name category sub_category category_name entry_type particular description reason remarks remark subject_label entity_secondary
   plot_no buyer_name plot_status scheme direction request_type sub_admin_name ledger_name ledger_type linked_user_name
   to_name name firm_name transfer_to_firm_name from_entity to_entity source_label target_label record_id record_buyer_name record_booked_by agent_name vendor_name
-  farmer_name activity_label`.split(/\s+/);
+  farmer_name activity_label imprest_handover`.split(/\s+/);
 const SEARCH_FIELDS = [...SUMMARY_FIELDS, 'notes', 'reference', 'reference_no', 'transaction_no', 'cheque_no', 'entity_phone'];
 const USER_FILTER_FIELDS = ['requested_by_name', 'created_by_name', 'from_holder_name', 'admin_name', 'sub_admin_name', 'assigned_admin_name', 'asked_to_name', 'to_holder_name', 'to_name'];
 const terminal = "lower(h.status::text) IN ('approved','accepted','received','returned','rejected','declined')";

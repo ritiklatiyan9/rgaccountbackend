@@ -4,6 +4,25 @@ import permissionModel from '../models/Permission.model.js';
 import { visibleImprestPeople } from './imprestManagementAccess.service.js';
 import { seekHistorySource } from './seekPermission.service.js';
 
+const imprestVisibility = (alias, allocation) =>
+  `($3 OR ($4 AND (${alias}.sub_admin_id=$2 OR ${alias}.${allocation ? 'admin_id' : 'assigned_admin_id'}=$2))
+    OR ($5 AND ${alias}.sub_admin_id=ANY($6::int[])))`;
+
+// The receipt posting records the originating request number. A manual
+// handover with the same amount, recipient and date is a separate event.
+const requestHandoverMatch = (request, handover) => `
+  ${request}.request_type='IMPREST' AND ${request}.status='APPROVED' AND ${handover}.status='RECEIVED'
+  AND ${request}.site_id=${handover}.site_id AND ${request}.sub_admin_id=${handover}.sub_admin_id
+  AND ${request}.reviewed_by=${handover}.admin_id AND ${request}.amount=${handover}.amount
+  AND EXISTS (
+    SELECT 1 FROM imprest_ledger receipt
+    WHERE receipt.site_id=${handover}.site_id AND receipt.user_id=${handover}.sub_admin_id
+      AND receipt.reference_id=${handover}.id AND receipt.amount=${handover}.amount
+      AND receipt.created_by=${handover}.admin_id
+      AND ((receipt.type='ALLOCATION' AND receipt.remarks LIKE 'Imprest allocated (request #' || ${request}.id || ' approved)%')
+        OR (receipt.type='TRANSFER_IN' AND receipt.remarks LIKE 'Imprest request #' || ${request}.id || ' funded by %'))
+  )`;
+
 // These are reads only. Sharing a history surface does not grant a new right to
 // see staff requests; keep each module's current visibility rules.
 export async function operationalHistorySources(db, actor, siteId, {source: requestedSource} = {}) {
@@ -61,6 +80,9 @@ export async function operationalHistorySources(db, actor, siteId, {source: requ
   const visible = management && !admin ? await visibleImprestPeople(db, actor, siteId) : [];
   visible.sort((a,b)=>a-b);
   const params = [siteId, actor.id, admin, personal, management, visible];
+  const linkHandovers = wanted('imprest') && (await Promise.all(
+    ['imprest_expense_requests', 'imprest_allocations', 'imprest_ledger'].map(hasRelation)
+  )).every(Boolean);
   for (const [table, type, source, label, credit] of [
     ['imprest_expense_requests', 'imprest', 'imprest', 'Imprest request', false],
     ['imprest_returns', 'imprest_return', 'imprest_return', 'Imprest return', true],
@@ -69,19 +91,30 @@ export async function operationalHistorySources(db, actor, siteId, {source: requ
     if (!wanted(source) || !await hasRelation(table)) continue;
     const allocation = type === 'allocation';
     const requester = allocation ? 'r.admin_id' : 'r.sub_admin_id';
-    const visibility = allocation
-      ? '($3 OR ($4 AND (r.sub_admin_id=$2 OR r.admin_id=$2)) OR ($5 AND r.sub_admin_id=ANY($6::int[])))'
-      : '($3 OR ($4 AND (r.sub_admin_id=$2 OR r.assigned_admin_id=$2)) OR ($5 AND r.sub_admin_id=ANY($6::int[])))';
+    const handoverDetails = type === 'imprest' && linkHandovers ? `, (
+      SELECT jsonb_build_object('id', a.id, 'received_at', COALESCE(a.confirmed_at,a.created_at),
+        'sender_name', sender.name, 'label', 'Cash handover')
+      FROM imprest_allocations a LEFT JOIN users sender ON sender.id=a.admin_id
+      WHERE ${requestHandoverMatch('r', 'a')} AND ${imprestVisibility('a', true)}
+      ORDER BY a.id LIMIT 1
+    ) AS imprest_handover` : '';
+    // Keep direct handovers and the explicit handover filter. In the combined
+    // feed use the request row only when the viewer can also see that request.
+    const hideLinkedHandover = allocation && linkHandovers && !requestedSource ? `
+      AND NOT EXISTS (
+        SELECT 1 FROM imprest_expense_requests request
+        WHERE ${requestHandoverMatch('request', 'r')} AND ${imprestVisibility('request', false)}
+      )` : '';
     sources.push({ sql: `SELECT r.*, '${source}'::text AS source,'${type}'::text AS _type,
       '${label}'::text AS module_label, '${label}'::text AS activity_label,
       s.name AS site_name,holder.name AS entity_name,'Imprest holder'::text AS entity_type,
       holder.name AS sub_admin_name,requester.name AS created_by_name,reviewer.name AS assigned_admin_name,
-      ${credit ? '0::numeric AS debit,r.amount AS credit' : 'r.amount AS debit,0::numeric AS credit'}
+      ${credit ? '0::numeric AS debit,r.amount AS credit' : 'r.amount AS debit,0::numeric AS credit'}${handoverDetails}
       FROM ${table} r JOIN sites s ON s.id=r.site_id
       LEFT JOIN users holder ON holder.id=r.sub_admin_id
       LEFT JOIN users requester ON requester.id=${requester}
       LEFT JOIN users reviewer ON reviewer.id=r.assigned_admin_id
-      WHERE r.site_id=$1 AND ${visibility}`, params });
+      WHERE r.site_id=$1 AND ${imprestVisibility('r', allocation)}${hideLinkedHandover}`, params });
   }
   return sources;
 }

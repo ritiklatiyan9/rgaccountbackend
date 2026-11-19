@@ -1,5 +1,5 @@
 import {
- createCashflowTransfer,transferEligibility,transferDestinations,listCashflowTransfers,
+ createCashflowTransfer,transferEligibility,transferDestinations,transferSources,listCashflowTransfers,
  getCashflowTransfer,getTransferSettings,updateTransferSettings,
 } from '../services/cashflowTransfer.service.js';
 import {createQuickPersonalLedgerTransfer,quickTransferContext} from '../services/quickPersonalLedgerTransfer.service.js';
@@ -23,6 +23,7 @@ export const createTransfer=handle(async(req,res)=>{
 });
 export const eligibility=handle(async(req,res)=>res.json(await transferEligibility(req.user,req.query)));
 export const destinations=handle(async(req,res)=>res.json(await transferDestinations(req.user,req.query)));
+export const sources=handle(async(req,res)=>res.json(await transferSources(req.user,req.query)));
 export const listTransfers=handle(async(req,res)=>res.json(await listCashflowTransfers(req.user,req.query)));
 export const getTransfer=handle(async(req,res)=>res.json(await getCashflowTransfer(req.user,req.params.id)));
 export const getSettings=handle(async(req,res)=>res.json(await getTransferSettings(req.user,req.query)));

@@ -129,6 +129,72 @@ test('operational history keeps selected staff visibility, personal wallet acces
   } finally {await db.close();}
 });
 
+test('Imprest history counts each approved request and its recorded handover once before paging', async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      CREATE TABLE sites(id int,name text);
+      CREATE TABLE users(id int,name text,email text);
+      CREATE TABLE imprest_expense_requests(id int PRIMARY KEY,site_id int,sub_admin_id int,assigned_admin_id int,
+        status text,amount numeric,request_type text,reviewed_by int,reviewed_at timestamptz,created_at timestamptz);
+      CREATE TABLE imprest_allocations(id int PRIMARY KEY,site_id int,sub_admin_id int,admin_id int,assigned_admin_id int,
+        status text,amount numeric,confirmed_at timestamptz,created_at timestamptz);
+      CREATE TABLE imprest_ledger(id int PRIMARY KEY,site_id int,user_id int,reference_id int,type text,amount numeric,
+        created_by int,remarks text);
+      INSERT INTO sites VALUES (1,'DG Associates'),(2,'Different site');
+      INSERT INTO users VALUES (5,'Admin'),(6,'Staff'),(7,'Reviewer');
+      INSERT INTO imprest_expense_requests VALUES
+        (43,1,6,7,'APPROVED',100000,'IMPREST',5,'2026-11-19T12:15:00Z','2026-11-19T12:00:00Z'),
+        (44,1,6,7,'APPROVED',100000,'IMPREST',7,'2026-11-19T12:16:00Z','2026-11-19T12:00:00Z');
+      INSERT INTO imprest_allocations VALUES
+        (104,1,6,5,7,'RECEIVED',100000,'2026-11-19T12:15:00Z','2026-11-19T12:15:00Z'),
+        (105,1,6,7,7,'RECEIVED',100000,'2026-11-19T12:16:00Z','2026-11-19T12:16:00Z'),
+        (106,1,6,5,7,'RECEIVED',100000,'2026-11-19T12:15:00Z','2026-11-19T12:15:00Z'),
+        (107,2,6,5,7,'RECEIVED',100000,'2026-11-19T12:15:00Z','2026-11-19T12:15:00Z');
+      INSERT INTO imprest_ledger VALUES
+        (1186,1,6,104,'ALLOCATION',100000,5,'Imprest allocated (request #43 approved): site expense'),
+        (1187,1,6,105,'TRANSFER_IN',100000,7,'Imprest request #44 funded by Reviewer.'),
+        (1188,1,6,106,'ALLOCATION',100000,5,'Direct handover'),
+        (1189,2,6,107,'ALLOCATION',100000,5,'Imprest allocated (request #43 approved): other site');
+    `);
+    const source = readFileSync(new URL('../src/services/operationalRequestHistory.service.js', import.meta.url), 'utf8')
+      .replace(/^import[\s\S]*?;\n/gm, '').replace('export async function', 'async function');
+    const context = {
+      hasRelation: async name => ['imprest_expense_requests', 'imprest_allocations', 'imprest_ledger'].includes(name),
+      permissionModel: { getPermission: async (_id, module) => ({ can_read: module === 'imprest' }) },
+      withWalletVisibility: async actor => ({ ...actor, wallet_can_read: false }),
+      canViewAllWallets: () => false,
+    };
+    vm.createContext(context);
+    vm.runInContext(`${source}\nthis.sources=operationalHistorySources;`, context);
+    const load = async (query, actor = { id: 5, role: 'admin' }) => {
+      const options = requestHistoryOptions({ site_id: '1', view: 'summary', ...query });
+      const reader = createRequestHistoryReader(db, options);
+      for (const { sql, params } of await context.sources(db, actor, options.siteId, options)) reader.add(sql, params);
+      return reader.read();
+    };
+    const pages = [];
+    for (const page of [1, 2, 3]) {
+      const result = await load({ page_size: 1, page });
+      assert.equal(result.total, 3);
+      pages.push(...result.rows);
+    }
+    assert.deepEqual(pages.map(row => `${row.source}:${row.id}`).sort(), ['imprest:43', 'imprest:44', 'imprest_allocation:106']);
+    const detail = (await load({ source: 'imprest', record_id: '43', view: 'full' })).rows[0];
+    assert.equal(detail.imprest_handover.id, 104);
+    assert.equal(detail.imprest_handover.sender_name, 'Admin');
+    assert.equal(pages.find(row => row.id === 43).imprest_handover.id, 104);
+    assert.deepEqual((await load({ source: 'imprest_allocation' })).rows.map(row => row.id).sort(), [104, 105, 106]);
+    const sender = await load({}, { id: 5, role: 'sub_admin' });
+    assert.deepEqual(sender.rows.map(row => row.id).sort(), [104, 106], 'a sender can keep seeing a handover when the request is outside their visibility');
+    const recipient = await load({}, { id: 6, role: 'sub_admin' });
+    assert.equal(recipient.total, 3);
+    assert.deepEqual((await load({ site_id: '2' })).rows.map(row => row.id), [107]);
+  } finally {
+    await db.close();
+  }
+});
+
 test('user filters search authorised request participants before pagination and totals, independently of customer names', async () => {
   const db = new PGlite();
   try {

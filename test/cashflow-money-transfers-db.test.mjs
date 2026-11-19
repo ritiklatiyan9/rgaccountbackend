@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { up,down } from '../src/migrations/237_cashflow_money_transfers.js';
-import { createCashflowTransfer as create, transferEligibility,transferDestinations,listCashflowTransfers,getCashflowTransfer,
+import { createCashflowTransfer as create, transferEligibility,transferDestinations,transferSources,listCashflowTransfers,getCashflowTransfer,
   getTransferSettings,updateTransferSettings,moneyMinor,moneyDecimal } from '../src/services/cashflowTransfer.service.js';
 import {cacheGet,cacheSet,getCacheGeneration} from '../src/config/cache.js';
 import {pgliteFixture,fixturePair,fixtureEntry,fixtureLedger,ledgerFunds,organizationFunds,siteFunds} from './fixtures/cashflow-money-transfers.mjs';
@@ -217,6 +217,29 @@ test('Cashflow transfers preserve money and enforce database integrity in isolat
       assert.ok(second.transfers.every(row=>!first.transfers.some(other=>other.id===row.id)));
       await assert.rejects(listCashflowTransfers(admin,{start_date:'2026-02-30'},db),errorCode('INVALID_DATE'));
       await assert.rejects(listCashflowTransfers(admin,{cursor:'invalid'},db),errorCode('INVALID_CURSOR'));
+    });
+    await t.test('credit-side selection offers only eligible debit ledgers in accessible sites', async () => {
+      const receiver = await fixtureLedger(db, { site: 11, month: 4, year: 2025 });
+      await fixtureLedger(db, { name: 'Debit test Party A', month: 3, year: 2025 });
+      const debitLedger = await fixtureLedger(db, { name: 'Debit test Party A', month: 4, year: 2025 });
+      const secondLedger = await fixtureLedger(db, { name: 'Debit test Party B', month: 4, year: 2025 });
+      await fixtureLedger(db, { name: 'Debit test Locked', month: 4, year: 2025, locked: true });
+      const siteLedger = await fixtureLedger(db, { name: 'Debit test Site', month: 4, year: 2025 });
+      await db.query("UPDATE cash_flow_months SET ledger_type='site' WHERE id=$1", [siteLedger.id]);
+      const query = { destination_ledger_id: receiver.id, site_id: 10, q: 'Debit test', limit: 1 };
+      const first = await transferSources(staff, query, db);
+      assert.equal(first.destination.id, receiver.id);
+      assert.equal(first.destination.site_id, 11);
+      assert.equal(first.destination.available_balance, '0.00');
+      assert.deepEqual(first.ledgers.map(row => row.id), [debitLedger.id]);
+      assert.ok(first.sites.every(site => site.id !== 20));
+      const second = await transferSources(staff, { ...query, cursor: first.next_cursor }, db);
+      assert.deepEqual(second.ledgers.map(row => row.id), [secondLedger.id]);
+      assert.equal(second.next_cursor, null);
+      await assert.rejects(transferSources(staff, { ...query, site_id: 20 }, db), errorCode('TRANSFER_FORBIDDEN'));
+      await assert.rejects(transferSources({ id: 3 }, query, db), errorCode('LEDGER_NOT_FOUND'));
+      await db.query('UPDATE cash_flow_months SET is_locked=true WHERE id=$1', [receiver.id]);
+      await assert.rejects(transferSources(staff, query, db), errorCode('LEDGER_UNAVAILABLE'));
     });
   } finally { await close(); }
 });

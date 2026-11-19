@@ -8,6 +8,6 @@ export async function warmRequestHistory(database) {
     warmRequestHistorySchema(database),
     hasRelations(['transaction_transfer_approval_requests', 'plot_status_approvals', 'transaction_documentation',
       'transaction_party_links', 'edit_requests', 'seek_permissions', 'loyalty_vault_transfers', 'wallet_imprest_transfers',
-      'imprest_expense_requests', 'imprest_returns', 'imprest_allocations']),
+      'imprest_expense_requests', 'imprest_returns', 'imprest_allocations', 'imprest_ledger']),
   ]);
 }
