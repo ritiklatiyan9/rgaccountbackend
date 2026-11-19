@@ -10,6 +10,7 @@ import {
   getSeekAttachment,
   decideSeekPermission,
   cancelSeekPermission,
+  deleteSeekPermission,
   markSeekSeen,
   getSeekAccess,
   updateSeekAccess,
@@ -48,6 +49,7 @@ router.get('/:id/attachments/:index', getSeekAttachment);
 router.put('/:id/approve', decideSeekPermission('approve'));
 router.put('/:id/reject', decideSeekPermission('reject'));
 router.put('/:id/cancel', cancelSeekPermission);
+router.delete('/:id', deleteSeekPermission);
 
 return router;
 }

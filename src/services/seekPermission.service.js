@@ -58,6 +58,7 @@ const ROW_SQL = `SELECT sp.id, sp.site_id, s.name AS site_name, sp.requested_by,
     sp.requester_seen_at, sp.created_at, sp.updated_at, sp.comment_count, sp.last_comment_at,
     COALESCE(cr.last_comment_id, 0) AS last_read_comment_id,
     (sp.status = 'pending' AND ($4::boolean OR COALESCE(sp.asked_to = $2, false))) AS can_decide,
+    (sp.status = 'cancelled' AND sp.requested_by = $2) AS can_delete,
     CASE WHEN sp.status = 'cancelled' THEN sp.updated_at ELSE sp.decided_at END AS resolved_at
   FROM seek_permissions sp
   JOIN sites s ON s.id = sp.site_id
@@ -89,6 +90,14 @@ const SCOPE = {
   visible: `(sp.requested_by = $2 OR sp.asked_to = $2 OR $4::boolean OR a.scope = 'all'
     OR (a.scope = 'selected' AND sp.requested_by = ANY(a.visible_user_ids)))`,
 };
+const RECIPIENTS_SQL = `JOIN sites s ON s.id = sp.site_id
+    JOIN users u ON u.organization_id = s.organization_id AND u.is_active
+      AND u.role IN ('admin', 'super_admin', 'sub_admin')
+    LEFT JOIN seek_permission_access a ON a.site_id = sp.site_id AND a.user_id = u.id
+    WHERE sp.id = $1 AND (u.role IN ('admin', 'super_admin') OR (
+      EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id = u.id AND us.site_id = sp.site_id)
+      AND (u.id = sp.requested_by OR u.id = sp.asked_to OR a.scope = 'all'
+        OR (a.scope = 'selected' AND sp.requested_by = ANY(a.visible_user_ids)))))`;
 
 // Aggregate unread messages in SQL for the visible set. The indexed thread/id
 // range and per-user watermark avoid fetching message bodies or a query per row.
@@ -358,6 +367,28 @@ export async function cancelSeekPermission(actor, rawId, db = pool) {
   return getSeekPermission(actor, id, db);
 }
 
+export async function deleteSeekPermission(actor, rawId, db = pool) {
+  requireSeekActor(actor);
+  const id = positiveId(rawId, 'request id');
+  const params = viewerParams(actor, id);
+  // Check ownership, withdrawal and current access in the same write. Use
+  // the returned row to find the people who could see it before deletion.
+  const { rows: [deleted] } = await db.query(`WITH deleted AS (
+      DELETE FROM seek_permissions WHERE id = $1 AND requested_by = $2 AND status = 'cancelled'
+        AND EXISTS (${visibleById('sp.id')})
+      RETURNING id, site_id, requested_by, asked_to
+    )
+    SELECT id, site_id, ARRAY(SELECT u.id FROM deleted sp ${RECIPIENTS_SQL}) AS recipient_ids
+      FROM deleted`, params);
+  if (deleted) return deleted;
+
+  const { rows: [request] } = await db.query(visibleById('sp.status, sp.requested_by'), params);
+  if (!request) throw fail('Permission request not found', 404);
+  if (Number(request.requested_by) !== Number(actor.id)) throw fail('Only the requester can delete this request', 403);
+  if (request.status !== 'cancelled') throw fail('Only withdrawn requests can be deleted', 409);
+  throw fail('The request changed. Try deleting again.', 409);
+}
+
 export async function seekAttachmentFile(actor, rawId, rawIndex, db = pool) {
   const id = positiveId(rawId, 'request id');
   if (!/^\d+$/.test(String(rawIndex))) throw fail('Attachment not found', 404);
@@ -423,14 +454,7 @@ export async function setSeekAccess(actor, rawUserId, body = {}, db = pool) {
 
 /** Everyone whose bell or page shows this request: admins, requester, person asked, Studio viewers. */
 export async function seekRecipients(request, db = pool) {
-  const { rows } = await db.query(`SELECT u.id FROM seek_permissions sp JOIN sites s ON s.id = sp.site_id
-    JOIN users u ON u.organization_id = s.organization_id AND u.is_active
-      AND u.role IN ('admin', 'super_admin', 'sub_admin')
-    LEFT JOIN seek_permission_access a ON a.site_id = sp.site_id AND a.user_id = u.id
-    WHERE sp.id = $1 AND (u.role IN ('admin', 'super_admin') OR (
-      EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id = u.id AND us.site_id = sp.site_id)
-      AND (u.id = sp.requested_by OR u.id = sp.asked_to OR a.scope = 'all'
-        OR (a.scope = 'selected' AND sp.requested_by = ANY(a.visible_user_ids)))))`, [request.id]);
+  const { rows } = await db.query(`SELECT u.id FROM seek_permissions sp ${RECIPIENTS_SQL}`, [request.id]);
   return rows.map(row => row.id);
 }
 

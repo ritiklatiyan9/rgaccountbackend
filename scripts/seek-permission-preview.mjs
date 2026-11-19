@@ -22,7 +22,7 @@ const previewCors = {
     if (isSeekPreviewOrigin(origin)) return callback(null, true);
     callback(Object.assign(new Error('This local preview only accepts the dashboard on localhost:5173.'), { statusCode: 403 }));
   },
-  methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Authorization', 'Content-Type', 'X-Session-ID', 'X-App-Context'],
 };
 

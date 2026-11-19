@@ -89,6 +89,13 @@ export const cancelSeekPermission = asyncHandler(async (req, res) => {
   res.json({ request, message: 'Request withdrawn' });
 });
 
+export const deleteSeekPermission = asyncHandler(async (req, res) => {
+  const { id, site_id, recipient_ids } = await seek.deleteSeekPermission(req.user, req.params.id);
+  const event = { id, site_id, deleted: true };
+  noStore(res).json({ ...event, message: 'Permission request deleted' });
+  recipient_ids.forEach(userId => emitToUser(userId, 'seek_permission:changed', event));
+});
+
 export const markSeekSeen = asyncHandler(async (req, res) => {
   res.json({ seen: await seek.markSeekSeen(req.user, req.body) });
 });

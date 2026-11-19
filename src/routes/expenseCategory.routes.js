@@ -22,7 +22,7 @@ const bustExpenseCategoryCache = invalidateCacheOnSuccess(['expense-categories|'
 router.use(authMiddleware);
 
 router.get('/', requirePermission('expenses', 'read'), expenseCategoryReadCache, listExpenseCategories);
-router.post('/', requireRole('admin'), bustExpenseCategoryCache, createExpenseCategory);
+router.post('/', requirePermission('expenses', 'write'), bustExpenseCategoryCache, createExpenseCategory);
 // Sub-categories — declared before '/:id' so 'sub-categories' is never read as an id.
 router.get('/sub-categories', requirePermission('expenses', 'read'), expenseCategoryReadCache, listExpenseSubCategories);
 router.post('/sub-categories', requireRole('admin'), bustExpenseCategoryCache, createExpenseSubCategory);

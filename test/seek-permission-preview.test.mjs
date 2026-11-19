@@ -119,7 +119,7 @@ test('preview mounts only Seek Permission, keeps real authentication, and enforc
     const history = await request(app, { path: '/seek-permissions/1/comments?after_id=0', headers: requester });
     assert.equal(history.status, 200);
     assert.equal(history.body.comments[0].body, 'Please check this advance.');
-    // Link routes sit before /:id; reads are never cached; unlinking is a PUT (no DELETE in preview CORS).
+    // Link routes sit before /:id; reads are never cached; unlinking is a PUT.
     const links = await request(app, { path: '/seek-permissions/links?site_id=1&targets=expense:1', headers: requester });
     assert.equal(links.status, 200); assert.deepEqual(links.body, { links: [] }); assert.equal(links.headers['cache-control'], 'no-store');
     const linkPath = '/seek-permissions/links/expense/1';
@@ -129,6 +129,30 @@ test('preview mounts only Seek Permission, keeps real authentication, and enforc
       { link: null, message: 'Seek permission removed' });
     assert.equal((await request(app, { path: '/seek-permissions/1/comments', headers: auth({ id: 6, role: 'sub_admin' }) })).status, 404);
     assert.equal((await request(app, { path: '/seek-permissions/1', headers: auth({ id: 7, role: 'employee' }) })).status, 403);
+    const requestPath = '/seek-permissions/1';
+    const preflight = await request(app, { method: 'OPTIONS', path: requestPath,
+      headers: { Origin: origin, 'Access-Control-Request-Method': 'DELETE', 'Access-Control-Request-Headers': 'authorization' } });
+    assert.equal(preflight.status, 204);
+    assert.ok(preflight.headers['access-control-allow-methods'].split(',').includes('DELETE'));
+    assert.equal((await request(app, { method: 'DELETE', path: requestPath })).status, 401);
+    assert.equal((await request(app, { method: 'DELETE', path: requestPath, headers: requester })).status, 409);
+    assert.equal((await request(app, { method: 'PUT', path: linkPath, headers: requester, body: { site_id: 1, seek_permission_id: 1 } })).status, 200);
+    const withdrawn = await request(app, { method: 'PUT', path: `${requestPath}/cancel`, headers: requester });
+    assert.equal(withdrawn.body.request.status, 'cancelled');
+    assert.equal(withdrawn.body.request.can_delete, true);
+    const admin = auth({ id: 1, role: 'admin' });
+    assert.equal((await request(app, { path: requestPath, headers: admin })).body.request.can_delete, false);
+    assert.equal((await request(app, { method: 'DELETE', path: requestPath, headers: admin })).status, 403);
+    assert.equal((await request(app, { method: 'DELETE', path: requestPath, headers: auth({ id: 6, role: 'sub_admin' }) })).status, 404);
+    const deleted = await request(app, { method: 'DELETE', path: requestPath, headers: requester });
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(deleted.body, { id: 1, site_id: 1, deleted: true, message: 'Permission request deleted' });
+    assert.equal((await request(app, { method: 'DELETE', path: requestPath, headers: requester })).status, 404);
+    assert.equal((await request(app, { path: attachment, headers: requester })).status, 404);
+    assert.equal((await request(app, { path: `${requestPath}/comments`, headers: requester })).status, 404);
+    assert.deepEqual((await request(app, { path: '/seek-permissions/links?site_id=1&targets=expense:1', headers: requester })).body, { links: [] });
+    assert.deepEqual((await db.query('SELECT id FROM expenses')).rows, [{ id: 1 }]);
+    assert.equal((await request(app, { path: '/seek-permissions?site_id=1', headers: requester })).body.requests.some(row => row.id === 1), false);
     await db.exec('UPDATE users SET token_version = 1 WHERE id = 5');
     assert.equal((await request(app, { path: '/seek-permissions/1', headers: requester })).status, 401);
   } finally {
