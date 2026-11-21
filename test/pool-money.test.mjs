@@ -186,7 +186,7 @@ test('cancelled collections survive; deleting/changing recorded receipts is bloc
  assert.equal(Number((await db.query('SELECT credit FROM cash_flow_entries')).rows[0].credit),100000);
 });
 
-test('draw receipt deletion removes only its pending Accounting records and reverses collector cash', async t => {
+test('draw receipt corrections update pending Accounting records and reconcile collector cash', async t => {
  const {db}=await fixture(t,{ready:false});
  const query=async (sql,args)=>args?.length ? db.query(sql,args) : (await db.exec(sql)).at(-1);
  const pool={query,connect:async()=>({query,release(){}})};
@@ -216,17 +216,34 @@ test('draw receipt deletion removes only its pending Accounting records and reve
  const remove=async (drawId,paymentId) => (await db.query(
    'SELECT delete_draw_payment_with_accounting($1,$2,$3) AS deleted',[drawId,paymentId,admin.id]
  )).rows[0].deleted;
+ const edit=async (drawId,paymentId,patch) => (await db.query(
+   'SELECT update_draw_payment_with_accounting($1,$2,$3,$4::jsonb) AS updated',[drawId,paymentId,admin.id,JSON.stringify(patch)]
+ )).rows[0].updated;
  assert.equal(await balance(),120000);
  assert.equal(await remove(2,1),false);
+ assert.equal(await edit(2,1,{amount:90000}),false);
  await assert.rejects(db.exec('DELETE FROM cash_flow_entries WHERE source_id=1'),/pool collection cannot be deleted/);
  await db.exec('UPDATE cash_flow_months SET is_locked=true');
  await assert.rejects(remove(1,1),/locked or missing accounting period/);
+ await assert.rejects(edit(1,1,{amount:90000}),/locked or missing accounting period/);
  await db.exec('UPDATE cash_flow_months SET is_locked=false');
  await db.exec("UPDATE pool_money_receipts SET status='approved',approved_by=1,approved_at=now() WHERE id=1");
  await assert.rejects(remove(1,1),/already been processed/);
+ await assert.rejects(edit(1,1,{amount:90000}),/already been processed/);
  assert.deepEqual(await remaining(),{payments:[1,2],receipts:[1,2],ledger:[1,2]});
  assert.equal(await balance(),120000);
  await db.exec("UPDATE pool_money_receipts SET status='pending',approved_by=NULL,approved_at=NULL WHERE id=1");
+ await db.exec('INSERT INTO day_book VALUES(1,1)');
+ await assert.rejects(edit(1,1,{amount:90000}),/backs a posted entry/);
+ await db.exec('DELETE FROM day_book WHERE id=1');
+ assert.equal(await edit(1,1,{amount:90000,narration:'Corrected amount'}),true);
+ assert.deepEqual(await remaining(),{payments:[1,2],receipts:[1,2],ledger:[1,2]});
+ const { rows: [corrected] } = await db.query(`SELECT p.receipt_no,p.created_by,p.narration,
+   p.amount::int AS payment_amount,r.amount::int AS pool_amount,c.credit::int AS ledger_amount
+   FROM draw_payments p JOIN pool_money_receipts r ON r.source_kind='draw' AND r.source_id=p.id
+   JOIN cash_flow_entries c ON c.source_module='pool_money_receipts' AND c.source_id=r.id WHERE p.id=1 AND r.id=1 AND c.id=1`);
+ assert.deepEqual(corrected,{receipt_no:'DP-01',created_by:2,narration:'Corrected amount',payment_amount:90000,pool_amount:90000,ledger_amount:90000});
+ assert.equal(await balance(),110000);
  assert.equal(await remove(1,1),true);
  assert.deepEqual(await remaining(),{payments:[2],receipts:[2],ledger:[2]});
  assert.equal(await balance(),20000);
@@ -235,6 +252,11 @@ test('draw receipt deletion removes only its pending Accounting records and reve
  assert.equal(audit.rows.length,1);
  assert.equal(audit.rows[0].actor_user_id,admin.id);
  assert.equal(audit.rows[0].detail.reference,'DP-01');
+ const edits=await db.query("SELECT actor_user_id,detail FROM pool_money_events WHERE event_type='RECEIPT_UPDATED'");
+ assert.equal(edits.rows.length,1);
+ assert.equal(edits.rows[0].actor_user_id,admin.id);
+ assert.equal(edits.rows[0].detail.amount_before,100000);
+ assert.equal(edits.rows[0].detail.amount_after,90000);
 });
 
 test('explicit recording imports cancelled historical collections once after stale check',async t=>{
@@ -244,6 +266,23 @@ test('explicit recording imports cancelled historical collections once after sta
  const recorded=await mutatePoolMoney(pool,admin,identity,'record',{expected_amount:100000});assert.equal(recorded.row.unposted_amount,0);
  await mutatePoolMoney(pool,admin,identity,'record',{expected_amount:0});
  assert.equal((await db.query('SELECT count(*)::int AS n FROM cash_flow_entries')).rows[0].n,1);
+});
+
+test('historical receipt edits preserve unrecorded status and recorded edits move the bank projection in place',async t=>{
+ const {db,pool}=await fixture(t,{ready:false});
+ await db.exec(`${poolMoneySql}
+   CREATE TRIGGER pool_capture AFTER INSERT OR UPDATE OR DELETE ON draw_payments FOR EACH ROW EXECUTE FUNCTION capture_pool_money_source();
+   CREATE TABLE day_book(id integer PRIMARY KEY,cash_flow_entry_id integer);
+   CREATE TABLE firm_transactions(id integer PRIMARY KEY,cash_flow_entry_id integer);
+   INSERT INTO bank_accounts VALUES(5,1);`);
+ const edit=async patch=>(await db.query('SELECT update_draw_payment_with_accounting(1,1,1,$1::jsonb) AS updated',[JSON.stringify(patch)])).rows[0].updated;
+ assert.equal(await edit({amount:105000}),true);
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM pool_money_receipts')).rows[0].n,0);
+ await mutatePoolMoney(pool,admin,identity,'record',{expected_amount:105000});
+ const { rows:[initial] }=await db.query("SELECT id,source_id FROM cash_flow_entries WHERE source_module='pool_money_receipts'");
+ assert.equal(await edit({payment_from:'UPI',bank_details:'test-utr',bank_account_id:5,cheque_no:null}),true);
+ const { rows:[corrected] }=await db.query("SELECT id,source_id,cash_type,bank_account_id FROM cash_flow_entries WHERE source_module='pool_money_receipts'");
+ assert.deepEqual(corrected,{...initial,cash_type:'bank',bank_account_id:5});
 });
 
 test('organization scope applies to admins and sub-admins',async t=>{
