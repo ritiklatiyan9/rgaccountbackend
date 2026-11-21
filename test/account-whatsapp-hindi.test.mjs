@@ -368,9 +368,11 @@ test("payment messages attach the receipt PDF to the Hindi message too", async (
   );
   assert.notEqual(calls[0].media.id, calls[1].media.id, "each message uploads its own PDF");
   assert.deepEqual((await log(pg)).map((row) => [row.language, row.status]), [["en", "SENT"], ["hi", "SENT"]]);
-  // A cash payment still sends nothing in either language.
+  // Cash can send both configured language variants.
   await pg.query("UPDATE plot_payments SET payment_type='CASH',payment_from='CASH' WHERE id=40");
-  assert.equal((await queueAccountWhatsApp("PAYMENT_RECEIVED", 40, { siteId: 1, db, dedupeKey: "again" })).queued, false);
+  assert.equal((await queueAccountWhatsApp("PAYMENT_RECEIVED", 40, { siteId: 1, db, dedupeKey: "cash" })).queued, true);
+  await drainAccountWhatsApp({ db, send, upload });
+  assert.equal(calls.length, 4);
 });
 
 test("installment reminders keep their due-date check for both languages", async (t) => {

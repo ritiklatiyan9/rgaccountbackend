@@ -60,7 +60,8 @@ export function configuredPaymentReceipt(event, data, inputDesign) {
   const organization = content.organization_text || text(data.site_name);
   const address = content.address_text || first(data.site_address, [data.site_city, data.site_state].filter(Boolean).join(', '));
   const amount = Math.abs(Number(data.amount));
-  const moduleLabel = event === 'INSTALLMENT_RECEIVED' ? 'Plot Installment' : 'Plot Payment';
+  const moduleLabel = event === 'POOL_PAYMENT_RECEIVED' ? 'Pool Money Receipt'
+    : event === 'INSTALLMENT_RECEIVED' ? 'Plot Installment' : 'Plot Payment';
   const values = {
     module: [moduleLabel, data.plot_no && `Plot ${text(data.plot_no)}`].filter(Boolean).join(' · '),
     plot_no: text(data.plot_no), plot_size: /^\d+(?:\.\d+)?$/.test(text(data.plot_size)) ? `${text(data.plot_size)} ${['flat', 'shop'].includes(data.unit_type) ? 'sq. ft.' : 'sq. yd.'}` : text(data.plot_size),

@@ -270,6 +270,43 @@ async function apply(db, event, siteId = 1) {
   return template;
 }
 
+test("an approved unallotted cash receipt sends the pool PDF only once, even after allotment", async (t) => {
+  const { db } = await fixture(t);
+  await up(db);
+  await db.query(`
+    CREATE TABLE draw_registrations(id integer PRIMARY KEY,site_id integer,client_member_id integer);
+    CREATE TABLE pool_money_receipts(id integer PRIMARY KEY,site_id integer,source_kind text,owner_id integer,
+      amount numeric,payment_type text,payment_from text,date date,reference text,status text,
+      cheque_status text,cheque_no text,plot_payment_id integer);
+    INSERT INTO draw_registrations VALUES(90,1,10);
+    INSERT INTO pool_money_receipts VALUES(91,1,'draw',90,1000,'CASH','CASH',CURRENT_DATE,'LD-91','pending',NULL,NULL,NULL);
+  `);
+  const template = await apply(db, 'POOL_PAYMENT_RECEIVED');
+  await apply(db, 'PAYMENT_RECEIVED');
+  assert.equal((await queueAccountWhatsApp('POOL_PAYMENT_RECEIVED', 91, { db })).queued, false);
+  await db.query("UPDATE pool_money_receipts SET status='approved' WHERE id=91");
+  assert.equal((await queueAccountWhatsApp('POOL_PAYMENT_RECEIVED', 91, { siteId: 2, db })).queued, false);
+  assert.equal((await queueAccountWhatsApp('POOL_PAYMENT_RECEIVED', 91, { db })).queued, true);
+  await db.query('UPDATE pool_money_receipts SET plot_payment_id=40 WHERE id=91');
+  assert.equal((await queueAccountWhatsApp('PAYMENT_RECEIVED', 40, { db })).queued, false);
+
+  const calls = [];
+  await drainAccountWhatsApp({
+    db,
+    upload: async (pdf) => {
+      assert.equal(pdf.subarray(0, 4).toString(), '%PDF');
+      return 'pool-receipt-pdf';
+    },
+    send: async (...args) => { calls.push(args); return 'pool-accepted'; },
+  });
+  assert.equal(calls.length, 1);
+  const [[phone, sentTemplate, values]] = calls;
+  assert.equal(phone, '+919876543210');
+  assert.equal(sentTemplate, template.name);
+  assert.ok(values.includes('CASH'));
+  assert.ok(values.includes('LD-91'));
+});
+
 test("every default template meets Meta body constraints and uses event-scoped sample fields", () => {
   for (const [event, spec] of Object.entries(ACCOUNT_WHATSAPP_EVENTS)) {
     const compiled = compileAccountWhatsAppBody(event, spec.body);
@@ -694,14 +731,14 @@ test("the chosen category reaches Meta, persists on drafts and preserves rejecti
   );
 });
 
-test("payment policy always excludes CASH, unknown modes, pending and wrong direction", () => {
+test("payment policy includes approved cash and excludes unknown modes, pending and wrong direction", () => {
   const valid = { payment_mode: "BANK", status: "approved", amount: 100 };
   assert.equal(
     isAccountWhatsAppPaymentEligible(valid, "PAYMENT_RECEIVED"),
     true,
   );
+  assert.equal(isAccountWhatsAppPaymentEligible({ ...valid, payment_mode: "CASH", payment_from: "CASH" }, "PAYMENT_RECEIVED"), true);
   for (const change of [
-    { payment_mode: "CASH" },
     { payment_mode: "" },
     { payment_mode: "BANK CASH" },
     { payment_from: "CASH" },
@@ -730,7 +767,7 @@ test("missing migration gives a usable off-by-default workspace; schema installs
   const before = (await pg.query("SELECT * FROM plot_payments")).rows;
   let state = await accountWhatsAppStudio(admin, 1, { db });
   assert.equal(state.schema_ready, false);
-  assert.equal(state.stages.length, 8);
+  assert.equal(state.stages.length, 9);
   assert.ok(
     state.stages.every((s) => !s.settings.enabled && !s.active_template),
   );
@@ -738,7 +775,7 @@ test("missing migration gives a usable off-by-default workspace; schema installs
   assert.equal(await up(db), false);
   state = await accountWhatsAppStudio(admin, 1, { db });
   assert.equal(state.schema_ready, true);
-  assert.equal(state.policy.cash_excluded, true);
+  assert.equal(state.policy.cash_excluded, false);
   assert.equal(state.recent.length, 0);
   assert.deepEqual(
     (await pg.query("SELECT * FROM plot_payments")).rows,
@@ -923,7 +960,7 @@ test("worker rereads current mode, amount, approval, cheque and site; queue dedu
       .queued,
     false,
   );
-  await pg.query("UPDATE plot_payments SET payment_type='CASH' WHERE id=40");
+  await pg.query("UPDATE plot_payments SET status='pending' WHERE id=40");
   const calls = [];
   const send = async (...args) => {
     calls.push(args);
@@ -1399,7 +1436,6 @@ test("approved PDF imports preserve seven variables, attach the canonical receip
 
 test("cash changes and attachment failures never send a payment message without its correct receipt", async (t) => {
   for (const scenario of [
-    "cash_before",
     "cash_during",
     "amount_during",
     "recipient_during",
@@ -1422,10 +1458,6 @@ test("cash changes and attachment failures never send a payment message without 
       { db },
     );
     await queueAccountWhatsApp("PAYMENT_RECEIVED", 40, { siteId: 1, db });
-    if (scenario === "cash_before")
-      await db.query(
-        "UPDATE plot_payments SET payment_type='CASH',payment_from='CASH' WHERE id=40",
-      );
     let uploads = 0,
       sends = 0;
     const upload = async () => {
@@ -1452,7 +1484,7 @@ test("cash changes and attachment failures never send a payment message without 
       },
     });
     assert.equal(sends, 0, scenario);
-    assert.equal(uploads, scenario === "cash_before" ? 0 : 1, scenario);
+    assert.equal(uploads, 1, scenario);
     const row = (
       await db.query("SELECT status,error FROM account_whatsapp_messages")
     ).rows[0];
@@ -1465,9 +1497,7 @@ test("cash changes and attachment failures never send a payment message without 
       row.error,
       scenario === "upload_failed"
         ? /Storage unavailable/
-        : scenario === "cash_before"
-          ? /policy/
-          : /Payment changed/,
+        : /Payment changed/,
     );
   }
 });

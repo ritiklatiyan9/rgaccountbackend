@@ -115,7 +115,7 @@ The WABA supports one event destination, so an incompatible existing destination
 is left untouched for review. No infrastructure is created on server startup.
 
 `scripts/account-whatsapp-preview.mjs` serves only campaigns and inbox at
-`127.0.0.1:8010`. It verifies the existing hosted Accounts session using the
+`127.0.0.1:8014`. It verifies the existing hosted Accounts session using the
 same fixed-upstream session bridge as other local previews. The Vite plugin
 starts this service when `VITE_ACCOUNT_WHATSAPP_API_URL` is configured to a
 loopback HTTP origin. Existing event-automation requests keep their original API

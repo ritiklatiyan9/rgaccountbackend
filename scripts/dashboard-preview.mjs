@@ -10,6 +10,7 @@ import pool from '../src/config/db.js';
 import { schema as accountsSchema } from '../src/graphql/schema.js';
 import { createDashboardPermissionRouter } from '../src/routes/dashboardPermission.routes.js';
 import siteCashReceiptRoutes from '../src/routes/siteCashReceipt.routes.js';
+import { createSiteMoneyTransferRouter } from '../src/routes/siteMoneyTransfer.routes.js';
 import { sources } from '../src/controllers/cashflowTransfer.controller.js';
 import { createSeekPermissionPreviewAuth } from '../src/middlewares/seekPermissionPreviewAuth.middleware.js';
 import requireRole from '../src/middlewares/role.middleware.js';
@@ -35,6 +36,7 @@ export function createDashboardPreviewApp({ authenticate, database = pool, audit
   app.get('/health', (_req, res) => res.json({ service: 'dashboard-preview', version: 3 }));
   app.use(authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, audit);
   app.use('/cashflow/site-receipts', siteCashReceiptRoutes);
+  app.use('/site-transfers', createSiteMoneyTransferRouter({ authenticate: (_req, _res, next) => next() }));
   app.get('/cashflow/transfer-sources', requireRole('admin', 'sub_admin'), sources);
   // The hosted API cache is process-local. Use a live balance read after
   // transfers committed by this preview so both site balances refresh together.

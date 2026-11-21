@@ -50,7 +50,7 @@ export function createAccountWhatsAppPreviewApp({ campaignRouter, inboxRouter, e
 export async function startAccountWhatsAppPreview() {
   dotenv.config({ path: '.env.whatsapp.local', quiet: true });
   loadSharedWhatsAppSender(process.env.ACCOUNT_WHATSAPP_SHARED_SENDER_ENV);
-  const port = Number(process.env.ACCOUNT_WHATSAPP_PREVIEW_PORT || 8010);
+  const port = Number(process.env.ACCOUNT_WHATSAPP_PREVIEW_PORT || 8014);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Choose a valid WhatsApp preview port.');
   const [{ default: pool }, { createSeekPermissionPreviewAuth }, { createAccountWhatsAppCampaignsRouter },
     { createAccountWhatsAppInboxRouter }, { default: errorHandler }] = await Promise.all([

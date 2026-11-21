@@ -32,7 +32,6 @@ import {
   accountWhatsAppPhone,
   compileAccountWhatsAppBody,
   cleanAccountWhatsAppParameter,
-  isAccountWhatsAppPaymentEligible,
 } from "./accountWhatsApp.spec.js";
 export {
   ACCOUNT_WHATSAPP_EVENTS,
@@ -1363,6 +1362,15 @@ export async function loadAccountWhatsAppContext(
     query = `SELECT ${PLOT_COLUMNS},${RECEIPT_PLOT_COLUMNS},${receiptRecordColumns("pp")},pp.id AS source_id,'plot_payment' AS receipt_module,pp.amount,pp.payment_type,pp.payment_type AS payment_mode,pp.payment_from,to_jsonb(pp)->>'money_transfer_id' AS money_transfer_id,to_jsonb(pp)->>'money_transfer_role' AS money_transfer_role,to_jsonb(pp)->>'entry_transfer_id' AS entry_transfer_id,pp.date AS payment_date,'ACK-' || pp.id::text AS receipt_no,pp.status,pp.cheque_status FROM plot_payments pp JOIN plots p ON p.id=pp.plot_id AND p.site_id=pp.site_id JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pp.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "INSTALLMENT_RECEIVED")
     query = `SELECT ${PLOT_COLUMNS},${RECEIPT_PLOT_COLUMNS},${receiptRecordColumns("pip")},pip.id AS source_id,'plot_installment_payment' AS receipt_module,pip.amount,pip.payment_mode,pip.payment_date,'ACK-' || pip.id::text AS receipt_no,pip.status,pip.cheque_status,to_jsonb(pip)->>'entry_transfer_id' AS entry_transfer_id,pi.installment_name FROM plot_installment_payments pip JOIN plots p ON p.id=pip.plot_id JOIN sites s ON s.id=p.site_id LEFT JOIN plot_installments pi ON pi.id=pip.installment_id AND pi.plot_id=p.id ${PLOT_BUYER_MEMBER_JOIN} WHERE pip.id=$1 AND p.site_id=$2 AND ${PLOT_CLIENT_PREDICATE}`;
+  else if (event === "POOL_PAYMENT_RECEIVED")
+    query = `SELECT ${MEMBER_COLUMNS},r.site_id,r.id AS source_id,'pool_money_receipt' AS receipt_module,r.amount,
+      r.payment_type,r.payment_type AS payment_mode,r.payment_from,r.date AS payment_date,
+      r.reference AS receipt_no,r.status,r.cheque_status,r.cheque_no
+      FROM pool_money_receipts r JOIN sites s ON s.id=r.site_id
+      LEFT JOIN bookings b ON r.source_kind='booking' AND b.id=r.owner_id AND b.site_id=r.site_id
+      LEFT JOIN draw_registrations d ON r.source_kind='draw' AND d.id=r.owner_id AND d.site_id=r.site_id
+      JOIN members m ON m.id=COALESCE(b.client_member_id,d.client_member_id) AND m.site_id=r.site_id
+      WHERE r.id=$1 AND r.site_id=$2 AND ${CLIENT_PREDICATE}`;
   else if (event === "INSTALLMENT_DUE")
     query = `SELECT ${PLOT_COLUMNS},pi.id AS installment_id,p.id AS plot_id,pi.installment_name,pi.amount,pi.due_date FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pi.id=$1 AND p.site_id=$2 AND ${ACTIVE_INSTALLMENT_PLOT} AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "INSTALLMENT_OVERDUE")
@@ -1373,15 +1381,10 @@ export async function loadAccountWhatsAppContext(
   const data = (await db.query(query, [refId, siteId])).rows[0];
   if (!data) return null;
   if (
-    ["PAYMENT_RECEIVED", "PAYMENT_SENT", "INSTALLMENT_RECEIVED"].includes(
-      event,
-    ) &&
-    (!isAccountWhatsAppPaymentEligible(data, event) ||
-      !classifyAccountWhatsAppPayment(event, data) ||
-      data.money_transfer_id ||
-      data.money_transfer_role)
+    requiresPaymentReceipt(event) && !classifyAccountWhatsAppPayment(event, data)
   )
     return null;
+  if (event === "POOL_PAYMENT_RECEIVED") return data;
   if (requiresPaymentReceipt(event)) {
     const available = (await db.query("SELECT to_regclass('public.cash_flow_entries') IS NOT NULL AND to_regclass('public.bank_accounts') IS NOT NULL AS banks,to_regclass('public.transaction_party_links') IS NOT NULL AS parties,to_regclass('public.transaction_receipts') IS NOT NULL AS receipts")).rows[0] || {};
     if (available.receipts) {
@@ -1507,6 +1510,7 @@ export async function queueAccountWhatsApp(event, refId, options = {}) {
         PAYMENT_SENT: "SELECT site_id FROM plot_payments WHERE id=$1",
         INSTALLMENT_RECEIVED:
           "SELECT p.site_id FROM plot_installment_payments pip JOIN plots p ON p.id=pip.plot_id WHERE pip.id=$1",
+        POOL_PAYMENT_RECEIVED: "SELECT site_id FROM pool_money_receipts WHERE id=$1",
         INSTALLMENT_DUE:
           "SELECT p.site_id FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id WHERE pi.id=$1",
         INSTALLMENT_OVERDUE:
@@ -1527,7 +1531,24 @@ export async function queueAccountWhatsApp(event, refId, options = {}) {
         )
           result = { queued: false, reason: "policy_or_missing_record" };
         else {
-          const key = options.dedupeKey || `${event}:${reference}`;
+          let key = options.dedupeKey || `${event}:${reference}`;
+          if (event === "PAYMENT_RECEIVED") {
+            const { rows: [schema] } = await client.query("SELECT to_regclass('public.pool_money_receipts') IS NOT NULL AS pool_receipts");
+            if (schema?.pool_receipts) {
+              // An allotment moves the same collection to Plot Payments.
+              // Keep the original receipt identity across both approval paths.
+              const { rows: [origin] } = await client.query(
+                `SELECT id FROM pool_money_receipts WHERE site_id=$1 AND plot_payment_id=$2`, [siteId, reference],
+              );
+              if (origin) {
+                const { rows: [existing] } = await client.query(
+                  "SELECT dedupe_key FROM account_whatsapp_messages WHERE site_id=$1 AND event=$2 AND ref_id=$3 AND NOT is_test LIMIT 1",
+                  [siteId, event, reference],
+                );
+                key = existing?.dedupe_key || `POOL_PAYMENT_RECEIVED:${origin.id}`;
+              }
+            }
+          }
           const out = await client.query(
             "INSERT INTO account_whatsapp_messages(site_id,event,ref_id,dedupe_key) VALUES($1,$2,$3,$4) ON CONFLICT(site_id,dedupe_key) DO NOTHING RETURNING id",
             [siteId, event, reference, key],

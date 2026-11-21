@@ -185,6 +185,58 @@ test('cancelled collections survive; deleting/changing recorded receipts is bloc
  await assert.rejects(db.exec('UPDATE draw_payments SET amount=200000 WHERE id=1'),/already been recorded/);
  assert.equal(Number((await db.query('SELECT credit FROM cash_flow_entries')).rows[0].credit),100000);
 });
+
+test('draw receipt deletion removes only its pending Accounting records and reverses collector cash', async t => {
+ const {db}=await fixture(t,{ready:false});
+ const query=async (sql,args)=>args?.length ? db.query(sql,args) : (await db.exec(sql)).at(-1);
+ const pool={query,connect:async()=>({query,release(){}})};
+ await db.exec(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
+   CREATE TABLE day_book(id integer PRIMARY KEY,cash_flow_entry_id integer);
+   CREATE TABLE firm_transactions(id integer PRIMARY KEY,cash_flow_entry_id integer);
+   ${postingPolicySql}`);
+ await walletUp(pool);
+ await vaultUp(pool);
+ await unifiedUp(pool);
+ await siteUp(pool);
+ await collectorUp(pool);
+ await migratePoolMoney(pool);
+ await db.exec("UPDATE loyalty_vault_settings SET consolidated_at='2019-01-01'");
+ await db.exec("UPDATE draw_registrations SET status='REGISTERED' WHERE id=1");
+ await mutatePoolMoney(pool,admin,identity,'record',{expected_amount:100000});
+ await db.exec(`INSERT INTO draw_payments(draw_registration_id,receipt_no,payment_date,amount,payment_from,created_by)
+   VALUES(1,'DP-02','2020-01-02',20000,'CASH',2)`);
+ const balance=async () => Number((await db.query(
+   "SELECT balance FROM loyalty_vault_accounts WHERE holder_key='user:2'"
+ )).rows[0].balance);
+ const remaining=async () => (await db.query(`SELECT
+   ARRAY(SELECT id FROM draw_payments ORDER BY id) AS payments,
+   ARRAY(SELECT source_id FROM pool_money_receipts ORDER BY id) AS receipts,
+   ARRAY(SELECT source_id FROM cash_flow_entries WHERE source_module='pool_money_receipts' ORDER BY id) AS ledger`
+ )).rows[0];
+ const remove=async (drawId,paymentId) => (await db.query(
+   'SELECT delete_draw_payment_with_accounting($1,$2,$3) AS deleted',[drawId,paymentId,admin.id]
+ )).rows[0].deleted;
+ assert.equal(await balance(),120000);
+ assert.equal(await remove(2,1),false);
+ await assert.rejects(db.exec('DELETE FROM cash_flow_entries WHERE source_id=1'),/pool collection cannot be deleted/);
+ await db.exec('UPDATE cash_flow_months SET is_locked=true');
+ await assert.rejects(remove(1,1),/locked or missing accounting period/);
+ await db.exec('UPDATE cash_flow_months SET is_locked=false');
+ await db.exec("UPDATE pool_money_receipts SET status='approved',approved_by=1,approved_at=now() WHERE id=1");
+ await assert.rejects(remove(1,1),/already been processed/);
+ assert.deepEqual(await remaining(),{payments:[1,2],receipts:[1,2],ledger:[1,2]});
+ assert.equal(await balance(),120000);
+ await db.exec("UPDATE pool_money_receipts SET status='pending',approved_by=NULL,approved_at=NULL WHERE id=1");
+ assert.equal(await remove(1,1),true);
+ assert.deepEqual(await remaining(),{payments:[2],receipts:[2],ledger:[2]});
+ assert.equal(await balance(),20000);
+ assert.equal(await remove(1,1),false);
+ const audit=await db.query("SELECT actor_user_id,detail FROM pool_money_events WHERE event_type='RECEIPT_DELETED'");
+ assert.equal(audit.rows.length,1);
+ assert.equal(audit.rows[0].actor_user_id,admin.id);
+ assert.equal(audit.rows[0].detail.reference,'DP-01');
+});
+
 test('explicit recording imports cancelled historical collections once after stale check',async t=>{
  const {db,pool}=await fixture(t,{ready:false,cancelled:true});
  await db.exec(poolMoneySql);await db.exec('CREATE TRIGGER pool_capture AFTER INSERT OR UPDATE OR DELETE ON draw_payments FOR EACH ROW EXECUTE FUNCTION capture_pool_money_source()');

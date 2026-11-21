@@ -2,6 +2,104 @@ import { pathToFileURL } from 'node:url';
 import pool from '../config/db.js';
 import { cashWalletReceiptDetailsSql } from './209_cash_wallet_receipt_details.js';
 
+export const drawPaymentDeletionSql = `
+CREATE OR REPLACE FUNCTION guard_pool_cashflow_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF OLD.source_module='pool_money_receipts' THEN
+   IF TG_OP='DELETE' THEN
+     IF OLD.status='pending' AND OLD.approved_at IS NULL AND OLD.approved_by IS NULL
+       AND COALESCE(OLD.cheque_status,'PENDING')='PENDING'
+       AND NOT EXISTS(SELECT 1 FROM pool_money_receipts WHERE id=OLD.source_id) THEN
+       RETURN OLD;
+     END IF;
+     RAISE EXCEPTION 'A pool collection cannot be deleted; review its source receipt' USING ERRCODE='23514',CONSTRAINT='pool_money_receipt_locked';
+   END IF;
+   IF (NEW.site_id,NEW.date,NEW.credit,NEW.debit,NEW.cash_type,NEW.created_by) IS DISTINCT FROM
+      (OLD.site_id,OLD.date,OLD.credit,OLD.debit,OLD.cash_type,OLD.created_by) THEN
+     RAISE EXCEPTION 'Pool collection amounts and original payment details cannot be edited through a ledger mirror' USING ERRCODE='23514',CONSTRAINT='pool_money_receipt_locked';
+   END IF;
+   IF (NEW.source_module,NEW.source_id) IS DISTINCT FROM (OLD.source_module,OLD.source_id) AND NOT EXISTS(
+     SELECT 1 FROM pool_money_receipts r WHERE r.id=OLD.source_id AND r.plot_payment_id=NEW.source_id AND NEW.source_module='plot_payments') THEN
+     RAISE EXCEPTION 'Pool receipt source can only change during allotment' USING ERRCODE='23514',CONSTRAINT='pool_money_receipt_locked';
+   END IF;
+ END IF;
+ RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
+END $$;
+
+-- Only the individual draw-payment action uses this path. Ordinary DELETEs on
+-- a recorded draw payment or on a live Pool Money mirror still hit their guards.
+CREATE OR REPLACE FUNCTION delete_draw_payment_with_accounting(
+ p_registration_id integer, p_payment_id integer, p_actor_id integer
+) RETURNS boolean LANGUAGE plpgsql AS $$
+DECLARE
+ payment record;
+ receipt pool_money_receipts%ROWTYPE;
+ ledger cash_flow_entries%ROWTYPE;
+ recycle_setting text;
+BEGIN
+ SELECT p.amount,p.plot_payment_id,r.site_id INTO payment
+ FROM draw_payments p JOIN draw_registrations r ON r.id=p.draw_registration_id
+ WHERE p.id=p_payment_id AND r.id=p_registration_id FOR UPDATE OF r,p;
+ IF NOT FOUND THEN RETURN false; END IF;
+ IF payment.plot_payment_id IS NOT NULL THEN
+   RAISE EXCEPTION 'This payment was transferred to a plot. Correct it in Accounting.'
+     USING ERRCODE='23514',CONSTRAINT='draw_payment_delete_conflict';
+ END IF;
+
+ SELECT * INTO receipt FROM pool_money_receipts
+ WHERE source_kind='draw' AND source_id=p_payment_id FOR UPDATE;
+ IF FOUND THEN
+   SELECT * INTO ledger FROM cash_flow_entries
+   WHERE source_module='pool_money_receipts' AND source_id=receipt.id FOR UPDATE;
+   IF NOT FOUND OR receipt.owner_id IS DISTINCT FROM p_registration_id
+     OR receipt.site_id IS DISTINCT FROM payment.site_id OR ledger.site_id IS DISTINCT FROM payment.site_id
+     OR receipt.amount IS DISTINCT FROM payment.amount OR ledger.credit IS DISTINCT FROM payment.amount
+     OR ledger.debit IS DISTINCT FROM 0::numeric THEN
+     RAISE EXCEPTION 'The Accounting entry is missing or differs from this receipt. Review it in Accounting.'
+       USING ERRCODE='23514',CONSTRAINT='draw_payment_delete_conflict';
+   END IF;
+   IF receipt.plot_payment_id IS NOT NULL
+     OR receipt.status IS DISTINCT FROM 'pending' OR ledger.status IS DISTINCT FROM 'pending'
+     OR receipt.approved_at IS NOT NULL OR ledger.approved_at IS NOT NULL
+     OR receipt.approved_by IS NOT NULL OR ledger.approved_by IS NOT NULL
+     OR COALESCE(receipt.cheque_status,'PENDING') <> 'PENDING'
+     OR COALESCE(ledger.cheque_status,'PENDING') <> 'PENDING' THEN
+     RAISE EXCEPTION 'This receipt has already been processed in Accounting. Correct it there.'
+       USING ERRCODE='23514',CONSTRAINT='draw_payment_delete_conflict';
+   END IF;
+   PERFORM 1 FROM cash_flow_months WHERE id=ledger.cash_flow_month_id AND is_locked IS FALSE FOR SHARE;
+   IF NOT FOUND THEN
+     RAISE EXCEPTION 'This receipt belongs to a locked or missing accounting period.'
+       USING ERRCODE='23514',CONSTRAINT='draw_payment_delete_conflict';
+   END IF;
+   IF EXISTS(SELECT 1 FROM day_book WHERE cash_flow_entry_id=ledger.id)
+     OR EXISTS(SELECT 1 FROM firm_transactions WHERE cash_flow_entry_id=ledger.id) THEN
+     RAISE EXCEPTION 'This receipt is linked to another Accounting entry. Correct it in Accounting.'
+       USING ERRCODE='23514',CONSTRAINT='draw_payment_delete_conflict';
+   END IF;
+
+   -- Only the draw receipt goes into the recycle bin. Restoring it regenerates
+   -- both projections. Replaying the archived projections would double-post it.
+   recycle_setting:=current_setting('app.recycle_bin_skip',true);
+   PERFORM set_config('app.recycle_bin_skip','on',true);
+   DELETE FROM pool_money_receipts WHERE id=receipt.id;
+   -- The mirror now has no source. Its other guards and wallet reversal still run.
+   DELETE FROM cash_flow_entries WHERE id=ledger.id;
+   PERFORM set_config('app.recycle_bin_skip',COALESCE(recycle_setting,''),true);
+   INSERT INTO pool_money_events(source_kind,owner_id,site_id,event_type,detail,actor_user_id)
+   VALUES('draw',p_registration_id,payment.site_id,'RECEIPT_DELETED',
+     jsonb_build_object('payment_id',p_payment_id,'receipt_id',receipt.id,'reference',receipt.reference,
+       'amount',receipt.amount,'cash_flow_entry_id',ledger.id),p_actor_id);
+ END IF;
+ DELETE FROM draw_payments WHERE id=p_payment_id AND draw_registration_id=p_registration_id;
+ IF NOT FOUND THEN
+   RAISE EXCEPTION 'The draw receipt could not be removed. Refresh the ledger and try again.'
+     USING ERRCODE='23514',CONSTRAINT='draw_payment_delete_conflict';
+ END IF;
+ RETURN true;
+END $$;
+`;
+
 // Source receipts remain the authority. This projection gives unallotted money
 // a real accounting entry and retains that entry's identity on allotment.
 export const poolMoneySql = `
@@ -82,21 +180,7 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS pool_money_receipt_guard ON plot_payments;
 CREATE TRIGGER pool_money_receipt_guard BEFORE UPDATE OR DELETE ON plot_payments FOR EACH ROW EXECUTE FUNCTION guard_pool_plot_receipt();
-CREATE OR REPLACE FUNCTION guard_pool_cashflow_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
- IF OLD.source_module='pool_money_receipts' THEN
-   IF TG_OP='DELETE' THEN RAISE EXCEPTION 'A pool collection cannot be deleted; review its source receipt' USING ERRCODE='23514',CONSTRAINT='pool_money_receipt_locked'; END IF;
-   IF (NEW.site_id,NEW.date,NEW.credit,NEW.debit,NEW.cash_type,NEW.created_by) IS DISTINCT FROM
-      (OLD.site_id,OLD.date,OLD.credit,OLD.debit,OLD.cash_type,OLD.created_by) THEN
-     RAISE EXCEPTION 'Pool collection amounts and original payment details cannot be edited through a ledger mirror' USING ERRCODE='23514',CONSTRAINT='pool_money_receipt_locked';
-   END IF;
-   IF (NEW.source_module,NEW.source_id) IS DISTINCT FROM (OLD.source_module,OLD.source_id) AND NOT EXISTS(
-     SELECT 1 FROM pool_money_receipts r WHERE r.id=OLD.source_id AND r.plot_payment_id=NEW.source_id AND NEW.source_module='plot_payments') THEN
-     RAISE EXCEPTION 'Pool receipt source can only change during allotment' USING ERRCODE='23514',CONSTRAINT='pool_money_receipt_locked';
-   END IF;
- END IF;
- RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
-END $$;
+${drawPaymentDeletionSql}
 DROP TRIGGER IF EXISTS pool_money_cashflow_guard ON cash_flow_entries;
 CREATE TRIGGER pool_money_cashflow_guard BEFORE UPDATE OR DELETE ON cash_flow_entries FOR EACH ROW EXECUTE FUNCTION guard_pool_cashflow_receipt();
 CREATE OR REPLACE FUNCTION capture_pool_money_source() RETURNS trigger LANGUAGE plpgsql AS $$

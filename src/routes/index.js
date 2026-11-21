@@ -70,6 +70,7 @@ import loyaltyVaultRoutes from './loyaltyVault.routes.js';
 import backupRoutes from './backup.routes.js';
 import transactionDocumentationRoutes from './transactionDocumentation.routes.js';
 import seekPermissionRoutes from './seekPermission.routes.js';
+import siteMoneyTransferRoutes from './siteMoneyTransfer.routes.js';
 import complaintRoutes from './complaint.routes.js';
 import accountWhatsAppRoutes from './accountWhatsApp.routes.js';
 import accountWhatsAppCampaignsRoutes from './accountWhatsAppCampaigns.routes.js';
@@ -158,6 +159,7 @@ router.use('/loyalty-vault', loyaltyVaultRoutes);
 router.use('/backups', backupRoutes);
 router.use('/transaction-documentation', transactionDocumentationRoutes);
 router.use('/seek-permissions', seekPermissionRoutes);
+router.use('/site-transfers', siteMoneyTransferRoutes);
 router.use('/complaints', complaintRoutes);
 // Signed AWS events have their own authentication boundary; admin APIs retain
 // normal Accounts authentication in each router.

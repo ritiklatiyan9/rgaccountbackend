@@ -9,16 +9,18 @@ export const ACCOUNT_WHATSAPP_DOCUMENT_EVENTS = Object.freeze([
   "PAYMENT_RECEIVED",
   "PAYMENT_SENT",
   "INSTALLMENT_RECEIVED",
+  "POOL_PAYMENT_RECEIVED",
 ]);
 export const accountWhatsAppReceiptSample = (event) => ({
   full_name: "Rahul Sharma",
   site_name: "Defence Garden",
   member_code: "CLT-00123",
-  plot_no: "A12",
+  plot_no: event === "POOL_PAYMENT_RECEIVED" ? "" : "A12",
+  ...(event === "POOL_PAYMENT_RECEIVED" ? { receipt_module: "pool_money_receipt" } : {}),
   amount: event === "PAYMENT_SENT" ? -100000 : 100000,
   payment_mode: "BANK",
   payment_date: "2026-10-23",
-  receipt_no: "ACK-100123",
+  receipt_no: event === "POOL_PAYMENT_RECEIVED" ? "POOL-100123" : "ACK-100123",
   status: "approved",
   ...(event === "INSTALLMENT_RECEIVED"
     ? { installment_name: "Installment 2" }
@@ -30,7 +32,7 @@ export const accountWhatsAppReceiptFilename = (data) =>
     .slice(0, 100)}.pdf`;
 /** Use the native receipt identity and recorded facts, as the print viewer does. */
 export function accountWhatsAppReceiptVerifyUrl(event, data) {
-  if (!ACCOUNT_WHATSAPP_DOCUMENT_EVENTS.includes(event)) return "";
+  if (!ACCOUNT_WHATSAPP_DOCUMENT_EVENTS.includes(event) || event === "POOL_PAYMENT_RECEIVED") return "";
   const module = event === "INSTALLMENT_RECEIVED" ? "plot_installment_payment" : "plot_payment";
   const sourceId = Number(data.source_id);
   if (!Number.isSafeInteger(sourceId) || sourceId <= 0 || data.receipt_module !== module) return "";

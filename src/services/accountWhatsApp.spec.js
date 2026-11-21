@@ -144,8 +144,8 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
     "Payment received",
     "Plot payments",
     "Approved receipts",
-    "Non-cash plot receipt approved; cheques cleared",
-    "Send receipts for approved non-cash payments only. Cash is always excluded.",
+    "Plot receipt approved; cheques cleared",
+    "Send receipts for approved payments, including cash.",
     PAYMENT,
     branded(
       "Dear {customer_name},",
@@ -162,8 +162,8 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
     "Payment sent / refund",
     "Plot payments",
     "Approved refunds",
-    "Non-cash outgoing plot payment approved; cheques cleared",
-    "Confirm approved refunds or outgoing plot payments. Cash is always excluded.",
+    "Outgoing plot payment approved; cheques cleared",
+    "Confirm approved refunds or outgoing plot payments, including cash.",
     PAYMENT,
     branded(
       "Dear {customer_name},",
@@ -176,12 +176,31 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "कृपया अपने रिकॉर्ड के लिए यह संदर्भ संख्या सुरक्षित रखें।",
     ),
   ),
+  POOL_PAYMENT_RECEIVED: event(
+    "Pool money receipt",
+    "Pool money",
+    "Approved collections",
+    "Booking or draw receipt approved; cheques cleared",
+    "Send the receipt to the registered client after the collection is approved.",
+    Object.fromEntries(["customer_name", "project", "amount", "payment_mode", "payment_date", "receipt_no"]
+      .map(key => [key, PAYMENT[key]])),
+    branded(
+      "Dear {customer_name},",
+      "We have received your payment for {project}.\n*Amount:* {amount}\n*Mode:* {payment_mode}\n*Date:* {payment_date}\n*Receipt:* {receipt_no}",
+      "Your receipt is attached.",
+    ),
+    brandedHi(
+      "प्रिय {customer_name},",
+      "{project} में आपका भुगतान प्राप्त हो गया है।\n*राशि:* {amount}\n*माध्यम:* {payment_mode}\n*दिनांक:* {payment_date}\n*रसीद:* {receipt_no}",
+      "आपकी रसीद संलग्न है।",
+    ),
+  ),
   INSTALLMENT_RECEIVED: event(
     "Installment payment received",
     "Installment tracker",
     "Approved installment receipts",
-    "Non-cash direct installment receipt approved; cheques cleared",
-    "Confirm a direct installment receipt after approval. Cash is always excluded.",
+    "Direct installment receipt approved; cheques cleared",
+    "Confirm approved direct installment receipts, including cash.",
     {
       ...PAYMENT,
       installment_name: field("Installment name", "Installment 2", (d) =>
@@ -269,8 +288,8 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
   ),
 };
 export const ACCOUNT_WHATSAPP_POLICY = Object.freeze({
-  cash_excluded: true,
-  allowed_modes: ["BANK", "CHEQUE", "UPI", "NEFT", "RTGS", "IMPS", "TRANSFER"],
+  cash_excluded: false,
+  allowed_modes: ["CASH", "BANK", "CHEQUE", "UPI", "NEFT", "RTGS", "IMPS", "TRANSFER"],
   approval_required: true,
   cheque_clearance_required: true,
   no_historical_backfill: true,
@@ -338,7 +357,7 @@ export function compileAccountWhatsAppBody(eventName, body) {
     ),
   };
 }
-/** Fail closed for unknown, mixed or cash payment modes; outgoing rows have a negative amount. */
+/** Fail closed for unknown or mixed payment modes; outgoing rows have a negative amount. */
 export function isAccountWhatsAppPaymentEligible(data, eventName) {
   const mode = String(data.payment_mode ?? data.payment_type ?? "")
     .trim()
@@ -348,14 +367,14 @@ export function isAccountWhatsAppPaymentEligible(data, eventName) {
     .toUpperCase();
   if (
     !ACCOUNT_WHATSAPP_POLICY.allowed_modes.includes(mode) ||
-    /\bCASH\b/.test(mode) ||
-    /\bCASH\b/.test(from)
+    (mode !== "CASH" && /\bCASH\b/.test(from))
   )
     return false;
-  if (String(data.status).toLowerCase() !== "approved") return false;
+  if (String(data.status).trim().toLowerCase() !== "approved") return false;
+  const chequeStatus = String(data.cheque_status ?? "").trim().toUpperCase();
   if (
-    mode === "CHEQUE" &&
-    String(data.cheque_status).toUpperCase() !== "CLEARED"
+    (mode === "CHEQUE" || chequeStatus) &&
+    chequeStatus !== "CLEARED"
   )
     return false;
   const amount = Number(data.amount);

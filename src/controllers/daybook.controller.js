@@ -1111,6 +1111,7 @@ export const listDayBookEntries = asyncHandler(async (req, res) => {
     plot_commission_payments:  { prefix: 'pcp', entry_type: 'PLOT COMMISSION PAYMENT', source: 'commission_payment', category: 'COMMISSION' },
     land_deal_payments:        { prefix: 'ldp', entry_type: 'LAND SALE RECEIPT', source: 'land_deal_payment', category: 'LAND SALE' },
     misc_income_entries:       { prefix: 'mie', entry_type: 'MISC INCOME', source: 'misc_income_entry', category: 'MISC INCOME' },
+    cashflow_transfers:        { prefix: 'mt',  entry_type: 'MONEY TRANSFER', source: 'money_transfer', category: 'TRANSFER' },
   };
   const linkedVpIds = new Set(
     dayBookEntries

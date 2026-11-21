@@ -8,7 +8,7 @@ import { approveEntry, bulkApprove } from '../src/controllers/approval.controlle
 const payment = { id: 41, site_id: 5, plot_id: 8, amount: 10000, status: 'approved', payment_type: 'BANK' };
 const approvedPlot = { id: 8, site_id: 5, status: 'BOOKED', approval_status: 'approved' };
 
-for (const mode of ['CASH', ' cash ', '', null, undefined, 'OTHER', 'ADJUST', 'REFUND']) {
+for (const mode of ['', null, undefined, 'OTHER', 'ADJUST', 'REFUND']) {
   test(`payment mode ${JSON.stringify(mode)} cannot queue a WhatsApp transaction`, async () => {
     const queued = [];
     const hooks = createAccountWhatsAppHooks(async (...args) => queued.push(args));
@@ -18,6 +18,16 @@ for (const mode of ['CASH', ' cash ', '', null, undefined, 'OTHER', 'ADJUST', 'R
     assert.equal(queued.length, 0);
   });
 }
+
+test('approved cash payments and pool receipts use the right events', async () => {
+  const queued = [];
+  const hooks = createAccountWhatsAppHooks(async (event) => queued.push(event));
+  const cash = { ...payment, payment_type: 'Cash', payment_from: 'CASH' };
+  await hooks.paymentApproved('plot_payment', cash);
+  await hooks.paymentApproved('pool_money_receipt', cash);
+  await hooks.paymentApproved('pool_money_receipt', { ...cash, status: 'pending' });
+  assert.deepEqual(queued, ['PAYMENT_RECEIVED', 'POOL_PAYMENT_RECEIVED']);
+});
 
 test('canonical source distinguishes receipts, client refunds and installment receipts without overlapping IDs', async () => {
   const queued = [];

@@ -125,7 +125,7 @@ export async function sendWATemplate(to, templateName, components = {}) {
 }
 
 /** Backward-compatible entry point. Payment WhatsApp now always obeys the
- * Accountancy Studio assignment, approval and non-CASH policy. Generic MSG91
+ * Accountancy Studio assignment and payment eligibility policy. Generic MSG91
  * helpers above remain available for the separate compliance scheduler. */
 export async function notifyPlotPaymentRecorded(payment) {
   return accountWhatsAppHooks.paymentApproved('plot_payment', payment);
