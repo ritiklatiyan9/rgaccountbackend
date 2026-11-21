@@ -52,14 +52,14 @@ export async function actorFor(user,db,write=false) {
  return actor;
 }
 const accessSql=(siteAlias='s')=>`${siteAlias}.organization_id=$2 AND ($3::boolean OR EXISTS(SELECT 1 FROM user_sites us WHERE us.user_id=$4 AND us.site_id=${siteAlias}.id))`;
-const latestSql=`NOT EXISTS(SELECT 1 FROM cash_flow_months newer WHERE newer.site_id=m.site_id
+export const latestLedgerPeriodSql=`NOT EXISTS(SELECT 1 FROM cash_flow_months newer WHERE newer.site_id=m.site_id
  AND newer.ledger_name IS NOT DISTINCT FROM m.ledger_name AND newer.ledger_type IS NOT DISTINCT FROM m.ledger_type
  AND (newer.year,newer.month,newer.id)>(m.year,m.month,m.id))`;
 
 // Use the same posted accounting view as site balances and Dashboard. No
 // mutable shadow balance or second set of posting rules is introduced.
 export const transferLedgerBalanceSql=`SELECT m.id,m.site_id,m.ledger_name,m.ledger_type,m.month,m.year,m.is_locked,s.name AS site_name,
- m.opening_balance::text,(${latestSql}) AS is_latest,
+ m.opening_balance::text,(${latestLedgerPeriodSql}) AS is_latest,
  ((m.year,m.month)>(EXTRACT(YEAR FROM CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'),EXTRACT(MONTH FROM CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'))) AS is_future,
  (m.opening_balance+COALESCE(b.net,0))::numeric(15,2)::text AS available_balance,
  COALESCE(b.cash,0)::numeric(15,2)::text AS cash_balance,COALESCE(b.bank,0)::numeric(15,2)::text AS bank_balance
@@ -161,7 +161,7 @@ async function transferLedgerOptions(user, query, db, receiving) {
   }
 
   const { rows } = await db.query(`SELECT m.id FROM cash_flow_months m WHERE m.site_id=$1 AND m.id<>$2 AND m.id>$3
-    AND NOT COALESCE(m.is_locked,false) AND ${latestSql}
+    AND NOT COALESCE(m.is_locked,false) AND ${latestLedgerPeriodSql}
     AND (m.year,m.month)<=(EXTRACT(YEAR FROM CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'),EXTRACT(MONTH FROM CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'))
     AND ($4='' OR m.ledger_name ILIKE '%'||$4||'%')
     AND (NOT $6::boolean OR m.ledger_type='person') ORDER BY m.id LIMIT $5`,
@@ -229,7 +229,7 @@ export async function listCashflowTransfers(user,query={},db=pool) {
 }
 
 export const TRANSFER_CACHE_PREFIXES=['cashflow|','cashflow-meta|','/daybook','wallet|','wallet-workspace|','wallet-imprest|','imprest|','balance-sheet|','site-profit|','dashboard:','management-analytics|','reports|'];
-export async function transaction(database,run) {
+export async function transaction(database,run,{invalidateFinancialCaches=true}={}) {
  let db,result,discard,connectionError;
  const connectionFailed=error=>{connectionError=error;};
  try {
@@ -245,7 +245,7 @@ export async function transaction(database,run) {
   throw error;
  } finally {db?.removeListener?.('error',connectionFailed);db?.release(discard||connectionError);}
  // Never acknowledge success or publish new balances before COMMIT succeeds.
- await clearCacheByPrefixes(TRANSFER_CACHE_PREFIXES).catch(()=>{});
+ if(invalidateFinancialCaches) await clearCacheByPrefixes(TRANSFER_CACHE_PREFIXES).catch(()=>{});
  return result;
 }
 

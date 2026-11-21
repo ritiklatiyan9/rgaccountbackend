@@ -231,7 +231,7 @@
     "migrate:seek-permission-priority": "node src/migrations/231_seek_permission_priority.js",
     "migrate:seek-permission-links": "node src/migrations/248_seek_permission_links.js",
     "test:seek-permissions": "node --test test/seek-permissions-db.test.mjs test/seek-permission-comments-db.test.mjs test/seek-permission-links-db.test.mjs",
-    "test:site-transfers": "node --test test/site-money-transfer.test.mjs",
+    "test:site-transfers": "node --test test/site-money-transfer*.test.mjs",
     "test:construction-workflow": "node --test test/construction-workflow*.test.mjs test/construction-payment-integrity-db.test.mjs test/construction-expenses-db.test.mjs test/construction-expense-access.test.mjs test/construction-portfolio-contract.test.mjs",
     "check:construction-payments": "node src/checks/construction-payments.mjs",
     "test:vendor-stock-summary": "node --test test/vendor-stock-summary-db.test.mjs",

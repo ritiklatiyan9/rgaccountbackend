@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import pool from '../config/db.js';
 import { cashWalletReceiptDetailsSql } from './209_cash_wallet_receipt_details.js';
+import { drawPaymentEditSql } from './draw_payment_edit.sql.js';
 
 export const drawPaymentDeletionSql = `
 CREATE OR REPLACE FUNCTION guard_pool_cashflow_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -15,7 +16,9 @@ BEGIN
      RAISE EXCEPTION 'A pool collection cannot be deleted; review its source receipt' USING ERRCODE='23514',CONSTRAINT='pool_money_receipt_locked';
    END IF;
    IF (NEW.site_id,NEW.date,NEW.credit,NEW.debit,NEW.cash_type,NEW.created_by) IS DISTINCT FROM
-      (OLD.site_id,OLD.date,OLD.credit,OLD.debit,OLD.cash_type,OLD.created_by) THEN
+      (OLD.site_id,OLD.date,OLD.credit,OLD.debit,OLD.cash_type,OLD.created_by)
+      AND NOT (pg_trigger_depth()>1 AND OLD.status IS NOT DISTINCT FROM 'pending'
+        AND COALESCE(current_setting('app.draw_pending_receipt_edit_id',true),'')=OLD.source_id::text) THEN
      RAISE EXCEPTION 'Pool collection amounts and original payment details cannot be edited through a ledger mirror' USING ERRCODE='23514',CONSTRAINT='pool_money_receipt_locked';
    END IF;
    IF (NEW.source_module,NEW.source_id) IS DISTINCT FROM (OLD.source_module,OLD.source_id) AND NOT EXISTS(
@@ -26,7 +29,7 @@ BEGIN
  RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
 END $$;
 
--- Only the individual draw-payment action uses this path. Ordinary DELETEs on
+-- Draw payment and registration deletion both use this path. Ordinary DELETEs on
 -- a recorded draw payment or on a live Pool Money mirror still hit their guards.
 CREATE OR REPLACE FUNCTION delete_draw_payment_with_accounting(
  p_registration_id integer, p_payment_id integer, p_actor_id integer
@@ -162,7 +165,10 @@ BEGIN
    NEW.narration,NEW.status,'pool_money_receipts',NEW.id,NEW.created_by,NEW.created_at,NEW.cheque_no,NEW.cheque_status,NEW.bank_account_id,NEW.approved_by,NEW.approved_at,NEW.assigned_admin_id)
  ON CONFLICT(source_module,source_id) DO UPDATE SET date=EXCLUDED.date,cash_flow_month_id=EXCLUDED.cash_flow_month_id,
    particular=EXCLUDED.particular,credit=EXCLUDED.credit,cash_type=EXCLUDED.cash_type,remarks=EXCLUDED.remarks,
-   bank_account_id=cash_flow_entries.bank_account_id,status=EXCLUDED.status,cheque_status=EXCLUDED.cheque_status,cheque_no=EXCLUDED.cheque_no,approved_by=EXCLUDED.approved_by,approved_at=EXCLUDED.approved_at,assigned_admin_id=EXCLUDED.assigned_admin_id,updated_at=now();
+   bank_account_id=CASE WHEN COALESCE(current_setting('app.draw_pending_receipt_edit_id',true),'')=NEW.id::text
+     AND (OLD.bank_account_id,OLD.payment_type) IS DISTINCT FROM (NEW.bank_account_id,NEW.payment_type)
+     THEN EXCLUDED.bank_account_id ELSE cash_flow_entries.bank_account_id END,
+   status=EXCLUDED.status,cheque_status=EXCLUDED.cheque_status,cheque_no=EXCLUDED.cheque_no,approved_by=EXCLUDED.approved_by,approved_at=EXCLUDED.approved_at,assigned_admin_id=EXCLUDED.assigned_admin_id,updated_at=now();
  RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS pool_money_project ON pool_money_receipts;
@@ -181,6 +187,7 @@ END $$;
 DROP TRIGGER IF EXISTS pool_money_receipt_guard ON plot_payments;
 CREATE TRIGGER pool_money_receipt_guard BEFORE UPDATE OR DELETE ON plot_payments FOR EACH ROW EXECUTE FUNCTION guard_pool_plot_receipt();
 ${drawPaymentDeletionSql}
+${drawPaymentEditSql}
 DROP TRIGGER IF EXISTS pool_money_cashflow_guard ON cash_flow_entries;
 CREATE TRIGGER pool_money_cashflow_guard BEFORE UPDATE OR DELETE ON cash_flow_entries FOR EACH ROW EXECUTE FUNCTION guard_pool_cashflow_receipt();
 CREATE OR REPLACE FUNCTION capture_pool_money_source() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -193,6 +200,10 @@ BEGIN
  IF TG_OP='DELETE' THEN
    IF existing.id IS NOT NULL THEN RAISE EXCEPTION 'This receipt is held in Pool Money. Recorded collections cannot be deleted.' USING ERRCODE='23514'; END IF;
    RETURN OLD;
+ END IF;
+ IF kind='draw' AND TG_OP='UPDATE' AND existing.id IS NULL
+   AND current_setting('app.draw_unrecorded_receipt_edit_id',true)=(payload->>'id') THEN
+   RETURN NEW;
  END IF;
  IF kind='booking' THEN
    parent:=payload; owner:=(payload->>'id')::integer; site:=(payload->>'site_id')::integer;

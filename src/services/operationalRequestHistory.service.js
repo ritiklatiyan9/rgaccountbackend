@@ -42,7 +42,19 @@ export async function operationalHistorySources(db, actor, siteId, {source: requ
     params: [siteId, actor.id, admin],
   });
   if (wanted('seek_permission') && await hasRelation('seek_permissions')) sources.push(seekHistorySource(actor, siteId));
-  if (['edit_request','seek_permission'].includes(requestedSource)) return sources;
+  if (wanted('site_money_transfer') && await hasRelation('site_money_transfers')) sources.push({
+    sql: `SELECT t.*, 'site_money_transfer'::text AS source, 'SMT-' || t.id AS reference,
+      sending.name AS source_site_name, receiving.name AS destination_site_name,
+      requester.name AS requested_by_name, approver.name AS assigned_admin_name,
+      t.transfer_date AS date, t.mode AS payment_mode
+      FROM site_money_transfers t
+      JOIN sites sending ON sending.id=t.source_site_id JOIN sites receiving ON receiving.id=t.destination_site_id
+      JOIN users requester ON requester.id=t.requested_by JOIN users approver ON approver.id=t.approver_id
+      WHERE t.organization_id=$3 AND $1 IN (t.source_site_id,t.destination_site_id)
+        AND $2 IN (t.requested_by,t.approver_id) AND t.status IN ('approved','rejected')`,
+    params: [siteId, actor.id, actor.organization_id],
+  });
+  if (['edit_request','seek_permission','site_money_transfer'].includes(requestedSource)) return sources;
   const walletActor = await withWalletVisibility(actor, db);
   const walletAll = canViewAllWallets(walletActor);
   if (wanted('wallet_transfer') && walletActor.wallet_can_read !== false && await hasRelation('loyalty_vault_transfers')) sources.push({

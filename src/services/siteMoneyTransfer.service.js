@@ -1,16 +1,18 @@
+import { createHash } from 'node:crypto';
 import pool from '../config/db.js';
-import { transaction, moneyMinor, moneyDecimal } from './cashflowTransfer.service.js';
+import { transaction, moneyMinor, moneyDecimal, latestLedgerPeriodSql } from './cashflowTransfer.service.js';
 import { currentTransactionDate, transactionDateEditable } from './transactionDate.service.js';
 
 // Main Site Balance → another site. A request waits for the approver it names;
 // approval posts the debit and credit legs (migration 256) in one transaction.
 const fail = (message, statusCode = 400, code) => Object.assign(new Error(message), { statusCode, code });
 const ADMIN_ROLES = new Set(['admin', 'super_admin']);
+const MAIN_LEDGER_NAME = 'Main site ledger';
 const reference = id => `SMT-${id}`;
 const inr = value => `₹${Number(value).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
 function positiveId(value, label) {
-  if (!/^\d+$/.test(String(value ?? '')) || Number(value) < 1 || Number(value) > 2147483647) throw fail(`Choose ${label}.`);
+  if (!['number', 'string'].includes(typeof value) || !/^\d+$/.test(String(value)) || Number(value) < 1 || Number(value) > 2147483647) throw fail(`Choose ${label}.`);
   return Number(value);
 }
 
@@ -32,9 +34,16 @@ export function parseTransferRequest(body = {}, today) {
   const remarks = (body.remarks || '').trim();
   if (remarks.length > 1000) throw fail('Keep remarks within 1000 characters.');
   const bank = (value, label) => mode === 'bank' && value != null && value !== '' ? positiveId(value, label) : null;
+  const ledger = (value, label) => value === 'site' ? null : positiveId(value, label);
+  if (body.idempotency_key != null && (typeof body.idempotency_key !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.idempotency_key))) {
+    throw fail('The transfer request key is invalid.');
+  }
   return {
     sourceSiteId, destinationSiteId, amount: moneyDecimal(minor), mode, date, time: time.length === 5 ? `${time}:00` : time,
     approverId: positiveId(body.approver_id, 'who should approve'),
+    sourceLedgerId: ledger(body.source_ledger_id, 'the debit ledger'),
+    destinationLedgerId: ledger(body.destination_ledger_id, 'the credit ledger'),
     sourceBankId: bank(body.source_bank_account_id, 'a valid sending bank account'),
     destinationBankId: bank(body.destination_bank_account_id, 'a valid receiving bank account'),
     remarks,
@@ -43,7 +52,9 @@ export function parseTransferRequest(body = {}, today) {
 
 async function actorFor(user, db) {
   if (!user?.id) throw fail('Authentication required', 401);
-  const { rows: [actor] } = await db.query('SELECT id, name, role, organization_id, is_active FROM users WHERE id=$1', [user.id]);
+  const { rows: [actor] } = await db.query(`SELECT u.id, u.name, u.role, u.organization_id, u.is_active,
+      (p.can_read AND p.can_write AND p.can_view_all) AS can_transfer_ledgers
+    FROM users u LEFT JOIN user_permissions p ON p.user_id=u.id AND p.module='cashflow' WHERE u.id=$1`, [user.id]);
   if (!actor?.is_active || !['admin', 'super_admin', 'sub_admin'].includes(actor.role)) throw fail('Your account cannot transfer site money.', 403);
   return { ...actor, isAdmin: ADMIN_ROLES.has(actor.role) };
 }
@@ -51,6 +62,10 @@ async function actorFor(user, db) {
 // $1 organisation, $2 actor is admin, $3 actor id.
 const SITES_SQL = `SELECT s.id, s.name FROM sites s WHERE s.organization_id=$1
   AND ($2::boolean OR EXISTS (SELECT 1 FROM user_sites us WHERE us.user_id=$3 AND us.site_id=s.id))`;
+const NAMED_LEDGER_FIELDS = 'm.id, m.site_id, m.ledger_name, m.ledger_type, m.month, m.year, m.cash_receipt_source_site_id';
+const AVAILABLE_LEDGER = `m.ledger_type IN ('person','site') AND NULLIF(trim(m.ledger_name),'') IS NOT NULL
+  AND NOT COALESCE(m.is_locked,false) AND ${latestLedgerPeriodSql}
+  AND (m.year,m.month) <= (EXTRACT(YEAR FROM now() AT TIME ZONE 'Asia/Kolkata'),EXTRACT(MONTH FROM now() AT TIME ZONE 'Asia/Kolkata'))`;
 // Who may approve money leaving a site: any active admin, or a sub-admin of that site.
 const approverRule = (alias, org, site) => `${alias}.organization_id=${org} AND ${alias}.is_active
   AND ${alias}.can_login_accounts IS NOT FALSE AND (${alias}.role IN ('admin','super_admin')
@@ -71,6 +86,7 @@ const ROW_SQL = `SELECT t.id, 'SMT-' || t.id AS reference, t.status, t.amount::t
     to_char(t.transfer_date,'YYYY-MM-DD') AS transfer_date, to_char(t.transfer_time,'HH24:MI:SS') AS transfer_time,
     t.remarks, t.decision_note, t.created_at, t.decided_at,
     t.source_site_id, ss.name AS source_site_name, t.destination_site_id, ds.name AS destination_site_name,
+    t.source_ledger_id, t.source_ledger_name, t.destination_ledger_id, t.destination_ledger_name,
     t.requested_by, ru.name AS requested_by_name, t.approver_id, au.name AS approver_name, du.name AS decided_by_name,
     sb.name AS source_bank_name, rb.name AS destination_bank_name
   FROM site_money_transfers t
@@ -85,46 +101,97 @@ export async function transferContext(user, siteId, db = pool) {
   const actor = await actorFor(user, db);
   const id = positiveId(siteId, 'a site');
   const access = [actor.organization_id, actor.isAdmin, actor.id];
-  const [sites, approvers, banks, available, dateEditable] = await Promise.all([
-    db.query(`${SITES_SQL} ORDER BY lower(s.name), s.id`, access).then(r => r.rows),
+  const { rows: sites } = await db.query(`${SITES_SQL} ORDER BY lower(s.name), s.id`, access);
+  const site = sites.find(row => row.id === id);
+  if (!site) throw fail('Access denied to this site', 403);
+  const [approvers, banks, namedLedgers, available, dateEditable] = await Promise.all([
     db.query(`SELECT u.id, u.name, u.role FROM users u WHERE u.id<>$2 AND ${approverRule('u', '$1', '$3')}
       ORDER BY CASE u.role WHEN 'admin' THEN 0 WHEN 'super_admin' THEN 1 ELSE 2 END, lower(u.name), u.id`,
     [actor.organization_id, actor.id, id]).then(r => r.rows),
     db.query(`SELECT b.id, b.name, b.site_id FROM bank_accounts b JOIN (${SITES_SQL}) s ON s.id=b.site_id
       WHERE b.is_active IS NOT FALSE ORDER BY b.site_id, lower(b.name)`, access).then(r => r.rows),
+    actor.isAdmin || actor.can_transfer_ledgers
+      ? db.query(`SELECT ${NAMED_LEDGER_FIELDS} FROM cash_flow_months m JOIN (${SITES_SQL}) s ON s.id=m.site_id
+          WHERE ${AVAILABLE_LEDGER} ORDER BY m.site_id, lower(m.ledger_name), m.id`, access).then(r => r.rows)
+      : [],
     balances(db, id, actor.organization_id),
     transactionDateEditable(id, db),
   ]);
-  const site = sites.find(row => row.id === id);
-  if (!site) throw fail('Access denied to this site', 403);
-  return { site, sites: sites.filter(row => row.id !== id), approvers, banks, available,
+  const ledgers = sites.map(row => ({ id: 'site', site_id: row.id, ledger_name: MAIN_LEDGER_NAME,
+    ledger_type: 'site', month: null, year: null })).concat(namedLedgers);
+  return { site, sites: sites.filter(row => row.id !== id), approvers, banks, available, ledgers,
     today: currentTransactionDate(), date_editable: dateEditable };
 }
 
-export async function createTransfer(user, body, db = pool) {
-  const actor = await actorFor(user, db);
+async function selectedLedgerNames(db, sourceSiteId, sourceId, destinationSiteId, destinationId, mode) {
+  const ids = [sourceId, destinationId].filter(id => id !== null);
+  const { rows } = ids.length ? await db.query(`SELECT ${NAMED_LEDGER_FIELDS} FROM cash_flow_months m
+    WHERE m.id=ANY($1::int[]) AND m.site_id IN ($2,$3) AND ${AVAILABLE_LEDGER} ORDER BY m.id FOR SHARE OF m`,
+  [ids, sourceSiteId, destinationSiteId]) : { rows: [] };
+  const source = rows.find(row => row.id === sourceId && row.site_id === sourceSiteId);
+  const destination = rows.find(row => row.id === destinationId && row.site_id === destinationSiteId);
+  if (sourceId !== null && !source) throw fail('The debit ledger is unavailable. Choose an open ledger in the sending site.', 409);
+  if (destinationId !== null && !destination) throw fail('The credit ledger is unavailable. Choose an open ledger in the receiving site.', 409);
+  if (mode === 'cash' && destination?.cash_receipt_source_site_id != null && destination.cash_receipt_source_site_id !== sourceSiteId) {
+    throw fail('This credit ledger accepts cash receipts from a different sending site.', 409);
+  }
+  return [source?.ledger_name ?? MAIN_LEDGER_NAME, destination?.ledger_name ?? MAIN_LEDGER_NAME];
+}
+
+async function validateBanks(db, sourceSite, sourceBank, destinationSite, destinationBank) {
+  const selected = [sourceBank, destinationBank].filter(id => id !== null);
+  if (!selected.length) return;
+  const { rows } = await db.query(`SELECT id FROM bank_accounts WHERE is_active IS NOT FALSE
+    AND ((id=$1 AND site_id=$2) OR (id=$3 AND site_id=$4)) ORDER BY id FOR SHARE`,
+  [sourceBank, sourceSite, destinationBank, destinationSite]);
+  if (rows.length !== selected.length) throw fail('Each selected bank account must be active and belong to its own site.', 409);
+}
+
+export async function createTransfer(user, body, database = pool) {
   const today = currentTransactionDate();
   const input = parseTransferRequest(body, today);
+  return transaction(database, async db => {
+    const actor = await actorFor(user, db);
+    const key = body.idempotency_key?.toLowerCase() ?? null;
+    const hash = key && createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    if (key) {
+      await db.query("SELECT pg_advisory_xact_lock(hashtext('site-transfer-request'),hashtext($1))", [`${actor.organization_id}:${actor.id}:${key}`]);
+      const { rows: [existing] } = await db.query(`SELECT id, request_hash FROM site_money_transfers
+        WHERE organization_id=$1 AND requested_by=$2 AND idempotency_key=$3`, [actor.organization_id, actor.id, key]);
+      if (existing) {
+        if (existing.request_hash !== hash) throw fail('This request key already belongs to different transfer details.', 409);
+        return readTransfer(db, existing.id);
+      }
+    }
+    return insertTransfer(db, actor, input, today, key, hash);
+  }, { invalidateFinancialCaches: false });
+}
+
+async function insertTransfer(db, actor, input, today, key, hash) {
   const { rows: [check] } = await db.query(`SELECT
       (SELECT count(*) FROM (${SITES_SQL}) s WHERE s.id IN ($4,$5)) = 2 AS sites_ok,
-      EXISTS (SELECT 1 FROM users u WHERE u.id=$6 AND u.id<>$3 AND ${approverRule('u', '$1', '$4')}) AS approver_ok,
-      ($7::int IS NULL OR EXISTS (SELECT 1 FROM bank_accounts WHERE id=$7 AND site_id=$4)) AS source_bank_ok,
-      ($8::int IS NULL OR EXISTS (SELECT 1 FROM bank_accounts WHERE id=$8 AND site_id=$5)) AS destination_bank_ok`,
-  [actor.organization_id, actor.isAdmin, actor.id, input.sourceSiteId, input.destinationSiteId, input.approverId,
-    input.sourceBankId, input.destinationBankId]);
+      EXISTS (SELECT 1 FROM users u WHERE u.id=$6 AND u.id<>$3 AND ${approverRule('u', '$1', '$4')}) AS approver_ok`,
+  [actor.organization_id, actor.isAdmin, actor.id, input.sourceSiteId, input.destinationSiteId, input.approverId]);
   if (!check.sites_ok) throw fail('Choose sending and receiving sites you can access.', 403);
   if (!check.approver_ok) throw fail('Choose an active admin, or a sub-admin of the sending site, to approve.');
-  if (!check.source_bank_ok || !check.destination_bank_ok) throw fail('Each bank account must belong to its own site.');
+  if ((input.sourceLedgerId !== null || input.destinationLedgerId !== null) && !actor.isAdmin && !actor.can_transfer_ledgers) {
+    throw fail('Selecting a named ledger requires full Cashflow transfer access.', 403);
+  }
+  const [sourceLedgerName, destinationLedgerName] = await selectedLedgerNames(db, input.sourceSiteId, input.sourceLedgerId,
+    input.destinationSiteId, input.destinationLedgerId, input.mode);
+  await validateBanks(db, input.sourceSiteId, input.sourceBankId, input.destinationSiteId, input.destinationBankId);
   if (input.date !== today && !(await transactionDateEditable(input.sourceSiteId, db))) throw fail('This site records transfers on today’s date only.');
   const available = (await balances(db, input.sourceSiteId, actor.organization_id))[input.mode];
   if (moneyMinor(input.amount) > moneyMinor(available)) {
     throw fail(`Only ${inr(available)} ${input.mode} is available in the sending site.`, 409, 'INSUFFICIENT_SITE_BALANCE');
   }
   const { rows: [{ id }] } = await db.query(`INSERT INTO site_money_transfers(organization_id, source_site_id, destination_site_id, amount, mode,
-      source_bank_account_id, destination_bank_account_id, transfer_date, transfer_time, remarks, requested_by, approver_id)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+      source_bank_account_id, destination_bank_account_id, transfer_date, transfer_time, remarks, requested_by, approver_id,
+      source_ledger_id, destination_ledger_id, source_ledger_name, destination_ledger_name, idempotency_key, request_hash)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
   [actor.organization_id, input.sourceSiteId, input.destinationSiteId, input.amount, input.mode, input.sourceBankId,
-    input.destinationBankId, input.date, input.time, input.remarks, actor.id, input.approverId]);
+    input.destinationBankId, input.date, input.time, input.remarks, actor.id, input.approverId,
+    input.sourceLedgerId, input.destinationLedgerId, sourceLedgerName, destinationLedgerName, key, hash]);
   return readTransfer(db, id);
 }
 
@@ -146,9 +213,11 @@ export async function approveTransfer(user, id, database = pool) {
     const actor = await actorFor(user, db);
     const org = actor.organization_id;
     const { rows: [t] } = await db.query(`SELECT t.id, t.status, t.approver_id, t.amount::text AS amount, t.mode,
-        t.source_site_id, t.destination_site_id, ss.name AS source_name, ds.name AS destination_name
+        t.source_site_id, t.source_ledger_id, t.destination_site_id, t.destination_ledger_id,
+        t.source_bank_account_id, t.destination_bank_account_id,
+        ss.name AS source_name, ds.name AS destination_name
       FROM site_money_transfers t JOIN sites ss ON ss.id=t.source_site_id JOIN sites ds ON ds.id=t.destination_site_id
-      WHERE t.id=$1 AND t.organization_id=$2 FOR UPDATE OF t`, [transferId, org]);
+      WHERE t.id=$1 AND t.organization_id=$2 AND ss.organization_id=$2 AND ds.organization_id=$2 FOR UPDATE OF t`, [transferId, org]);
     if (!t) throw fail('Transfer request not found.', 404);
     if (t.approver_id !== actor.id) throw fail('Only the chosen approver can decide this transfer.', 403);
     if (t.status !== 'pending') throw fail(`This transfer was already ${t.status}.`, 409);
@@ -164,11 +233,20 @@ export async function approveTransfer(user, id, database = pool) {
     if (moneyMinor(t.amount) > moneyMinor(available)) {
       throw fail(`${t.source_name} now has only ${inr(available)} ${t.mode} available. Ask for a smaller transfer.`, 409, 'INSUFFICIENT_SITE_BALANCE');
     }
-    const { rows: [month] } = await db.query(`SELECT ensure_site_cashflow_month(t.source_site_id, t.transfer_date, t.requested_by) AS source,
-        ensure_site_cashflow_month(t.destination_site_id, t.transfer_date, t.requested_by) AS destination
+    // Never substitute another ledger for one the requester selected. A newer
+    // period, lock or receipt-source change while pending requires a new request.
+    await selectedLedgerNames(db, t.source_site_id, t.source_ledger_id, t.destination_site_id, t.destination_ledger_id, t.mode);
+    await validateBanks(db, t.source_site_id, t.source_bank_account_id, t.destination_site_id, t.destination_bank_account_id);
+    const { rows: [month] } = await db.query(`SELECT
+        COALESCE(t.source_ledger_id, ensure_site_cashflow_month(t.source_site_id, t.transfer_date, t.requested_by)) AS source,
+        COALESCE(t.destination_ledger_id, ensure_site_cashflow_month(t.destination_site_id, t.transfer_date, t.requested_by)) AS destination
       FROM site_money_transfers t WHERE t.id=$1`, [t.id]);
-    const { rows: locked } = await db.query('SELECT 1 FROM cash_flow_months WHERE id IN ($1,$2) AND is_locked', [month.source, month.destination]);
-    if (locked.length) throw fail('The accounting period for this transfer date is locked in one of the sites.', 409);
+    const { rows: periods } = await db.query(`SELECT m.is_locked FROM cash_flow_months m JOIN site_money_transfers t ON t.id=$3
+      WHERE m.id IN ($1,$2) OR (m.site_id IN (t.source_site_id,t.destination_site_id)
+        AND COALESCE(m.ledger_type,'site')='site' AND COALESCE(m.ledger_name,'')=''
+        AND (m.year,m.month)=(EXTRACT(YEAR FROM t.transfer_date),EXTRACT(MONTH FROM t.transfer_date)))
+      ORDER BY m.id FOR SHARE OF m`, [month.source, month.destination, t.id]);
+    if (periods.some(row => row.is_locked)) throw fail('The accounting period for this transfer date is locked in one of the sites.', 409);
 
     const { rows: legs } = await db.query(`INSERT INTO cash_flow_entries(cash_flow_month_id, site_id, date, transaction_time, particular,
         debit, credit, cash_type, remarks, to_name, bank_account_id, created_by, status, approved_by, approved_at, assigned_admin_id,

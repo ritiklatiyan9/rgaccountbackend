@@ -339,7 +339,7 @@ const listApprovalEntries = async (req, res, { history = false } = {}) => {
     if (!access?.site_allowed) return res.status(403).json({ message: 'This site is unavailable to your account.' });
     res.set('Cache-Control', 'private, no-store');
     await Promise.all([historyReader.prepare(), hasRelations(['transaction_transfer_approval_requests', 'plot_status_approvals', 'transaction_documentation',
-      'transaction_party_links', 'edit_requests', 'seek_permissions', 'loyalty_vault_transfers', 'wallet_imprest_transfers',
+      'transaction_party_links', 'edit_requests', 'seek_permissions', 'site_money_transfers', 'loyalty_vault_transfers', 'wallet_imprest_transfers',
       'imprest_expense_requests', 'imprest_returns', 'imprest_allocations'])]);
     if (req.user.role === 'sub_admin') {
       // One fresh snapshot for this request; no cross-request grant cache.
@@ -949,7 +949,7 @@ const listApprovalEntries = async (req, res, { history = false } = {}) => {
 
   let historyTotal = 0, historyPage;
   if (history) {
-    if (!historyOptions.source || ['edit_request','seek_permission','wallet_transfer','wallet_imprest_transfer','imprest','imprest_return','imprest_allocation'].includes(historyOptions.source)) {
+    if (!historyOptions.source || ['edit_request','seek_permission','site_money_transfer','wallet_transfer','wallet_imprest_transfer','imprest','imprest_return','imprest_allocation'].includes(historyOptions.source)) {
       for (const source of await operationalHistorySources(pool, req.user, historyOptions.siteId, {source:historyOptions.source})) {
         await collectEntries(source.sql, source.params);
       }

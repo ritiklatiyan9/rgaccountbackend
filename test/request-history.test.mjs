@@ -234,3 +234,48 @@ test('summary history retains participant filter columns while pruning other pay
     assert.equal(result.rows[0].history_summary,true);
   } finally {await db.close();}
 });
+
+test('site transfer history follows both sites and both participants, including older decisions searched by ledger or reference', async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`CREATE TABLE sites(id int PRIMARY KEY,name text);
+      CREATE TABLE users(id int PRIMARY KEY,name text,email text);
+      CREATE TABLE site_money_transfers(id int PRIMARY KEY,organization_id int,source_site_id int,destination_site_id int,
+        requested_by int,approver_id int,status text,amount numeric,mode text,source_ledger_name text,destination_ledger_name text,
+        transfer_date date,created_at timestamptz NOT NULL,decided_by int,decided_at timestamptz,decision_note text);
+      INSERT INTO sites VALUES (1,'OM Associates'),(2,'DG Associates'),(3,'Other site');
+      INSERT INTO users VALUES (5,'Requester','a@example.test'),(6,'Approver','b@example.test'),(7,'Unrelated','c@example.test');
+      INSERT INTO site_money_transfers SELECT n,1,1,2,5,6,
+        CASE n WHEN 2 THEN 'rejected' WHEN 3 THEN 'pending' WHEN 4 THEN 'cancelled' ELSE 'approved' END,
+        500000,'cash',CASE WHEN n=1 THEN 'Old debit ledger' ELSE 'Cash ledger' END,'Project ledger',
+        '2026-11-01'::date,'2026-11-01'::timestamptz,6,'2026-11-01'::timestamptz+n*interval '1 day',
+        CASE WHEN n=2 THEN 'Incorrect ledger' END FROM generate_series(1,30) n;`);
+    const source = readFileSync(new URL('../src/services/operationalRequestHistory.service.js', import.meta.url), 'utf8')
+      .replace(/^import[\s\S]*?;\n/gm, '').replace('export async function', 'async function');
+    const context = { hasRelation: async name => name === 'site_money_transfers' };
+    vm.createContext(context);
+    vm.runInContext(source, context);
+    const load = async (filters = {}, id = 5, organizationId = 1) => {
+      const options = requestHistoryOptions({ site_id: 1, source: 'site_money_transfer', view: 'summary', ...filters });
+      const reader = createRequestHistoryReader(db, options);
+      for (const { sql, params } of await context.operationalHistorySources(db, { id, role: 'sub_admin', organization_id: organizationId }, options.siteId, options)) {
+        reader.add(sql, params);
+      }
+      return reader.read();
+    };
+    assert.equal((await load()).total, 28);
+    assert.equal((await load({ site_id: 2 }, 6)).total, 28);
+    assert.equal((await load({ site_id: 3 })).total, 0);
+    assert.equal((await load({}, 7)).total, 0);
+    assert.equal((await load({}, 5, 2)).total, 0);
+    const older = await load({ q: 'Old debit ledger', pagination: 'cursor' });
+    assert.equal(older.rows[0].id, 1);
+    assert.equal(older.rows[0].destination_ledger_name, 'Project ledger');
+    assert.equal(older.rows[0].requested_by_name, 'Requester');
+    const refused = await load({ status: 'rejected', q: 'SMT-2', view: 'full' }, 6);
+    assert.equal(refused.total, 1);
+    assert.equal(refused.rows[0].decision_note, 'Incorrect ledger');
+    assert.equal(refused.rows[0].history_decided_by_name, 'Approver');
+    assert.equal(refused.rows[0].can_decide, false);
+  } finally { await db.close(); }
+});

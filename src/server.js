@@ -29,6 +29,7 @@ import { up as migrateCashflowTransfers, VERSION as cashflowTransferVersion } fr
 import { up as migrateQuickTransfers, VERSION as quickTransferVersion } from './migrations/240_quick_personal_ledger_transfers.js';
 import { up as migrateSiteCashReceipts } from './migrations/255_site_cash_receipts.js';
 import { up as migrateSiteMoneyTransfers } from './migrations/256_site_money_transfers.js';
+import { up as migrateSiteTransferLedgers } from './migrations/257_site_transfer_ledgers.js';
 import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
@@ -123,6 +124,7 @@ connectDB().then(async () => {
   if (!(await pool.query('SELECT 1 FROM app_schema_migrations WHERE version=$1', [quickTransferVersion])).rows.length) await migrateQuickTransfers(pool);
   await migrateSiteCashReceipts(pool);
   await migrateSiteMoneyTransfers(pool);
+  await migrateSiteTransferLedgers(pool);
   const constructionStartup = await ensureConstructionStartup(pool);
   console.log(constructionStartup.current
     ? '[startup] Construction schema current; installed migrations skipped'

@@ -1,6 +1,9 @@
 import { isDatabaseUnavailable } from '../utils/databaseError.js';
 
 const errorMiddleware = (err, req, res, next) => {
+  if (err.constraint === 'site_transfer_posting_mismatch') {
+    return res.status(409).json({ code: 'SITE_TRANSFER_POSTING_MISMATCH', message: err.message });
+  }
   if (err.constraint === 'site_cash_receipt_requires_transfer') {
     return res.status(409).json({ code: 'SITE_CASH_RECEIPT_REQUIRES_TRANSFER', message: err.message });
   }

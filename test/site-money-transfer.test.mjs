@@ -3,14 +3,26 @@ import test from 'node:test';
 import { parseTransferRequest } from '../src/services/siteMoneyTransfer.service.js';
 
 const today = '2026-11-21';
-const valid = { source_site_id: 5, destination_site_id: 6, amount: '500000', mode: 'CASH', date: today, time: '14:05', approver_id: 7 };
+const valid = { source_site_id: 5, destination_site_id: 6, source_ledger_id: '15', destination_ledger_id: '27',
+  amount: '500000', mode: 'CASH', date: today, time: '14:05', approver_id: 7 };
 const rejects = (patch, message) => assert.throws(() => parseTransferRequest({ ...valid, ...patch }, today), { message });
 
 test('a valid request is normalised for storage', () => {
   assert.deepEqual(parseTransferRequest(valid, today), {
     sourceSiteId: 5, destinationSiteId: 6, amount: '500000.00', mode: 'cash', date: today, time: '14:05:00',
-    approverId: 7, sourceBankId: null, destinationBankId: null, remarks: '',
+    approverId: 7, sourceLedgerId: 15, destinationLedgerId: 27, sourceBankId: null, destinationBankId: null, remarks: '',
   });
+});
+
+test('main-site routing requires an explicit choice for each ledger', () => {
+  const input = parseTransferRequest({ ...valid, source_ledger_id: 'site', destination_ledger_id: 'site' }, today);
+  assert.equal(input.sourceLedgerId, null);
+  assert.equal(input.destinationLedgerId, null);
+  rejects({ source_ledger_id: undefined }, 'Choose the debit ledger.');
+  rejects({ destination_ledger_id: null }, 'Choose the credit ledger.');
+  rejects({ destination_ledger_id: [] }, 'Choose the credit ledger.');
+  rejects({ source_ledger_id: -1 }, 'Choose the debit ledger.');
+  rejects({ idempotency_key: '' }, 'The transfer request key is invalid.');
 });
 
 test('bank accounts are kept only for bank transfers', () => {
