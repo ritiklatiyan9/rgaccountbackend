@@ -40,6 +40,55 @@ function request(app, { method = 'GET', path = '/health', headers = {}, body } =
   });
 }
 
+test('agreement defaults use the selected site, merge partial edits, and restore inherited fields', async t => {
+  t.mock.method(console, 'error', () => {});
+  let overrides = {};
+  const database = { async query(sql, args) {
+    if (sql.includes('FROM sites s')) {
+      assert.match(sql, /s\.organization_id = \$2/);
+      assert.match(sql, /user_sites WHERE site_id = s\.id AND user_id = \$4/);
+      assert.equal(args[1], 3);
+      return { rows: args[0] === 7 ? [{ id: 7, profile: { approval_number: 'P1' }, has_letterhead: true }] : [] };
+    }
+    assert.equal(args[0], 7);
+    if (sql.includes('FROM project_settings')) return { rows: [{ company_legal_name: 'Example Ltd', document_config: { signatory_name: 'Dev' } }] };
+    assert.equal(args[1], 'shop_agreement_defaults');
+    if (sql.includes('INSERT INTO application_settings')) {
+      assert.equal(args[3], 15);
+      assert.match(sql, /setting_value \|\| \$3::jsonb/);
+      overrides = Object.fromEntries(Object.entries({ ...overrides, ...JSON.parse(args[2]) }).filter(([, v]) => v != null));
+    }
+    return { rows: [{ setting_value: overrides }] };
+  } };
+  const app = createPoolMoneyPreviewApp({
+    database, poolMoneyRouter: express.Router(), audit: (_req, _res, next) => next(),
+    authenticate(req, res, next) {
+      const role = req.header('role');
+      if (!role) return res.status(401).json({ message: 'Authentication required.' });
+      req.user = { id: 15, organization_id: 3, role, permissionsByModule: new Map([['plot_payments', { can_read: true }]]) };
+      next();
+    },
+  });
+  const path = '/plots/agreement-settings?site_id=7';
+  const send = (method, role, fields, url = path) => request(app, { method, path: url, headers: { role }, body: fields && { fields } });
+  assert.equal((await request(app, { path })).status, 401);
+  assert.equal((await send('GET', 'admin', undefined, '/plots/agreement-settings?site_id=8')).status, 404);
+  assert.equal((await send('GET', 'admin', undefined, '/plots/agreement-settings')).status, 400);
+  assert.equal((await send('PUT', 'sub_admin', { company_cin: 'C1' })).status, 403);
+  assert.equal((await send('PUT', 'admin', { applicant_name: 'wrong scope' })).status, 400);
+  assert.equal((await send('PUT', 'admin', { deed_date: '2026-02-31' })).status, 400);
+  assert.equal((await send('PUT', 'admin', { approval_area_sqm: '0' })).status, 400);
+  const first = await send('GET', 'sub_admin');
+  assert.equal(first.body.site_id, 7);
+  assert.equal(first.headers['cache-control'], 'no-store');
+  assert.deepEqual(first.body.fields, { company_legal_name: 'Example Ltd', signatory_name: 'Dev', approval_number: 'P1' });
+  await send('PUT', 'admin', { company_legal_name: 'New Ltd', architect: 'Asha' });
+  const changed = await send('PUT', 'admin', { company_legal_name: '', deed_date: '2026-11-20' });
+  assert.equal(changed.body.fields.company_legal_name, 'Example Ltd');
+  assert.equal(changed.body.fields.architect, 'Asha');
+  assert.deepEqual((await send('GET', 'admin')).body, changed.body);
+});
+
 test('preview isolates routes, rejects foreign origins and requires session proof before module access', async t => {
   t.mock.method(console, 'error', () => {});
   let moduleReads = 0, dbReads = 0;
@@ -56,7 +105,10 @@ test('preview isolates routes, rejects foreign origins and requires session proo
     audit: (_req, _res, next) => next(),
   });
   assert.equal((await request(app)).body.service, 'pool-money-preview');
-  for (const path of ['/plots/pool-money', '/sites', '/sites/7']) assert.equal((await request(app, { path })).status, 401);
+  for (const path of ['/plots/pool-money', '/sites', '/sites/7', '/plots/42/installments?view=agreement',
+    '/plots/42/installment-payments?view=agreement', '/plots/payments/list?plot_id=42&view=agreement']) {
+    assert.equal((await request(app, { path })).status, 401);
+  }
   assert.equal(moduleReads, 0); assert.equal(dbReads, 0);
   assert.equal((await request(app, { path: '/wallet' })).status, 404);
   assert.equal((await request(app, { path: '/plots/payments', method: 'POST', body: {} })).status, 404);

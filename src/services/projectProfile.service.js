@@ -38,6 +38,17 @@ export function validateProjectProfile(input) {
   return result;
 }
 
+function shopDimensionsArea(value) {
+  const sides = String(value ?? '').trim().split(/\s*[×x*]\s*/i);
+  if (sides.length !== 2) return null;
+  const inches = sides.map(side => {
+    const match = /^(\d{1,4})\s*(?:['′]\s*(?:(\d{1,2})\s*["″]?)?)?$/.exec(side);
+    if (!match || Number(match[2]) >= 12) return 0;
+    return Number(match[1]) * 12 + Number(match[2] || 0);
+  });
+  return inches.every(side => side > 0) ? Number((inches[0] * inches[1] / 144).toFixed(4)) : null;
+}
+
 export function validateUnitMetadata(input, profile, existing = null) {
   const type = choice(input.unit_type ?? existing?.unit_type ?? 'plot', ['plot', 'flat', 'shop'], 'unit type');
   if (existing && type !== (existing.unit_type || 'plot')) fail('An existing unit cannot change type. Create a separate unit to preserve its area and payment history.', 409);
@@ -48,6 +59,11 @@ export function validateUnitMetadata(input, profile, existing = null) {
   for (const key of ['tower', 'floor', 'bedrooms', 'parking', 'facing', 'khasra_no', 'approval_reference', 'allotment_no']) {
     if (key in raw) details[key] = text(raw[key], key, 100);
   }
+  if (type === 'shop') {
+    for (const key of ['draw_order', 'unit_north', 'unit_south', 'unit_east', 'unit_west']) {
+      if (Object.hasOwn(raw, key)) details[key] = text(raw[key], key.replaceAll('_', ' '), 100);
+    }
+  }
   for (const key of ['agreement_date', 'possession_date']) if (key in raw) details[key] = date(raw[key], key);
   for (const key of ['carpet_area', 'built_up_area', 'super_built_up_area', 'balcony_area']) {
     if (!(key in raw)) continue;
@@ -56,7 +72,16 @@ export function validateUnitMetadata(input, profile, existing = null) {
     if (!['number', 'string'].includes(typeof value) || !Number.isFinite(Number(value)) || Number(value) <= 0 || Number(value) > 1e9) fail(`${key.replaceAll('_', ' ')} must be a positive number`);
     details[key] = Number(value);
   }
-  if ('area_basis' in raw) details.area_basis = choice(raw.area_basis, ['carpet', 'built_up', 'super_built_up'], 'sale area basis');
+  if (type === 'shop' && 'dimensions_ft' in raw) {
+    details.dimensions_ft = text(raw.dimensions_ft, 'Shop dimensions', 64);
+    details.dimensions_area = shopDimensionsArea(details.dimensions_ft);
+    if (details.dimensions_ft && !details.dimensions_area) fail('Enter two positive shop dimensions in feet and inches, for example 10′0″ × 20′0″.');
+  }
+  if ('area_basis' in raw) {
+    const bases = ['carpet', 'built_up', 'super_built_up'];
+    if (type === 'shop') bases.push('dimensions');
+    details.area_basis = choice(raw.area_basis, bases, 'sale area basis');
+  }
   if (type === 'flat' || type === 'shop') {
     if (type === 'flat' && (!details.tower || !details.bedrooms)) fail('Flats require tower, floor, configuration, carpet area and sale area basis');
     if (!details.floor || !details.carpet_area || !details.area_basis) fail(`${type === 'shop' ? 'Shops' : 'Flats'} require floor, carpet area and sale area basis`);
@@ -85,5 +110,11 @@ export async function unitMetadataForWrite(input, siteId, db, existing = null) {
   if (!site) fail('Site not found', 404);
   const metadata = validateUnitMetadata(input, site.project_profile, existing);
   validateBuiltUnitSaleArea(input, metadata, existing);
+  if (existing && metadata.unit_details) {
+    // Validate the complete unit, then write only the keys that actually changed.
+    // A concurrent edit from an older client can omit newer agreement fields.
+    metadata.unit_details = Object.fromEntries(Object.entries(metadata.unit_details)
+      .filter(([key, value]) => existing.unit_details?.[key] !== value));
+  }
   return metadata;
 }

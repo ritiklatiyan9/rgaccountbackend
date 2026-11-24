@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { PGlite } from '@electric-sql/pglite';
+import { plotModel } from '../src/models/Plot.model.js';
 import { DEFAULT_PROJECT_PROFILE, validateProjectProfile, validateUnitMetadata, allowedUnitTypes, unitMetadataForWrite } from '../src/services/projectProfile.service.js';
 
 const flatDetails = { tower: 'A', floor: '0', bedrooms: '2 BHK', carpet_area: '850', built_up_area: '1000', area_basis: 'carpet' };
@@ -84,4 +86,37 @@ test('shop contracted sale area follows its basis when creating and editing', as
   const metadata = await unitMetadataForWrite({ unit_type: 'shop', plot_size: 360, unit_details: details }, 9, db);
   assert.equal(metadata.unit_type, 'shop');
   await assert.rejects(unitMetadataForWrite({ plot_size: 300 }, 9, db, { unit_type: 'shop', plot_size: 360, unit_details: details }), /must match/);
+});
+
+test('shop dimensions preserve inches and calculate sale area independently of measured carpet area', async () => {
+  const details = { floor: 'G', carpet_area: 229.28, dimensions_ft: '9′3″ × 25′1″', area_basis: 'dimensions', dimensions_area: 999 };
+  const db = { query: async () => ({ rows: [{ project_profile: { inventory_type: 'shops' } }] }) };
+  const input = { unit_type: 'shop', plot_size: 232.0208, unit_details: details };
+  const result = await unitMetadataForWrite(input, 7, db);
+  assert.equal(result.unit_details.dimensions_area, 232.0208);
+  assert.equal(result.unit_details.carpet_area, 229.28);
+  await assert.rejects(unitMetadataForWrite({ ...input, plot_size: 999 }, 7, db), /must match/);
+  await assert.rejects(unitMetadataForWrite({ ...input, unit_details: { ...details, dimensions_ft: '9′12″ × 25′0″' } }, 7, db), /feet and inches/);
+  const irregular = await unitMetadataForWrite({ ...input, plot_size: 229.28, unit_details: { ...details, area_basis: 'carpet' } }, 7, db);
+  assert.equal(irregular.unit_details.dimensions_area, 232.0208);
+});
+
+test('shop agreement fields survive older metadata updates and support explicit clearing', async t => {
+  const db = new PGlite();
+  t.after(() => db.close());
+  await db.exec(`CREATE TABLE sites (id int, project_profile jsonb);
+    INSERT INTO sites VALUES (7, '{"inventory_type":"shops"}');
+    CREATE TABLE plots (id int, unit_type text, plot_size numeric, unit_details jsonb);
+    INSERT INTO plots VALUES (1,'shop',200,'{"floor":"G","carpet_area":200,"area_basis":"carpet"}')`);
+  const oldShop = (await db.query('SELECT * FROM plots WHERE id=1')).rows[0];
+  const newFields = { draw_order: '08', unit_north: 'Shop 10', unit_south: 'Road', unit_east: 'Courtyard', unit_west: 'Shop 8' };
+  const newUpdate = await unitMetadataForWrite({ unit_details: newFields }, 7, db, oldShop);
+  const oldClientUpdate = await unitMetadataForWrite({ unit_details: { ...oldShop.unit_details, facing: 'east' } }, 7, db, oldShop);
+  await plotModel.update(1, newUpdate, db);
+  const edited = await plotModel.update(1, oldClientUpdate, db);
+  assert.deepEqual(edited.unit_details, { ...oldShop.unit_details, ...newFields, facing: 'east' });
+  const cleared = await unitMetadataForWrite({ unit_details: { unit_west: '' } }, 7, db, edited);
+  assert.equal((await plotModel.update(1, cleared, db)).unit_details.unit_west, '');
+  await assert.rejects(unitMetadataForWrite({ unit_details: { draw_order: 'x'.repeat(101) } }, 7, db, edited), /100 characters/);
+  await assert.rejects(unitMetadataForWrite({ unit_details: { unit_north: {} } }, 7, db, edited), /must be text/);
 });

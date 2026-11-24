@@ -60,6 +60,8 @@ test('manual settlement validates every original broker and never rewrites the o
 
 test('cancel three-broker booking, recover excess, then rebook with two new brokers on a separate sale ID',async t=>{
  const state=await setup();const{db,database,masters,plot,rev}=state;t.after(()=>db.close());
+ await db.exec(`ALTER TABLE plots ADD COLUMN unit_type text, ADD COLUMN unit_details jsonb;
+   UPDATE plots SET unit_type='shop',unit_details='{"allotment_no":"old","draw_order":"12","agreement_date":"2026-11-01","unit_west":"Road"}' WHERE id=1`);
  const original=await masters();
  await db.query("INSERT INTO plot_commission_payments(site_id,plot_commission_id,amount,tds_amount,status,payment_mode) VALUES(1,$1,90,10,'approved','CASH'),(1,$2,500,0,'approved','CASH')",[original[0].id,original[1].id]);
  const oldPayments=(await db.query('SELECT * FROM plot_commission_payments ORDER BY id')).rows;
@@ -86,6 +88,7 @@ test('cancel three-broker booking, recover excess, then rebook with two new brok
  await db.query("UPDATE plot_commission_payments SET status='approved' WHERE amount=-25");
  let notifications=0;
  const rawCreate=async(req,res)=>{
+   assert.deepEqual(req.body.unit_details, { unit_west: 'Road' });
    await database.query("UPDATE plots SET plot_tag='OLD' WHERE id=$1",[req.rebookingSourcePlotId]);
    const {rows:[created]}=await database.query(`INSERT INTO plots(site_id,plot_no,buyer_name,booking_by,booking_date,plot_size,plot_rate,sale_price,plot_commission,commission_rate,status,previous_booking_plot_id)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'BOOKED',$11) RETURNING *`,[req.body.site_id,req.body.plot_no,req.body.buyer_name,req.body.booking_by,req.body.booking_date,req.body.plot_size,req.body.plot_rate,req.body.sale_price,req.body.plot_commission,req.body.commission_rate,req.rebookingSourcePlotId]);

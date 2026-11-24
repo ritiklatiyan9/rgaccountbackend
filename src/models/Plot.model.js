@@ -23,7 +23,7 @@ class PlotModel extends MasterModel {
   // REGISTRY also creates its workspace before the caller's transaction commits.
   async update(id, data, db) {
     if (!Object.hasOwn(data, 'status')) {
-      return super.update(id, data, db);
+      return super.update(id, data, db, 'unit_details');
     }
     // pg Pool owns a new transaction; a caller-supplied Client is already
     // inside the edit-request approval transaction and must not be committed here.
@@ -33,7 +33,7 @@ class PlotModel extends MasterModel {
       if (ownsTransaction) await client.query('BEGIN');
       const { rows } = await client.query('SELECT id FROM plots WHERE id=$1 FOR UPDATE', [id]);
       if (!rows[0]) { if (ownsTransaction) await client.query('COMMIT'); return null; }
-      const plot = await super.update(id, data, client);
+      const plot = await super.update(id, data, client, 'unit_details');
       if (plot && String(data.status || '').trim().toUpperCase() === 'REGISTRY') await ensurePlotRegistryWorkspace(client, id, data.approval_requested_by ?? null);
       if (ownsTransaction) await client.query('COMMIT');
       return plot;

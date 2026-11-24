@@ -16,11 +16,13 @@ import auditRequestMiddleware from '../src/middlewares/audit.middleware.js';
 import errorMiddleware from '../src/middlewares/error.middleware.js';
 import { updateSite } from '../src/controllers/site.controller.js';
 import { getCommissionAllocations, getCommissionReceivers } from '../src/controllers/plotCommissionV2.controller.js';
-import { createPlot, updatePlot, cancelBooking, rebookPlot, getPlot, listPlotKycMembers, linkPlotBuyer, getPlotNocRegistry, createPlotNocRegistry } from '../src/controllers/plot.controller.js';
+import { createPlot, updatePlot, cancelBooking, rebookPlot, getPlot, listPlotKycMembers, linkPlotBuyer, getPlotNocRegistry, createPlotNocRegistry, listPayments } from '../src/controllers/plot.controller.js';
+import { listInstallments, listInstallmentPayments } from '../src/controllers/installment.controller.js';
 import requirePermission, { requireAnyPermission } from '../src/middlewares/permission.middleware.js';
 import requireRegistrySiteAccess from '../src/middlewares/registrySiteAccess.middleware.js';
 import { getRegistryNoc, saveRegistryNoc, approveRegistryNoc } from '../src/controllers/registry.controller.js';
 import requirePlotSiteAccess from '../src/middlewares/plotSiteAccess.middleware.js';
+import { createAgreementSettingsRouter } from '../src/routes/agreementSettings.routes.js';
 import { invalidateCacheOnSuccess } from '../src/middlewares/cache.middleware.js';
 import { listPendingCheques, manuallyUpdateChequeStatus } from '../src/controllers/bankReconciliation.controller.js';
 import { updateChequeStatus } from '../src/controllers/approval.controller.js';
@@ -56,7 +58,7 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     allowedHeaders: ['Authorization', 'Content-Type', 'X-Session-ID', 'X-App-Context', 'X-Transaction-Date', 'X-Transaction-Time'],
   }));
   app.use(express.json({ limit: '128kb' }));
-  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true, plot_co_applicants: Boolean(memberRouter && plotGraphql), registry_noc: registryNoc, receipt_signatures: receiptSettings }));
+  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true, plot_co_applicants: Boolean(memberRouter && plotGraphql), registry_noc: registryNoc, receipt_signatures: receiptSettings, agreement_settings: true }));
   app.use(['/plots/pool-money', '/sites'], authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.use(audit);
   if (receiptSettings) {
@@ -67,6 +69,7 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     app.delete('/settings/receipt-design', authenticate, requireRole('admin'), noStore, deleteSiteReceiptDesign);
   }
   app.use('/plots', poolMoneyRouter);
+  app.use('/plots/agreement-settings', createAgreementSettingsRouter({ authenticate, database }));
   if (commissionRouter) app.use('/plot-commission', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, commissionRouter);
 
   if (memberRouter) app.use('/members', authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, memberRouter);
@@ -141,6 +144,17 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     (req, res, next) => { res.set('Cache-Control','no-store'); req.query.plot_id=req.params.id; next(); }, getCommissionAllocations);
   app.get('/plots/:id/cancellation-preview',authenticate,requireRole('admin','sub_admin'),requirePermission('plot_payments','update'),
     requirePlotSiteAccess({entity:'plot',source:'params',key:'id'}),(req,res,next)=>{res.set('Cache-Control','no-store');req.query.plot_id=req.params.id;req.includeSettlementBalances=true;next();},getCommissionAllocations);
+  const agreementRead = [authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
+    (req, res, next) => {
+      if (req.query.view !== 'agreement') return next('route');
+      res.set('Cache-Control', 'no-store');
+      next();
+    }];
+  const agreementPlot = requirePlotSiteAccess({ entity: 'plot', source: 'params', key: 'id' });
+  app.get('/plots/payments/list', ...agreementRead,
+    requirePlotSiteAccess({ entity: 'plot', source: 'query', key: 'plot_id' }), listPayments);
+  app.get('/plots/:id/installments', ...agreementRead, agreementPlot, listInstallments);
+  app.get('/plots/:id/installment-payments', ...agreementRead, agreementPlot, listInstallmentPayments);
   app.get('/plots/:id', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
     requirePlotSiteAccess({ entity: 'plot', source: 'params', key: 'id' }), getPlot);
   app.post('/plots/:id/cancel-booking', authenticate, requireRole('admin','sub_admin'), requirePermission('plot_payments','update'),

@@ -29,10 +29,12 @@ class MasterModel {
     return result.rows[0];
   }
 
-  async update(id, data, pool) {
+  async update(id, data, pool, mergeJsonField = null) {
     data = withLoyaltyVault(this.tableName, withPaymentTds(this.tableName, withTransactionTime(this.tableName, data)));
     const keys = Object.keys(data);
-    const setClause = keys.map((key, i) => `${key} = $${i + 1}`).join(', ');
+    const setClause = keys.map((key, i) => key === mergeJsonField
+      ? `${key} = COALESCE(${key}, '{}'::jsonb) || $${i + 1}::jsonb`
+      : `${key} = $${i + 1}`).join(', ');
     const values = [...Object.values(data), id];
     const query = `UPDATE ${this.tableName} SET ${setClause} WHERE id = $${values.length} RETURNING *`;
     const result = await pool.query(query, values);

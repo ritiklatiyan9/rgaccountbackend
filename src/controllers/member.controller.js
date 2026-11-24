@@ -20,6 +20,7 @@ import { extractMemberKyc } from '../services/memberKycOcr.service.js';
 import { findPeopleByPlot } from '../services/plotPeople.service.js';
 import { findMemberPlots, findMemberPlotNumbers } from '../services/plotMemberLinks.service.js';
 import { signMemberDocumentUrl } from '../utils/memberDocumentUrls.js';
+import { readAgreementPortrait } from '../services/memberAgreementPortrait.js';
 import { uniqueMemberNameMatch, memberTransactionMatch, LEDGER_PLOT_BUYER_JOIN, MEMBER_PLOT_PAYMENT_MATCH } from '../services/memberLedgerIdentity.service.js';
 import {
   assertMemberSiteAccess,
@@ -612,6 +613,28 @@ export const getMemberAutocomplete = asyncHandler(async (req, res) => {
 });
 
 /** GET /members/:id */
+export const getMemberAgreementPortrait = asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  const id = Number(req.params.id);
+  const siteId = Number(req.query.site_id);
+  if (![id, siteId].every(n => Number.isSafeInteger(n) && n > 0)) return res.status(400).json({ message: 'Select a client and site.' });
+  if (!await assertMemberSiteAccess(pool, req.user, siteId)) return res.status(403).json({ message: 'Site unavailable.' });
+  const { rows: [member] } = await pool.query('SELECT photo FROM members WHERE id = $1 AND site_id = $2', [id, siteId]);
+  if (!member) return res.status(404).json({ message: 'Client unavailable in this site.' });
+  if (!member.photo) return res.json({ photo: '' });
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  res.once('close', abort);
+  try {
+    const image = await readAgreementPortrait(member.photo, AbortSignal.any([controller.signal, AbortSignal.timeout(12000)]));
+    if (!controller.signal.aborted) res.json({ photo: 'data:image/jpeg;base64,' + image.toString('base64') });
+  } catch {
+    if (!controller.signal.aborted) res.json({ photo: '', unavailable: true });
+  } finally {
+    res.removeListener('close', abort);
+  }
+});
+
 export const getMember = asyncHandler(async (req, res) => {
   const memberId = await resolveMemberIdentityId(pool, parseInt(req.params.id), req.user);
   const member = await memberModel.findByIdWithKyc(memberId, pool);

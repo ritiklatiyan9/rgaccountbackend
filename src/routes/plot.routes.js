@@ -2,6 +2,7 @@ import { getCommissionReceivers, getCommissionAllocations } from '../controllers
 import { transactionDateMiddleware } from '../services/transactionDate.service.js';
 import express from 'express';
 import { createPoolMoneyRouter } from './poolMoney.routes.js';
+import { createAgreementSettingsRouter } from './agreementSettings.routes.js';
 const router = express.Router();
 
 import {
@@ -28,6 +29,7 @@ import { cacheResponse, invalidateCacheOnSuccess } from '../middlewares/cache.mi
 
 // Pool Money uses the shared booking sources and its own guarded routes.
 router.use(createPoolMoneyRouter());
+router.use('/agreement-settings', createAgreementSettingsRouter());
 
 // All plot routes require auth
 router.use(authMiddleware);

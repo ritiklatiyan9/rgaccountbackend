@@ -136,6 +136,10 @@ export function withPlotRebooking(createHandler,{database=pool,onBooked=plot=>ac
           AND booking_cancelled_at IS NULL AND UPPER(COALESCE(status,'')) NOT IN ('RESALE','CANCELLED','CANCEL','TRANSFERRED') LIMIT 1`,[siteId,plot.plot_no,plotId])).rows[0];
         if(active) fail('This property already has another active booking',409,'BOOKING_ALREADY_REBOOKED');
         const inherited=Object.fromEntries(INVENTORY_FIELDS.filter(key=>plot[key]!==undefined).map(key=>[key,plot[key]]));
+        if (plot.unit_type === 'shop' && inherited.unit_details) {
+          inherited.unit_details = { ...inherited.unit_details };
+          for (const key of ['draw_order', 'allotment_no', 'agreement_date']) delete inherited.unit_details[key];
+        }
         req.body={...inherited,...originalBody,site_id:siteId,plot_no:plot.plot_no,status:'BOOKED',force_duplicate:true};
         delete req.body.revision;
         if(req.body.booking_allocations) req.body.booking_allocations={...req.body.booking_allocations,revision:undefined};

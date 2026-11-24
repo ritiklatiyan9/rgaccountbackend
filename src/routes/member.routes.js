@@ -3,7 +3,7 @@ import express from 'express';
 
 import {
   getMemberPlotOptions, createMember, listMembers, searchMembers, searchMembersByPlot, getMemberAutocomplete, getMemberOptions,
-  getMember, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo, getMemberLinkedRecords,
+  getMember, getMemberAgreementPortrait, updateMember, deleteMember, bulkDeleteMembers, getMemberTransactions, getMemberFinancialInfo, getMemberLinkedRecords,
   extractKycDocument, lookupMemberByPhone, registerMemberInSites, registerMembersInSites, getMemberIdentityReview, previewMemberSiteRegistrations,
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
@@ -93,6 +93,7 @@ router.get('/:id/transactions', requireRole('admin', 'sub_admin'), requirePermis
 router.get('/:id/financial-info', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMemberFinancialInfo);
 
 // Dynamic param last
+router.get('/:id/agreement-portrait', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberAgreementPortrait);
 router.get('/:id', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), memberReadCache, getMember);
 
 return router;

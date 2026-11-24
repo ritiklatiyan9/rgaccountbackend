@@ -525,6 +525,15 @@ export const updateInstallmentSettings = asyncHandler(async (req, res) => {
 /** GET /plots/:id/installments — List installments for a plot */
 export const listInstallments = asyncHandler(async (req, res) => {
   const { id } = req.params;
+  // Agreement preparation reads the contractual schedule only. The normal
+  // tracker can update booking status and calculate collection balances.
+  if (req.query.view === 'agreement') {
+    const { rows } = await pool.query(
+      'SELECT id, plot_id, installment_name, amount, due_date, sort_order FROM plot_installments WHERE plot_id = $1 ORDER BY sort_order, due_date, id',
+      [id],
+    );
+    return res.json({ installments: rows });
+  }
   const plot = await plotModel.findById(parseInt(id), pool);
   if (!plot) return res.status(404).json({ message: 'Plot not found' });
   applyProjectInterestPolicy(plot, await loadOverduePolicy(plot.site_id, pool));
