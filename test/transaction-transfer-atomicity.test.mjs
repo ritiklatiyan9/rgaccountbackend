@@ -237,6 +237,21 @@ test('paired transfer SQL behavior',{skip:!enabled},async t=>{
       const ra=await request('plot_payment','misc_income',{row:a}),rb=await request('plot_payment','misc_income',{row:b});ra.body.entries.push(rb.body.entries[0]);
       await assert.rejects(preview(ra.body),/source plot balance/);
     });
+    await t.test('generic transfer rejects an assigned Pool Money payment even with an earlier preview',async()=>{
+      await pg.exec(`CREATE TABLE pool_money_receipts(id int PRIMARY KEY,source_kind text,owner_id int,site_id int,plot_payment_id int);
+        CREATE TABLE pool_money_events(source_kind text,owner_id int,site_id int,event_type text,detail jsonb)`);
+      const row=await original('plot_payment',{amount:60});
+      await pool.query("INSERT INTO pool_money_receipts VALUES(1,'booking',1,1,$1)",[row.id]);
+      const r=await request('plot_payment','misc_income',{row});
+      await preview(r.body);
+      await pool.query(`INSERT INTO pool_money_events VALUES('booking',1,1,'RECEIPT_ALLOCATED',jsonb_build_object('receipt_id',1,'plot_payment_id',$1::int))`,[row.id]);
+      const error={statusCode:409,message:/Return this shop payment to Pool Money/};
+      await assert.rejects(invoke(getTransferOptions,{source_type:'plot_payment',source_id:row.id}),error);
+      await assert.rejects(preview(r.body),error);
+      await assert.rejects(invoke(transferEntry,r.body),error);
+      const {rows:[batch]}=await pool.query('SELECT COUNT(*)::int n FROM transaction_transfer_batches WHERE request_id=$1',[r.body.request_id]);
+      assert.equal(batch.n,0);
+    });
     await t.test('vendor allocations stay with their purchasing orders until explicitly adjusted',async()=>{
       const vendor=await original('vendor_payment',{direction:'debit',amount:40});
       const linked=(await pool.query("INSERT INTO vendor_inventory_payments(site_id,order_id,source_vendor_payment_id,date,payment_date,amount,payment_mode,status) VALUES(1,1,$1,'2026-10-21','2026-10-21',40,'bank','approved') RETURNING id",[vendor.id])).rows[0];

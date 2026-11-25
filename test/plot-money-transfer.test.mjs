@@ -50,10 +50,29 @@ test('missing-schema message is safe to expose while unexpected errors remain ge
   } finally { console.error = originalError; }
 });
 
-const invoke = (input, paymentId = 1, user = { id: 1, role: 'admin' }) => new Promise((resolve, reject) => {
-  const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(data) { resolve({ status: this.statusCode, ...data }); } };
-  transferPlotMoney({ user, params: { id: paymentId }, body: input }, res, reject);
+test('the retired plot transfer endpoint directs callers to unified Transfer Entry', async () => {
+  const response = await new Promise((resolve, reject) => {
+    const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(data) { resolve({ status: this.statusCode, ...data }); } };
+    transferPlotMoney({}, res, reject);
+  });
+  assert.equal(response.status, 410);
+  assert.equal(response.code, 'UNIFIED_TRANSFER_REQUIRED');
 });
+
+const invoke = async (input, paymentId = 1, user = { id: 1, role: 'admin' }) => {
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const result = await executePlotMoneyTransfer(db, user, transferInput(input, paymentId));
+    await db.query('COMMIT');
+    return { status: result.replayed ? 200 : 201, ...result };
+  } catch (error) {
+    await db.query('ROLLBACK');
+    throw error;
+  } finally {
+    db.release();
+  }
+};
 
 test('paired plot transfers reconcile with the cash-flow mirror and preserve atomicity', { skip: !process.env.PGLITE_MODULE }, async t => {
   const { PGlite } = await import(process.env.PGLITE_MODULE);
@@ -170,6 +189,19 @@ test('paired plot transfers reconcile with the cash-flow mirror and preserve ato
         const id = (await query("INSERT INTO plot_payments(plot_id,site_id,date,payment_type,amount,created_by,status,cheque_status) VALUES (1,1,'2026-09-09',$1,100,1,$2,$3) RETURNING id", [mode,status,cheque])).rows[0].id;
         await assert.rejects(invoke(body({ amount: '1' }), id), /Approve the received credit/);
       }
+    });
+    await t.test('payments applied to assigned shops must return to Pool Money before moving', async () => {
+      await pg.exec(`CREATE TABLE pool_money_receipts(id int PRIMARY KEY,source_kind text,owner_id int,site_id int,plot_payment_id int);
+        CREATE TABLE pool_money_events(source_kind text,owner_id int,site_id int,event_type text,detail jsonb)`);
+      const { rows: [payment] } = await query(`INSERT INTO plot_payments(plot_id,site_id,date,payment_type,amount,created_by,status)
+        VALUES (1,1,'2026-09-09','BANK',100,1,'approved') RETURNING id`);
+      await query("INSERT INTO pool_money_receipts VALUES(1,'draw',1,1,$1)", [payment.id]);
+      await query(`INSERT INTO pool_money_events VALUES('draw',1,1,'RECEIPT_ALLOCATED',jsonb_build_object('receipt_id',1,'plot_payment_id',$1::int))`, [payment.id]);
+      const input = body({ amount: '1' });
+      await assert.rejects(invoke(input, payment.id), { statusCode: 409, message: /Return this shop payment to Pool Money/ });
+      assert.equal((await query('SELECT id FROM plot_money_transfers WHERE id=$1', [input.request_id])).rows.length, 0);
+      await query("UPDATE pool_money_events SET event_type='ALLOTTED'");
+      assert.equal((await invoke(input, payment.id)).status, 201);
     });
   } finally { pool.connect = originalConnect; await pg.close(); }
 });

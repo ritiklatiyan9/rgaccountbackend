@@ -653,6 +653,7 @@ const PlotPaymentType = new GraphQLObjectType({
   fields: {
     id:                { type: new GraphQLNonNull(GraphQLID) },
     plot_id:           { type: GraphQLInt },
+    pool_return_receipt_id: { type: GraphQLInt },
     site_id:           { type: GraphQLInt },
     date:              { type: GraphQLString },
     payment_from:      { type: GraphQLString },

@@ -12,9 +12,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
 import { poolMoneySql,up as migratePoolMoney } from '../src/migrations/238_pool_money.js';
-import { listPoolMoney,poolDetail,mutatePoolMoney,poolEligibility,validatePoolIdentity,assertPoolSiteAccess } from '../src/services/poolMoney.service.js';
+import { listPoolMoney,poolDetail,mutatePoolMoney,poolEligibility,validatePoolIdentity,assertPoolSiteAccess,allocatePoolReceipt,returnPoolReceipt,poolReturnReceiptSql } from '../src/services/poolMoney.service.js';
 import { poolEnrollmentPlan, enrollExistingPoolReceipts } from '../src/services/poolMoneyEnrollment.service.js';
+import accountsDatabase from '../src/config/db.js';
+import { deletePayment } from '../src/controllers/plot.controller.js';
+import { deleteEntry } from '../src/controllers/cashflow.controller.js';
+import { deleteCashFlowEntryFromDayBook } from '../src/controllers/daybook.controller.js';
+import { forgetRelationProbes } from '../src/utils/schemaProbe.js';
 const admin={id:1,role:'admin',name:'ADMIN',organization_id:1}, identity={kind:'draw',id:1,siteId:1};
+function callController(handler, id) {
+ return new Promise((resolve, reject) => {
+   let status = 200;
+   const res = { status(code) { status = code; return this; }, json(body) { resolve({ status, body }); } };
+   handler({ params: { id: String(id) }, user: admin }, res, reject);
+ });
+}
 async function fixture(t,{source='draw',mode='CASH',date='2020-01-01',cancelled=false,ready=true}={}) {
  const db=new PGlite();t.after(()=>db.close());
  await db.exec(`
@@ -157,6 +169,110 @@ test('existing BK is allotted without creating another booking',async t=>{
  assert.equal(result.row.booking_no,'BK-0001');assert.equal(result.row.plot_id,1);
  assert.equal((await db.query('SELECT count(*)::int AS n FROM bookings')).rows[0].n,1);
 });
+
+test('Pool Money lists only the buyer’s assigned shops and applies a whole receipt once', async t => {
+ const { db, pool } = await fixture(t);
+ const before = await poolDetail(pool, identity);
+ assert.deepEqual(before.assigned_shops, []);
+ assert.equal(before.row.can_allocate, false);
+ assert.equal(before.payments[0].can_select_for_shop, true);
+ await db.exec(`INSERT INTO members VALUES (2,1,'BUYER','ACTIVE',NULL),(3,2,'BUYER','ACTIVE',NULL);
+   UPDATE plots SET status='BOOKED',buyer_member_id=1 WHERE id=1;
+   UPDATE plots SET status='BOOKED',buyer_member_id=3 WHERE id=2;
+   INSERT INTO plots(site_id,plot_no,status,buyer_member_id,unit_type,approval_status) VALUES
+     (1,'S-SECOND','REGISTRY',1,'shop','approved'),(1,'S-OTHER','BOOKED',2,'shop','approved'),
+     (1,'P-ONLY','BOOKED',1,'plot','approved'),(1,'S-PENDING','BOOKED',1,'shop','pending');`);
+ const detail = await poolDetail(pool, identity);
+ assert.deepEqual(detail.assigned_shops.map(shop => shop.id), [1, 3]);
+ assert.equal(detail.row.can_allocate, true);
+ assert.equal(detail.payments[0].can_allocate, true);
+ const input = { receiptId: detail.payments[0].id, siteId: 1, plotId: 3, expectedAmount: 100000 };
+ for (const plotId of [2, 4, 5, 6]) {
+   await assert.rejects(allocatePoolReceipt(pool, admin, { ...input, plotId }), /currently assigned/);
+ }
+ await assert.rejects(allocatePoolReceipt(pool, admin, { ...input, expectedAmount: 99999 }), /amount changed/);
+ await assert.rejects(allocatePoolReceipt(pool, { ...admin, organization_id: 2 }, input), { statusCode: 403 });
+ const original = (await db.query('SELECT id, credit, created_by FROM cash_flow_entries')).rows[0];
+ const posted = await allocatePoolReceipt(pool, admin, input);
+ assert.equal(posted.plot_id, 3);
+ await assert.rejects(allocatePoolReceipt(pool, admin, { ...input, plotId: 1 }), /already been applied/);
+ const after = await poolDetail(pool, identity);
+ assert.equal(after.payments[0].can_allocate, false);
+ assert.equal(after.payments[0].can_select_for_shop, false);
+ assert.equal(after.payments[0].can_return, true);
+ assert.equal(after.payments[0].allocated_plot_id, 3);
+ assert.equal(after.payments[0].allocated_plot_no, 'S-SECOND');
+ assert.equal(after.row.pool_balance, 0);
+ assert.equal(after.row.allocated_amount, 100000);
+ assert.deepEqual((await db.query(`SELECT pp.plot_id,pp.amount,${poolReturnReceiptSql} AS pool_return_receipt_id
+   FROM plot_payments pp`)).rows, [{ plot_id: 3, amount: '100000.00', pool_return_receipt_id: input.receiptId }]);
+ assert.deepEqual((await db.query('SELECT id, credit, created_by FROM cash_flow_entries')).rows, [original]);
+ assert.equal((await db.query('SELECT status FROM draw_registrations WHERE id=1')).rows[0].status, 'SLIP_ISSUED');
+});
+
+test('deleting a Pool Money shop payment restores the same original receipt and accounting approval', async t => {
+ const { db, pool } = await fixture(t, { source: 'booking' });
+ await db.exec(`UPDATE plots SET status='BOOKED',buyer_member_id=1 WHERE id=1;
+   INSERT INTO plots(site_id,plot_no,status,buyer_member_id) VALUES (1,'S-ANOTHER','BOOKED',1);
+   CREATE TABLE reverted_projections(source text);
+   CREATE FUNCTION capture_projection_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+     IF current_setting('app.recycle_bin_skip',true) IS DISTINCT FROM 'on' THEN
+       INSERT INTO reverted_projections VALUES (TG_TABLE_NAME);
+     END IF;
+     RETURN OLD;
+   END $$;
+   CREATE TRIGGER test_cfe_archive AFTER DELETE ON cash_flow_entries FOR EACH ROW EXECUTE FUNCTION capture_projection_delete();
+   CREATE TRIGGER test_plot_archive AFTER DELETE ON plot_payments FOR EACH ROW EXECUTE FUNCTION capture_projection_delete();
+   CREATE TABLE day_book(id integer,plot_payment_id integer);
+   CREATE TABLE plot_registry_payments(id integer,source_plot_payment_id integer);`);
+ const input = { receiptId: 1, siteId: 1, plotId: 1, expectedAmount: 100000 };
+ const originalLedger = (await db.query('SELECT id, credit, date, created_by FROM cash_flow_entries')).rows[0];
+ const posted = await allocatePoolReceipt(pool, admin, input);
+ const deleteInput = { receiptId: input.receiptId, siteId: input.siteId, plotPaymentId: posted.plot_payment_id };
+ await db.query(`UPDATE cash_flow_entries SET status='approved',approved_by=1,approved_at='2020-01-02' WHERE id=$1`, [originalLedger.id]);
+ await db.query('INSERT INTO day_book VALUES (10,$1)', [posted.plot_payment_id]);
+ await db.query('INSERT INTO plot_registry_payments VALUES (10,$1)', [posted.plot_payment_id]);
+ await db.exec('UPDATE cash_flow_months SET is_locked=true');
+ await assert.rejects(returnPoolReceipt(pool, admin, deleteInput), /locked or missing accounting period/);
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM plot_payments')).rows[0].n, 1);
+ await db.exec('UPDATE cash_flow_months SET is_locked=false');
+
+ t.mock.method(accountsDatabase, 'query', pool.query);
+ t.mock.method(accountsDatabase, 'connect', pool.connect);
+ forgetRelationProbes();
+ t.after(forgetRelationProbes);
+ for (const controller of [deleteEntry, deleteCashFlowEntryFromDayBook]) {
+   const response = await callController(controller, originalLedger.id);
+   assert.equal(response.status, 409);
+   assert.match(response.body.message, /Return this receipt to Pool Money/);
+ }
+ const { status: deleteStatus, body: restored } = await callController(deletePayment, posted.plot_payment_id);
+ assert.equal(deleteStatus, 200);
+ assert.equal(restored.pool_restored, true);
+ assert.equal(restored.receipt_id, input.receiptId);
+ const { status, approved_by: approvedBy, source_module: sourceModule, source_id: sourceId, ...ledger } = (await db.query(
+   'SELECT id, credit, date, created_by, status, approved_by, source_module, source_id FROM cash_flow_entries')).rows[0];
+ assert.deepEqual(ledger, originalLedger);
+ assert.deepEqual([status, approvedBy, sourceModule, sourceId], ['approved', 1, 'pool_money_receipts', input.receiptId]);
+ assert.deepEqual((await db.query('SELECT token_payment_id FROM bookings WHERE id=1')).rows, [{ token_payment_id: null }]);
+ for (const table of ['plot_payments', 'day_book', 'plot_registry_payments', 'reverted_projections']) {
+   assert.equal((await db.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n, 0);
+ }
+ const detail = await poolDetail(pool, { ...identity, kind: 'booking' });
+ assert.equal(detail.payments[0].id, input.receiptId);
+ assert.equal(detail.payments[0].can_allocate, true);
+ assert.equal(detail.payments[0].can_return, false);
+ assert.equal(detail.row.pool_balance, 100000);
+ assert.deepEqual(detail.events.map(event => event.event_type), ['RECEIPT_RETURNED', 'RECEIPT_ALLOCATED']);
+ assert.equal((await db.query('SELECT status FROM plots WHERE id=1')).rows[0].status, 'BOOKED');
+
+ const newPayment = await allocatePoolReceipt(pool, admin, { ...input, plotId: 3 });
+ assert.notEqual(newPayment.plot_payment_id, posted.plot_payment_id);
+ await assert.rejects(returnPoolReceipt(pool, admin, deleteInput), /no longer applied/);
+ assert.equal((await db.query('SELECT plot_payment_id FROM pool_money_receipts WHERE id=1')).rows[0].plot_payment_id, newPayment.plot_payment_id);
+ assert.equal((await returnPoolReceipt(pool, admin, { ...deleteInput, plotPaymentId: newPayment.plot_payment_id })).pool_restored, true);
+});
+
 test('result, KYC, unit site and stale amount are checked before allocation',async t=>{
  const {db,pool}=await fixture(t);
  await assert.rejects(mutatePoolMoney(pool,admin,identity,'allot',{plot_id:1,expected_amount:100000}),/draw result/);
@@ -347,6 +463,31 @@ test('actual deferred Cash Wallet reconciliation keeps collector cash unchanged 
   if(mode==='CASH') assert.equal((await db.query('SELECT count(*)::int AS n FROM loyalty_vault_entries')).rows[0].n,1,'allotment must not create a second wallet receipt or reversal');
  }
 });
+
+test('actual deferred Cash Wallet reconciliation preserves the collector posting through allocation and return',async t=>{
+ const {db}=await fixture(t,{ready:false});
+ const query=async(sql,args)=>{const r=args?.length?await db.query(sql,args):(await db.exec(sql)).at(-1);return {...r,rows:r?.rows||[],rowCount:r?.affectedRows??r?.rows?.length??0};};
+ const pool={query,connect:async()=>({query,release(){}})};
+ await db.exec(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);${postingPolicySql}`);
+ await walletUp(pool);await vaultUp(pool);await unifiedUp(pool);await siteUp(pool);await collectorUp(pool);
+ await migratePoolMoney(pool);
+ await db.exec(`UPDATE loyalty_vault_settings SET consolidated_at='2019-01-01';
+   UPDATE plots SET status='BOOKED',buyer_member_id=1 WHERE id=1;`);
+ const recorded=await mutatePoolMoney(pool,admin,identity,'record',{expected_amount:100000});
+ const receiptId=recorded.payments[0].id;
+ const readPosting=async()=>(await db.query("SELECT id,holder_key,amount,site_id FROM loyalty_vault_entries")).rows;
+ const originalPosting=await readPosting();
+ assert.deepEqual(originalPosting.map(({holder_key,amount,site_id})=>[holder_key,Number(amount),site_id]),[['user:2',100000,1]]);
+ const originalLedger=(await db.query('SELECT id FROM cash_flow_entries')).rows;
+ const {plot_payment_id:plotPaymentId}=await allocatePoolReceipt(pool,admin,{receiptId,siteId:1,plotId:1,expectedAmount:100000});
+ assert.deepEqual(await readPosting(),originalPosting);
+ assert.deepEqual((await db.query('SELECT id FROM cash_flow_entries')).rows,originalLedger);
+ await returnPoolReceipt(pool,admin,{receiptId,siteId:1,plotPaymentId});
+ assert.deepEqual(await readPosting(),originalPosting);
+ assert.deepEqual((await db.query('SELECT id FROM cash_flow_entries')).rows,originalLedger);
+ assert.deepEqual((await db.query('SELECT plot_payment_id FROM draw_payments WHERE id=1')).rows,[{plot_payment_id:null}]);
+});
+
 test('native plot approval queue stays intact and reserves the unit while review is pending',async t=>{
  const {db,pool}=await fixture(t);await db.exec('CREATE TABLE app_schema_migrations(version text PRIMARY KEY);ALTER TABLE plots ADD COLUMN created_by integer;');
  await db.exec(plotReviewSql);

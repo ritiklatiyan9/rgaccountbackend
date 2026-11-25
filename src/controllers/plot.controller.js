@@ -15,7 +15,8 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { readPlotPaymentHistory } from '../services/plotPaymentHistory.service.js';
 import { plotModel, plotPaymentModel, PP_COUNTABLE } from '../models/Plot.model.js';
 import pool from '../config/db.js';
-import { hasRelation } from '../utils/schemaProbe.js';
+import { hasRelations } from '../utils/schemaProbe.js';
+import { poolReturnReceiptSql, restorePoolPayment } from '../services/poolMoney.service.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
 import { withCompanyPlotBooking } from '../services/quickPlotBooking.service.js';
@@ -844,13 +845,17 @@ export const listPayments = asyncHandler(async (req, res) => {
 
   // Migration 160 may not have run here; without it no payment can be part of
   // a transfer, so nothing is transferred out of any receipt.
-  const transferred = await hasRelation('plot_money_transfers')
+  const relations = await hasRelations(['plot_money_transfers', 'pool_money_receipts', 'pool_money_events']);
+  const transferred = relations.get('plot_money_transfers')
     ? '(SELECT COALESCE(SUM(mt.amount), 0) FROM plot_money_transfers mt WHERE mt.source_payment_id = pp.id)'
     : '0::numeric';
+  const poolReturnReceipt = relations.get('pool_money_receipts') && relations.get('pool_money_events')
+    ? poolReturnReceiptSql : 'NULL::integer';
   const [paymentsRes, plotRes, fromBreakdown, receivedByBreakdown] = await Promise.all([
     pool.query(
       `SELECT pp.*, 'payment' AS source, u.name AS created_by_name, a.name AS approved_by_name,
               ${transferred} AS money_transferred_amount,
+              ${poolReturnReceipt} AS pool_return_receipt_id,
               aa.name AS assigned_admin_name
          FROM plot_payments pp
          LEFT JOIN users u ON u.id = pp.created_by
@@ -985,6 +990,12 @@ export const deletePayment = asyncHandler(async (req, res) => {
     if (!locked.rows[0]) {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Payment not found' });
+    }
+
+    const restored = await restorePoolPayment(client, req.user, { plotPaymentId: paymentId });
+    if (restored) {
+      await client.query('COMMIT');
+      return res.json(restored);
     }
 
     await client.query(

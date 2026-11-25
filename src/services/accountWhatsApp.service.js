@@ -32,6 +32,10 @@ import {
   accountWhatsAppPhone,
   compileAccountWhatsAppBody,
   cleanAccountWhatsAppParameter,
+  isBilingualShopReminder,
+  SHOP_INSTALLMENT_REMINDER,
+  SHOP_REMINDER_GRACE_DAYS,
+  SHOP_REMINDER_LEAD_DAYS,
 } from "./accountWhatsApp.spec.js";
 export {
   ACCOUNT_WHATSAPP_EVENTS,
@@ -56,6 +60,18 @@ const assertPaymentReceiptTemplate = (event, template) => {
       409,
     );
 };
+const isShopReminderTemplate = (template) =>
+  template?.category === "UTILITY" &&
+  Boolean(template.meta_template_id) &&
+  accountWhatsAppLanguageGroup(template.language) === "en" &&
+  !template.has_document &&
+  isBilingualShopReminder(template.body);
+const shopReminderKey = (installmentId, day) =>
+  `${SHOP_INSTALLMENT_REMINDER}:${installmentId}:${day}`;
+function isShopReminderDay(dueDate, day) {
+  const daysAfterDue = (Date.parse(day) - Date.parse(indiaDate(dueDate))) / 86400000;
+  return daysAfterDue >= -SHOP_REMINDER_LEAD_DAYS && daysAfterDue <= SHOP_REMINDER_GRACE_DAYS;
+}
 const titleFor = (title) => {
   if (typeof title !== "string" || !title.trim() || title.trim().length > 80)
     throw fail("Give the template a title of up to 80 characters");
@@ -724,6 +740,10 @@ export async function accountWhatsAppStudio(
         )
       ).rows.map(accountWhatsAppTemplateView)
     : [];
+  const hasShops = ready && (await db.query(
+    `SELECT EXISTS(SELECT 1 FROM plots p WHERE p.site_id=$1 AND ${SHOP_INSTALLMENT_PLOT}) AS present`,
+    [siteId],
+  )).rows[0]?.present;
   const settings = ready
     ? (
         await db.query(
@@ -761,7 +781,11 @@ export async function accountWhatsAppStudio(
       hindi_ready: hindiReady,
       hindi_enabled: hindiEnabled,
     },
-    stages: Object.entries(EVENTS).filter(([key]) => key !== 'INSTALLMENT_OVERDUE' || overduePolicy || templates.some((t) => t.event === key)).map(([key, spec]) => {
+    stages: Object.entries(EVENTS).filter(([key]) => {
+      if (key === "INSTALLMENT_OVERDUE") return overduePolicy || templates.some((t) => t.event === key);
+      if (key === SHOP_INSTALLMENT_REMINDER) return hasShops || templates.some((t) => t.event === key);
+      return true;
+    }).map(([key, spec]) => {
       const saved = settings.find((s) => s.event === key) || {
         event: key,
         enabled: false,
@@ -793,7 +817,7 @@ export async function accountWhatsAppStudio(
           : [],
         settings: saved,
         active_template: appliedIn(saved.template_name),
-        active_template_hi: hindiReady ? appliedIn(saved.template_name_hi) : null,
+        active_template_hi: hindiReady && key !== SHOP_INSTALLMENT_REMINDER ? appliedIn(saved.template_name_hi) : null,
         templates: own,
       };
     }),
@@ -823,6 +847,8 @@ export async function saveAccountWhatsAppStage(
     (typeof input.template_name_hi !== "string" || !input.template_name_hi.trim())
   )
     throw fail("Choose a Hindi template or null to remove the Hindi message");
+  if (event === SHOP_INSTALLMENT_REMINDER && input.template_name_hi)
+    throw fail("Daily shop reminders use one Hindi and English template.", 409);
   if (input.template_name_hi !== undefined) await requireHindiSchema(db);
   if (
     input.lead_days !== undefined &&
@@ -855,7 +881,7 @@ export async function saveAccountWhatsAppStage(
       (input.template_name === null ? false : previous.enabled);
     if (event === 'INSTALLMENT_OVERDUE' && nextEnabled && !(await loadOverduePolicy(siteId, client)))
       throw fail('Configure the project overdue penalty policy before enabling this event', 409);
-    if (name) {
+    if (name && !(event === SHOP_INSTALLMENT_REMINDER && !nextEnabled && input.template_name === undefined)) {
       const template = (
         await client.query(
           "SELECT * FROM account_whatsapp_templates WHERE site_id=$1 AND name=$2 FOR UPDATE",
@@ -872,6 +898,8 @@ export async function saveAccountWhatsAppStage(
           "Apply an approved, unarchived template created for this module",
           409,
         );
+      if (event === SHOP_INSTALLMENT_REMINDER && !isShopReminderTemplate(template))
+        throw fail("Apply a Meta-approved bilingual utility template for daily shop reminders.", 409);
       if (
         input.template_name !== undefined &&
         accountWhatsAppLanguageGroup(template.language) === "hi"
@@ -982,9 +1010,13 @@ export async function createAccountWhatsAppTemplate(
   const hasDocument = requiresPaymentReceipt(input.event);
   const compiled = compileAccountWhatsAppBody(input.event, input.body);
   const chosenLanguage = accountWhatsAppLanguage(input.language);
+  if (input.event === SHOP_INSTALLMENT_REMINDER &&
+      (chosenLanguage !== "en" || category !== "UTILITY" || !isBilingualShopReminder(compiled.body)))
+    throw fail("Write one utility template containing both Hindi and English.");
   if (chosenLanguage === "hi") await requireHindiSchema(db);
   // English keeps the configured provider code (WHATSAPP_TEMPLATE_LANG); Hindi is always "hi".
-  const templateLanguage = chosenLanguage === "hi" ? "hi" : language();
+  const templateLanguage = input.event === SHOP_INSTALLMENT_REMINDER
+    ? "en" : chosenLanguage === "hi" ? "hi" : language();
   const name = `dgg_acc_s${siteId}_${input.event.toLowerCase()}${chosenLanguage === "hi" ? "_hi" : ""}_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
   // Save a draft first: provider or connection failures never lose the edited text.
   let template = (
@@ -1244,6 +1276,8 @@ export async function testAccountWhatsAppTemplate(
         409,
       );
     assertPaymentReceiptTemplate(input.event, selected);
+    if (input.event === SHOP_INSTALLMENT_REMINDER && !isShopReminderTemplate(selected))
+      throw fail("Apply a Meta-approved bilingual utility template before sending a sample.", 409);
     const claimed = (
       await client.query(
         `INSERT INTO account_whatsapp_messages(site_id,event,ref_id,dedupe_key,is_test,status,phone,template${sampleLanguage === "hi" ? ",language" : ""}) VALUES($1,$2,0,$3,true,'SENDING',$4,$5${sampleLanguage === "hi" ? ",'hi'" : ""}) RETURNING *`,
@@ -1343,6 +1377,7 @@ const RECEIPT_PLOT_COLUMNS = `to_jsonb(p)->>'plot_size' AS plot_size,to_jsonb(p)
 const CLIENT_PREDICATE = `'CLIENT'=ANY(COALESCE(m.member_types,ARRAY[m.member_type])) AND UPPER(COALESCE(to_jsonb(m)->>'status','ACTIVE'))='ACTIVE'`;
 const PLOT_CLIENT_PREDICATE = `'CLIENT'=ANY(COALESCE(plot_buyer.member_types,ARRAY[plot_buyer.member_type])) AND UPPER(COALESCE(to_jsonb(plot_buyer)->>'status','ACTIVE'))='ACTIVE'`;
 const ACTIVE_INSTALLMENT_PLOT = `UPPER(TRIM(p.status)) IN ('BOOKED','REGISTRY') AND LOWER(COALESCE(to_jsonb(p)->>'approval_status',''))='approved' AND UPPER(COALESCE(to_jsonb(p)->>'plot_tag','')) <> 'OLD'`;
+const SHOP_INSTALLMENT_PLOT = `LOWER(COALESCE(to_jsonb(p)->>'unit_type',''))='shop'`;
 const ACTIVE_OVERDUE_PLOT = `UPPER(TRIM(p.status)) IN ('BOOKED','REGISTRY','UNDER CANCELLATION') AND LOWER(COALESCE(to_jsonb(p)->>'approval_status',''))='approved' AND UPPER(COALESCE(to_jsonb(p)->>'plot_tag','')) <> 'OLD'`;
 /** Re-read canonical records at delivery. Hooks never supply phone numbers, amounts or template parameters. */
 export async function loadAccountWhatsAppContext(
@@ -1371,8 +1406,17 @@ export async function loadAccountWhatsAppContext(
       LEFT JOIN draw_registrations d ON r.source_kind='draw' AND d.id=r.owner_id AND d.site_id=r.site_id
       JOIN members m ON m.id=COALESCE(b.client_member_id,d.client_member_id) AND m.site_id=r.site_id
       WHERE r.id=$1 AND r.site_id=$2 AND ${CLIENT_PREDICATE}`;
-  else if (event === "INSTALLMENT_DUE")
-    query = `SELECT ${PLOT_COLUMNS},pi.id AS installment_id,p.id AS plot_id,pi.installment_name,pi.amount,pi.due_date FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pi.id=$1 AND p.site_id=$2 AND ${ACTIVE_INSTALLMENT_PLOT} AND ${PLOT_CLIENT_PREDICATE}`;
+  else if (event === "INSTALLMENT_DUE" || event === SHOP_INSTALLMENT_REMINDER) {
+    const assignedShop = event === SHOP_INSTALLMENT_REMINDER ? `AND ${SHOP_INSTALLMENT_PLOT}
+      AND (plot_buyer.id=(to_jsonb(p)->>'buyer_member_id')::integer OR EXISTS (
+        SELECT 1 FROM bookings b WHERE b.site_id=p.site_id AND b.plot_id=p.id
+          AND b.client_member_id=plot_buyer.id AND COALESCE(b.status,'') NOT ILIKE 'cancel%'
+      ))` : "";
+    query = `SELECT ${PLOT_COLUMNS},to_jsonb(p)->>'unit_type' AS unit_type,pi.id AS installment_id,p.id AS plot_id,pi.installment_name,pi.amount,pi.due_date
+      FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled
+      JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN}
+      WHERE pi.id=$1 AND p.site_id=$2 AND ${ACTIVE_INSTALLMENT_PLOT} AND ${PLOT_CLIENT_PREDICATE} ${assignedShop}`;
+  }
   else if (event === "INSTALLMENT_OVERDUE")
     query = `SELECT ${PLOT_COLUMNS},to_jsonb(p)->>'unit_type' AS unit_type,pi.id AS installment_id,p.id AS plot_id,pi.installment_name,pi.amount,pi.due_date FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled JOIN sites s ON s.id=p.site_id ${PLOT_BUYER_MEMBER_JOIN} WHERE pi.id=$1 AND p.site_id=$2 AND ${ACTIVE_OVERDUE_PLOT} AND ${PLOT_CLIENT_PREDICATE}`;
   else if (event === "REGISTRY_COMPLETED")
@@ -1443,7 +1487,7 @@ export async function loadAccountWhatsAppContext(
       data.assigned_to = approver?.name || "";
     }
   }
-  if (["INSTALLMENT_DUE", "INSTALLMENT_OVERDUE"].includes(event)) {
+  if (["INSTALLMENT_DUE", "INSTALLMENT_OVERDUE", SHOP_INSTALLMENT_REMINDER].includes(event)) {
     const [{ rows: installments }, { rows: generic }, { rows: direct }] =
       await Promise.all([
         db.query(
@@ -1513,6 +1557,8 @@ export async function queueAccountWhatsApp(event, refId, options = {}) {
         POOL_PAYMENT_RECEIVED: "SELECT site_id FROM pool_money_receipts WHERE id=$1",
         INSTALLMENT_DUE:
           "SELECT p.site_id FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id WHERE pi.id=$1",
+        [SHOP_INSTALLMENT_REMINDER]:
+          "SELECT p.site_id FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id WHERE pi.id=$1",
         INSTALLMENT_OVERDUE:
           "SELECT p.site_id FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id WHERE pi.id=$1",
         REGISTRY_COMPLETED: "SELECT site_id FROM plot_registries WHERE id=$1",
@@ -1526,9 +1572,15 @@ export async function queueAccountWhatsApp(event, refId, options = {}) {
       const settings = await stageSettings(siteId, event, client);
       result = { queued: false, reason: "stage_disabled" };
       if (settings.enabled && settings.template_name) {
-        if (
-          !(await loadAccountWhatsAppContext(event, reference, siteId, client))
-        )
+        const data = await loadAccountWhatsAppContext(event, reference, siteId, client);
+        const day = event === SHOP_INSTALLMENT_REMINDER ? indiaDate() : null;
+        const shopReminderReady = !day || (
+          data && isShopReminderDay(data.due_date, day) &&
+          options.dedupeKey === shopReminderKey(reference, day) &&
+          (accountWhatsAppPhone(data.whatsapp) || accountWhatsAppPhone(data.phone)) &&
+          isShopReminderTemplate(await activeTemplate(siteId, event, client, "en"))
+        );
+        if (!data || !shopReminderReady)
           result = { queued: false, reason: "policy_or_missing_record" };
         else {
           let key = options.dedupeKey || `${event}:${reference}`;
@@ -1572,7 +1624,7 @@ export async function queueAccountWhatsApp(event, refId, options = {}) {
   }
 }
 
-/** Future/current-date only, exact lead-time scheduling; never sweep overdue historical installments. */
+/** Keep legacy lead times for plots and queue a shop reminder only for the current India date. */
 export async function scheduleAccountWhatsAppReminders({
   db = pool,
   scanLimit = 500,
@@ -1583,24 +1635,48 @@ export async function scheduleAccountWhatsAppReminders({
     1,
     Math.min(1000, Math.floor(Number(scanLimit) || 500)),
   );
+  const day = indiaDate();
   let cursor = 0;
   let queued = 0;
   // Paid/ineligible installments do not create outbox rows. Advance the cursor
   // through them so an early page of paid clients cannot starve later clients.
   while (true) {
     const { rows } = await db.query(
-      `SELECT pi.id,p.site_id,pi.due_date::text FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled
-      JOIN account_whatsapp_stage_settings s ON s.site_id=p.site_id AND s.event='INSTALLMENT_DUE' AND s.enabled AND s.template_name IS NOT NULL
-      WHERE ${ACTIVE_INSTALLMENT_PLOT} AND pi.id>$1 AND pi.due_date=(now() AT TIME ZONE 'Asia/Kolkata')::date + s.lead_days
-      AND s.enabled_at IS NOT NULL AND pi.due_date >= (s.enabled_at AT TIME ZONE 'Asia/Kolkata')::date
-      AND NOT EXISTS(SELECT 1 FROM account_whatsapp_messages w WHERE w.site_id=p.site_id AND w.dedupe_key='INSTALLMENT_DUE:' || pi.id::text || ':' || pi.due_date::text)
+      `SELECT pi.id,p.site_id,pi.due_date::text,s.event
+      FROM plot_installments pi JOIN plots p ON p.id=pi.plot_id AND p.installments_enabled
+      JOIN account_whatsapp_stage_settings s ON s.site_id=p.site_id AND s.enabled AND s.template_name IS NOT NULL
+        AND s.event=CASE WHEN ${SHOP_INSTALLMENT_PLOT} AND EXISTS (
+          SELECT 1 FROM account_whatsapp_stage_settings daily
+          WHERE daily.site_id=p.site_id AND daily.event=$3 AND daily.enabled
+        ) THEN $3 ELSE 'INSTALLMENT_DUE' END
+      JOIN account_whatsapp_templates t ON t.name=s.template_name AND t.site_id=s.site_id AND t.event=s.event
+      WHERE ${ACTIVE_INSTALLMENT_PLOT} AND pi.id>$1 AND s.enabled_at IS NOT NULL
+      AND (
+        (s.event='INSTALLMENT_DUE' AND pi.due_date=$4::date+s.lead_days
+          AND pi.due_date >= (s.enabled_at AT TIME ZONE 'Asia/Kolkata')::date)
+        OR (s.event=$3 AND t.status='APPROVED' AND t.archived_at IS NULL
+          AND $4::date >= (s.enabled_at AT TIME ZONE 'Asia/Kolkata')::date
+          AND pi.due_date BETWEEN $4::date-$5::integer AND $4::date+$6::integer)
+      )
+      AND NOT EXISTS(
+        SELECT 1 FROM account_whatsapp_messages w WHERE w.site_id=p.site_id AND (
+          w.dedupe_key=s.event || ':' || pi.id::text || ':' ||
+            CASE WHEN s.event=$3 THEN $4::date::text ELSE pi.due_date::text END
+          OR (s.event=$3 AND w.event='INSTALLMENT_DUE' AND w.ref_id=pi.id
+            AND w.status IN ('SENDING','SENT','FAILED')
+            AND (w.created_at AT TIME ZONE 'Asia/Kolkata')::date=$4::date)
+        )
+      )
       ORDER BY pi.id LIMIT $2`,
-      [cursor, limit],
+      [cursor, limit, SHOP_INSTALLMENT_REMINDER, day, SHOP_REMINDER_GRACE_DAYS, SHOP_REMINDER_LEAD_DAYS],
     );
     for (const row of rows) {
-      const result = await queueAccountWhatsApp("INSTALLMENT_DUE", row.id, {
+      const key = row.event === SHOP_INSTALLMENT_REMINDER
+        ? shopReminderKey(row.id, day)
+        : `INSTALLMENT_DUE:${row.id}:${row.due_date}`;
+      const result = await queueAccountWhatsApp(row.event, row.id, {
         siteId: row.site_id,
-        dedupeKey: `INSTALLMENT_DUE:${row.id}:${row.due_date}`,
+        dedupeKey: key,
         db,
       });
       if (result.queued) queued++;
@@ -1721,6 +1797,8 @@ async function deliverLanguage(
       );
     if (requiresPaymentReceipt(row.event) && !template.has_document)
       return end("SKIPPED", "Payment receipt PDF requires an approved document-header template. Create or import a PDF template in WhatsApp Studio before enabling payment messages.");
+    if (row.event === SHOP_INSTALLMENT_REMINDER && !isShopReminderTemplate(template))
+      return end("SKIPPED", "Daily shop reminders need an approved bilingual utility template");
     if (
       isImportedAccountWhatsAppTemplate(template) &&
       (send === sendAccountWhatsAppTemplate || transport !== remoteTransport)
@@ -1750,21 +1828,11 @@ async function deliverLanguage(
         "Client KYC is already verified; this template states KYC Pending.",
       );
     if (row.event === "INSTALLMENT_DUE") {
-      const today = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Asia/Kolkata",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(new Date());
-      const due =
-        data.due_date instanceof Date
-          ? new Intl.DateTimeFormat("en-CA", {
-              timeZone: "Asia/Kolkata",
-              year: "numeric",
-              month: "2-digit",
-              day: "2-digit",
-            }).format(data.due_date)
-          : String(data.due_date).slice(0, 10);
+      if (String(data.unit_type).toLowerCase() === "shop" &&
+          (await stageSettings(row.site_id, SHOP_INSTALLMENT_REMINDER, db)).enabled)
+        return end("SKIPPED", "Daily shop reminders now cover this installment");
+      const today = indiaDate();
+      const due = indiaDate(data.due_date);
       if (
         due < today ||
         due !==
@@ -1776,6 +1844,11 @@ async function deliverLanguage(
           "SKIPPED",
           "Installment due date changed or is now historical",
         );
+    }
+    if (row.event === SHOP_INSTALLMENT_REMINDER) {
+      const day = indiaDate();
+      if (baseKey !== shopReminderKey(data.installment_id, day) || !isShopReminderDay(data.due_date, day))
+        return end("SKIPPED", "The daily shop reminder expired or the installment is outside its reminder window");
     }
     if (row.event === 'INSTALLMENT_OVERDUE') {
       const key = overdueDedupeKey(data.policy, data.installment_id, data.plot_id, data.due_date);
@@ -1851,7 +1924,7 @@ export async function deliverAccountWhatsApp(
 ) {
   const context = { db, send, upload, transport };
   const outcome = await deliverLanguage(row, context);
-  if (!["SENT", "FAILED"].includes(outcome) || row.is_test) return;
+  if (!["SENT", "FAILED"].includes(outcome) || row.is_test || row.event === SHOP_INSTALLMENT_REMINDER) return;
   try {
     const settings = await stageSettings(row.site_id, row.event, db);
     if (

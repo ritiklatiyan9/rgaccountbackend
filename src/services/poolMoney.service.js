@@ -48,6 +48,47 @@ export async function poolSchema(db) {
 }
 const normalizePayment=(p)=>({...p,date:textDate(p.date),amount:amount(p.amount),status:p.status||'unrecorded',payment_from:p.payment_from||'CASH'});
 const countable=p=>p.status!=='rejected' && (String(p.payment_from).toUpperCase()!=='CHEQUE'||(p.status==='approved'&&String(p.cheque_status).toUpperCase()==='CLEARED'));
+const canAllocateReceipt = payment => payment.recorded && !payment.plot_payment_id
+  && ['pending', 'approved'].includes(payment.status) && countable(payment);
+
+// Keep older draw allotments protected. Only a receipt applied to an already
+// assigned shop through this workflow has an independent return operation.
+const manualAllocation = `EXISTS (SELECT 1 FROM pool_money_events e
+  WHERE e.source_kind=r.source_kind AND e.owner_id=r.owner_id AND e.site_id=r.site_id
+    AND e.event_type='RECEIPT_ALLOCATED' AND e.detail->>'receipt_id'=r.id::text
+    AND e.detail->>'plot_payment_id'=r.plot_payment_id::text)`;
+
+export const poolReturnReceiptSql = `(SELECT r.id FROM pool_money_receipts r
+  WHERE r.plot_payment_id=pp.id AND ${manualAllocation})`;
+
+export async function isPoolShopReceipt(db, plotPaymentId) {
+ const { rows: [tables] } = await db.query(`SELECT to_regclass('public.pool_money_receipts') IS NOT NULL
+   AND to_regclass('public.pool_money_events') IS NOT NULL AS ready`);
+ if (!tables?.ready) return false;
+ const { rows: [payment] } = await db.query(`SELECT ${poolReturnReceiptSql} AS pool_return_receipt_id
+   FROM plot_payments pp WHERE pp.id=$1`, [plotPaymentId]);
+ return payment?.pool_return_receipt_id != null;
+}
+
+async function findAssignedShops(db, siteId, memberIds, { bookings, plotId = null } = {}) {
+  if (!memberIds.length) return [];
+  // An explicit buyer link takes precedence. Older bookings can supply that
+  // link only when all current bookings for the shop identify the same buyer.
+  const legacyBuyer = bookings ? `(SELECT MIN(b.client_member_id) FROM bookings b
+    WHERE b.site_id=p.site_id AND b.plot_id=p.id AND COALESCE(b.status,'') NOT ILIKE 'cancel%'
+    HAVING COUNT(DISTINCT b.client_member_id)=1)` : 'NULL::integer';
+  const { rows } = await db.query(`SELECT p.id,p.plot_no,p.block,p.unit_type,p.plot_size,p.sale_price,p.booking_by,
+      m.id AS buyer_member_id,m.full_name AS buyer_name
+    FROM plots p JOIN members m ON m.id=COALESCE((to_jsonb(p)->>'buyer_member_id')::integer,${legacyBuyer})
+      AND m.site_id=p.site_id AND m.status='ACTIVE'
+    WHERE p.site_id=$1 AND m.id=ANY($2::integer[]) AND ($3::integer IS NULL OR p.id=$3)
+      AND UPPER(p.unit_type)='SHOP' AND UPPER(p.status) IN ('BOOKED','REGISTRY')
+      AND COALESCE(to_jsonb(p)->>'approval_status','approved')='approved'
+      AND UPPER(COALESCE(to_jsonb(p)->>'plot_tag',''))<>'OLD'
+    ORDER BY p.block,p.plot_no,p.id`, [siteId, memberIds, plotId]);
+  return rows;
+}
+
 export async function listPoolMoney(db,siteId,entryVisibility={canViewAll:true,creatorId:null}) {
  if(!integer(siteId)) fail(400,'Select a project to view Pool Money.');
  const schema=await poolSchema(db), sources=[];
@@ -55,10 +96,12 @@ export async function listPoolMoney(db,siteId,entryVisibility={canViewAll:true,c
  const creatorVisible=id=>visibleCreators===null||visibleCreators.has(Number(id));
  let recorded=[],results=[];
  if(schema.ready) {
-  recorded=(await db.query(`SELECT r.*,COALESCE(c.status,r.status) AS status,COALESCE(c.cheque_status,r.cheque_status) AS cheque_status
+  recorded=(await db.query(`SELECT r.*,COALESCE(c.status,r.status) AS status,COALESCE(c.cheque_status,r.cheque_status) AS cheque_status,
+   c.id IS NOT NULL AS ledger_present,${manualAllocation} AS can_return,p.id AS allocated_plot_id,p.plot_no AS allocated_plot_no
    FROM pool_money_receipts r LEFT JOIN cash_flow_entries c ON
    (c.source_module='pool_money_receipts' AND c.source_id=r.id) OR
    (r.plot_payment_id IS NOT NULL AND c.source_module='plot_payments' AND c.source_id=r.plot_payment_id)
+   LEFT JOIN plot_payments pp ON pp.id=r.plot_payment_id LEFT JOIN plots p ON p.id=pp.plot_id
    WHERE r.site_id=$1 ORDER BY r.date,r.id`,[siteId])).rows;
   results=(await db.query('SELECT * FROM pool_money_results WHERE site_id=$1',[siteId])).rows;
  }
@@ -92,16 +135,32 @@ export async function listPoolMoney(db,siteId,entryVisibility={canViewAll:true,c
    plot_id:d.allotted_plot_id,plot_no:d.plot_no,plot_approval_status:d.plot_approval_status,required_amount:amount(d.required_amount),draw_result:d.is_winner?'WINNER':'PENDING',
    draw_opening_date:textDate(d.draw_opening_date),workflow_version:Number(d.workflow_version||0),_payments:d.payments});
  }
+ const recordedBySource = new Map(recorded.map(receipt => [`${receipt.source_kind}:${receipt.source_id}`, receipt]));
+ const eligibleBuyerIds = new Set(sources.filter(source => source.client_member_id && source.status !== 'CANCELLED'
+   && source._payments.some(payment => {
+     const receipt = recordedBySource.get(`${source.kind}:${payment.source_id}`);
+     return creatorVisible(payment.created_by) && receipt?.ledger_present && canAllocateReceipt({ ...receipt, recorded: true });
+   })).map(source => source.client_member_id));
+ const assignedBuyers = new Set((await findAssignedShops(db, siteId, [...eligibleBuyerIds], schema)).map(shop => shop.buyer_member_id));
  const rows=sources.filter(s=>creatorVisible(s.created_by)||s._payments.some(p=>creatorVisible(p.created_by))).map(s=>{
   const result=results.find(r=>r.source_kind===s.kind&&r.owner_id===s.id);
-  const receipts=recorded.filter(r=>r.source_kind===s.kind&&r.owner_id===s.id);
-  const payments=s._payments.filter(p=>creatorVisible(p.created_by)).map(p=>normalizePayment({...p,...receipts.find(r=>r.source_id===p.source_id),receipt_no:p.receipt_no,
-   recorded:receipts.some(r=>r.source_id===p.source_id)}));
+  const payments=s._payments.filter(p=>creatorVisible(p.created_by)).map(p=>{
+   const receipt=recordedBySource.get(`${s.kind}:${p.source_id}`);
+   const {ledger_present:ledgerPresent,...payment}=normalizePayment({...p,...receipt,receipt_no:p.receipt_no,recorded:!!receipt});
+   const canSelectForShop = !!ledgerPresent && s.status !== 'CANCELLED' && canAllocateReceipt(payment);
+   return {
+    ...payment,
+    can_select_for_shop: canSelectForShop,
+    can_allocate: canSelectForShop && assignedBuyers.has(s.client_member_id),
+    can_return: payment.can_return === true,
+   };
+  });
   const sum=predicate=>amount(payments.filter(predicate).reduce((n,p)=>n+p.amount,0));
   const row={...s,draw_result:s.kind==='draw'?(s.draw_result==='WINNER'&&['WINNER','ALLOTTED'].includes(s.status)?'WINNER':result?.result==='NOT_SELECTED'?'NOT_SELECTED':'PENDING'):(result?.result||'PENDING'),result_note:entryVisibility.canViewAll?(result?.note||null):null,
    token_amount:sum(()=>true),total_received:sum(countable),pool_balance:sum(p=>!p.plot_payment_id&&countable(p)),
    allocated_amount:sum(p=>!!p.plot_payment_id&&countable(p)),payment_count:payments.length,
-   unposted_amount:sum(p=>!p.recorded&&!p.plot_payment_id),pending_cheque_amount:sum(p=>p.payment_from==='CHEQUE'&&!countable(p)),payment_link_missing:payments.some(p=>p.link_missing),payments};
+   unposted_amount:sum(p=>!p.recorded&&!p.plot_payment_id),pending_cheque_amount:sum(p=>p.payment_from==='CHEQUE'&&!countable(p)),payment_link_missing:payments.some(p=>p.link_missing),
+   can_allocate:payments.some(p=>p.can_allocate),payments};
   delete row._payments;
   row.reason=poolEligibility(row);
   if(!entryVisibility.canViewAll&&!row.reason) row.reason='An administrator must review all collected receipts before allotment';
@@ -122,7 +181,8 @@ export async function poolDetail(db,input,entryVisibility={canViewAll:true,creat
   ${schema.draws?"AND NOT EXISTS(SELECT 1 FROM draw_registrations d WHERE d.allotted_plot_id=p.id AND d.status='ALLOTTED')":''}
   ORDER BY p.block,p.plot_no,p.id`,[input.siteId])).rows;
  const events=list.available&&entryVisibility.canViewAll?(await db.query('SELECT e.*,u.name AS actor_name FROM pool_money_events e LEFT JOIN users u ON u.id=e.actor_user_id WHERE e.source_kind=$1 AND e.owner_id=$2 AND e.site_id=$3 ORDER BY e.id DESC',[input.kind,input.id,input.siteId])).rows:[];
- return {available:list.available,entryVisibility,row,payments:row.payments,units,events};
+ const assignedShops=await findAssignedShops(db,input.siteId,row.client_member_id?[row.client_member_id]:[],schema);
+ return {available:list.available,entryVisibility,row,payments:row.payments,units,assigned_shops:assignedShops,events};
 }
 async function lockedSource(db,input) {
  const table=input.kind==='booking'?'bookings':'draw_registrations';
@@ -133,6 +193,175 @@ async function lockedSource(db,input) {
 async function audit(db,input,user,type,detail) {
  await db.query('INSERT INTO pool_money_events(source_kind,owner_id,site_id,event_type,detail,actor_user_id) VALUES($1,$2,$3,$4,$5,$6)',[input.kind,input.id,input.siteId,type,detail,user.id]);
 }
+
+async function insertPoolPlotPayment(db, plot, receipt, { buyer, bookedBy, reference }) {
+ const { rows: [payment] } = await db.query(`INSERT INTO plot_payments(plot_id,site_id,date,amount,payment_from,payment_type,bank_name,branch,bank_details,
+   cheque_no,cheque_status,received_by,narration,buyer_name,booked_by,status,created_by,created_at,approved_by,approved_at)
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`,
+ [plot.id,receipt.site_id,receipt.date,receipt.amount,receipt.payment_from,receipt.payment_type,receipt.bank_name,receipt.branch,receipt.bank_details,
+  receipt.cheque_no,receipt.ledger_cheque_status,receipt.received_by,`POOL ${reference} · ${receipt.reference}${receipt.narration?' · '+receipt.narration:''}`,
+  buyer.toUpperCase(),bookedBy,receipt.ledger_status,receipt.created_by,receipt.created_at,receipt.ledger_approved_by,receipt.ledger_approved_at]);
+ return payment;
+}
+
+async function setPoolSourcePayment(db, kind, sourceId, paymentId) {
+ // The source trigger adopts the original cash-flow entry when linking.
+ const sql = kind === 'booking'
+   ? 'UPDATE bookings SET token_payment_id=$2 WHERE id=$1'
+   : 'UPDATE draw_payments SET plot_payment_id=$2 WHERE id=$1';
+ await db.query(sql, [sourceId, paymentId]);
+}
+
+function requirePoolAllocationAdmin(user) {
+ if (!['admin', 'super_admin'].includes(user?.role)) fail(403, 'Only an administrator can allocate or return Pool Money.');
+}
+
+const validAllocationId = value => ['string', 'number'].includes(typeof value) && integer(value);
+
+function sourceIdentity(receipt) {
+ return { kind: receipt.source_kind, id: receipt.owner_id, siteId: receipt.site_id };
+}
+
+async function lockReceiptSource(db, receipt) {
+ if (receipt.source_kind === 'booking') {
+   const source = await lockedSource(db, sourceIdentity(receipt));
+   return { source, plotPaymentId: source.token_payment_id };
+ }
+ const { rows: [drawPayment] } = await db.query(`SELECT plot_payment_id FROM draw_payments
+   WHERE id=$1 AND draw_registration_id=$2 FOR UPDATE`, [receipt.source_id, receipt.owner_id]);
+ if (!drawPayment) fail(409, 'The original draw receipt is missing.');
+ const source = await lockedSource(db, sourceIdentity(receipt));
+ return { source, plotPaymentId: drawPayment.plot_payment_id };
+}
+
+async function lockReceiptLedger(db, receipt, sourceModule, sourceId) {
+ const { rows: [ledger] } = await db.query(`SELECT * FROM cash_flow_entries
+   WHERE source_module=$1 AND source_id=$2 AND site_id=$3 FOR UPDATE`, [sourceModule, sourceId, receipt.site_id]);
+ if (!ledger || Number(ledger.credit) !== Number(receipt.amount) || Number(ledger.debit) !== 0
+   || textDate(ledger.date) !== textDate(receipt.date)) fail(409, 'The accounting entry is missing or differs from this receipt.');
+ const { rows: [period] } = await db.query(`SELECT id FROM cash_flow_months
+   WHERE id=$1 AND is_locked IS FALSE FOR SHARE`, [ledger.cash_flow_month_id]);
+ if (!period) fail(409, 'This receipt belongs to a locked or missing accounting period.');
+ return ledger;
+}
+
+async function skipProjectionRecycle(db) {
+ // These rows can be regenerated from the original receipt. Restoring a
+ // projection by itself would create another payment for the same money.
+ await db.query("SELECT set_config('app.recycle_bin_skip','on',true)");
+}
+
+async function withPoolTransaction(database, operation) {
+ const db = await database.connect();
+ try {
+   await db.query('BEGIN');
+   const result = await operation(db);
+   await db.query('COMMIT');
+   return result;
+ } catch (error) {
+   await db.query('ROLLBACK');
+   throw error;
+ } finally {
+   db.release();
+ }
+}
+
+export async function allocatePoolReceipt(database, user, { receiptId, siteId, plotId, expectedAmount } = {}) {
+ requirePoolAllocationAdmin(user);
+ if (![receiptId, siteId, plotId].every(validAllocationId)) fail(400, 'Select a valid receipt, project, and shop.');
+ if (!['string', 'number'].includes(typeof expectedAmount) || !Number.isFinite(Number(expectedAmount)) || Number(expectedAmount) <= 0) {
+   fail(400, 'Review the full receipt amount before applying it.');
+ }
+
+ return withPoolTransaction(database, async db => {
+   await assertPoolSiteAccess(db, user, siteId);
+   const schema = await poolSchema(db);
+   if (!schema.ready || !schema.automatic_enrollment) fail(503, 'Pool Money accounting setup is required before applying receipts.');
+   const { rows: [original] } = await db.query('SELECT * FROM pool_money_receipts WHERE id=$1 AND site_id=$2', [receiptId, siteId]);
+   if (!original) fail(404, 'Pool receipt not found in this project.');
+
+   const { source, plotPaymentId } = await lockReceiptSource(db, original);
+   const { rows: [receipt] } = await db.query('SELECT * FROM pool_money_receipts WHERE id=$1 FOR UPDATE', [receiptId]);
+   if (!receipt || receipt.plot_payment_id || plotPaymentId) fail(409, 'This receipt has already been applied. Refresh Pool Money before trying again.');
+   if (source.status === 'CANCELLED') fail(409, 'This registration is cancelled. Review its receipts in Accounting.');
+   if (amount(expectedAmount) !== Number(receipt.amount)) fail(409, 'The receipt amount changed. Refresh Pool Money before applying it.');
+
+   await db.query('SELECT id FROM plots WHERE id=$1 AND site_id=$2 FOR UPDATE', [plotId, siteId]);
+   const [shop] = await findAssignedShops(db, siteId, source.client_member_id ? [source.client_member_id] : [], { bookings: schema.bookings, plotId });
+   if (!shop) fail(409, 'Select a shop currently assigned to this buyer in this project.');
+
+   const ledger = await lockReceiptLedger(db, receipt, 'pool_money_receipts', receipt.id);
+   if (!canAllocateReceipt({ ...receipt, recorded: true, status: ledger.status, cheque_status: ledger.cheque_status })) {
+     fail(409, 'This receipt cannot be applied. Review its approval and cheque status in Accounting.');
+   }
+   const payment = await insertPoolPlotPayment(db, shop, {
+     ...receipt, ledger_status: ledger.status, ledger_cheque_status: ledger.cheque_status,
+     ledger_approved_by: ledger.approved_by, ledger_approved_at: ledger.approved_at,
+   }, { buyer: shop.buyer_name, bookedBy: shop.booking_by, reference: source.booking_no || source.registration_no || receipt.reference });
+   await skipProjectionRecycle(db);
+   await setPoolSourcePayment(db, receipt.source_kind, receipt.source_id, payment.id);
+   const { rows: [posted] } = await db.query(`SELECT 1 FROM pool_money_receipts r JOIN cash_flow_entries c
+     ON c.id=$2 AND c.source_module='plot_payments' AND c.source_id=r.plot_payment_id
+     WHERE r.id=$1 AND r.plot_payment_id=$3`, [receipt.id, ledger.id, payment.id]);
+   if (!posted) fail(409, 'The cash-flow receipt could not be linked. Refresh Pool Money before trying again.');
+
+   await audit(db, sourceIdentity(receipt), user, 'RECEIPT_ALLOCATED', {
+     receipt_id: receipt.id, plot_payment_id: payment.id, plot_id: shop.id, plot_no: shop.plot_no, amount: Number(receipt.amount),
+   });
+   return { receipt_id: receipt.id, plot_payment_id: payment.id, plot_id: shop.id, message: `Pool receipt applied to shop ${shop.plot_no}.` };
+ });
+}
+
+// The caller owns the transaction and locks the plot payment before deleting
+// ordinary payments or handing off to this reversal.
+export async function restorePoolPayment(db, user, { plotPaymentId, receiptId, siteId } = {}) {
+ const { rows: [tables] } = await db.query("SELECT to_regclass('public.pool_money_receipts') IS NOT NULL AND to_regclass('public.pool_money_events') IS NOT NULL AS ready");
+ if (!tables.ready) return null;
+ const { rows: [original] } = await db.query(`SELECT r.* FROM pool_money_receipts r
+   WHERE r.plot_payment_id=$1 AND ${manualAllocation}`, [plotPaymentId]);
+ if (!original || (receiptId != null && Number(receiptId) !== original.id)) return null;
+ requirePoolAllocationAdmin(user);
+ if (siteId != null && Number(siteId) !== original.site_id) return null;
+ await assertPoolSiteAccess(db, user, original.site_id);
+
+ const { plotPaymentId: linkedPaymentId } = await lockReceiptSource(db, original);
+ const { rows: [receipt] } = await db.query('SELECT * FROM pool_money_receipts WHERE id=$1 FOR UPDATE', [original.id]);
+ if (!receipt || receipt.plot_payment_id !== Number(plotPaymentId) || linkedPaymentId !== Number(plotPaymentId)) {
+   fail(409, 'The receipt allocation changed. Refresh Pool Money before returning it.');
+ }
+ const ledger = await lockReceiptLedger(db, receipt, 'plot_payments', plotPaymentId);
+ // Move the original ledger entry before clearing the link so the pool
+ // projection updates the same cash-flow row and keeps its wallet posting.
+ await db.query(`UPDATE cash_flow_entries SET source_module='pool_money_receipts',source_id=$2 WHERE id=$1`, [ledger.id, receipt.id]);
+ await db.query(`UPDATE pool_money_receipts SET plot_payment_id=NULL,status=$2,cheque_status=$3,bank_account_id=$4,
+   approved_by=$5,approved_at=$6,assigned_admin_id=$7,updated_at=now() WHERE id=$1`,
+ [receipt.id, ledger.status, ledger.cheque_status, ledger.bank_account_id, ledger.approved_by, ledger.approved_at, ledger.assigned_admin_id]);
+ await setPoolSourcePayment(db, receipt.source_kind, receipt.source_id, null);
+
+ await skipProjectionRecycle(db);
+ const { rows: [projections] } = await db.query(`SELECT to_regclass('public.plot_registry_payments') IS NOT NULL AS registry,
+   to_regclass('public.day_book') IS NOT NULL AS daybook`);
+ if (projections.registry) await db.query('DELETE FROM plot_registry_payments WHERE source_plot_payment_id=$1', [plotPaymentId]);
+ if (projections.daybook) await db.query('DELETE FROM day_book WHERE plot_payment_id=$1', [plotPaymentId]);
+ await db.query('DELETE FROM plot_payments WHERE id=$1', [plotPaymentId]);
+ await audit(db, sourceIdentity(receipt), user, 'RECEIPT_RETURNED', {
+   receipt_id: receipt.id, plot_payment_id: Number(plotPaymentId), amount: Number(receipt.amount),
+ });
+ return { receipt_id: receipt.id, pool_restored: true, message: 'Payment removed from the shop and returned to Pool Money.' };
+}
+
+export async function returnPoolReceipt(database, user, { receiptId, siteId, plotPaymentId } = {}) {
+ requirePoolAllocationAdmin(user);
+ if (![receiptId, siteId, plotPaymentId].every(validAllocationId)) fail(400, 'Select a valid receipt, project, and shop payment.');
+ return withPoolTransaction(database, async db => {
+   await assertPoolSiteAccess(db, user, siteId);
+   const { rows: [payment] } = await db.query('SELECT id FROM plot_payments WHERE id=$1 AND site_id=$2 FOR UPDATE', [plotPaymentId, siteId]);
+   const restored = payment && await restorePoolPayment(db, user, { plotPaymentId, receiptId, siteId });
+   if (!restored) fail(409, 'This receipt is no longer applied to that shop payment. Refresh Pool Money.');
+   return restored;
+ });
+}
+
 export async function mutatePoolMoney(pool,user,input,action,body={}) {
  if(!['admin','super_admin'].includes(user?.role)) fail(403,'Only an administrator can record draw results or allot a unit.');
  const db=await pool.connect();
@@ -203,15 +432,8 @@ export async function mutatePoolMoney(pool,user,input,action,body={}) {
      WHERE r.source_kind=$1 AND r.owner_id=$2 AND r.site_id=$3 AND r.plot_payment_id IS NULL ORDER BY r.id FOR UPDATE OF r,c`,[input.kind,input.id,input.siteId])).rows;
    if(amount(receipts.reduce((n,r)=>n+Number(r.amount),0))!==row.pool_balance) fail(409,'Receipt ledger changed. Refresh before allotment.');
    for(const receipt of receipts) {
-    const {rows:[payment]}=await db.query(`INSERT INTO plot_payments(plot_id,site_id,date,amount,payment_from,payment_type,bank_name,branch,bank_details,
-      cheque_no,cheque_status,received_by,narration,buyer_name,booked_by,status,created_by,created_at,approved_by,approved_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`,
-     [plot.id,input.siteId,receipt.date,receipt.amount,receipt.payment_from,receipt.payment_type,receipt.bank_name,receipt.branch,receipt.bank_details,
-      receipt.cheque_no,receipt.ledger_cheque_status,receipt.received_by,`POOL ${row.reference} · ${receipt.reference}${receipt.narration?' · '+receipt.narration:''}`,
-      member.full_name.toUpperCase(),bookingBy,receipt.ledger_status,receipt.created_by,receipt.created_at,receipt.ledger_approved_by,receipt.ledger_approved_at]);
-    // The source trigger atomically adopts the original cash-flow identity.
-    if(input.kind==='booking') await db.query('UPDATE bookings SET token_payment_id=$2 WHERE id=$1',[booking.id,payment.id]);
-    else await db.query('UPDATE draw_payments SET plot_payment_id=$2 WHERE id=$1',[receipt.source_id,payment.id]);
+    const payment=await insertPoolPlotPayment(db,plot,receipt,{buyer:member.full_name,bookedBy:bookingBy,reference:row.reference});
+    await setPoolSourcePayment(db,input.kind,receipt.source_id,payment.id);
    }
    await audit(db,input,user,'ALLOTTED',{plot_id:plot.id,plot_no:plot.plot_no,booking_id:booking.id,booking_no:booking.booking_no,amount:row.pool_balance});
    if(input.kind==='draw') await db.query('INSERT INTO draw_events(draw_registration_id,event_type,detail,actor_user_id) VALUES($1,$2,$3,$4)',[input.id,'ALLOTTED',{plot_id:plot.id,booking_id:booking.id,booking_no:booking.booking_no,source:'pool_money'},user.id]);

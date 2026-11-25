@@ -6,6 +6,19 @@ import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
 import { buildVerifyUrl, ReceiptType } from '../utils/receiptToken.js';
 import { canUserViewEntry, resolveEntryVisibility } from '../services/entryVisibility.service.js';
+import { hasRelations } from '../utils/schemaProbe.js';
+import { isPoolShopReceipt, poolReturnReceiptSql } from '../services/poolMoney.service.js';
+
+const poolShopReceiptMessage = 'Return this receipt to Pool Money from its shop account.';
+
+async function poolShopReceiptCondition() {
+  const tables = await hasRelations(['pool_money_receipts', 'pool_money_events']);
+  const pooled = "cfe.source_module IS NOT DISTINCT FROM 'pool_money_receipts'";
+  if (!tables.get('pool_money_receipts') || !tables.get('pool_money_events')) return pooled;
+  return `${pooled} OR (cfe.source_module IS NOT DISTINCT FROM 'plot_payments' AND EXISTS (
+    SELECT 1 FROM plot_payments pp WHERE pp.id = cfe.source_id AND ${poolReturnReceiptSql} IS NOT NULL
+  ))`;
+}
 
 // ══════════════════════════════════════════════════
 //  CASH FLOW MONTH ENDPOINTS
@@ -431,6 +444,9 @@ export const updateEntry = asyncHandler(async (req, res) => {
   if (!(await canUserViewEntry(req.user, 'cashflow', existing.created_by))) {
     return res.status(404).json({ message: 'Entry not found' });
   }
+  if (existing.source_module === 'plot_payments' && await isPoolShopReceipt(pool, existing.source_id)) {
+    return res.status(409).json({ message: poolShopReceiptMessage });
+  }
   if (existing.is_locked) return res.status(403).json({ message: 'This month is locked.' });
 
   const updateData = {};
@@ -528,6 +544,7 @@ export const listFirmsForCashFlow = asyncHandler(async (req, res) => {
 export const deleteEntry = asyncHandler(async (req, res) => {
   const entryId = parseInt(req.params.id);
   const entryVisibility = await resolveEntryVisibility(req.user, 'cashflow', null);
+  const poolShopReceipt = await poolShopReceiptCondition();
   // Single atomic DELETE — only deletes if the parent month is NOT locked.
   // Was 3 round-trips (entry SELECT, month SELECT, DELETE); now 1.
   const result = await pool.query(
@@ -536,14 +553,14 @@ export const deleteEntry = asyncHandler(async (req, res) => {
       WHERE cfe.id = $1
         AND cfe.cash_flow_month_id = cfm.id
         AND cfm.is_locked = FALSE
+        AND NOT (${poolShopReceipt})
         AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
       RETURNING cfe.id`,
     [entryId, entryVisibility.creatorId]
   );
   if (!result.rows[0]) {
-    // Distinguish "not found" from "month locked" with a single follow-up.
     const check = await pool.query(
-      `SELECT cfm.is_locked
+      `SELECT cfm.is_locked, (${poolShopReceipt}) AS pool_shop_receipt
          FROM cash_flow_entries cfe
          JOIN cash_flow_months cfm ON cfm.id = cfe.cash_flow_month_id
         WHERE cfe.id = $1
@@ -551,6 +568,7 @@ export const deleteEntry = asyncHandler(async (req, res) => {
       [entryId, entryVisibility.creatorId]
     );
     if (check.rows.length === 0) return res.status(404).json({ message: 'Entry not found' });
+    if (check.rows[0].pool_shop_receipt) return res.status(409).json({ message: poolShopReceiptMessage });
     return res.status(403).json({ message: 'This month is locked.' });
   }
   clearCacheByPrefixes(['dashboard:']).catch(() => {});
@@ -566,6 +584,7 @@ export const bulkDeleteEntries = asyncHandler(async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.map((id) => parseInt(id)).filter(Number.isInteger) : [];
   if (ids.length === 0) return res.status(400).json({ message: 'ids array is required' });
   const entryVisibility = await resolveEntryVisibility(req.user, 'cashflow', null);
+  const poolShopReceipt = await poolShopReceiptCondition();
 
   const result = await pool.query(
     `DELETE FROM cash_flow_entries cfe
@@ -573,6 +592,7 @@ export const bulkDeleteEntries = asyncHandler(async (req, res) => {
       WHERE cfe.id = ANY($1::int[])
         AND cfe.cash_flow_month_id = cfm.id
         AND cfm.is_locked = FALSE
+        AND NOT (${poolShopReceipt})
         AND ($2::text IS NULL OR cfe.created_by = ANY(string_to_array($2::text, ',')::int[]))
       RETURNING cfe.id`,
     [ids, entryVisibility.creatorId]
@@ -581,7 +601,7 @@ export const bulkDeleteEntries = asyncHandler(async (req, res) => {
   const skipped = ids.filter((id) => !deleted.includes(id));
   clearCacheByPrefixes(['dashboard:']).catch(() => {});
   res.json({
-    message: `${deleted.length} entr${deleted.length === 1 ? 'y' : 'ies'} deleted${skipped.length ? `, ${skipped.length} skipped (locked month or not found)` : ''}`,
+    message: `${deleted.length} entr${deleted.length === 1 ? 'y' : 'ies'} deleted${skipped.length ? `, ${skipped.length} skipped (protected, locked, or unavailable)` : ''}`,
     deleted,
     skipped,
   });

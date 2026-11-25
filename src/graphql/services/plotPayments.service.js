@@ -1,5 +1,7 @@
 import { PLOT_CO_APPLICANTS_JOIN, PLOT_CO_APPLICANTS_SELECT } from '../../services/plotCoApplicants.service.js';
 import { attachModuleChequeDates } from '../../services/chequeDates.service.js';
+import { poolReturnReceiptSql } from '../../services/poolMoney.service.js';
+import { hasRelations } from '../../utils/schemaProbe.js';
 /**
  * Plot Payments GraphQL Service
  * Optimized SQL queries replacing multiple REST endpoints with single GraphQL calls.
@@ -211,8 +213,10 @@ export async function getPlotPageData(siteId, creatorId = null) {
  * Fetch payments for a selected plot with breakdowns — replaces 3 REST calls.
  */
 export async function getPlotPaymentDetail(plotId, siteId, creatorId = null) {
+  const poolTables = await hasRelations(['pool_money_receipts', 'pool_money_events']);
+  const returnReceipt = [...poolTables.values()].every(Boolean) ? poolReturnReceiptSql : 'NULL::integer';
   const paymentsQuery = `
-    SELECT pp.*, 'payment' AS source, u.name AS created_by_name
+    SELECT pp.*, 'payment' AS source, u.name AS created_by_name, ${returnReceipt} AS pool_return_receipt_id
     FROM plot_payments pp
     JOIN plots authorized_plot
       ON authorized_plot.id = pp.plot_id

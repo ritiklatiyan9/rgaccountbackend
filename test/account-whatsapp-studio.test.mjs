@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import { up as baseUp } from "../src/migrations/225_account_whatsapp_studio.js";
 import { up as documentUp } from "../src/migrations/226_account_whatsapp_documents.js";
+import { up as hindiUp } from "../src/migrations/246_account_whatsapp_hindi.js";
 const up = async (db) => {
   const base = await baseUp(db);
   const documents = await documentUp(db);
@@ -44,6 +45,8 @@ import {
   compileAccountWhatsAppBody,
   isAccountWhatsAppPaymentEligible,
   accountWhatsAppCategory,
+  SHOP_INSTALLMENT_REMINDER,
+  SHOP_INSTALLMENT_REMINDER_BODY,
 } from "../src/services/accountWhatsApp.spec.js";
 import {
   inspectAccountWhatsAppRemoteTemplate,
@@ -1120,6 +1123,64 @@ test("future reminders use canonical allocation including cash receipts; no hist
     ),
     /0 and 30/,
   );
+});
+
+test("daily shop reminders require Meta approval and send one bilingual message per eligible day", async (t) => {
+  const { pg, db } = await fixture(t);
+  await up(db);
+  await hindiUp(db);
+  await pg.exec(`
+    ALTER TABLE plots ADD COLUMN unit_type text DEFAULT 'plot';
+    UPDATE plots SET unit_type='shop' WHERE id=20;
+    UPDATE plot_payments SET amount=0;
+    UPDATE plot_installment_payments SET amount=0;
+    INSERT INTO plots VALUES(21,1,'A13','Rahul Sharma',10,'BOOKED','approved',true,'plot');
+    INSERT INTO plot_installments (id,plot_id,installment_name,amount,due_date,sort_order)
+    SELECT id,plot_id,'Installment '||id,5000,(now() AT TIME ZONE 'Asia/Kolkata')::date+offset_days,id
+    FROM (VALUES (51,20,-15),(52,20,0),(53,20,4),(54,20,-16),(55,20,-1),(56,21,3)) dates(id,plot_id,offset_days);
+  `);
+  const event = SHOP_INSTALLMENT_REMINDER;
+  const input = { site_id: 1, event, title: "Naya Baazar reminder", body: SHOP_INSTALLMENT_REMINDER_BODY };
+  await assert.rejects(
+    createAccountWhatsAppTemplate(admin, { ...input, body: "Due date {due_date}. Thank you." }, { db, transport: localTransport() }),
+    /both Hindi and English/,
+  );
+  const template = await createAccountWhatsAppTemplate(admin, input, { db, transport: localTransport("PENDING") });
+  const enable = { site_id: 1, template_name: template.name, enabled: true };
+  await assert.rejects(saveAccountWhatsAppStage(admin, event, enable, { db }), /approved/);
+  assert.equal(await scheduleAccountWhatsAppReminders({ db }), 0);
+  await pg.query("UPDATE account_whatsapp_templates SET status='APPROVED' WHERE name=$1", [template.name]);
+  const legacy = await apply(db, "INSTALLMENT_DUE");
+  await saveAccountWhatsAppStage(admin, event, enable, { db });
+  await assert.rejects(
+    saveAccountWhatsAppStage(admin, event, { ...enable, template_name_hi: template.name }, { db }),
+    /one Hindi and English template/,
+  );
+  await pg.query("INSERT INTO application_settings(site_id,setting_key,setting_value) VALUES(1,'account_whatsapp_hindi_v1','{\"enabled\":true}')");
+  await pg.query("UPDATE account_whatsapp_stage_settings SET template_name_hi=$1 WHERE event=$2", [template.name, event]);
+
+  assert.equal(await scheduleAccountWhatsAppReminders({ db }), 5);
+  const { rows: queued } = await pg.query("SELECT event,ref_id FROM account_whatsapp_messages ORDER BY ref_id");
+  assert.deepEqual(queued.map((row) => [row.event, Number(row.ref_id)]),
+    [[event, 50], [event, 51], [event, 52], [event, 55], ["INSTALLMENT_DUE", 56]]);
+  await pg.exec("UPDATE plot_installments SET due_date=due_date-1 WHERE id=50");
+  assert.equal(await scheduleAccountWhatsAppReminders({ db }), 0, "rescheduling cannot repeat the day's reminder");
+  await pg.exec(`
+    INSERT INTO plot_installment_payments VALUES(61,20,51,5000,'CASH',CURRENT_DATE,'approved',NULL);
+    UPDATE account_whatsapp_messages SET dedupe_key=event||':'||ref_id||':'||((now() AT TIME ZONE 'Asia/Kolkata')::date-1)::text
+      WHERE ref_id=52;
+    UPDATE plot_installments SET due_date=due_date-15 WHERE id=55;
+  `);
+  const sent = [];
+  await drainAccountWhatsApp({ db, send: async (phone, name, params, options) => {
+    sent.push({ phone, name, params, language: options.language });
+    return "mock-accepted";
+  } });
+  assert.deepEqual(sent.map(({ name, language }) => [name, language]), [[template.name, "en"], [legacy.name, "en"]]);
+  assert.equal(sent[0].params.filter((value) => value === "Rahul Sharma").length, 2);
+  assert.ok(sent[0].params.includes("₹5,000.00"));
+  const { rows: skipped } = await pg.query("SELECT ref_id FROM account_whatsapp_messages WHERE status='SKIPPED' ORDER BY ref_id");
+  assert.deepEqual(skipped.map((row) => Number(row.ref_id)), [51, 52, 55]);
 });
 
 test("sample action uses fictional values, protects in-flight version and logs provider acceptance", async (t) => {

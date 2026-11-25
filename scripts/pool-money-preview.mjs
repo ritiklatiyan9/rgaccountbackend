@@ -16,7 +16,7 @@ import auditRequestMiddleware from '../src/middlewares/audit.middleware.js';
 import errorMiddleware from '../src/middlewares/error.middleware.js';
 import { updateSite } from '../src/controllers/site.controller.js';
 import { getCommissionAllocations, getCommissionReceivers } from '../src/controllers/plotCommissionV2.controller.js';
-import { createPlot, updatePlot, cancelBooking, rebookPlot, getPlot, listPlotKycMembers, linkPlotBuyer, getPlotNocRegistry, createPlotNocRegistry, listPayments } from '../src/controllers/plot.controller.js';
+import { createPlot, updatePlot, cancelBooking, rebookPlot, getPlot, listPlotKycMembers, linkPlotBuyer, getPlotNocRegistry, createPlotNocRegistry, listPayments, deletePayment } from '../src/controllers/plot.controller.js';
 import { listInstallments, listInstallmentPayments } from '../src/controllers/installment.controller.js';
 import requirePermission, { requireAnyPermission } from '../src/middlewares/permission.middleware.js';
 import requireRegistrySiteAccess from '../src/middlewares/registrySiteAccess.middleware.js';
@@ -58,7 +58,7 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     allowedHeaders: ['Authorization', 'Content-Type', 'X-Session-ID', 'X-App-Context', 'X-Transaction-Date', 'X-Transaction-Time'],
   }));
   app.use(express.json({ limit: '128kb' }));
-  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true, plot_co_applicants: Boolean(memberRouter && plotGraphql), registry_noc: registryNoc, receipt_signatures: receiptSettings, agreement_settings: true }));
+  app.get('/health', (_req, res) => res.set('Cache-Control', 'no-store').json({ service: 'pool-money-preview', version: 1, commission_allocations: Boolean(commissionRouter), booking_allocations: true, booking_history: true, plot_co_applicants: Boolean(memberRouter && plotGraphql), registry_noc: registryNoc, receipt_signatures: receiptSettings, agreement_settings: true, pool_money_allocations: true }));
   app.use(['/plots/pool-money', '/sites'], authenticate, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.use(audit);
   if (receiptSettings) {
@@ -151,8 +151,11 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
       next();
     }];
   const agreementPlot = requirePlotSiteAccess({ entity: 'plot', source: 'params', key: 'id' });
-  app.get('/plots/payments/list', ...agreementRead,
+  app.get('/plots/payments/list', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
+    (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); },
     requirePlotSiteAccess({ entity: 'plot', source: 'query', key: 'plot_id' }), listPayments);
+  app.delete('/plots/payments/:id', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'),
+    requirePlotSiteAccess({ entity: 'payment', source: 'params', key: 'id' }), bustPlotCache, deletePayment);
   app.get('/plots/:id/installments', ...agreementRead, agreementPlot, listInstallments);
   app.get('/plots/:id/installment-payments', ...agreementRead, agreementPlot, listInstallmentPayments);
   app.get('/plots/:id', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),

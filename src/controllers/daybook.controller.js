@@ -11,6 +11,7 @@ import { memberModel } from '../models/Member.model.js';
 import { cashFlowMonthModel, cashFlowEntryModel } from '../models/CashFlow.model.js';
 import { firmModel, firmTransactionModel } from '../models/Firm.model.js';
 import { plotModel, plotPaymentModel } from '../models/Plot.model.js';
+import { isPoolShopReceipt, restorePoolPayment } from '../services/poolMoney.service.js';
 import { installmentModel } from '../models/Installment.model.js';
 import pool from '../config/db.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
@@ -2550,6 +2551,9 @@ export const updateCashFlowEntryFromDayBook = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const existing = await cashFlowEntryModel.findById(parseInt(id), pool);
   if (!existing) return res.status(404).json({ message: 'Cash flow entry not found' });
+  if (existing.source_module === 'plot_payments' && await isPoolShopReceipt(pool, existing.source_id)) {
+    return res.status(409).json({ message: 'Return this receipt to Pool Money from its shop account.' });
+  }
   if (existing.source_module === 'tds_settlements' || (await pool.query('SELECT 1 FROM tds_settlements WHERE existing_entry_id=$1', [existing.id])).rows.length) {
     return res.status(409).json({ message: 'TDS settlements are immutable. View this payment in the TDS register.' });
   }
@@ -2651,6 +2655,12 @@ export const deleteCashFlowEntryFromDayBook = asyncHandler(async (req, res) => {
   const cfId = parseInt(req.params.id);
   const existing = await cashFlowEntryModel.findById(cfId, pool);
   if (!existing) return res.status(404).json({ message: 'Cash flow entry not found' });
+  if (existing.source_module === 'pool_money_receipts') {
+    return res.status(409).json({ message: 'Review this collection in Pool Money.' });
+  }
+  if (existing.source_module === 'plot_payments' && await isPoolShopReceipt(pool, existing.source_id)) {
+    return res.status(409).json({ message: 'Return this receipt to Pool Money from its shop account.' });
+  }
   if (existing.source_module === 'tds_settlements' || (await pool.query('SELECT 1 FROM tds_settlements WHERE existing_entry_id=$1', [existing.id])).rows.length) {
     return res.status(409).json({ message: 'TDS settlements are immutable. View this payment in the TDS register.' });
   }
@@ -2872,15 +2882,27 @@ export const updatePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
  */
 export const deletePlotPaymentFromDayBook = asyncHandler(async (req, res) => {
   const ppId = parseInt(req.params.id);
-  const existing = await plotPaymentModel.findById(ppId, pool);
-  if (!existing) return res.status(404).json({ message: 'Plot payment not found' });
-
-  // Delete linked day_book entry first (if any)
-  await pool.query('DELETE FROM day_book WHERE plot_payment_id = $1', [ppId]);
-
-  // Delete the plot payment
-  await plotPaymentModel.delete(ppId, pool);
-  res.json({ message: 'Plot payment deleted from Day Book and Plot Payments' });
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const { rows: [payment] } = await db.query('SELECT id FROM plot_payments WHERE id=$1 FOR UPDATE', [ppId]);
+    if (!payment) {
+      await db.query('ROLLBACK');
+      return res.status(404).json({ message: 'Plot payment not found' });
+    }
+    const restored = await restorePoolPayment(db, req.user, { plotPaymentId: ppId });
+    if (!restored) {
+      await db.query('DELETE FROM day_book WHERE plot_payment_id = $1', [ppId]);
+      await plotPaymentModel.delete(ppId, db);
+    }
+    await db.query('COMMIT');
+    return res.json(restored || { message: 'Plot payment deleted from Day Book and Plot Payments' });
+  } catch (error) {
+    await db.query('ROLLBACK');
+    throw error;
+  } finally {
+    db.release();
+  }
 });
 
 // ══════════════════════════════════════════════════

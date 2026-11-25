@@ -7,6 +7,7 @@ import pool from '../config/db.js';
 import permissionModel from '../models/Permission.model.js';
 import { clearCacheByPrefixes } from '../config/cache.js';
 import { canUserViewEntry } from '../services/entryVisibility.service.js';
+import { isPoolShopReceipt } from '../services/poolMoney.service.js';
 import {
   TransferError,
   asId,
@@ -276,6 +277,8 @@ const loadSource = async (db, req, type, id, lock = false) => {
     if(linked.rows.length) throw new TransferError(409,'This vendor payment is allocated to purchasing orders. Adjust those allocations before transferring its balance');
   }
   if (type === 'plot_payment') {
+    if (await isPoolShopReceipt(db, id))
+      throw new TransferError(409, 'Return this shop payment to Pool Money before applying it elsewhere.');
     const linked = await db.query(
       'SELECT 1 FROM plot_registry_payments WHERE source_plot_payment_id = $1 LIMIT 1',
       [id],

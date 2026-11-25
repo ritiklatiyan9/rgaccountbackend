@@ -22,6 +22,7 @@ import {
   accountWhatsAppLanguage,
   accountWhatsAppLanguageGroup,
   compileAccountWhatsAppBody,
+  SHOP_INSTALLMENT_REMINDER,
 } from "../src/services/accountWhatsApp.spec.js";
 import {
   overdueTemplateBody,
@@ -121,6 +122,11 @@ test("migration 246 adds only the Hindi columns, enables nothing and is idempote
 
 test("every default Hindi text meets Meta's rules and carries exactly the English fields", () => {
   for (const [event, spec] of Object.entries(ACCOUNT_WHATSAPP_EVENTS)) {
+    if (event === SHOP_INSTALLMENT_REMINDER) {
+      assert.equal(spec.body_hi, undefined, "shop reminders never use a separate Hindi template");
+      assert.match(compileAccountWhatsAppBody(event, spec.body).text, DEVANAGARI);
+      continue;
+    }
     assert.match(spec.body_hi, DEVANAGARI, event);
     const english = compileAccountWhatsAppBody(event, spec.body);
     const hindi = compileAccountWhatsAppBody(event, spec.body_hi);

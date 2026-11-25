@@ -42,7 +42,10 @@ Every module always sends its English message. A project can also send a Hindi m
 | Payment sent / refund | Approved non-cash outgoing plot payment |
 | Installment received | Approved non-cash direct installment receipt |
 | Installment due | Unpaid eligible installment at its selected lead time, in India time |
+| Daily shop installment reminder | One Hindi and English message per eligible unpaid shop installment per India date, from three days before the due date through the fifteenth day after it |
 | Registry congratulations | Completed registered-deed handover with registry date and deed on file |
+
+Daily shop reminders start paused. Apply a Meta-approved bilingual utility template to **Daily shop installment reminder** and enable the event to activate the schedule for that project. The event uses one template and one send even when the project's separate Hindi-message switch is on. It rechecks the buyer, approval, current due date and posted balance before delivery. Today's reminder expires at the end of the India date, and missed days are never backfilled.
 
 CASH, unknown modes, internal transfers, pending entries and uncleared cheques cannot produce transaction messages. The queue and worker both re-read canonical financial records. Cash receipts still reduce outstanding installment balances. NOC creation does not mean registry completion.
 

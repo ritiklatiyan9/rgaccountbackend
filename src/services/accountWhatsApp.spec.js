@@ -79,6 +79,28 @@ const PAYMENT = {
     clean(d.receipt_no),
   ),
 };
+const INSTALLMENT_REMINDER = {
+  ...PLOT,
+  installment_name: field("Installment name", "Installment 2", (d) => clean(d.installment_name)),
+  amount_due: field("Remaining installment amount", "₹50,000.00", (d) => money(d.remaining)),
+  due_date: field("Due date", "26 Oct 2026", (d) => date(d.due_date)),
+};
+export const SHOP_INSTALLMENT_REMINDER = "SHOP_INSTALLMENT_REMINDER";
+export const SHOP_REMINDER_LEAD_DAYS = 3;
+export const SHOP_REMINDER_GRACE_DAYS = 15;
+export const SHOP_INSTALLMENT_REMINDER_BODY = [
+  "*Shop installment reminder / दुकान की किस्त का अनुस्मारक*",
+  "Dear {customer_name},\nPlease pay the outstanding balance on your shop installment. If you have already paid, please contact our office so we can update your account.",
+  "प्रिय {customer_name},\nकृपया अपनी दुकान की बकाया किस्त का भुगतान करें। यदि आपने भुगतान कर दिया है, तो खाते में भुगतान दर्ज कराने के लिए हमारे कार्यालय से संपर्क करें।",
+  "*Project / परियोजना:* {project}\n*Shop / दुकान:* {plot_no}\n*Installment / किस्त:* {installment_name}\n*Outstanding amount / बकाया राशि:* {amount_due}\n*Due date / देय तिथि:* {due_date}",
+  "Defence Garden Group / डिफेंस गार्डन ग्रुप",
+].join("\n\n");
+
+export function isBilingualShopReminder(body) {
+  const text = String(body || "").replace(/\{[a-z_]+\}/g, "");
+  return /\p{Script=Latin}/u.test(text) && /\p{Script=Devanagari}/u.test(text);
+}
+
 const branded = (...paragraphs) =>
   [
     "*DEFENCE GARDEN GROUP*",
@@ -224,16 +246,7 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
     "Scheduled reminders",
     "Once per future due installment at the selected lead time",
     "Remind clients of an unpaid installment. Uses current allocated balances; no historical reminders are backfilled.",
-    {
-      ...PLOT,
-      installment_name: field("Installment name", "Installment 2", (d) =>
-        clean(d.installment_name),
-      ),
-      amount_due: field("Remaining installment amount", "₹50,000.00", (d) =>
-        money(d.remaining),
-      ),
-      due_date: field("Due date", "26 Oct 2026", (d) => date(d.due_date)),
-    },
+    INSTALLMENT_REMINDER,
     branded(
       "Dear {customer_name},",
       "This is a reminder for {installment_name} on Plot {plot_no} at {project}.\n*Amount due:* {amount_due}\n*Due date:* {due_date}",
@@ -244,6 +257,15 @@ export const ACCOUNT_WHATSAPP_EVENTS = {
       "यह {project} में प्लॉट {plot_no} की {installment_name} के लिए एक अनुस्मारक है।\n*देय राशि:* {amount_due}\n*देय तिथि:* {due_date}",
       "यदि आप भुगतान कर चुके हैं, तो कृपया अपना खाता मिलान कराने के लिए हमारे कार्यालय से संपर्क करें।",
     ),
+  ),
+  [SHOP_INSTALLMENT_REMINDER]: event(
+    "Daily shop installment reminder",
+    "Installment tracker",
+    "Bilingual reminders",
+    "Every day from 3 days before the due date through the 15th day after it",
+    "Send one WhatsApp message in Hindi and English per unpaid shop installment per day when an approved template is applied and the event is enabled.",
+    INSTALLMENT_REMINDER,
+    SHOP_INSTALLMENT_REMINDER_BODY,
   ),
   INSTALLMENT_OVERDUE: event(
     "Overdue installment penalty",

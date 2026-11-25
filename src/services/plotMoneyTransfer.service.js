@@ -1,6 +1,7 @@
 import { currentTransactionDate, transactionDateEditable } from './transactionDate.service.js';
 import { transactionTimeForWrite } from './transactionTime.service.js';
 import { canUserViewEntry } from './entryVisibility.service.js';
+import { isPoolShopReceipt } from './poolMoney.service.js';
 import { transactionMovesMoney } from '../utils/transactionPosting.js';
 
 const fail = (statusCode, message) => { throw Object.assign(new Error(message), { statusCode }); };
@@ -45,6 +46,7 @@ export async function executePlotMoneyTransfer(db, user, input) {
   }
   const receipt = (await db.query('SELECT * FROM plot_payments WHERE id = $1 FOR UPDATE', [input.paymentId])).rows[0];
   if (!receipt || receipt.plot_id !== from.id) fail(409, 'Source payment changed. Refresh and try again');
+  if (await isPoolShopReceipt(db, receipt.id)) fail(409, 'Return this shop payment to Pool Money before applying it elsewhere.');
   if (receipt.status !== 'approved' || Number(receipt.amount) <= 0 || !transactionMovesMoney({ direction: 'credit', status: receipt.status, paymentMode: receipt.payment_type, chequeStatus: receipt.cheque_status })) fail(409, 'Approve the received credit and clear any cheque before transferring');
   if (['CANCELLED', 'COMPANY', 'RESALE'].includes(String(to.status).toUpperCase()) || String(to.plot_tag).toUpperCase() === 'OLD') fail(409, 'Select an active booked destination plot');
   const spent = (await db.query('SELECT COALESCE(SUM(amount), 0) AS amount FROM plot_money_transfers WHERE source_payment_id = $1', [receipt.id])).rows[0];

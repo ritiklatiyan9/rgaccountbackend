@@ -97,7 +97,10 @@ test('preview isolates routes, rejects foreign origins and requires session proo
   const app = createPoolMoneyPreviewApp({
     authenticate: (req, res, next) => {
       if (req.header('Authorization') !== 'Bearer verified') return res.status(401).json({ message: 'Authentication required' });
-      req.user = { id: 1, organization_id: 1, role: 'admin' }; next();
+      req.user = req.header('X-Read-Only') ? {
+        id: 2, organization_id: 1, role: 'sub_admin', permissionsByModule: new Map([['plot_payments', { can_read: true }]]),
+      } : { id: 1, organization_id: 1, role: 'admin' };
+      next();
     },
     poolMoneyRouter: router,
     memberKycRouter: createMemberKycRouter({ authenticate: (_req, _res, next) => next() }),
@@ -106,9 +109,12 @@ test('preview isolates routes, rejects foreign origins and requires session proo
   });
   assert.equal((await request(app)).body.service, 'pool-money-preview');
   for (const path of ['/plots/pool-money', '/sites', '/sites/7', '/plots/42/installments?view=agreement',
-    '/plots/42/installment-payments?view=agreement', '/plots/payments/list?plot_id=42&view=agreement']) {
+    '/plots/42/installment-payments?view=agreement', '/plots/payments/list?plot_id=42&view=agreement', '/plots/payments/list?plot_id=42']) {
     assert.equal((await request(app, { path })).status, 401);
   }
+  const deletePayment = { path: '/plots/payments/42', method: 'DELETE' };
+  assert.equal((await request(app, deletePayment)).status, 401);
+  assert.equal((await request(app, { ...deletePayment, headers: { Authorization: 'Bearer verified', 'X-Read-Only': '1' } })).status, 403);
   assert.equal(moduleReads, 0); assert.equal(dbReads, 0);
   assert.equal((await request(app, { path: '/wallet' })).status, 404);
   assert.equal((await request(app, { path: '/plots/payments', method: 'POST', body: {} })).status, 404);
