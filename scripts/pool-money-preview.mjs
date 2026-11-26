@@ -17,7 +17,7 @@ import errorMiddleware from '../src/middlewares/error.middleware.js';
 import { updateSite } from '../src/controllers/site.controller.js';
 import { getCommissionAllocations, getCommissionReceivers } from '../src/controllers/plotCommissionV2.controller.js';
 import { createPlot, updatePlot, cancelBooking, rebookPlot, getPlot, listPlotKycMembers, linkPlotBuyer, getPlotNocRegistry, createPlotNocRegistry, listPayments, deletePayment } from '../src/controllers/plot.controller.js';
-import { listInstallments, listInstallmentPayments } from '../src/controllers/installment.controller.js';
+import { createInstallments, replaceInstallments, listInstallments, listInstallmentPayments } from '../src/controllers/installment.controller.js';
 import requirePermission, { requireAnyPermission } from '../src/middlewares/permission.middleware.js';
 import requireRegistrySiteAccess from '../src/middlewares/registrySiteAccess.middleware.js';
 import { getRegistryNoc, saveRegistryNoc, approveRegistryNoc } from '../src/controllers/registry.controller.js';
@@ -84,12 +84,14 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
     });
     app.all('/graphql', authenticate, createHandler({ schema, context: async (request) => {
       const user = request.raw.user;
-      if (user.role !== 'sub_admin') return { user, permissions: new Map(), siteIds: new Set() };
+      // Hosted approvals cannot invalidate this process's in-memory cache.
+      const context = { user, cachePlotPage: false };
+      if (user.role !== 'sub_admin') return { ...context, permissions: new Map(), siteIds: new Set() };
       const [permissions, sites] = await Promise.all([
         database.query('SELECT module, can_read, can_write, can_update, can_delete, can_restore, can_view_all FROM user_permissions WHERE user_id=$1', [user.id]),
         database.query('SELECT site_id FROM user_sites WHERE user_id=$1', [user.id]),
       ]);
-      return { user, permissions: new Map(permissions.rows.map(row => [row.module, row])), siteIds: new Set(sites.rows.map(row => Number(row.site_id))) };
+      return { ...context, permissions: new Map(permissions.rows.map(row => [row.module, row])), siteIds: new Set(sites.rows.map(row => Number(row.site_id))) };
     } }));
   }
 
@@ -157,6 +159,10 @@ export function createPoolMoneyPreviewApp({ authenticate, poolMoneyRouter, datab
   app.delete('/plots/payments/:id', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'delete'),
     requirePlotSiteAccess({ entity: 'payment', source: 'params', key: 'id' }), bustPlotCache, deletePayment);
   app.get('/plots/:id/installments', ...agreementRead, agreementPlot, listInstallments);
+  app.post('/plots/:id/installments', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'write'),
+    shopOrganization, agreementPlot, bustPlotCache, createInstallments);
+  app.put('/plots/:id/installments', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'update'),
+    shopOrganization, agreementPlot, bustPlotCache, replaceInstallments);
   app.get('/plots/:id/installment-payments', ...agreementRead, agreementPlot, listInstallmentPayments);
   app.get('/plots/:id', authenticate, requireRole('admin', 'sub_admin'), requirePermission('plot_payments', 'read'),
     requirePlotSiteAccess({ entity: 'plot', source: 'params', key: 'id' }), getPlot);

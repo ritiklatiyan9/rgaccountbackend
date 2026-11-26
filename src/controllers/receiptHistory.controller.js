@@ -2,6 +2,10 @@ import crypto from 'crypto';
 import pool from '../config/db.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import { writeAuditLog } from '../services/auditLog.service.js';
+import { assertMemberSiteAccess } from '../services/memberPhoneReuse.service.js';
+
+const APP_INVITE_MODULE = 'member_app_invite';
+const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 const cleanModule = (value) => {
   const module = String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').slice(0, 80);
@@ -51,13 +55,8 @@ const historyForReceipt = async (receiptId, db = pool) => {
   return rows;
 };
 
-export const recordReceiptPrint = asyncHandler(async (req, res) => {
-  const module = cleanModule(req.body.module);
-  const recordId = cleanRecordId(req.body.record_id);
-  const siteId = positiveSiteId(req.body.site_id);
-  if (!module || !recordId) return res.status(400).json({ message: 'module and record_id are required' });
-
-  await assertSiteAccess(req, siteId);
+const savePrint = async (req, res, { module, recordId, siteId, inviteRequestId = null }) => {
+  const body = inviteRequestId ? {} : req.body;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -80,9 +79,9 @@ export const recordReceiptPrint = asyncHandler(async (req, res) => {
         siteId,
         module,
         recordId,
-        cleanUrl(req.body.customer_signature_url),
-        cleanUrl(req.body.authority_signature_url),
-        cleanUrl(req.body.evidence_photo_url),
+        cleanUrl(body.customer_signature_url),
+        cleanUrl(body.authority_signature_url),
+        cleanUrl(body.evidence_photo_url),
         req.user.id,
       ]
     );
@@ -91,12 +90,23 @@ export const recordReceiptPrint = asyncHandler(async (req, res) => {
       'SELECT COUNT(*)::int AS count FROM transaction_receipt_prints WHERE receipt_id = $1',
       [receipt.id]
     );
-    const printNumber = Number(countResult.rows[0]?.count || 0) + 1;
+    const printCount = Number(countResult.rows[0]?.count || 0);
+    if (inviteRequestId) {
+      const prior = await client.query(
+        'SELECT 1 FROM transaction_receipt_prints WHERE receipt_id = $1 AND workflow_id = $2 AND printed_by = $3 LIMIT 1',
+        [receipt.id, inviteRequestId, req.user.id],
+      );
+      if (prior.rows.length) {
+        await client.query('COMMIT');
+        return res.json({ print_count: printCount });
+      }
+    }
+    const printNumber = printCount + 1;
     const watermark = printNumber === 1 ? 'ORIGINAL' : 'DUPLICATE';
-    const suppliedPrintedAt = req.body.printed_at && !Number.isNaN(Date.parse(req.body.printed_at))
-      ? new Date(req.body.printed_at)
+    const suppliedPrintedAt = body.printed_at && !Number.isNaN(Date.parse(body.printed_at))
+      ? new Date(body.printed_at)
       : new Date();
-    const workflowId = String(req.body.workflow_id || '').trim();
+    const workflowId = String(inviteRequestId || body.workflow_id || '').trim();
 
     const printResult = await client.query(
       `INSERT INTO transaction_receipt_prints (
@@ -110,15 +120,15 @@ export const recordReceiptPrint = asyncHandler(async (req, res) => {
         watermark,
         req.user.id,
         suppliedPrintedAt,
-        req.body.preview_print === true,
+        body.preview_print === true,
         /^[0-9a-f-]{36}$/i.test(workflowId) ? workflowId : null,
-        String(req.body.route_path || '').slice(0, 2000) || null,
+        inviteRequestId ? '/clients' : String(body.route_path || '').slice(0, 2000) || null,
         {
-          receipt_no: String(req.body.receipt_no || '').slice(0, 160) || null,
-          direction: String(req.body.direction || '').slice(0, 20) || null,
-          amount: Number.isFinite(Number(req.body.amount)) ? Math.abs(Number(req.body.amount)) : null,
-          form_snapshot: Array.isArray(req.body.form_snapshot) ? req.body.form_snapshot.slice(0, 80) : [],
-          blank_signatures: req.body.blank_signatures === true,
+          receipt_no: String(body.receipt_no || '').slice(0, 160) || null,
+          direction: String(body.direction || '').slice(0, 20) || null,
+          amount: Number.isFinite(Number(body.amount)) ? Math.abs(Number(body.amount)) : null,
+          form_snapshot: Array.isArray(body.form_snapshot) ? body.form_snapshot.slice(0, 80) : [],
+          blank_signatures: body.blank_signatures === true,
         },
       ]
     );
@@ -128,21 +138,22 @@ export const recordReceiptPrint = asyncHandler(async (req, res) => {
       siteId,
       userId: req.user.id,
       action: 'PRINT',
-      eventType: 'RECEIPT',
+      eventType: inviteRequestId ? 'APP_INVITE' : 'RECEIPT',
       module,
-      transactionName: req.body.receipt_no || `${module} receipt`,
-      amount: req.body.amount,
-      entityType: 'transaction_receipt',
+      transactionName: inviteRequestId ? 'My Real Assets app invite' : body.receipt_no || `${module} receipt`,
+      amount: body.amount,
+      entityType: inviteRequestId ? 'member' : 'transaction_receipt',
       entityId: recordId,
       requestMethod: 'POST',
       requestPath: req.originalUrl,
       statusCode: 201,
       outcome: 'SUCCESS',
-      description: `${req.user.name || req.user.email || `User ${req.user.id}`} printed ${watermark.toLowerCase()} receipt copy #${printNumber}`,
+      description: inviteRequestId ? `App invite print request #${printNumber}`
+        : `${req.user.name || req.user.email || `User ${req.user.id}`} printed ${watermark.toLowerCase()} receipt copy #${printNumber}`,
       metadata: {
         print_number: printNumber,
         watermark,
-        preview_print: req.body.preview_print === true,
+        preview_print: body.preview_print === true,
         receipt_id: receipt.id,
         workflow_id: workflowId || null,
       },
@@ -152,6 +163,7 @@ export const recordReceiptPrint = asyncHandler(async (req, res) => {
     }, client);
 
     await client.query('COMMIT');
+    if (inviteRequestId) return res.status(201).json({ print_count: printNumber });
     const history = await historyForReceipt(receipt.id);
     res.status(201).json({ receipt, print: printResult.rows[0], print_number: printNumber, watermark, history });
   } catch (error) {
@@ -160,12 +172,65 @@ export const recordReceiptPrint = asyncHandler(async (req, res) => {
   } finally {
     client.release();
   }
+};
+
+export const recordReceiptPrint = asyncHandler(async (req, res) => {
+  const module = cleanModule(req.body.module);
+  const recordId = cleanRecordId(req.body.record_id);
+  const siteId = positiveSiteId(req.body.site_id);
+  if (!module || !recordId) return res.status(400).json({ message: 'module and record_id are required' });
+  if (module === APP_INVITE_MODULE) return res.status(404).json({ message: 'Receipt module not found.' });
+
+  await assertSiteAccess(req, siteId);
+  return savePrint(req, res, { module, recordId, siteId });
+});
+
+const clientInviteScope = async (req, res) => {
+  const memberId = Number(req.params.id);
+  const siteId = Number(req.query.site_id);
+  if (!Number.isSafeInteger(memberId) || memberId < 1 || !Number.isSafeInteger(siteId) || siteId < 1) {
+    res.status(400).json({ message: 'A valid client and site are required.' });
+    return null;
+  }
+  if (!await assertMemberSiteAccess(pool, req.user, siteId)) {
+    res.status(403).json({ message: 'This site is unavailable to your account.' });
+    return null;
+  }
+  const { rows } = await pool.query(`SELECT id FROM members WHERE id = $1 AND site_id = $2
+    AND 'CLIENT' = ANY(COALESCE(NULLIF(member_types, ARRAY[]::text[]), ARRAY[member_type::text]))`, [memberId, siteId]);
+  if (!rows.length) {
+    res.status(404).json({ message: 'Client not found at this site.' });
+    return null;
+  }
+  res.set('Cache-Control', 'private, no-store');
+  return { module: APP_INVITE_MODULE, recordId: String(memberId), siteId };
+};
+
+export const getClientAppInvitePrintCount = asyncHandler(async (req, res) => {
+  const scope = await clientInviteScope(req, res);
+  if (!scope) return;
+  const { rows: [row] } = await pool.query(`SELECT COUNT(p.id)::int AS print_count
+    FROM transaction_receipts r JOIN transaction_receipt_prints p ON p.receipt_id = r.id
+    WHERE r.organization_id = $1 AND r.module = $2 AND r.record_id = $3 AND r.site_id = $4`,
+  [Number(req.user.organization_id), scope.module, scope.recordId, scope.siteId]);
+  res.json({ print_count: row.print_count });
+});
+
+export const recordClientAppInvitePrint = asyncHandler(async (req, res) => {
+  const scope = await clientInviteScope(req, res);
+  if (!scope) return;
+  const inviteRequestId = req.body?.request_id;
+  if (typeof inviteRequestId !== 'string' || !uuidPattern.test(inviteRequestId)) {
+    return res.status(400).json({ message: 'A valid print request ID is required.' });
+  }
+  return savePrint(req, res, { ...scope, inviteRequestId });
 });
 
 export const getReceiptHistory = asyncHandler(async (req, res) => {
   const module = cleanModule(req.params.module);
   const recordId = cleanRecordId(req.params.recordId);
   if (!module || !recordId) return res.status(400).json({ message: 'module and recordId are required' });
+  if (module === APP_INVITE_MODULE) return res.status(404).json({ message: 'Receipt module not found.' });
 
   const { rows } = await pool.query(
     `SELECT * FROM transaction_receipts

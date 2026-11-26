@@ -485,13 +485,8 @@ export const paymentReminders = asyncHandler(async (req, res) => {
 // ══════════════════════════════════════════════════
 
 /** PUT /plots/:id/installment-settings — Update installment & interest config on plot */
-export const updateInstallmentSettings = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { installments_enabled, interest_enabled, interest_rate, interest_type, grace_period_days, penalty_enabled, penalty_rate, penalty_type, free_to_sale_days } = req.body;
-
-  const plot = await plotModel.findById(parseInt(id), pool);
-  if (!plot) return res.status(404).json({ message: 'Plot not found' });
-
+export async function installmentSettingsForWrite(body, siteId) {
+  const { installments_enabled, interest_enabled, interest_rate, interest_type, grace_period_days, penalty_enabled, penalty_rate, penalty_type, free_to_sale_days } = body;
   const updateData = {};
   if (installments_enabled !== undefined) updateData.installments_enabled = !!installments_enabled;
   if (interest_enabled !== undefined) updateData.interest_enabled = !!interest_enabled;
@@ -510,8 +505,14 @@ export const updateInstallmentSettings = asyncHandler(async (req, res) => {
     updateData.penalty_type = validPenaltyTypes.includes(penalty_type) ? penalty_type : 'per_day';
   }
   if (free_to_sale_days !== undefined) updateData.free_to_sale_days = Math.max(0, parseInt(free_to_sale_days) || 0);
-  applyProjectInterestPolicy(updateData, await loadOverduePolicy(plot.site_id, pool));
+  return applyProjectInterestPolicy(updateData, await loadOverduePolicy(siteId, pool));
+}
 
+export const updateInstallmentSettings = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const plot = await plotModel.findById(parseInt(id), pool);
+  if (!plot) return res.status(404).json({ message: 'Plot not found' });
+  const updateData = await installmentSettingsForWrite(req.body, plot.site_id);
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
   const updated = await plotModel.update(parseInt(id), updateData, pool);
@@ -620,24 +621,48 @@ export const listInstallments = asyncHandler(async (req, res) => {
 });
 
 /** POST /plots/:id/installments — Create installment(s) for a plot */
+const scheduleDate = value => value instanceof Date
+  ? [value.getFullYear(), value.getMonth() + 1, value.getDate()].map(part => String(part).padStart(2, '0')).join('-')
+  : String(value || '').slice(0, 10);
+
+const isUnnShop = plot => String(plot.site_id) === '7' && plot.unit_type === 'shop';
+const hasUnnBookingAnchor = (plot, first) => isUnnShop(plot) && first?.booking_anchor === true;
+
 export const bookingScheduleError = (plot, installments) => {
   const salePrice = Number(plot?.sale_price) || 0;
   const storedFirst = Number(plot?.first_installment) || 0;
   const expectedFirst = Math.round(salePrice * 25) / 100;
-  // Only new bookings opt into this contract by storing the canonical first
-  // installment. Historic plans keep their existing rules.
-  if (salePrice <= 0 || Math.abs(storedFirst - expectedFirst) >= 0.01) return '';
-  const bookingDate = plot.booking_date instanceof Date
-    ? plot.booking_date.toISOString().slice(0, 10) : String(plot.booking_date || '').slice(0, 10);
   const first = installments[0];
+  const flexible = plot && hasUnnBookingAnchor(plot, first);
+  if (!flexible && (salePrice <= 0 || Math.abs(storedFirst - expectedFirst) >= 0.01)) return '';
+  const bookingDate = scheduleDate(plot.booking_date);
+  const unnTerms = isUnnShop(plot);
   if (installments.length < 2) return 'A booking plan needs installment 1 plus at least one later installment.';
-  if (String(first?.due_date || '').slice(0, 10) !== bookingDate || Math.abs(Number(first?.amount) - expectedFirst) >= 0.01) {
-    return 'Installment 1 must be 25% of the sale price on the booking date.';
+  const dueDate = scheduleDate(first?.due_date);
+  const dueMillis = Date.parse(`${dueDate}T00:00:00Z`);
+  const firstOffset = (dueMillis - Date.parse(`${bookingDate}T00:00:00Z`)) / 86_400_000;
+  const validFirstDate = unnTerms ? firstOffset >= 0 && firstOffset <= 15 : dueDate === bookingDate;
+  const firstAmount = Number(first?.amount);
+  if (flexible) {
+    if (!validFirstDate || new Date(dueMillis).toISOString().slice(0, 10) !== dueDate) return 'Installment 1 must be due within 15 days of booking.';
+    if (!(firstAmount > 0 && firstAmount < salePrice)) return 'Installment 1 must be a positive amount below the sale price.';
+  } else if (!validFirstDate || !Number.isFinite(firstAmount) || Math.abs(firstAmount - expectedFirst) >= 0.01) {
+    return unnTerms ? 'Installment 1 must be 25% of the sale price and due within 15 days of booking.'
+      : 'Installment 1 must be 25% of the sale price on the booking date.';
   }
-  const scheduled = installments.reduce((sum, row) => sum + (Number(row?.amount) || 0), 0);
-  if (Math.abs(scheduled - salePrice) >= 0.01) return 'The installment schedule must cover the full sale price.';
+  const scheduled = installments.reduce((sum, row) => sum + Math.round(Number(row?.amount) * 100), 0);
+  if (scheduled !== Math.round(salePrice * 100)) return 'The installment schedule must cover the full sale price.';
   return '';
 };
+
+async function syncUnnBookingAmount(plot, first, userId, client) {
+  const changes = plot.installments_enabled ? {} : { installments_enabled: true };
+  if (Number(first.amount) !== Number(plot.first_installment)) {
+    changes.first_installment = Number(first.amount);
+    changes.approval_requested_by = userId;
+  }
+  if (Object.keys(changes).length) await plotModel.update(plot.id, changes, client);
+}
 
 export const createInstallments = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -646,39 +671,48 @@ export const createInstallments = asyncHandler(async (req, res) => {
   if (!Array.isArray(installments) || installments.length === 0)
     return res.status(400).json({ message: 'At least one installment is required' });
 
-  const plot = await plotModel.findById(parseInt(id), pool);
-  if (!plot) return res.status(404).json({ message: 'Plot not found' });
-
-  // Get existing installments to determine sort_order
-  const existing = await installmentModel.findByPlotId(parseInt(id), pool);
-  const scheduleError = existing.length === 0 ? bookingScheduleError(plot, installments) : '';
-  if (scheduleError) return res.status(400).json({ message: scheduleError });
-  let nextOrder = existing.length > 0 ? Math.max(...existing.map(e => e.sort_order)) + 1 : 1;
-
-  const created = [];
-  for (const inst of installments) {
-    if (!inst.amount || !inst.due_date)
-      return res.status(400).json({ message: 'Each installment must have amount and due_date' });
-
-    const data = {
-      plot_id: parseInt(id),
-      installment_name: inst.installment_name || `Installment ${nextOrder}`,
-      amount: parseFloat(inst.amount) || 0,
-      due_date: inst.due_date,
-      status: 'pending',
-      paid_amount: 0,
-      sort_order: nextOrder++,
-    };
-    const row = await installmentModel.create(data, pool);
-    created.push(row);
+  if (installments.some(inst => !Number.isFinite(Number(inst?.amount)) || !(Number(inst.amount) > 0) || !inst.due_date)) {
+    return res.status(400).json({ message: 'Each installment must have a positive amount and a due date' });
   }
-
-  // Enable installments on the plot
-  if (!plot.installments_enabled) {
-    await plotModel.update(parseInt(id), { installments_enabled: true }, pool);
+  const plotId = parseInt(id, 10);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [plot] } = await client.query('SELECT * FROM plots WHERE id = $1 FOR UPDATE', [plotId]);
+    if (!plot) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Plot not found' }); }
+    const existing = await installmentModel.findByPlotId(plotId, client);
+    const first = installments[0];
+    const anchored = hasUnnBookingAnchor(plot, first);
+    if (anchored && existing.length) {
+      const same = existing.length === installments.length && existing.every((row, index) => {
+        const incoming = installments[index];
+        return Number(row.amount) === Number(incoming.amount) && scheduleDate(row.due_date) === scheduleDate(incoming.due_date)
+          && row.installment_name === (incoming.installment_name || `Installment ${index + 1}`);
+      });
+      await client.query('ROLLBACK');
+      return same ? res.json({ installments: existing })
+        : res.status(409).json({ message: 'This shop already has an installment schedule. Open Edit Shop to update it.' });
+    }
+    const scheduleError = existing.length === 0 ? bookingScheduleError(plot, installments) : '';
+    if (scheduleError) { await client.query('ROLLBACK'); return res.status(400).json({ message: scheduleError }); }
+    let nextOrder = existing.length ? Math.max(...existing.map(row => row.sort_order)) + 1 : 1;
+    const created = [];
+    for (const inst of installments) {
+      created.push(await installmentModel.create({
+        plot_id: plotId, installment_name: inst.installment_name || `Installment ${nextOrder}`,
+        amount: Number(inst.amount), due_date: inst.due_date, status: 'pending', paid_amount: 0, sort_order: nextOrder++,
+      }, client));
+    }
+    if (anchored) await syncUnnBookingAmount(plot, first, req.user.id, client);
+    else if (!plot.installments_enabled) await plotModel.update(plotId, { installments_enabled: true }, client);
+    await client.query('COMMIT');
+    res.status(201).json({ installments: created });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-
-  res.status(201).json({ installments: created });
 });
 
 /** PUT /plots/:id/installments — Replace the whole schedule in one step.
@@ -701,13 +735,29 @@ export const replaceInstallments = asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const plot = (await client.query('SELECT id, installments_enabled, sale_price, first_installment, booking_date FROM plots WHERE id = $1 FOR UPDATE', [plotId])).rows[0];
+    const plot = (await client.query('SELECT id, site_id, unit_type, installments_enabled, sale_price, first_installment, booking_date::text FROM plots WHERE id = $1 FOR UPDATE', [plotId])).rows[0];
     if (!plot) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Plot not found' }); }
     const scheduleError = bookingScheduleError(plot, installments);
     if (scheduleError) { await client.query('ROLLBACK'); return res.status(400).json({ message: scheduleError }); }
 
     const { rows: linked } = await client.query(
       `SELECT DISTINCT installment_id FROM plot_installment_payments WHERE plot_id = $1 AND installment_id IS NOT NULL`, [plotId]);
+    const first = installments[0];
+    const anchored = hasUnnBookingAnchor(plot, first);
+    if (anchored) {
+      const { rows: [current] } = await client.query(`SELECT id, installment_name, amount, due_date::text, paid_amount
+        FROM plot_installments WHERE plot_id = $1 ORDER BY sort_order, due_date, id LIMIT 1 FOR UPDATE`, [plotId]);
+      const changed = current && (Number(current.id) !== Number(first.id) || Number(current.amount) !== Number(first.amount)
+        || scheduleDate(current.due_date) !== scheduleDate(first.due_date) || current.installment_name !== first.installment_name);
+      if (changed) {
+        const { rows: [receipts] } = await client.query(`SELECT COALESCE(SUM(amount), 0) > 0 AS received FROM plot_payments
+          WHERE plot_id = $1 AND ${plotPaymentPosts()}`, [plotId]);
+        if (Number(current.paid_amount) > 0 || receipts.received || linked.some(row => Number(row.installment_id) === Number(current.id))) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ message: 'Installment 1 has payments against it and is locked.' });
+        }
+      }
+    }
     const keptIds = new Set(installments.map((inst) => parseInt(inst.id)).filter(Number.isInteger));
     const missing = linked.map((row) => row.installment_id).filter((id) => !keptIds.has(id));
     if (missing.length) {
@@ -735,7 +785,8 @@ export const replaceInstallments = asyncHandler(async (req, res) => {
              VALUES ($1,$2,$3,$4,$5,'pending',0) RETURNING *`, [plotId, data.installment_name, data.amount, data.due_date, data.sort_order])).rows[0];
       if (row) saved.push(row);
     }
-    if (!plot.installments_enabled) await client.query('UPDATE plots SET installments_enabled = TRUE WHERE id = $1', [plotId]);
+    if (anchored) await syncUnnBookingAmount(plot, first, req.user.id, client);
+    else if (!plot.installments_enabled) await client.query('UPDATE plots SET installments_enabled = TRUE WHERE id = $1', [plotId]);
     await installmentModel.refreshStatuses(plotId, client);
     await client.query('COMMIT');
     res.json({ installments: saved });

@@ -56,10 +56,11 @@ export async function up(database = pool) {
   try {
     await client.query('BEGIN');
     await client.query("SELECT pg_advisory_xact_lock(hashtext('177_plot_status_approval_setting'))");
-    // Migration 158 still runs on every startup and defines the original
-    // trigger function. Reapply this replacement after it, even once stamped.
-    await client.query(migrationSql);
-    await client.query("INSERT INTO app_schema_migrations(version) VALUES ('177_plot_status_approval_setting') ON CONFLICT DO NOTHING");
+    const { rows } = await client.query("SELECT 1 FROM app_schema_migrations WHERE version='258_direct_plot_status'");
+    if (!rows.length) {
+      await client.query(migrationSql);
+      await client.query("INSERT INTO app_schema_migrations(version) VALUES ('177_plot_status_approval_setting') ON CONFLICT DO NOTHING");
+    }
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');

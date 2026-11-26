@@ -5,6 +5,8 @@ import { IncomingMessage, ServerResponse } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { createPoolMoneyPreviewApp, isPoolPreviewOrigin, poolPreviewPort } from '../scripts/pool-money-preview.mjs';
 import { createMemberKycRouter } from '../src/routes/memberKyc.routes.js';
+import pool from '../src/config/db.js';
+import { cacheSet, clearCacheByPrefixes } from '../src/config/cache.js';
 
 function request(app, { method = 'GET', path = '/health', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -186,6 +188,30 @@ test('booking preview retains session authentication for member links and expose
   assert.deepEqual(response.body.data.__schema.queryType.fields.map(field => field.name).sort(), ['plotPageData', 'plotPaymentDetail']);
   assert.deepEqual(response.body.data.__schema.mutationType.fields.map(field => field.name), ['invalidatePlotCache']);
   assert.equal((await request(app)).body.plot_co_applicants, true);
+});
+
+test('the preview rereads plot status after an approval in another process', async t => {
+  const key = 'plots:pageData:7:creator:all';
+  let approvalStatus = 'pending';
+  t.mock.method(pool, 'query', async sql => ({ rows: sql.includes('ORDER BY p.plot_no ASC')
+    ? [{ id: 1091, approval_status: approvalStatus }] : [] }));
+  t.after(() => clearCacheByPrefixes([key]));
+  await cacheSet(key, { plots: [{ id: 1091, approval_status: 'pending' }] }, 60);
+  const app = createPoolMoneyPreviewApp({
+    authenticate: (req, _res, next) => { req.user = { id: 1, organization_id: 1, role: 'admin' }; next(); },
+    poolMoneyRouter: express.Router(), plotGraphql: true, audit: (_req, _res, next) => next(),
+  });
+  const read = async () => {
+    const result = await request(app, { path: '/graphql', method: 'POST', body: {
+      query: '{ plotPageData(siteId: "7") { plots { id approval_status } } }',
+    } });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.errors, undefined);
+    return result.body.data.plotPageData.plots[0];
+  };
+  assert.deepEqual(await read(), { id: '1091', approval_status: 'pending' });
+  approvalStatus = 'approved';
+  assert.deepEqual(await read(), { id: '1091', approval_status: 'approved' });
 });
 
 test('optional NOC preview exposes only the five guarded certificate routes', async () => {

@@ -8,6 +8,7 @@ import {
 } from '../controllers/member.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import { getKycSources, incorporateKyc } from '../controllers/memberKycIncorporation.controller.js';
+import { getClientAppInvitePrintCount, recordClientAppInvitePrint } from '../controllers/receiptHistory.controller.js';
 import requireRole from '../middlewares/role.middleware.js';
 import requirePermission from '../middlewares/permission.middleware.js';
 import requirePlotSiteAccess from '../middlewares/plotSiteAccess.middleware.js';
@@ -86,6 +87,8 @@ router.post('/:id/register-sites', requireRole('admin', 'sub_admin'), requirePer
 router.get('/:id/kyc-sources', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getKycSources);
 router.post('/:id/incorporate-kyc', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), requirePermission('clients', 'update'), bustMemberCache, incorporateKyc);
 router.get('/:id/identity-review', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), requirePermission('clients', 'update'), getMemberIdentityReview);
+router.get('/:id/app-invite/prints', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getClientAppInvitePrintCount);
+router.post('/:id/app-invite/prints', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), recordClientAppInvitePrint);
 
 // Member transactions
 router.get('/:id/links', requireRole('admin', 'sub_admin'), requirePermission('clients', 'read'), getMemberLinkedRecords);

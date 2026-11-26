@@ -18,7 +18,7 @@ import { selectedFields } from './selectedFields.js';
 import { getExpensesPageData, getExpensesBreakdown } from './services/expenses.service.js';
 import { getPlotPageData, getPlotPaymentDetail, getRegistryBankChequePayments } from './services/plotPayments.service.js';
 import { getFinanceForecast } from './services/forecast.service.js';
-import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes } from '../config/cache.js';
+import { cacheGet, cacheSet, cacheEnabled, clearCacheByPrefixes, getCacheGeneration } from '../config/cache.js';
 import pool from '../config/db.js';
 import { inventoryModel } from '../models/Inventory.model.js';
 import { buildProfitPortfolio } from '../services/profitPortfolio.service.js';
@@ -1384,15 +1384,17 @@ const QueryType = new GraphQLObjectType({
           || ctx.permissions?.get('plot_payments')?.can_view_all === true;
         const creatorId = canViewAll ? (createdBy || null) : Number(ctx.user.id);
         const key = `plots:pageData:${id}:creator:${creatorId || 'all'}`;
+        const useCache = ctx.cachePlotPage !== false && cacheEnabled();
+        const generation = getCacheGeneration();
 
-        if (cacheEnabled()) {
+        if (useCache) {
           const cached = await cacheGet(key);
-          if (cached) return cached;
+          if (cached && generation === getCacheGeneration()) return cached;
         }
 
         const data = await getPlotPageData(id, creatorId);
 
-        if (cacheEnabled()) await cacheSet(key, data, 60); // 1 min cache
+        if (useCache && generation === getCacheGeneration()) await cacheSet(key, data, 60);
         return data;
       },
     },
@@ -1454,7 +1456,7 @@ const MutationType = new GraphQLObjectType({
       },
       async resolve(_, { siteId }, ctx) {
         const id = requireModuleRead(ctx, 'plot_payments', siteId);
-        await clearCacheByPrefixes([`plots:pageData:${id}`]);
+        await clearCacheByPrefixes([`plots:pageData:${id}:`]);
         return true;
       },
     },
