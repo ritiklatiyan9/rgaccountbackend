@@ -51,7 +51,8 @@ async function up() {
     await client.query('BEGIN');
     await client.query("SELECT pg_advisory_xact_lock(hashtext('158_plot_status_approval'))");
     await client.query("SET LOCAL lock_timeout = '5s'");
-    await client.query(migrationSql);
+    const { rows } = await client.query("SELECT 1 FROM app_schema_migrations WHERE version='258_direct_plot_status'");
+    if (!rows.length) await client.query(migrationSql);
     await client.query('COMMIT');
     console.log('Migration 158: plot scheme and status approval ready');
   } catch (error) {

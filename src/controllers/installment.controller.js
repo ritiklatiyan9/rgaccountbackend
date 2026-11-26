@@ -485,13 +485,8 @@ export const paymentReminders = asyncHandler(async (req, res) => {
 // ══════════════════════════════════════════════════
 
 /** PUT /plots/:id/installment-settings — Update installment & interest config on plot */
-export const updateInstallmentSettings = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { installments_enabled, interest_enabled, interest_rate, interest_type, grace_period_days, penalty_enabled, penalty_rate, penalty_type, free_to_sale_days } = req.body;
-
-  const plot = await plotModel.findById(parseInt(id), pool);
-  if (!plot) return res.status(404).json({ message: 'Plot not found' });
-
+export async function installmentSettingsForWrite(body, siteId) {
+  const { installments_enabled, interest_enabled, interest_rate, interest_type, grace_period_days, penalty_enabled, penalty_rate, penalty_type, free_to_sale_days } = body;
   const updateData = {};
   if (installments_enabled !== undefined) updateData.installments_enabled = !!installments_enabled;
   if (interest_enabled !== undefined) updateData.interest_enabled = !!interest_enabled;
@@ -510,8 +505,14 @@ export const updateInstallmentSettings = asyncHandler(async (req, res) => {
     updateData.penalty_type = validPenaltyTypes.includes(penalty_type) ? penalty_type : 'per_day';
   }
   if (free_to_sale_days !== undefined) updateData.free_to_sale_days = Math.max(0, parseInt(free_to_sale_days) || 0);
-  applyProjectInterestPolicy(updateData, await loadOverduePolicy(plot.site_id, pool));
+  return applyProjectInterestPolicy(updateData, await loadOverduePolicy(siteId, pool));
+}
 
+export const updateInstallmentSettings = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const plot = await plotModel.findById(parseInt(id), pool);
+  if (!plot) return res.status(404).json({ message: 'Plot not found' });
+  const updateData = await installmentSettingsForWrite(req.body, plot.site_id);
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
   const updated = await plotModel.update(parseInt(id), updateData, pool);

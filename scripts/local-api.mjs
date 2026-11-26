@@ -4,6 +4,7 @@ import http from 'node:http';
 import app from '../src/app.js';
 import { up as migrateTransactionDocumentation } from '../src/migrations/218_transaction_documentation.js';
 import { up as migratePlotAreaChanges } from '../src/migrations/205_plot_area_conversion_and_approval_changes.js';
+import { up as migrateDirectPlotStatus } from '../src/migrations/258_direct_plot_status.js';
 import { up as migratePlotBankRounding } from '../src/migrations/206_plot_bank_target_rounding.js';
 import { up as migrateChequeTransactionDates } from '../src/migrations/215_cheque_transaction_dates.js';
 import { up as migrateCashWalletSiteScope } from '../src/migrations/208_cash_wallet_site_scope.js';
@@ -20,6 +21,7 @@ import { initCache } from '../src/config/cache.js';
 import { backupMaintenanceEnabled } from '../src/middlewares/backupMaintenance.middleware.js';
 
 await migratePlotAreaChanges(pool);
+await migrateDirectPlotStatus(pool);
 await migratePlotBankRounding(pool);
 await migrateChequeTransactionDates(pool);
 await migrateCashWalletSiteScope(pool);

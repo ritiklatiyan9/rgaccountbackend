@@ -21,7 +21,7 @@ class PlotModel extends MasterModel {
 
   // Accounts status edits use the plot row lock independently of website holds.
   // REGISTRY also creates its workspace before the caller's transaction commits.
-  async update(id, data, db) {
+  async update(id, data, db, { actorId = data.approval_requested_by, expectedPlot, directBooking = false } = {}) {
     if (!Object.hasOwn(data, 'status')) {
       return super.update(id, data, db, 'unit_details');
     }
@@ -31,10 +31,16 @@ class PlotModel extends MasterModel {
     const client = ownsTransaction ? await db.connect() : db;
     try {
       if (ownsTransaction) await client.query('BEGIN');
-      const { rows } = await client.query('SELECT id FROM plots WHERE id=$1 FOR UPDATE', [id]);
+      const { rows } = expectedPlot
+        ? await client.query(`SELECT id FROM plots WHERE id=$1 AND status IS NOT DISTINCT FROM $2
+          AND buyer_member_id IS NOT DISTINCT FROM $3 AND buyer_name IS NOT DISTINCT FROM $4 FOR UPDATE`,
+        [id, expectedPlot.status, expectedPlot.buyer_member_id ?? null, expectedPlot.buyer_name ?? null])
+        : await client.query('SELECT id FROM plots WHERE id=$1 FOR UPDATE', [id]);
       if (!rows[0]) { if (ownsTransaction) await client.query('COMMIT'); return null; }
+      if (directBooking) await client.query("SELECT set_config('accounts.direct_plot_booking', $1, true)", [String(id)]);
       const plot = await super.update(id, data, client, 'unit_details');
-      if (plot && String(data.status || '').trim().toUpperCase() === 'REGISTRY') await ensurePlotRegistryWorkspace(client, id, data.approval_requested_by ?? null);
+      if (directBooking) await client.query("SELECT set_config('accounts.direct_plot_booking', '', true)");
+      if (plot && String(data.status || '').trim().toUpperCase() === 'REGISTRY') await ensurePlotRegistryWorkspace(client, id, actorId ?? null);
       if (ownsTransaction) await client.query('COMMIT');
       return plot;
     } catch (error) {

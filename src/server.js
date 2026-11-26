@@ -34,6 +34,7 @@ import 'dotenv/config';
 import http from 'http';
 import app from './app.js';
 import { up as migratePlotAreaChanges } from './migrations/205_plot_area_conversion_and_approval_changes.js';
+import { up as migrateDirectPlotStatus } from './migrations/258_direct_plot_status.js';
 import { up as migratePlotBankRounding } from './migrations/206_plot_bank_target_rounding.js';
 import { up as migratePlotFixedDiscount } from './migrations/214_plot_fixed_discount.js';
 import { up as migrateChequeTransactionDates } from './migrations/215_cheque_transaction_dates.js';
@@ -88,6 +89,7 @@ connectDB().then(async () => {
   await migrateWhatsAppInbox(pool);
   await migrateCalendarEventDone(pool);
   await migratePlotAreaChanges(pool);
+  await migrateDirectPlotStatus(pool);
   await migratePlotBankRounding(pool);
   await migratePlotFixedDiscount(pool);
   await migrateChequeTransactionDates(pool);

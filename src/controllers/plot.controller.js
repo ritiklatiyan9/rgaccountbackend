@@ -6,8 +6,8 @@ import { accountWhatsAppHooks } from '../services/accountWhatsAppHooks.service.j
 import { vaultInsertColumns, vaultInsertValues, vaultUpdateSet, vaultAssignmentFor } from '../services/loyaltyVaultContext.service.js';
 import { attachChequeDates } from '../services/chequeDates.service.js';
 import { ensurePlotRegistryWorkspace } from '../services/plotRegistryWorkspace.service.js';
-import { isDirectPlotStatusChange, validatePlotApprover } from '../services/plotApproval.service.js';
-import applicationSettingModel, { FEATURE_KEYS } from '../models/ApplicationSetting.model.js';
+import { isDirectPlotBooking, isDirectPlotStatusChange, validatePlotApprover } from '../services/plotApproval.service.js';
+import { installmentSettingsForWrite } from './installment.controller.js';
 import { isRegistryStatusTransitionBlocked } from '../services/registryStatusPolicy.service.js';
 import { unitMetadataForWrite } from '../services/projectProfile.service.js';
 import { transactionTimeForWrite } from '../services/transactionTime.service.js';
@@ -267,8 +267,8 @@ const createPlotRecord = async (req, res) => {
   if (!plot_no || !plot_no.trim()) return res.status(400).json({ message: 'Plot number is required' });
   if (!plot_size && plot_size !== 0) return res.status(400).json({ message: 'Plot size is required' });
 
-  await validatePlotApprover(pool, site_id, assigned_admin_id);
   const normalizedStatus = String(status || 'BOOKED').trim().toUpperCase();
+  if (normalizedStatus !== 'BOOKED' || assigned_admin_id != null) await validatePlotApprover(pool, site_id, assigned_admin_id);
   if (normalizedStatus === 'REGISTRY') {
     return res.status(409).json({
       code: 'PLOT_REGISTRY_WORKFLOW_REQUIRED',
@@ -277,6 +277,11 @@ const createPlotRecord = async (req, res) => {
   }
 
   const unitMetadata = await unitMetadataForWrite(req.body, Number(site_id), pool);
+  const bookingSettings = req.body.booking_installment_settings;
+  if (bookingSettings !== undefined && (normalizedStatus !== 'BOOKED' || !bookingSettings
+    || typeof bookingSettings !== 'object' || Array.isArray(bookingSettings))) {
+    return res.status(400).json({ message: 'Booking installment settings require a new booking.' });
+  }
   const trimmedPlotNo = plot_no.trim().toUpperCase();
 
   // Duplicate check — returns all existing plots with same plot_no
@@ -315,6 +320,7 @@ const createPlotRecord = async (req, res) => {
   const data = {
     ...unitMetadata,
     ...plotDiscountForWrite(req.body),
+    ...(bookingSettings ? await installmentSettingsForWrite(bookingSettings, Number(site_id)) : {}),
     site_id: parseInt(site_id),
     plot_no: trimmedPlotNo,
     block: block ? block.trim().toUpperCase() : null,
@@ -339,7 +345,7 @@ const createPlotRecord = async (req, res) => {
     booking_date: booking_date || null,
     status: normalizedStatus,
     scheme: String(req.body.scheme || "").trim() || null,
-    approval_requested_by: req.user.id,
+    approval_requested_by: normalizedStatus === 'BOOKED' ? null : req.user.id,
     notes: notes ? notes.trim() : null,
     plc_charges: parseFloat(plc_charges) || 0,
     commission_rate: parseFloat(commission_rate) || 0,
@@ -476,13 +482,14 @@ export const updatePlot = asyncHandler(withPlotBookingAllocations(async (req, re
   if (!existing) return res.status(404).json({ message: 'Plot not found' });
   if (['CANCELLED','CANCEL','CANCELLATION','RESALE','TRANSFERRED'].includes(String(existing.status||'').toUpperCase()) && status!==undefined && !['CANCELLED','CANCEL','CANCELLATION','RESALE','TRANSFERRED'].includes(String(status||'').toUpperCase())) return res.status(409).json({code:'PLOT_REBOOK_REQUIRED',message:'Create a new booking with Rebook so past buyer and broker records remain separate.'});
   if (existing.booking_cancelled_at) return res.status(409).json({code:'BOOKING_HISTORY_IMMUTABLE',message:'This cancelled booking is preserved. Record broker payments or recoveries in its commission ledger, or create a new booking.'});
-
-
-  const statusOnly = Object.keys(req.body).length === 1 && typeof status === 'string';
-  const approvalRequired = statusOnly
-    ? await applicationSettingModel.isFeatureEnabled(existing.site_id, FEATURE_KEYS.PLOT_STATUS_APPROVAL_REQUIRED)
-    : true;
-  if (!isDirectPlotStatusChange(req.body, existing.status, approvalRequired)) {
+  const directBooking = isDirectPlotBooking(req.body, existing);
+  const directStatus = directBooking || isDirectPlotStatusChange(req.body, existing.status);
+  const bookingSettings = req.body.booking_installment_settings;
+  if (bookingSettings !== undefined && (!directBooking || !bookingSettings
+    || typeof bookingSettings !== 'object' || Array.isArray(bookingSettings))) {
+    return res.status(400).json({ message: 'Booking installment settings require a new booking.' });
+  }
+  if (!directStatus) {
     await validatePlotApprover(pool, existing.site_id, assigned_admin_id === undefined ? existing.assigned_admin_id : assigned_admin_id);
   }
   const updateData = await unitMetadataForWrite(req.body, existing.site_id, pool, existing);
@@ -562,7 +569,8 @@ export const updatePlot = asyncHandler(withPlotBookingAllocations(async (req, re
   if (original_plot_rate !== undefined) updateData.original_plot_rate = parseFloat(original_plot_rate) || 0;
   Object.assign(updateData, plotDiscountForWrite(req.body));
   if (team !== undefined) updateData.team = team ? team.trim().toUpperCase() : null;
-  if (assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+  if (!directStatus && assigned_admin_id !== undefined) updateData.assigned_admin_id = assigned_admin_id ? parseInt(assigned_admin_id) : null;
+  if (bookingSettings) Object.assign(updateData, await installmentSettingsForWrite(bookingSettings, existing.site_id));
 
   const columns = await getPlotCommissionColumns();
   if (columns.has('commission_enabled') && commission_enabled !== undefined) updateData.commission_enabled = !!commission_enabled;
@@ -575,9 +583,16 @@ export const updatePlot = asyncHandler(withPlotBookingAllocations(async (req, re
 
   if (Object.keys(updateData).length === 0) return res.status(400).json({ message: 'Nothing to update' });
 
-  updateData.approval_requested_by = req.user.id;
-  updateData.approval_requested_at = new Date().toISOString();
-  const updated = await plotModel.update(parseInt(id), updateData, pool);
+  if (!directStatus) {
+    updateData.approval_requested_by = req.user.id;
+    updateData.approval_requested_at = new Date().toISOString();
+  }
+  const updated = await plotModel.update(parseInt(id), updateData, pool, {
+    actorId: req.user.id,
+    expectedPlot: directStatus ? existing : null,
+    directBooking,
+  });
+  if (!updated) return res.status(409).json({ message: 'The plot changed. Refresh it before saving.' });
 
   // ── Retire the previous agent's orphaned commission when booking_by changes ──
   // Auto-create only ever ADDS a (plot_id, agent_id) commission, so re-assigning
