@@ -39,12 +39,16 @@ export function validateProjectProfile(input) {
 }
 
 function shopDimensionsArea(value) {
-  const sides = String(value ?? '').trim().split(/\s*[×x*]\s*/i);
+  const sides = String(value ?? '').trim().split(/\s*(?:[×x*✕]|\bby\b)\s*/i);
   if (sides.length !== 2) return null;
   const inches = sides.map(side => {
-    const match = /^(\d{1,4})\s*(?:['′]\s*(?:(\d{1,2})\s*["″]?)?)?$/.exec(side);
-    if (!match || Number(match[2]) >= 12) return 0;
-    return Number(match[1]) * 12 + Number(match[2] || 0);
+    const measure = /^(\d{1,4})\s*(?:['′‘’]|ft\.?)\s*-?\s*(\d{1,2}(?:\.\d+)?)\s*(?:["″“”]|['′‘’]{2}|in\.?)?$/i.exec(side);
+    if (measure) {
+      const fraction = Number(measure[2]);
+      return fraction < 12 ? Number(measure[1]) * 12 + fraction : 0;
+    }
+    const feet = /^(\d{1,4}(?:\.\d+)?)\s*(?:['′‘’]|ft\.?)?$/i.exec(side);
+    return feet ? Number(feet[1]) * 12 : 0;
   });
   return inches.every(side => side > 0) ? Number((inches[0] * inches[1] / 144).toFixed(4)) : null;
 }
@@ -82,11 +86,29 @@ export function validateUnitMetadata(input, profile, existing = null) {
     if (type === 'shop') bases.push('dimensions');
     details.area_basis = choice(raw.area_basis, bases, 'sale area basis');
   }
+  if (type === 'shop' && details.area_basis === 'dimensions') {
+    if (details.dimensions_ft) {
+      details.dimensions_area = shopDimensionsArea(details.dimensions_ft);
+    } else if ('dimensions_area' in raw) {
+      const area = raw.dimensions_area;
+      if (!['number', 'string'].includes(typeof area) || !Number.isFinite(Number(area)) || Number(area) <= 0 || Number(area) > 1e9) {
+        fail('Enter a positive shop sale area in square feet.');
+      }
+      details.dimensions_area = Number(area);
+    }
+  }
   if (type === 'flat' || type === 'shop') {
     if (type === 'flat' && (!details.tower || !details.bedrooms)) fail('Flats require tower, floor, configuration, carpet area and sale area basis');
-    if (!details.floor || !details.carpet_area || !details.area_basis) fail(`${type === 'shop' ? 'Shops' : 'Flats'} require floor, carpet area and sale area basis`);
+    const usesShopDimensions = type === 'shop' && details.area_basis === 'dimensions';
+    if (usesShopDimensions) {
+      if (!existing && !details.floor) fail('Enter the shop floor');
+    } else if (!details.floor || !details.carpet_area || !details.area_basis) {
+      fail(`${type === 'shop' ? 'Shops' : 'Flats'} require floor, carpet area and sale area basis`);
+    }
     if (!details[`${details.area_basis}_area`]) fail('Enter the area for the selected sale area basis');
-    for (const key of ['built_up_area', 'super_built_up_area']) if (details[key] && details[key] < details.carpet_area) fail('Built-up areas cannot be smaller than carpet area');
+    if (!usesShopDimensions) {
+      for (const key of ['built_up_area', 'super_built_up_area']) if (details[key] && details[key] < details.carpet_area) fail('Built-up areas cannot be smaller than carpet area');
+    }
   }
   if (details.agreement_date && details.possession_date && details.possession_date < details.agreement_date) fail('Possession date cannot precede the agreement date');
   return { unit_type: type, unit_details: details };

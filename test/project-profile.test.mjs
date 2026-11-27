@@ -5,6 +5,20 @@ import { PGlite } from '@electric-sql/pglite';
 import { plotModel } from '../src/models/Plot.model.js';
 import { DEFAULT_PROJECT_PROFILE, validateProjectProfile, validateUnitMetadata, allowedUnitTypes, unitMetadataForWrite } from '../src/services/projectProfile.service.js';
 
+test('shop sale area accepts dimensions or a directly entered area without carpet area', async () => {
+  const db = { query: async () => ({ rows: [{ project_profile: { inventory_type: 'shops' } }] }) };
+  const base = { unit_type: 'shop', plot_size: 200 };
+  const details = { floor: 'G', area_basis: 'dimensions' };
+  const measured = await unitMetadataForWrite({ ...base, unit_details: { ...details, dimensions_ft: '10 × 20' } }, 7, db);
+  assert.equal(measured.unit_details.dimensions_area, 200);
+  const manual = await unitMetadataForWrite({ ...base, unit_details: { ...details, dimensions_ft: '', dimensions_area: '200' } }, 7, db);
+  assert.equal(manual.unit_details.dimensions_area, 200);
+  const edit = await unitMetadataForWrite({ plot_size: 250, unit_details: { dimensions_ft: '', dimensions_area: 250 } }, 7, db,
+    { ...base, unit_details: measured.unit_details });
+  assert.equal(edit.unit_details.dimensions_area, 250);
+  await assert.rejects(unitMetadataForWrite({ ...base, plot_size: 180, unit_details: { ...details, dimensions_ft: '10 × 20', dimensions_area: 180 } }, 7, db), /must match/);
+});
+
 const flatDetails = { tower: 'A', floor: '0', bedrooms: '2 BHK', carpet_area: '850', built_up_area: '1000', area_basis: 'carpet' };
 const mixed = { inventory_type: 'mixed' };
 test('unconfigured and legacy sites remain plots without invented approvals', () => {
@@ -95,6 +109,12 @@ test('shop dimensions preserve inches and calculate sale area independently of m
   const result = await unitMetadataForWrite(input, 7, db);
   assert.equal(result.unit_details.dimensions_area, 232.0208);
   assert.equal(result.unit_details.carpet_area, 229.28);
+  for (const dimensions_ft of ['9’3” x 25’1”', '9 ft 3 in by 25 ft 1 in']) {
+    const edited = await unitMetadataForWrite({ ...input, unit_details: { ...details, dimensions_ft } }, 7, db);
+    assert.equal(edited.unit_details.dimensions_area, 232.0208);
+  }
+  const decimal = await unitMetadataForWrite({ ...input, plot_size: 212.625, unit_details: { ...details, dimensions_ft: '10.5 x 20.25' } }, 7, db);
+  assert.equal(decimal.unit_details.dimensions_area, 212.625);
   await assert.rejects(unitMetadataForWrite({ ...input, plot_size: 999 }, 7, db), /must match/);
   await assert.rejects(unitMetadataForWrite({ ...input, unit_details: { ...details, dimensions_ft: '9′12″ × 25′0″' } }, 7, db), /feet and inches/);
   const irregular = await unitMetadataForWrite({ ...input, plot_size: 229.28, unit_details: { ...details, area_basis: 'carpet' } }, 7, db);
