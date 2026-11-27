@@ -59,6 +59,31 @@ class MemberModel extends MasterModel {
     return result.rows;
   }
 
+  /**
+   * Broker whose BRK code the Booking app took for each client: the code given at
+   * client registration / KYC (members.referred_by_member_*), else the client's
+   * latest Lucky Draw enrollment. Booking-owned columns, so callers degrade if absent.
+   */
+  async findBrokersBySite(siteId, pool) {
+    const { rows } = await pool.query(
+      `SELECT c.id,
+              COALESCE(ref.full_name, drw.full_name) AS broker_name,
+              COALESCE(ref.phone, drw.phone) AS broker_phone,
+              CASE WHEN ref.id IS NOT NULL THEN c.referred_by_member_code ELSE drw.broker_code END AS broker_code
+         FROM members c
+         LEFT JOIN members ref ON ref.id = c.referred_by_member_id
+         LEFT JOIN LATERAL (
+           SELECT b.full_name, b.phone, d.broker_code
+             FROM draw_registrations d JOIN members b ON b.id = d.broker_member_id
+            WHERE d.client_member_id = c.id
+            ORDER BY d.created_at DESC, d.id DESC LIMIT 1
+         ) drw ON ref.id IS NULL
+        WHERE c.site_id = $1 AND (ref.id IS NOT NULL OR drw.full_name IS NOT NULL)`,
+      [siteId]
+    );
+    return new Map(rows.map(({ id, ...broker }) => [String(id), broker]));
+  }
+
   /** Full profile plus its strongest KYC state for the profile header. */
   async findByIdWithKyc(id, pool) {
     const result = await pool.query(

@@ -547,15 +547,20 @@ export const listMembers = asyncHandler(async (req, res) => {
   const site = await assertMemberSiteAccess(pool, req.user, Number(site_id));
   if (!site) return res.status(403).json({ message: 'This site is unavailable to your account' });
 
-  const [members, summary, plotNumbers] = await Promise.all([
+  const [members, summary, plotNumbers, brokers] = await Promise.all([
     memberModel.findBySiteIdList(parseInt(site_id), pool, type || null),
     memberModel.getSummary(parseInt(site_id), pool),
     findMemberPlots(parseInt(site_id), pool),
+    memberModel.findBrokersBySite(parseInt(site_id), pool).catch((error) => {
+      console.warn('Member broker lookup skipped:', error.message);
+      return new Map();
+    }),
   ]);
   res.json({ members: await Promise.all(members.map(async (member) => {
     const plots = plotNumbers.get(String(member.id)) || [];
     return {
       ...member,
+      ...brokers.get(String(member.id)),
       photo: await signMemberDocumentUrl(member.photo),
       plots,
       plot_numbers: [...new Set(plots.map((plot) => plot.plot_no))],
