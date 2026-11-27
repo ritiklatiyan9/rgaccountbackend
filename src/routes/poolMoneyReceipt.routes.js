@@ -21,7 +21,7 @@ export function createPoolMoneyReceiptRouter({ authenticate = authMiddleware, da
       return res.json(result);
     }));
   const invalidate = invalidateCacheOnSuccess(['plots|', 'plots:pageData:', 'approvals|', '/approvals', '/daybook', 'daybook|', 'cashflow|', 'wallet|', 'loyalty-vault|', 'banks|', 'registries|', 'registries-meta|']);
-  router.post('/pool-money/receipts/:id/allocate', authenticate, requireRole('admin'),
+  router.post('/pool-money/receipts/:id/allocate', authenticate, requireRole('admin', 'sub_admin'),
     requirePermission('plot_payments', 'write'), invalidate,
     asyncHandler(async (req, res) => {
       const { site_id: siteId, plot_id: plotId, expected_amount: expectedAmount } = req.body ?? {};

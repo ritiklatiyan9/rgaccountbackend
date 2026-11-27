@@ -1,5 +1,6 @@
 import { validatePlotBuyerMember } from './plotMemberLinks.service.js';
 import { validatePlotApprover } from './plotApproval.service.js';
+import { canUserViewEntry } from './entryVisibility.service.js';
 
 const fail=(statusCode,message)=>{throw Object.assign(new Error(message),{statusCode,status:statusCode});};
 const integer=value=>/^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value)>0 && Number(value)<=2147483647;
@@ -212,8 +213,8 @@ async function setPoolSourcePayment(db, kind, sourceId, paymentId) {
  await db.query(sql, [sourceId, paymentId]);
 }
 
-function requirePoolAllocationAdmin(user) {
- if (!['admin', 'super_admin'].includes(user?.role)) fail(403, 'Only an administrator can allocate or return Pool Money.');
+function requirePoolReturnAdmin(user) {
+ if (!['admin', 'super_admin'].includes(user?.role)) fail(403, 'Only an administrator can return Pool Money.');
 }
 
 const validAllocationId = value => ['string', 'number'].includes(typeof value) && integer(value);
@@ -267,7 +268,7 @@ async function withPoolTransaction(database, operation) {
 }
 
 export async function allocatePoolReceipt(database, user, { receiptId, siteId, plotId, expectedAmount } = {}) {
- requirePoolAllocationAdmin(user);
+ if (!['admin', 'super_admin', 'sub_admin'].includes(user?.role)) fail(403, 'Access denied to Pool Money.');
  if (![receiptId, siteId, plotId].every(validAllocationId)) fail(400, 'Select a valid receipt, project, and shop.');
  if (!['string', 'number'].includes(typeof expectedAmount) || !Number.isFinite(Number(expectedAmount)) || Number(expectedAmount) <= 0) {
    fail(400, 'Review the full receipt amount before applying it.');
@@ -278,7 +279,7 @@ export async function allocatePoolReceipt(database, user, { receiptId, siteId, p
    const schema = await poolSchema(db);
    if (!schema.ready || !schema.automatic_enrollment) fail(503, 'Pool Money accounting setup is required before applying receipts.');
    const { rows: [original] } = await db.query('SELECT * FROM pool_money_receipts WHERE id=$1 AND site_id=$2', [receiptId, siteId]);
-   if (!original) fail(404, 'Pool receipt not found in this project.');
+   if (!original || !await canUserViewEntry(user, 'plot_payments', original.created_by)) fail(404, 'Pool receipt not found in this project.');
 
    const { source, plotPaymentId } = await lockReceiptSource(db, original);
    const { rows: [receipt] } = await db.query('SELECT * FROM pool_money_receipts WHERE id=$1 FOR UPDATE', [receiptId]);
@@ -320,7 +321,7 @@ export async function restorePoolPayment(db, user, { plotPaymentId, receiptId, s
  const { rows: [original] } = await db.query(`SELECT r.* FROM pool_money_receipts r
    WHERE r.plot_payment_id=$1 AND ${manualAllocation}`, [plotPaymentId]);
  if (!original || (receiptId != null && Number(receiptId) !== original.id)) return null;
- requirePoolAllocationAdmin(user);
+ requirePoolReturnAdmin(user);
  if (siteId != null && Number(siteId) !== original.site_id) return null;
  await assertPoolSiteAccess(db, user, original.site_id);
 
@@ -351,7 +352,7 @@ export async function restorePoolPayment(db, user, { plotPaymentId, receiptId, s
 }
 
 export async function returnPoolReceipt(database, user, { receiptId, siteId, plotPaymentId } = {}) {
- requirePoolAllocationAdmin(user);
+ requirePoolReturnAdmin(user);
  if (![receiptId, siteId, plotPaymentId].every(validAllocationId)) fail(400, 'Select a valid receipt, project, and shop payment.');
  return withPoolTransaction(database, async db => {
    await assertPoolSiteAccess(db, user, siteId);

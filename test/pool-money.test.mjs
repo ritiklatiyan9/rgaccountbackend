@@ -19,6 +19,7 @@ import { deletePayment } from '../src/controllers/plot.controller.js';
 import { deleteEntry } from '../src/controllers/cashflow.controller.js';
 import { deleteCashFlowEntryFromDayBook } from '../src/controllers/daybook.controller.js';
 import { forgetRelationProbes } from '../src/utils/schemaProbe.js';
+import { createPoolMoneyRouter } from '../src/routes/poolMoney.routes.js';
 const admin={id:1,role:'admin',name:'ADMIN',organization_id:1}, identity={kind:'draw',id:1,siteId:1};
 function callController(handler, id) {
  return new Promise((resolve, reject) => {
@@ -208,6 +209,34 @@ test('Pool Money lists only the buyer’s assigned shops and applies a whole rec
    FROM plot_payments pp`)).rows, [{ plot_id: 3, amount: '100000.00', pool_return_receipt_id: input.receiptId }]);
  assert.deepEqual((await db.query('SELECT id, credit, created_by FROM cash_flow_entries')).rows, [original]);
  assert.equal((await db.query('SELECT status FROM draw_registrations WHERE id=1')).rows[0].status, 'SLIP_ISSUED');
+});
+
+test('sub-admin receipt allocation requires write permission, project access, and receipt visibility', async t => {
+ const { db, pool } = await fixture(t);
+ await db.exec(`UPDATE plots SET status='BOOKED',buyer_member_id=1 WHERE id=1;
+   INSERT INTO draw_payments(draw_registration_id,receipt_no,payment_date,amount,payment_from,created_by)
+   VALUES (1,'DP-OTHER','2020-01-01',100000,'CASH',1);`);
+ const { payments } = await poolDetail(pool, identity);
+ const ownReceiptId = payments.find(payment => payment.created_by === 2).id;
+ const otherReceiptId = payments.find(payment => payment.created_by === 1).id;
+ const router = createPoolMoneyRouter({ database: pool, authenticate: (_req, _res, next) => next() });
+ const apply = (id, canWrite) => new Promise((resolve, reject) => {
+   const user = { id: 2, role: 'sub_admin', organization_id: 1,
+     permissionsByModule: new Map([['plot_payments', { can_read: true, can_write: canWrite, can_view_all: false }]]) };
+   const req = { method: 'POST', url: `/pool-money/receipts/${id}/allocate`, user,
+     body: { site_id: 1, plot_id: 1, expected_amount: 100000 } };
+   const res = { statusCode: 200, on() {}, status(code) { this.statusCode = code; return this; },
+     json(body) { resolve({ status: this.statusCode, body }); } };
+   router.handle(req, res, error => error?.statusCode ? resolve({ status: error.statusCode }) : reject(error || new Error('No route matched')));
+ });
+ assert.equal((await apply(ownReceiptId, true)).status, 403);
+ await db.exec('INSERT INTO user_sites VALUES (2,1)');
+ assert.equal((await apply(ownReceiptId, false)).status, 403);
+ assert.equal((await apply(otherReceiptId, true)).status, 404);
+ const applied = await apply(ownReceiptId, true);
+ assert.equal(applied.status, 201);
+ assert.equal(applied.body.receipt_id, ownReceiptId);
+ assert.deepEqual((await db.query('SELECT created_by FROM plot_payments')).rows, [{ created_by: 2 }]);
 });
 
 test('deleting a Pool Money shop payment restores the same original receipt and accounting approval', async t => {
