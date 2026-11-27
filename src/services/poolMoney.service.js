@@ -191,6 +191,23 @@ async function lockedSource(db,input) {
  if(!source) fail(404,'Pool booking not found in this project.');
  return source;
 }
+async function poolDrawBroker(db,source) {
+ if(source.broker_member_id) {
+  const {rows:[broker]}=await db.query('SELECT id,full_name FROM members WHERE id=$1 AND site_id=$2',[source.broker_member_id,source.site_id]);
+  if(broker?.full_name?.trim()) return broker;
+ }
+ const codeId=Number(/^BRK-(\d+)$/i.exec(String(source.broker_code||'').trim())?.[1]);
+ if(integer(codeId)) {
+  const {rows:[broker]}=await db.query(`SELECT m.id,m.full_name FROM members m WHERE m.site_id=$1 AND m.code_id=$2
+    AND COALESCE(m.status,'ACTIVE')='ACTIVE' AND (m.member_type='BROKER' OR (m.member_type='MEMBER' AND EXISTS (
+      SELECT 1 FROM members canonical WHERE canonical.code_id=m.code_id AND canonical.member_type='BROKER'
+        AND COALESCE(canonical.status,'ACTIVE')='ACTIVE')))
+    ORDER BY (m.member_type='BROKER') DESC,m.id LIMIT 1`,[source.site_id,codeId]);
+  if(broker?.full_name?.trim()) return broker;
+ }
+ if(source.broker_member_id||source.broker_code) fail(409,'The broker saved on this draw could not be found in this project.');
+ return null;
+}
 async function audit(db,input,user,type,detail) {
  await db.query('INSERT INTO pool_money_events(source_kind,owner_id,site_id,event_type,detail,actor_user_id) VALUES($1,$2,$3,$4,$5,$6)',[input.kind,input.id,input.siteId,type,detail,user.id]);
 }
@@ -413,11 +430,12 @@ export async function mutatePoolMoney(pool,user,input,action,body={}) {
    if(!member) fail(409,'The customer must be active and registered in this project.');
    const approver=await validatePlotApprover(db,input.siteId,plot.assigned_admin_id||user.id);
    const agent=(await db.query("SELECT id,name,to_jsonb(u)->>'team_id' AS team_id FROM users u WHERE id=$1",[source.agent_user_id||source.created_by||null])).rows[0];
-   const bookingBy=source.booked_by||agent?.name||plot.booking_by||null;
+   const broker=input.kind==='draw'?await poolDrawBroker(db,source):null;
+   const bookingBy=broker?.full_name.trim().toUpperCase()||source.booked_by||agent?.name||plot.booking_by||null;
    let booking=source;
    if(input.kind==='draw') {
-    booking=(await db.query(`INSERT INTO bookings(site_id,plot_id,client_member_id,booking_date,sale_price,token_amount,payment_plan,status,kyc_status,buyer_name,booked_by,created_by,agent_user_id,team_id)
-      VALUES($1,$2,$3,$4,$5,0,'FULL','CONFIRMED','VERIFIED',$6,$7,$8,$9,$10) RETURNING *`,[input.siteId,plot.id,member.id,today(),plot.sale_price,member.full_name,bookingBy,user.id,source.agent_user_id||null,agent?.team_id||null])).rows[0];
+    booking=(await db.query(`INSERT INTO bookings(site_id,plot_id,client_member_id,booking_date,sale_price,token_amount,payment_plan,status,kyc_status,buyer_name,booked_by,created_by,agent_user_id,team_id${broker?',booking_agent_id':''})
+      VALUES($1,$2,$3,$4,$5,0,'FULL','CONFIRMED','VERIFIED',$6,$7,$8,$9,$10${broker?',$11':''}) RETURNING *`,[input.siteId,plot.id,member.id,today(),plot.sale_price,member.full_name,bookingBy,user.id,source.agent_user_id||null,agent?.team_id||null,...(broker?[broker.id]:[])])).rows[0];
     const no=`BK-${today().slice(0,4)}-${String(booking.id).padStart(6,'0')}`;
     await db.query('UPDATE bookings SET booking_no=$2 WHERE id=$1',[booking.id,no]);booking.booking_no=no;
     await db.query(`UPDATE draw_registrations SET allotted_plot_id=$2,allotted_at=now(),allotted_by=$3,booking_id=$4,status='ALLOTTED',updated_at=now() WHERE id=$1`,[input.id,plot.id,user.id,booking.id]);
@@ -426,8 +444,14 @@ export async function mutatePoolMoney(pool,user,input,action,body={}) {
      ORDER BY (id=$4) DESC NULLS LAST,id DESC LIMIT 1) RETURNING id`,[booking.id,member.id,input.siteId,source.kyc_case_id||null,Number(source.workflow_version||0)]);
     if(!adopted.rows.length) fail(409,'The verified KYC case is already attached to another active booking. Review it in Booking Software.');
    } else await db.query("UPDATE bookings SET plot_id=$2,sale_price=$3,status='CONFIRMED',updated_at=now() WHERE id=$1",[booking.id,plot.id,plot.sale_price]);
-   await db.query(`UPDATE plots SET status='BOOKED',buyer_member_id=$2,buyer_name=$3,booking_date=$4,booking_by=COALESCE($5,booking_by),
-     assigned_admin_id=$6,approval_requested_by=$7,updated_at=now() WHERE id=$1`,[plot.id,member.id,member.full_name.toUpperCase(),today(),bookingBy,approver,user.id]);
+   const directShop = input.siteId === 7 && plot.unit_type === 'shop';
+   if (directShop) await db.query("SELECT set_config('accounts.direct_plot_booking',$1,true)", [String(plot.id)]);
+   const {rows:[bookedPlot]} = await db.query(`UPDATE plots SET status='BOOKED',buyer_member_id=$2,buyer_name=$3,booking_date=$4,booking_by=COALESCE($5,booking_by),
+     assigned_admin_id=$6,approval_requested_by=$7,updated_at=now() WHERE id=$1 RETURNING approval_status`,[plot.id,member.id,member.full_name.toUpperCase(),today(),bookingBy,approver,user.id]);
+   if (directShop) {
+    await db.query("SELECT set_config('accounts.direct_plot_booking','',true)");
+    if (bookedPlot?.approval_status !== 'approved') fail(409,'Accounts could not confirm this shop booking. The allotment was rolled back.');
+   }
    const receipts=(await db.query(`SELECT r.*,c.status AS ledger_status,c.cheque_status AS ledger_cheque_status,c.bank_account_id AS ledger_bank_account_id,c.approved_by AS ledger_approved_by,c.approved_at AS ledger_approved_at
      FROM pool_money_receipts r JOIN cash_flow_entries c ON c.source_module='pool_money_receipts' AND c.source_id=r.id
      WHERE r.source_kind=$1 AND r.owner_id=$2 AND r.site_id=$3 AND r.plot_payment_id IS NULL ORDER BY r.id FOR UPDATE OF r,c`,[input.kind,input.id,input.siteId])).rows;

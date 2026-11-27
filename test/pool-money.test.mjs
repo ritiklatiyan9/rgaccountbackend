@@ -8,6 +8,7 @@ import { migrationSql as plotReviewSettingSql } from '../src/migrations/177_plot
 import { plotSnapshotFunctionSql } from '../src/migrations/172_approval_change_snapshots.js';
 import { resolveEntryVisibility } from '../src/services/entryVisibility.service.js';
 import { migrationSql as plotReviewSql } from '../src/migrations/158_plot_status_approval.js';
+import { migrationSql as directPlotBookingSql } from '../src/migrations/258_direct_plot_status.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
@@ -28,7 +29,7 @@ function callController(handler, id) {
    handler({ params: { id: String(id) }, user: admin }, res, reject);
  });
 }
-async function fixture(t,{source='draw',mode='CASH',date='2020-01-01',cancelled=false,ready=true}={}) {
+async function fixture(t,{source='draw',mode='CASH',date='2020-01-01',cancelled=false,ready=true,projectId=1}={}) {
  const db=new PGlite();t.after(()=>db.close());
  await db.exec(`
  CREATE TABLE sites(id integer PRIMARY KEY,organization_id integer);
@@ -54,7 +55,7 @@ async function fixture(t,{source='draw',mode='CASH',date='2020-01-01',cancelled=
  created_by integer,created_at timestamptz DEFAULT now(),approved_by integer,approved_at timestamptz);
  CREATE TABLE plot_installments(id serial PRIMARY KEY,plot_id integer);
  CREATE TABLE cash_flow_months(id integer PRIMARY KEY,site_id integer,month integer,year integer,is_locked boolean DEFAULT false);
- INSERT INTO cash_flow_months(id,site_id,month,year) VALUES(1,1,1,2020);
+ INSERT INTO cash_flow_months(id,site_id,month,year) VALUES(1,${projectId},1,2020);
  CREATE TABLE cash_flow_entries(id serial PRIMARY KEY,cash_flow_month_id integer,site_id integer,date date,particular text,debit numeric,credit numeric,
  cash_type text,remarks text,status text,source_module text,source_id integer,created_by integer,created_at timestamptz,updated_at timestamptz,
  cheque_no text,cheque_status text,bank_account_id integer,approved_by integer,approved_at timestamptz,assigned_admin_id integer,UNIQUE(source_module,source_id));
@@ -64,19 +65,19 @@ async function fixture(t,{source='draw',mode='CASH',date='2020-01-01',cancelled=
  VALUES(NEW.site_id,NEW.date,'Plot payment',0,NEW.amount,lower(NEW.payment_type),NEW.status,'plot_payments',NEW.id,NEW.created_by,NEW.created_at,NEW.cheque_status);
  RETURN NEW; END $$;
  CREATE TRIGGER test_pp AFTER INSERT ON plot_payments FOR EACH ROW EXECUTE FUNCTION test_plot_mirror();
- INSERT INTO sites VALUES(1,1),(2,1);
+ INSERT INTO sites VALUES(${projectId},1),(2,1);
  INSERT INTO users VALUES(1,'ADMIN','admin',true,1),(2,'COLLECTOR','sub_admin',true,1);
- INSERT INTO members VALUES(1,1,'BUYER','ACTIVE','9999999999');
- INSERT INTO plots(site_id,plot_no,sale_price,status,assigned_admin_id) VALUES(1,'S-01',1000000,'COMPANY',1),(2,'OTHER',1000000,'COMPANY',1);
- INSERT INTO kyc_cases(booking_id,client_member_id,site_id,status) VALUES(NULL,1,1,'VERIFIED');
+ INSERT INTO members VALUES(1,${projectId},'BUYER','ACTIVE','9999999999');
+ INSERT INTO plots(site_id,plot_no,sale_price,status,assigned_admin_id) VALUES(${projectId},'S-01',1000000,'COMPANY',1),(2,'OTHER',1000000,'COMPANY',1);
+ INSERT INTO kyc_cases(booking_id,client_member_id,site_id,status) VALUES(NULL,1,${projectId},'VERIFIED');
  `);
  const pool={query:(...args)=>db.query(...args),connect:async()=>({query:(...args)=>db.query(...args),release(){}})};
  if(ready) {await db.exec(poolMoneySql);await db.exec('CREATE TRIGGER pool_capture AFTER INSERT OR UPDATE OR DELETE ON bookings FOR EACH ROW EXECUTE FUNCTION capture_pool_money_source(); CREATE TRIGGER pool_capture AFTER INSERT OR UPDATE OR DELETE ON draw_payments FOR EACH ROW EXECUTE FUNCTION capture_pool_money_source()');}
  if(source==='draw') {
-  await db.query("INSERT INTO draw_registrations(site_id,client_member_id,registration_no,required_amount,status,kyc_case_id,draw_opening_date) VALUES(1,1,'DR-01',100000,$1,1,$2)",['SLIP_ISSUED',date]);
+  await db.query("INSERT INTO draw_registrations(site_id,client_member_id,registration_no,required_amount,status,kyc_case_id,draw_opening_date) VALUES($1,1,'DR-01',100000,$2,1,$3)",[projectId,'SLIP_ISSUED',date]);
   await db.query("INSERT INTO draw_payments(draw_registration_id,receipt_no,payment_date,amount,payment_from,created_by,bank_details,cheque_no) VALUES(1,'DP-01','2020-01-01',100000,$1,2,'REFERENCE','CH01')",[mode]);
   if(cancelled) await db.exec("UPDATE draw_registrations SET status='CANCELLED' WHERE id=1");
- } else await db.exec("INSERT INTO bookings(site_id,client_member_id,booking_no,booking_date,token_amount,token_payment_from,status,kyc_status,created_by) VALUES(1,1,'BK-0001','2020-01-01',100000,'CASH','KYC_DONE','VERIFIED',2); UPDATE kyc_cases SET booking_id=1;");
+ } else await db.exec(`INSERT INTO bookings(site_id,client_member_id,booking_no,booking_date,token_amount,token_payment_from,status,kyc_status,created_by) VALUES(${projectId},1,'BK-0001','2020-01-01',100000,'CASH','KYC_DONE','VERIFIED',2); UPDATE kyc_cases SET booking_id=1;`);
  return {db,pool};
 }
 test('validates IDs and recognises allotted records',()=>{
@@ -530,6 +531,26 @@ test('native plot approval queue stays intact and reserves the unit while review
  assert.equal(plot.approval_requested_by,admin.id);assert.equal(plot.approved_by,null);
  await db.exec("UPDATE plot_status_approvals SET status='rejected' WHERE id=1");
  assert.equal((await db.query('SELECT status FROM plots WHERE id=1')).rows[0].status,'BOOKED','review flag does not release money or reserve the unit for another buyer');
+});
+
+test('Pool Money allots an approved Naya Baazar shop without raising another review', async t => {
+ const {db,pool}=await fixture(t,{projectId:7});
+ await db.exec(`CREATE TABLE app_schema_migrations(version text PRIMARY KEY);
+   ALTER TABLE plots ADD COLUMN created_by integer;
+   ALTER TABLE draw_registrations ADD COLUMN broker_member_id integer, ADD COLUMN agent_user_id integer;
+   ALTER TABLE bookings ADD COLUMN booking_agent_id integer;
+   INSERT INTO members VALUES(202,7,'Draw Broker','ACTIVE',NULL);
+   UPDATE draw_registrations SET broker_member_id=202,agent_user_id=2 WHERE id=1;
+   ${plotReviewSql};${directPlotBookingSql}`);
+ const nayaDraw = { ...identity, siteId: 7 };
+ await mutatePoolMoney(pool,admin,nayaDraw,'result',{result:'WINNER',note:'Official result'});
+ const result=await mutatePoolMoney(pool,admin,nayaDraw,'allot',{plot_id:1,expected_amount:100000});
+ assert.equal(result.row.status,'ALLOTTED');
+ assert.equal(result.row.plot_approval_status,'approved');
+ assert.equal(result.row.allocated_amount,100000);
+ assert.deepEqual((await db.query('SELECT booking_by FROM plots WHERE id=1')).rows,[{booking_by:'DRAW BROKER'}]);
+ assert.deepEqual((await db.query('SELECT booking_agent_id,booked_by,created_by FROM bookings')).rows,[{booking_agent_id:202,booked_by:'DRAW BROKER',created_by:admin.id}]);
+ assert.deepEqual((await db.query('SELECT booked_by FROM plot_payments WHERE plot_id=1')).rows,[{booked_by:'DRAW BROKER'}]);
 });
 
 test('a changed result in Booking Software overrides a stale Pool Money winner',async t=>{
