@@ -361,6 +361,10 @@ const listApprovalEntries = async (req, res, { history = false } = {}) => {
   // visibility below is requester/reviewer based, independent of decision grants.
   const allowedModules = history ? hasGlobalApprovalOverride(req.user) ? null : new Set() : await getAllowedModules(req.user, req.assignedApprovalsOnly);
   const personalNotifications = (history || req.query.scope === 'notifications') && req.user.role === 'sub_admin';
+  // One grant query instead of one per source below.
+  if (!history && personalNotifications && req.user.permissionsByModule instanceof Map) {
+    for (const [name, permission] of await permissionModel.getPermissions(req.user.id, HISTORY_PERMISSION_MODULES)) req.user.permissionsByModule.set(name, permission);
+  }
   const ownReadableAliases = new Set();
   const notificationSources = { tar: 'transaction_transfer', pa: 'plot_status', fp: 'farmer_payment', ldp: 'land_deal_payment', mie: 'misc_income_entry',
     pc: 'plot_commission', pcp: 'plot_commission_payment', cfe: 'cash_flow_entry', ft: 'firm_transaction', pp: 'plot_payment',
@@ -381,10 +385,16 @@ const listApprovalEntries = async (req, res, { history = false } = {}) => {
   }
 
   const results = [];
+  // The queue sources are independent reads: start each without waiting for the
+  // last (a round trip apiece), then merge them below in declared order. Five at
+  // a time, so one request cannot take the whole database pool.
+  const reads = [], lanes = Array.from({ length: 5 }, () => Promise.resolve());
   const collectEntries = async (sql, params, map = row => row) => {
     if (history) return historyReader.add(sql, params, map);
-    const { rows } = await pool.query(sql, params);
-    results.push(...rows.map(map));
+    const index = reads.length % lanes.length;
+    const run = lanes[index].then(() => pool.query(sql, params));
+    lanes[index] = run.catch(() => {});
+    reads.push(run.then(({ rows }) => ({ rows: rows.map(map) }), error => ({ error })));
   };
 
   // Helper to build WHERE clause.
@@ -945,6 +955,11 @@ const listApprovalEntries = async (req, res, { history = false } = {}) => {
         };
       });
     }
+  }
+
+  for (const read of await Promise.all(reads)) {
+    if (read.error) throw read.error;
+    results.push(...read.rows);
   }
 
   let historyTotal = 0, historyPage;

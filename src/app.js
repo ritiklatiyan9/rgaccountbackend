@@ -14,6 +14,7 @@ import auditRequestMiddleware from './middlewares/audit.middleware.js';
 import { loyaltyVaultMiddleware } from './services/loyaltyVaultContext.service.js';
 import { transactionTimeMiddleware } from './services/transactionTime.service.js';
 import backupMaintenanceMiddleware from './middlewares/backupMaintenance.middleware.js';
+import { createLiveChanges } from './middlewares/liveChanges.middleware.js';
 import { transactionDocumentationMiddleware } from './middlewares/transactionDocumentation.middleware.js';
 
 const app = express();
@@ -34,6 +35,7 @@ app.use(loyaltyVaultMiddleware);
 // Register before authenticated routes. The middleware records on response
 // completion, after route-level auth has attached the actor to req.user.
 app.use(auditRequestMiddleware);
+app.use(createLiveChanges());
 
 import path from 'path';
 // Serve fallback local excel files if AWS S3 isn't configured

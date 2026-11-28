@@ -88,12 +88,13 @@ export const initSocket = (server, options = {}) => {
                 'x-app-context': socket.handshake.auth.appContext,
             } });
             const { rows } = await pool.query(
-                'SELECT id, role, is_active, token_version, can_login_accounts, can_login_booking_accounts FROM users WHERE id=$1', [decoded.id]
+                'SELECT id, role, organization_id, is_active, token_version, can_login_accounts, can_login_booking_accounts FROM users WHERE id=$1', [decoded.id]
             );
             const user = rows[0];
             if (!user?.is_active || user.token_version !== decoded.version) throw new Error('Invalid session');
             assertAppLoginAccess(user, app, decoded);
             socket.user = { ...decoded, role: user.role };
+            socket.organizationId = Number(user.organization_id) || 1;
             socket.appContext = app;
             next();
         } catch {
@@ -106,6 +107,8 @@ export const initSocket = (server, options = {}) => {
         const joinedSites = new Set();
         // Personal room: background work (Drive shares) reports back here.
         if (userId) socket.join(userRoom(userId));
+        // Data-free "something changed" pings; see liveChanges.middleware.js.
+        if (socket.organizationId) socket.join(`org_${socket.organizationId}`);
 
         const leaveSite = (siteId) => {
             if (!joinedSites.has(siteId)) return;
@@ -219,6 +222,10 @@ export const emitNewMessage = (siteId, conversationId, message) => {
     if (io) {
         io.to(conversationRoom(siteId, conversationId)).emit('new_message', message);
     }
+};
+
+export const emitToOrganization = (organizationId, event) => {
+    if (io && !authorizeUserDelivery) io.to(`org_${organizationId}`).emit(event);
 };
 
 /** Fire-and-forget to every open tab of one user; a no-op before init or in maintenance mode. */
